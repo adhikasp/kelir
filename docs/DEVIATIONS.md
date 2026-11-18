@@ -114,3 +114,57 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   `stop` cannot reach. `kill_on_drop(true)` covers the remaining case of a call
   task cancelled after its tree was killed.
 
+## M2
+
+- **The OSC 7501 record format, as written.** `ESC ] 7501 ;` then `;`-separated
+  `key=value` pairs, terminated by ST (`ESC \`, safer than BEL inside a TUI):
+  `state=<idle|working|done|error>;app=kelir[;id=<session id>][;msg=<base64>]`.
+  This is what `claude-code` emits (its writer was read out of the binary:
+  `state` first, then `app`, then `id`/`kind`/`progress`/`title`/`msg`, with
+  `msg` and `title` base64 because the payload may not contain a space or a
+  `;`), and it is what the Herdr core on this machine parses (`crates/herdr-core/
+  src/status.rs`: `state`, `msg`, `progress`, the words `idle, working, done,
+  blocked, error`, both terminators). `hc get <terminal>` decodes `msg`, so the
+  encoding is observable rather than assumed. Every change writes **two**
+  records: one with no `id` (Herdr's *root* record — the pane's `status`, which
+  is what the app draws) and one with `id=<session id>` (an entry in `records`,
+  which is the "resume label" Herdr's resume mods read). kelir never sends
+  `blocked`.
+- **The status writer is on for `kelir run` too**, not only the TUI: whenever
+  stdout is a TTY (or `KELIR_HERDR=1`) and `--json` is off. A headless agent in
+  a Herdr pane is still an agent. `--json` is always excluded, because NDJSON on
+  stdout must stay parseable; `KELIR_HERDR=0` turns it off.
+- **`compact` is a parsed verb from M2, with the compactor in M3.** The TUI's
+  `/compact` must be a verb like every other action, so `verbs::parse` accepts
+  `compact [focus]`; applying it records an `error` event (`compact is not
+  implemented until M3`) and the session carries on, exactly as a refused
+  `model` swap already does. M3 replaces the apply arm.
+- **`kelir tui --resume <id>` parses the flag and refuses it** with a usage
+  error until M3 implements resume. The flag exists so a pane launcher can be
+  written against the surface the task names.
+- **A TUI action is a verb; a view is not.** Every action that changes the
+  session (`submit`, `/stop`, `/say-now`, `/later`, `/model`, `/tools`,
+  `/compact`, `/quit`, Ctrl-C, double Ctrl-C) is a `commands::Action` and goes
+  out as one verb on the same channel the socket feeds, with `from: "tui"`.
+  Three things are local views with no session state and therefore no verb:
+  `/help`, the output tail (Ctrl-O), and editor movement. The enumeration test
+  covers the `Action` enum, which is exhaustive by construction.
+- **Enter sends, Alt-Enter or Shift-Enter adds a line, Ctrl-J adds a line
+  everywhere.** A terminal does not distinguish Ctrl-Enter from Enter, so Ctrl-J
+  (the bare line feed) is the portable way to type a newline.
+- **`stop` with nothing running is dropped in idle, not queued.** A queued stop
+  would apply at the next turn's first boundary and kill it, so Ctrl-C in an
+  idle TUI would eat the next message. It is still logged as a `verb`; the UI is
+  told "nothing is running".
+- **The inline viewport is a fixed 8 rows** (four live rows, a three-row editor,
+  the status line), and a terminal shorter than that gets fewer. Streaming text
+  that no longer fits is written into the scrollback as it arrives, so a long
+  answer scrolls like normal terminal output instead of growing the repaint area.
+- **The TUI ends the session if it dies.** A panic or a terminal error in the
+  UI task sends the `end` verb, so a broken UI cannot leave a pane hanging with
+  no way in; the terminal itself is restored by ratatui's panic hook.
+- **A TUI session starts with no task and no `user` event.** `session_started`
+  is written first; the first turn begins when the first `say` arrives, so the
+  log and the request sequence are the same as any other session's.
+
+

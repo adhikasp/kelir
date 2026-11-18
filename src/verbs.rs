@@ -58,6 +58,12 @@ pub enum Verb {
         disable: Vec<String>,
         enable: Vec<String>,
     },
+    /// `compact [focus]`: the verb exists from M2 (the TUI's `/compact` sends
+    /// it); the compactor itself lands in M3 and answers with a note until
+    /// then.
+    Compact {
+        focus: Option<String>,
+    },
     End,
 }
 
@@ -68,7 +74,7 @@ impl Verb {
             Verb::Say { now: true, .. } | Verb::Stop { .. } | Verb::End => "now",
             Verb::Say { .. } => "queued",
             Verb::Later { .. } => "turn_end",
-            Verb::Model { .. } | Verb::Tools { .. } => "next_step",
+            Verb::Model { .. } | Verb::Tools { .. } | Verb::Compact { .. } => "next_step",
         }
     }
 
@@ -78,7 +84,9 @@ impl Verb {
             // `say` and `stop` take the first boundary they can get.
             Verb::Say { .. } | Verb::Stop { .. } | Verb::End => true,
             Verb::Later { .. } => boundary == Boundary::TurnEnd,
-            Verb::Model { .. } | Verb::Tools { .. } => boundary == Boundary::BeforeStep,
+            Verb::Model { .. } | Verb::Tools { .. } | Verb::Compact { .. } => {
+                boundary == Boundary::BeforeStep
+            }
         }
     }
 }
@@ -184,8 +192,13 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             Ok(Verb::Tools { disable, enable })
         }
         "end" => Ok(Verb::End),
+        // Parsed from M2 so the TUI's `/compact` is a real verb from the start;
+        // the boundary it applies at answers with a note until M3.
+        "compact" => Ok(Verb::Compact {
+            focus: string_arg(args, "focus").filter(|focus| !focus.trim().is_empty()),
+        }),
         other => Err(format!(
-            "unknown verb `{other}` (say, later, stop, model, tools, end)"
+            "unknown verb `{other}` (say, later, stop, model, tools, compact, end)"
         )),
     }
 }

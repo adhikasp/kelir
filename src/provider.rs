@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::chat::ChatMessage;
 use crate::config::{ProviderConfig, ProviderKind};
-use crate::stream::Assembler;
+use crate::stream::{Assembler, Delta};
 use crate::{VERSION, sse::SseParser};
 
 /// A request ready to send: URL, headers and body.
@@ -177,6 +177,16 @@ impl Client {
     /// Send one request and assemble the stream. Any connect, transport or
     /// truncated-stream failure comes back as a (usually retryable) error.
     pub async fn stream(&self, request: &BuiltRequest) -> Result<Assembler, ProviderError> {
+        self.stream_with(request, &mut |_| {}).await
+    }
+
+    /// The same, handing each new piece of text to `on_delta` as it arrives.
+    /// The callback must return quickly: it runs on the stream's own task.
+    pub async fn stream_with(
+        &self,
+        request: &BuiltRequest,
+        on_delta: &mut dyn FnMut(Delta),
+    ) -> Result<Assembler, ProviderError> {
         let mut builder = self.http.post(&request.url);
         for (name, value) in &request.headers {
             builder = builder.header(name.as_str(), value.as_str());
@@ -215,6 +225,9 @@ impl Client {
                         assembler
                             .feed_event(&event)
                             .map_err(|message| ProviderError::new(message, true))?;
+                        for delta in assembler.take_pending() {
+                            on_delta(delta);
+                        }
                         if assembler.done {
                             break;
                         }

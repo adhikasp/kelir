@@ -20,6 +20,13 @@ pub struct Usage {
     pub allowance: Option<Value>,
 }
 
+/// Text that arrived in the stream, for a UI that renders it live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delta {
+    Text(String),
+    Reasoning(String),
+}
+
 #[derive(Debug, Default, Clone)]
 struct ToolAcc {
     index: usize,
@@ -37,6 +44,9 @@ pub struct Assembler {
     pub done: bool,
     reasoning_field: Option<String>,
     calls: Vec<ToolAcc>,
+    /// How much of `text`/`reasoning` a live renderer has already been given.
+    emitted_text: usize,
+    emitted_reasoning: usize,
 }
 
 impl Assembler {
@@ -118,10 +128,10 @@ impl Assembler {
                 self.calls.len() - 1
             }
         };
-        if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
-            if !id.is_empty() {
-                self.calls[slot].id.push_str(id);
-            }
+        if let Some(id) = call.get("id").and_then(|v| v.as_str())
+            && !id.is_empty()
+        {
+            self.calls[slot].id.push_str(id);
         }
         if let Some(function) = call.get("function") {
             if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
@@ -154,6 +164,23 @@ impl Assembler {
 
     pub fn has_content(&self) -> bool {
         !self.text.is_empty() || !self.reasoning.is_empty() || !self.calls.is_empty()
+    }
+
+    /// Text appended since the last call, so a UI can render the answer as it
+    /// arrives. Each piece is handed out exactly once, in order.
+    pub fn take_pending(&mut self) -> Vec<Delta> {
+        let mut out = Vec::new();
+        if self.emitted_text < self.text.len() {
+            out.push(Delta::Text(self.text[self.emitted_text..].to_string()));
+            self.emitted_text = self.text.len();
+        }
+        if self.emitted_reasoning < self.reasoning.len() {
+            out.push(Delta::Reasoning(
+                self.reasoning[self.emitted_reasoning..].to_string(),
+            ));
+            self.emitted_reasoning = self.reasoning.len();
+        }
+        out
     }
 }
 

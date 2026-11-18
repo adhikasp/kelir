@@ -17,7 +17,18 @@ The spec names `tokio`, `serde`, one HTTP client (`reqwest` + rustls), `clap`, `
   and a `Toolhelp32` thread walk (N2).
 - **`libc`** (Unix only) — `killpg(2)` is the only way to signal a whole process group; `std` has no
   process-group signalling. The spec's *Shell and platforms* table names `killpg` for `stop`.
+- **`ratatui`** (with its `crossterm` backend) — the spec names `ratatui`/`crossterm`. M2 uses ratatui
+  0.30's inline viewport and `insert_before`, and takes `crossterm` through ratatui's re-export so the
+  two can never disagree about the version. Default features are trimmed to the crossterm backend,
+  the layout cache and 256-colour support; the widget calendar, serde and macros are off.
+- **`unicode-width`** — `wrap` needs a column count, and CJK/emoji are two columns wide. ratatui
+  already depends on it (0.2), so this adds no build.
+
+**MSRV:** `rust-version` is now 1.88, because ratatui 0.30 requires it (and the let-chains clippy
+suggests for edition 2024 are stable from 1.88). Both build hosts run 1.99/1.100.
 
 ## Dev only (not linked into the binary)
 
 - **`tempfile`** — isolated state/session and working dirs for the unit and e2e tests.
+- **`portable-pty`** — the headless PTY test that drives the real binary's TUI (type a message, read
+  the answer off the pty, `/quit`). It is a test dependency only; nothing in the binary uses it.

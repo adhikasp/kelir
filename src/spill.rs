@@ -152,10 +152,10 @@ impl Capture {
     pub fn render(&self, exit_code: Option<i32>, out_path: &Path) -> (String, bool) {
         if !self.spilled() {
             let mut out = String::new();
-            if let Some(code) = exit_code {
-                if code != 0 {
-                    out.push_str(&format!("[exit code {code}]\n"));
-                }
+            if let Some(code) = exit_code
+                && code != 0
+            {
+                out.push_str(&format!("[exit code {code}]\n"));
             }
             if self.inline.is_empty() {
                 out.push_str("[no output]");
@@ -177,10 +177,10 @@ impl Capture {
             self.lines(),
             path
         ));
-        if let Some(code) = exit_code {
-            if code != 0 {
-                out.push_str(&format!("[exit code {code}]\n"));
-            }
+        if let Some(code) = exit_code
+            && code != 0
+        {
+            out.push_str(&format!("[exit code {code}]\n"));
         }
         out.push_str(&format!("--- first {HEAD_BYTES} bytes ---\n{head}\n"));
         out.push_str(&format!("--- last {TAIL_BYTES} bytes ---\n{tail}\n"));

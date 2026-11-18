@@ -6,19 +6,24 @@
 
 pub mod chat;
 pub mod cli;
+pub mod commands;
 pub mod config;
 pub mod ctl;
+pub mod editor;
 pub mod event;
 pub mod fold;
+pub mod herdr;
 pub mod ipc;
 pub mod paths;
 pub mod proc;
 pub mod provider;
+pub mod scrollback;
 pub mod session;
 pub mod spill;
 pub mod sse;
 pub mod stream;
 pub mod tools;
+pub mod tui;
 pub mod util;
 pub mod verbs;
 

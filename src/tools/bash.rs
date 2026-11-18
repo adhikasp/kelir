@@ -184,10 +184,10 @@ async fn write_chunk(
     write_error: &mut Option<String>,
 ) {
     capture.push(chunk);
-    if write_error.is_none() {
-        if let Err(error) = out_file.write_all(chunk).await {
-            *write_error = Some(error.to_string());
-        }
+    if write_error.is_none()
+        && let Err(error) = out_file.write_all(chunk).await
+    {
+        *write_error = Some(error.to_string());
     }
 }
 

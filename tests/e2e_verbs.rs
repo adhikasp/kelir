@@ -876,10 +876,10 @@ async fn wait_for_output(session: &LiveSession, needle: &str) -> String {
         if let Ok(entries) = std::fs::read_dir(&commands) {
             for entry in entries.flatten() {
                 let out = entry.path().join("out");
-                if let Ok(text) = std::fs::read_to_string(&out) {
-                    if text.contains(needle) {
-                        return out.to_string_lossy().replace('\\', "/");
-                    }
+                if let Ok(text) = std::fs::read_to_string(&out)
+                    && text.contains(needle)
+                {
+                    return out.to_string_lossy().replace('\\', "/");
                 }
             }
         }

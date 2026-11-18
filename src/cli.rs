@@ -12,8 +12,9 @@ use clap::{Args, Parser, Subcommand};
     disable_help_subcommand = true
 )]
 pub struct Cli {
+    /// No subcommand is the interactive session (`kelir tui`).
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -22,11 +23,13 @@ pub enum Command {
     Run(RunArgs),
     /// Ask one question and print the final text.
     Ask(AskArgs),
+    /// Start the interactive session (the default with no subcommand).
+    Tui(TuiArgs),
     /// Send a verb to a running session and print its answer.
     Ctl(CtlArgs),
 }
 
-#[derive(Debug, Args, Clone)]
+#[derive(Debug, Args, Clone, Default)]
 pub struct CommonArgs {
     /// Model id for this run (overrides the config).
     #[arg(long)]
@@ -61,6 +64,16 @@ pub struct RunArgs {
 pub struct AskArgs {
     #[command(flatten)]
     pub common: CommonArgs,
+}
+
+/// `kelir` with no subcommand, or `kelir tui`.
+#[derive(Debug, Args, Clone, Default)]
+pub struct TuiArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Continue a session from its log (arrives with M3).
+    #[arg(long, value_name = "ID")]
+    pub resume: Option<String>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -100,7 +113,7 @@ mod tests {
     fn run_parses_flags_and_a_quoted_task() {
         let cli = Cli::parse_from(["kelir", "run", "--json", "--model", "m", "say hi"]);
         match cli.command {
-            Command::Run(args) => {
+            Some(Command::Run(args)) => {
                 assert!(args.json);
                 assert!(!args.keep);
                 assert_eq!(args.common.model.as_deref(), Some("m"));
@@ -114,7 +127,7 @@ mod tests {
     fn run_keep_is_a_flag() {
         let cli = Cli::parse_from(["kelir", "run", "--keep", "go"]);
         match cli.command {
-            Command::Run(args) => assert!(args.keep),
+            Some(Command::Run(args)) => assert!(args.keep),
             _ => panic!("expected run"),
         }
     }
@@ -123,7 +136,7 @@ mod tests {
     fn task_words_are_joined_later() {
         let cli = Cli::parse_from(["kelir", "run", "fix", "the", "bug"]);
         match cli.command {
-            Command::Run(args) => assert_eq!(args.common.task.len(), 3),
+            Some(Command::Run(args)) => assert_eq!(args.common.task.len(), 3),
             _ => panic!("expected run"),
         }
     }
@@ -137,7 +150,7 @@ mod tests {
     fn ctl_parses_a_verb_with_text_and_flags() {
         let cli = Cli::parse_from(["kelir", "ctl", "latest", "say", "--now", "change of plan"]);
         match cli.command {
-            Command::Ctl(args) => {
+            Some(Command::Ctl(args)) => {
                 assert_eq!(args.session, "latest");
                 assert_eq!(args.verb, "say");
                 assert!(args.now);
@@ -153,7 +166,7 @@ mod tests {
             "kelir", "ctl", "ses_1", "stop", "--call", "call_2", "--reason", "wrong",
         ]);
         match cli.command {
-            Command::Ctl(args) => {
+            Some(Command::Ctl(args)) => {
                 assert_eq!(args.call.as_deref(), Some("call_2"));
                 assert_eq!(args.reason.as_deref(), Some("wrong"));
             }
@@ -161,7 +174,7 @@ mod tests {
         }
         let cli = Cli::parse_from(["kelir", "ctl", "ses_1", "tools", "--disable", "bash"]);
         match cli.command {
-            Command::Ctl(args) => assert_eq!(args.disable, vec!["bash".to_string()]),
+            Some(Command::Ctl(args)) => assert_eq!(args.disable, vec!["bash".to_string()]),
             _ => panic!("expected ctl"),
         }
     }

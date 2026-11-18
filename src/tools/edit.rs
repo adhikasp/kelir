@@ -64,12 +64,11 @@ fn edit(args: &Value, ctx: &Ctx) -> Result<String, String> {
         if !old.is_empty() {
             return Err(format!("edit: file not found: {display}"));
         }
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    format!("edit: cannot create {}: {error}", parent.display())
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("edit: cannot create {}: {error}", parent.display()))?;
         }
         std::fs::write(&path, new.as_bytes())
             .map_err(|error| format!("edit: cannot write {display}: {error}"))?;

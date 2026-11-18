@@ -5,6 +5,7 @@
 //! [`Boundary`], never between a tool call and its result.
 
 use std::collections::BTreeSet;
+use std::io::IsTerminal as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::VERSION;
 use crate::chat::ToolCall;
@@ -22,9 +23,11 @@ use crate::config::{self, Config};
 use crate::event::{
     Blobs, EventBody, EventLog, LogEvent, LoggedToolCall, Payload, SystemInfo, spill_payloads,
 };
-use crate::ipc::{self, Incoming, Response};
+use crate::herdr::{Herdr, State as HerdrState};
+use crate::ipc::{self, Incoming, Request, Response};
 use crate::provider::{self, Client};
 use crate::tools::{self, Ctx, ToolOutcome};
+use crate::tui::{self, UiEvent};
 use crate::verbs::{self, Boundary, Pending, Scheduler, Verb};
 
 /// How long a stopped call may take to report back before the session settles
@@ -45,6 +48,7 @@ pub async fn run(args: RunArgs) -> u8 {
         json: args.json,
         ask: false,
         keep: args.keep,
+        tui: false,
         common: args.common,
     })
     .await
@@ -55,6 +59,36 @@ pub async fn ask(args: AskArgs) -> u8 {
         json: false,
         ask: true,
         keep: false,
+        tui: false,
+        common: args.common,
+    })
+    .await
+}
+
+/// `kelir` with no subcommand, or `kelir tui`: the interactive session.
+pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
+    if !std::io::stdout().is_terminal() {
+        eprintln!(
+            "kelir: no terminal: `kelir` is the interactive session and needs a TTY \
+             (use `kelir run <task>` or `kelir ask <question>` in a script)"
+        );
+        return 2;
+    }
+    if args.resume.is_some() {
+        eprintln!("kelir: --resume arrives with M3 (resume); start a new session for now");
+        return 2;
+    }
+    if !args.common.task.is_empty() {
+        eprintln!("kelir: `tui` takes no task: type the first message in the editor");
+        return 2;
+    }
+    drive(Options {
+        json: false,
+        ask: false,
+        // The TUI stays up between turns, like `run --keep`, and a failed turn
+        // never ends it.
+        keep: true,
+        tui: true,
         common: args.common,
     })
     .await
@@ -64,6 +98,9 @@ struct Options {
     json: bool,
     ask: bool,
     keep: bool,
+    /// Interactive: an inline viewport owns the terminal and every turn is
+    /// rendered through `tui::UiEvent`s instead of stdout.
+    tui: bool,
     common: CommonArgs,
 }
 
@@ -103,6 +140,8 @@ struct Prepared {
     json: bool,
     ask: bool,
     keep: bool,
+    tui: bool,
+    herdr: Option<Herdr>,
 }
 
 struct Session {
@@ -119,6 +158,15 @@ struct Session {
     json: bool,
     echo_assistant: bool,
     keep: bool,
+    /// Interactive: output goes to the inline viewport, not to stdout.
+    tui: bool,
+    /// The UI, when one is attached. Every event is best-effort: a dead UI
+    /// never fails a turn.
+    ui: Option<mpsc::UnboundedSender<UiEvent>>,
+    /// Herdr's OSC 7501 status, when this session reports one.
+    herdr: Option<Herdr>,
+    /// A task was given on the command line (the TUI starts with none).
+    has_task: bool,
     final_text: String,
     /// Session-wide step counter: every `step_started` in a `--keep` session
     /// keeps counting, so step numbers stay unique in one log.
@@ -235,9 +283,53 @@ async fn drive(opts: Options) -> u8 {
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
-    ipc::serve(listener, tx);
+    ipc::serve(listener, tx.clone());
+
+    // The interactive session: the TUI runs as a task beside the loop, and all
+    // it can do is send verbs into the same channel the socket feeds.
+    let mut tui = None;
+    if opts.tui {
+        let (to_tui, from_session) = mpsc::unbounded_channel::<UiEvent>();
+        let banner = vec![
+            format!("kelir · {} · {}", session.provider_name, session.model),
+            format!("session {}", session.id),
+            format!("cwd {}", crate::util::path_string(&session.ctx.cwd)),
+            "Enter sends · Alt-Enter adds a line · /help shows the commands".to_string(),
+            String::new(),
+        ];
+        match tui::start(from_session, to_tui.clone(), tx.clone(), &banner) {
+            Ok(handle) => {
+                session.ui = Some(to_tui.clone());
+                let task = tokio::spawn(handle.run());
+                // If the UI dies (a panic, a terminal error) the session ends
+                // the same way `/quit` ends it, instead of running forever with
+                // nobody watching.
+                let verbs = tx.clone();
+                let watchdog = tokio::spawn(async move {
+                    let _ = task.await;
+                    let (reply, _answer) = oneshot::channel();
+                    let _ = verbs.send(Incoming {
+                        request: Request::new("end", json!({}), "tui"),
+                        reply,
+                    });
+                });
+                tui = Some((watchdog, to_tui));
+            }
+            Err(error) => {
+                // Raw mode may already be on; leave the terminal usable.
+                let _ = ratatui::try_restore();
+                eprintln!("kelir: cannot start the terminal UI: {error}");
+                return 1;
+            }
+        }
+    }
 
     let code = session.run(&mut rx).await;
+    if let Some((watchdog, to_tui)) = tui {
+        // One last paint, then the terminal goes back to the shell.
+        let _ = to_tui.send(UiEvent::Quit);
+        let _ = watchdog.await;
+    }
     if opts.ask && !session.final_text.is_empty() {
         println!("{}", session.final_text);
     }
@@ -273,7 +365,12 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         )));
     }
 
-    let task = task_text(&common.task).await.map_err(Failure::Usage)?;
+    // The TUI has no task: the first turn starts when a human sends a message.
+    let task = if opts.tui {
+        String::new()
+    } else {
+        task_text(&common.task).await.map_err(Failure::Usage)?
+    };
     let id = new_session_id();
     let client = Client::new(provider_cfg, &id, cfg.cache_ttl.clone())
         .map_err(|error| Failure::Usage(error.message))?;
@@ -288,11 +385,14 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     // The address this session is expected to use; `drive` re-reads it after
     // `ipc::bind`, because Unix may fall back to a shorter socket path.
     let sock = ipc::value(&dir, &id);
+    let herdr = Herdr::detect(&id, opts.json);
 
     Ok(Prepared {
         json: opts.json,
         ask: opts.ask,
         keep: opts.keep,
+        tui: opts.tui,
+        herdr,
         cfg,
         provider_name,
         model,
@@ -330,8 +430,12 @@ impl Session {
             client: prepared.client.clone(),
             ctx,
             json: prepared.json,
-            echo_assistant: !prepared.ask,
+            echo_assistant: !prepared.ask && !prepared.tui,
             keep: prepared.keep,
+            tui: prepared.tui,
+            ui: None,
+            herdr: prepared.herdr,
+            has_task: !prepared.task.trim().is_empty(),
             final_text: String::new(),
             step: 0,
             turn: 0,
@@ -356,12 +460,14 @@ impl Session {
             sources: Vec::new(),
             tools: tools::names(),
         })?;
-        session.record(EventBody::User {
-            text: prepared.task.clone().into(),
-            from: "cli".into(),
-            delivery: "now".into(),
-            attachments: Vec::new(),
-        })?;
+        if session.has_task {
+            session.record(EventBody::User {
+                text: prepared.task.clone().into(),
+                from: "cli".into(),
+                delivery: "now".into(),
+                attachments: Vec::new(),
+            })?;
+        }
         session.sync();
         Ok(session)
     }
@@ -391,6 +497,35 @@ impl Session {
 
     fn sync(&mut self) {
         let _ = self.writer.sync();
+    }
+
+    /// Tell the UI what happened. A closed UI is not an error: the session is
+    /// the source of truth and keeps working headless.
+    fn emit(&self, event: UiEvent) {
+        if let Some(ui) = &self.ui {
+            let _ = ui.send(event);
+        }
+    }
+
+    /// Report Herdr status (no-op unless a writer was opened).
+    fn report(&mut self, state: HerdrState, msg: Option<&str>) {
+        if let Some(herdr) = &mut self.herdr {
+            herdr.report(state, msg);
+        }
+    }
+
+    /// One turn is over: the UI gets its outcome, Herdr gets its word.
+    fn finish_turn(&mut self, outcome: &str, message: Option<&str>) {
+        self.emit(UiEvent::TurnEnded {
+            outcome: outcome.to_string(),
+            final_text: self.final_text.clone(),
+        });
+        let state = match outcome {
+            "done" => HerdrState::Done,
+            "error" => HerdrState::Error,
+            _ => HerdrState::Idle,
+        };
+        self.report(state, message);
     }
 
     fn print_result(&self, exit_code: u8) {
@@ -454,10 +589,9 @@ impl Session {
         if let Ok(Verb::Stop {
             call: Some(call), ..
         }) = &parsed
+            && !self.live_calls.iter().any(|id| id == call)
         {
-            if !self.live_calls.iter().any(|id| id == call) {
-                parsed = Err(format!("no running call with id `{call}`"));
-            }
+            parsed = Err(format!("no running call with id `{call}`"));
         }
         let boundary = match &parsed {
             Ok(verb) => verb.scope().to_string(),
@@ -501,6 +635,11 @@ impl Session {
         for pending in self.scheduler.due(boundary) {
             match pending.verb {
                 Verb::Say { text, now } => {
+                    // A message from anywhere but this UI gets echoed, so a
+                    // steering `ctl say` is visible in the pane it steers.
+                    if pending.from != "tui" {
+                        self.emit(UiEvent::Info(format!("› {}", one_line(&text))));
+                    }
                     self.record(EventBody::User {
                         text: Payload::text(text),
                         from: pending.from,
@@ -536,6 +675,20 @@ impl Session {
                     }
                 }
                 Verb::End => applied.end = true,
+                Verb::Compact { focus } => {
+                    let message = match focus {
+                        Some(focus) => {
+                            format!("compact is not implemented until M3 (focus: {focus})")
+                        }
+                        None => "compact is not implemented until M3".to_string(),
+                    };
+                    self.emit(UiEvent::Info(format!("kelir: {message}")));
+                    self.record(EventBody::Error {
+                        location: "verb".into(),
+                        message,
+                        retryable: false,
+                    })?;
+                }
             }
         }
         self.sync();
@@ -582,7 +735,10 @@ impl Session {
                     from: pending.from,
                 }),
                 Verb::End => end = true,
-                Verb::Stop { .. } | Verb::Model { .. } | Verb::Tools { .. } => {}
+                Verb::Stop { .. }
+                | Verb::Model { .. }
+                | Verb::Tools { .. }
+                | Verb::Compact { .. } => {}
             }
         }
         if end {
@@ -596,6 +752,9 @@ impl Session {
 
     fn record_messages(&mut self, messages: Vec<Message>) -> Result<(), String> {
         for message in messages {
+            if message.from != "tui" {
+                self.emit(UiEvent::Info(format!("› {}", one_line(&message.text))));
+            }
             self.record(EventBody::User {
                 text: Payload::text(message.text),
                 from: message.from,
@@ -614,6 +773,19 @@ impl Session {
     async fn run(&mut self, rx: &mut Inbox) -> u8 {
         let mut code = 0u8;
         let mut reason = "done".to_string();
+        // A TUI session starts with no task: wait for the first message.
+        if !self.has_task && self.keep {
+            match self.idle(rx).await {
+                Idle::Turn => {}
+                Idle::End => {
+                    let _ = self.record(EventBody::SessionEnded {
+                        reason: "end".into(),
+                    });
+                    self.sync();
+                    return 0;
+                }
+            }
+        }
         loop {
             self.turn += 1;
             let end = self.drive_turn(rx).await;
@@ -623,16 +795,19 @@ impl Session {
                         outcome: "done".into(),
                         final_text: self.final_text.clone().into(),
                     });
+                    self.finish_turn("done", None);
                     false
                 }
                 Ok(TurnEnd::Stopped(why)) => {
-                    if !self.json && !why.is_empty() {
+                    if !self.json && !self.tui && !why.is_empty() {
                         eprintln!("→ turn stopped: {why}");
                     }
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "stopped".into(),
                         final_text: self.final_text.clone().into(),
                     });
+                    let message = (!why.is_empty()).then(|| why.clone());
+                    self.finish_turn("stopped", message.as_deref());
                     reason = "stopped".into();
                     false
                 }
@@ -641,15 +816,20 @@ impl Session {
                         outcome: "stopped".into(),
                         final_text: self.final_text.clone().into(),
                     });
+                    self.finish_turn("stopped", None);
                     reason = "end".into();
                     false
                 }
                 Err(message) => {
-                    eprintln!("kelir: {message}");
+                    if !self.tui {
+                        eprintln!("kelir: {message}");
+                    }
+                    self.emit(UiEvent::Error(message.clone()));
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "error".into(),
                         final_text: String::new().into(),
                     });
+                    self.finish_turn("error", Some(message));
                     // A long-lived session survives a failed turn: the error is
                     // in the log and the next `say` gets another chance (M1
                     // review N6). A one-shot run still exits 1.
@@ -704,7 +884,13 @@ impl Session {
                 return Idle::End;
             };
             if let Some(pending) = self.accept(incoming) {
-                self.scheduler.push(pending);
+                // Nothing is running in idle, so a `stop` has nothing to stop;
+                // queueing it would stop the *next* turn at its first boundary.
+                if matches!(pending.verb, Verb::Stop { call: None, .. }) {
+                    self.emit(UiEvent::Info("» stop: nothing is running".into()));
+                } else {
+                    self.scheduler.push(pending);
+                }
             }
             match self.take_turn_messages() {
                 Some(TurnStart::End) => return Idle::End,
@@ -721,6 +907,12 @@ impl Session {
 
     async fn drive_turn(&mut self, rx: &mut Inbox) -> Result<TurnEnd, String> {
         self.final_text.clear();
+        self.emit(UiEvent::TurnStarted {
+            turn: self.turn,
+            provider: self.provider_name.clone(),
+            model: self.model.clone(),
+        });
+        self.report(HerdrState::Working, None);
         let mut turn_steps = 0u32;
         loop {
             turn_steps += 1;
@@ -750,6 +942,11 @@ impl Session {
                 model: self.model.clone(),
                 request_hash: crate::util::fnv1a64_hex(request_text.as_bytes()),
             })?;
+            self.emit(UiEvent::Step {
+                step,
+                provider: self.provider_name.clone(),
+                model: self.model.clone(),
+            });
 
             let assembler = match self.stream(rx, &request).await? {
                 StreamEnd::Assembled(assembler) => assembler,
@@ -777,6 +974,7 @@ impl Session {
                     .collect(),
                 finish_reason: assembler.finish_reason.clone(),
             })?;
+            self.emit(UiEvent::Assistant { text: text.clone() });
             if let Some(usage) = &assembler.usage {
                 self.record(EventBody::Usage {
                     step,
@@ -787,6 +985,12 @@ impl Session {
                     cost: usage.cost,
                     allowance: usage.allowance.clone(),
                 })?;
+                self.emit(UiEvent::Usage {
+                    prompt: usage.prompt_tokens,
+                    completion: usage.completion_tokens,
+                    cached: usage.cached_tokens,
+                    cost: usage.cost,
+                });
             }
             // Even a turn that ends up stopped keeps the last thing the model
             // said in `turn_ended.final_text`.
@@ -845,7 +1049,17 @@ impl Session {
         let mut inbox_open = true;
         loop {
             let client = self.client.clone();
-            let future = client.stream(request);
+            // Live text goes to the UI as it arrives; the callback is a send to
+            // an unbounded channel, so it can never stall the stream.
+            let ui = self.ui.clone();
+            let mut on_delta = move |delta: crate::stream::Delta| {
+                if let Some(ui) = &ui
+                    && let crate::stream::Delta::Text(text) = delta
+                {
+                    let _ = ui.send(UiEvent::Delta(text));
+                }
+            };
+            let future = client.stream_with(request, &mut on_delta);
             tokio::pin!(future);
             let mut outcome: Option<Result<crate::stream::Assembler, provider::ProviderError>> =
                 None;
@@ -935,6 +1149,10 @@ impl Session {
                 input: Payload::value(call.args.clone()),
                 pid: None,
             })?;
+            self.emit(UiEvent::ToolStarted {
+                name: call.name.clone(),
+                input: call.args.clone(),
+            });
             plan.push((
                 format!("{}-{}-{}", started.seq, step, index + 1),
                 call.clone(),
@@ -1117,6 +1335,16 @@ impl Session {
                     elapsed.as_secs_f64()
                 );
             }
+            self.emit(UiEvent::ToolSettled {
+                name: call.name.clone(),
+                input: call.args.clone(),
+                outcome: outcome.outcome.clone(),
+                exit_code: outcome.exit_code,
+                bytes: outcome.bytes,
+                lines: outcome.lines,
+                spilled: outcome.spilled,
+                out_path: outcome.out_path.clone(),
+            });
         }
         self.sync();
         Ok(batch)
@@ -1249,6 +1477,11 @@ fn compact_input(args: &Value) -> String {
         .map(str::to_string)
         .unwrap_or_else(|| args.to_string());
     crate::util::truncate_chars(&text.replace('\n', " ↵ "), 60)
+}
+
+/// One line for the UI: newlines folded, length bounded.
+fn one_line(text: &str) -> String {
+    crate::util::truncate_chars(&text.replace('\n', " ↵ "), 200)
 }
 
 fn new_session_id() -> String {

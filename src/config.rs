@@ -303,10 +303,10 @@ fn load_prompt(configured: Option<&str>) -> Result<String, ConfigError> {
             .unwrap_or_default(),
     ];
     for candidate in candidates {
-        if candidate.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&candidate) {
-                return Ok(text);
-            }
+        if candidate.is_file()
+            && let Ok(text) = std::fs::read_to_string(&candidate)
+        {
+            return Ok(text);
         }
     }
     Ok(DEFAULT_PROMPT.to_string())
