@@ -218,8 +218,7 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   `compact` existed keeps its two-tool list and its cache prefix. A disabled
   tool is *not* replayed into a resume (the list never changed anyway, but a
   `tools --disable` is forgotten).
-- **A resume takes its id, cwd, provider, model and counters from the log, not
-  from flags.** `--cwd`, `--model` and `--provider` are ignored with `--resume`;
+- **A resume takes its id, cwd, provider, model and counters from the log, not  from flags.** `--cwd`, `--model` and `--provider` are ignored with `--resume`;
   the config (windows, prompts, keys) is today's machine's. The model/provider
   are the last `step_started`'s, so a `model` verb swap survives the resume.
   `step` and `turn` continue from the log instead of restarting.
@@ -229,6 +228,12 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   `kelir run --resume <id> <task>`) the message is appended (delivery `next`
   when a turn was in flight, so it lands after the unknown results) and one turn
   runs.
+- **A `SIGKILL`d session cannot clean up its running calls.** Windows closes the
+  Job Object when the process dies, so the call's tree goes with it; on Unix the
+  call's own process group (`setsid`) is not a child of anything the session can
+  still signal after `SIGKILL`, so a long command can outlive the log. kelir
+  never kills a call it cannot reach; the resume reports that call as unknown,
+  which is exactly the case the unknown outcome exists for.
 - **A live session is refused, not taken over.** `resume` connects to the
   session socket first; if something answers, it exits 2 with `session … is
   already running`. A stale `sock` (and a `sock.path` pointer) left by a dead
