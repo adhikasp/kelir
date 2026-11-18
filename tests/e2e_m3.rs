@@ -360,6 +360,43 @@ async fn resume_adds_a_new_task_after_a_clean_end() {
     assert_eq!(mock.request_count(), 2, "the idle resume made a request");
 }
 
+#[tokio::test]
+async fn a_log_that_was_never_closed_resumes_without_a_new_task() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&text_turn("one", 0))),
+        Reply::Sse(sse(&text_turn("two", 0))),
+    ])
+    .await;
+    let sandbox = Sandbox::new("");
+    let first = sandbox
+        .kelir(&mock.base_url(), &["run", "--json", "the task"], &[])
+        .await;
+    assert_eq!(first.code, 0, "stderr: {}", first.stderr);
+    let id = sandbox.only_session();
+
+    // What a kill between two turns leaves: the turn ended, the log was never
+    // closed. (The crash hooks all fire inside a turn, so the suffix is made by
+    // dropping the `session_ended` the killed process never wrote.)
+    let path = sandbox.session_dir(&id).join("events.jsonl");
+    let kept: String = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.contains("\"type\":\"session_ended\""))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&path, kept).unwrap();
+
+    let second = sandbox
+        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .await;
+    assert_eq!(second.code, 0, "stderr: {}", second.stderr);
+    assert_eq!(mock.request_count(), 2, "an unclosed log was not continued");
+    let log = sandbox.log(&id);
+    assert_eq!(events_of(&log, "resumed").len(), 1);
+    assert_eq!(events_of(&log, "turn_ended").len(), 2);
+    assert_eq!(log.last().unwrap()["type"], "session_ended");
+}
+
 // --------------------------------------------------------------- compaction
 
 #[tokio::test]

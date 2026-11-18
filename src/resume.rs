@@ -90,6 +90,21 @@ pub fn turn_in_flight(events: &[LogEvent]) -> bool {
         })
 }
 
+/// Does a resume have a turn to continue?
+///
+/// Either a turn was running when the log stopped (no `turn_ended` after its
+/// last step), or the process never closed the log with `session_ended` — a
+/// kill between two turns is still an interrupted session. A log that ended
+/// cleanly continues only when the caller passes a new task.
+pub fn interrupted(events: &[LogEvent]) -> bool {
+    if turn_in_flight(events) {
+        return true;
+    }
+    !events
+        .iter()
+        .any(|event| matches!(event.body, EventBody::SessionEnded { .. }))
+}
+
 /// The seq the log continues from (0 for an empty log).
 pub fn last_seq(events: &[LogEvent]) -> u64 {
     events.last().map(|event| event.seq).unwrap_or(0)
@@ -321,6 +336,31 @@ mod tests {
         ];
         assert!(!turn_in_flight(&idle));
         assert!(!turn_in_flight(&[]));
+    }
+
+    #[test]
+    fn an_unclosed_log_is_interrupted_even_between_turns() {
+        let ended = |reason: &str| {
+            LogEvent::new(
+                9,
+                EventBody::SessionEnded {
+                    reason: reason.into(),
+                },
+            )
+        };
+        // A kill between two turns: the turn ended, the process did not.
+        let killed_between_turns = vec![step(1), assistant(2, &[]), turn_ended(3)];
+        assert!(!turn_in_flight(&killed_between_turns));
+        assert!(interrupted(&killed_between_turns));
+        // A clean exit is not continued without a new task.
+        let mut clean = killed_between_turns.clone();
+        clean.push(ended("done"));
+        assert!(!interrupted(&clean));
+        // A crash mid-turn is interrupted whether or not the log was closed.
+        let mut crash = vec![step(1), assistant(2, &[])];
+        assert!(interrupted(&crash));
+        crash.push(ended("error"));
+        assert!(interrupted(&crash), "the step after the last turn end");
     }
 
     #[test]

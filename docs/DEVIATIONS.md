@@ -242,9 +242,12 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
 - **A crash leaves no `turn_ended` and no `session_ended`.** That was already
   true and is unchanged: the log simply stops. A resume does not invent them; it
   appends `resumed`, settles the unknown calls and continues the turn, and the
-  `turn_ended` in the log after that is the resumed turn's own. `turn_in_flight`
-  is "an event that belongs to a turn (user, step, assistant, usage, tool) after
-  the last `turn_ended`", so a crash between turns resumes without running one.
+  `turn_ended` in the log after that is the resumed turn's own. A resume
+  continues when the log was **not closed cleanly** — a turn with no
+  `turn_ended` after its last step, or (a kill between two turns) no
+  `session_ended` at all — so a `kill -9` at any point during a task resumes it.
+  A session that ended cleanly (`done`, `stopped` or `error`, then
+  `session_ended`) continues only when the caller passes a new task.
 - **`compacted.cache_restart` is a field the spec's table does not list.** The
   spec asks that the cache restart is logged; the event carries
   `cache_restart: true` (it is inherent), the UI says so, and the next

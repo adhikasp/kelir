@@ -169,8 +169,8 @@ struct Prepared {
 /// What a resume reads out of the log before the session continues it.
 struct Reopened {
     events: Vec<LogEvent>,
-    /// A turn was running when the process died: continue it from the model's
-    /// next step.
+    /// The log was not closed cleanly (a turn was running, or the process was
+    /// killed between turns): resume continues from the model's next step.
     in_flight: bool,
     /// Calls the log shows as requested but never settled.
     unsettled: Vec<UnsettledCall>,
@@ -234,7 +234,7 @@ struct Session {
     tool_names: Vec<String>,
     /// This process reopened the log instead of writing `session_started`.
     resumed: bool,
-    /// A turn was running when the previous process died.
+    /// The log was not closed cleanly: a turn is continued on resume.
     in_flight: bool,
     /// The task words from the command line, for the `user` event a resume
     /// adds when it is given a new message.
@@ -653,7 +653,7 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
         model,
         client,
         reopened: Reopened {
-            in_flight: resume::turn_in_flight(&events),
+            in_flight: resume::interrupted(&events),
             unsettled: resume::unsettled(&events),
             damage: resume::log_damage(&read),
             step: resume::last_step(&events),
