@@ -260,6 +260,9 @@ pub fn lock(dir: &Path) -> Result<SessionLock, String> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
+        // The lock file is empty; opening it must not truncate another
+        // process's lock while it holds one.
+        .truncate(false)
         .open(&path)
         .map_err(|error| {
             format!(
