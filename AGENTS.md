@@ -42,3 +42,10 @@ authoritative; if you must deviate, write the deviation and the reason in `docs/
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (all layers 1-2),
 then reviewer sign-off from layer 3. Record the result in `docs/PROGRESS.md` (one row per
 milestone: date, commit, test counts, live-drive verdict, known gaps).
+
+## Linux gate
+
+Everything that passes on the Windows dev box must also pass on Linux: run
+`scripts/remote-check.sh <machine>` (the orchestrator tells you the machine name; it builds HEAD there
+with fmt, clippy -D warnings and the full test suite). It is part of every milestone's gates. If you
+add Unix-only code, it is only verified by that script, so run it before reporting.
