@@ -26,9 +26,8 @@ that proves a real bug is the best finding).
 Build `cargo build --release`. Drive the **real binary against a real model in a Herdr pane**, not
 via the mock: `hc run --bg --name live-Mn --cwd <scratch dir> bash -lc '<command>'`, watch with
 `hc read live-Mn`, wait with `hc wait live-Mn`, never `sleep`-poll. Use a scratch directory
-outside the repo (`C:/Users/the maintainer/kelir-scratch/Mn`). Provider: OpenRouter with a cheap model
-(`deepseek/deepseek-v4.1-flash-1017`); `OPENROUTER_API_KEY` is in your environment (never print
-it, never write it to a file). `KELIR_GO_API_KEY` is not available: mark the Go path
+outside the repo (your prompt names it). Provider: OpenRouter with a cheap model
+(`deepseek/deepseek-v4.1-flash-1017`); `hc` panes do not inherit your environment, so your prompt names an env file outside the repo: start the pane as `hc run --bg --name live-Mn --cwd <scratch> <git-bash> -c 'set -a; . <envfile>; set +a; <command>'` (never print the key, never copy it anywhere, never into the repo). Do not run live scenarios from your own shell instead of a pane unless a pane truly cannot do it, and say so. `KELIR_GO_API_KEY` is not available: mark the Go path
 "not live-verified" and verify it against the mock only.
 
 The milestone's live scenarios are in `docs/tasks/Mn.md` under "Live drive". Beyond those, try to
