@@ -24,7 +24,7 @@ no longer honoured by `bash` calls.
 | `cargo test` (Windows), implementer's suites | 254 unit; e2e 16, e2e_m3 11, **e2e_m4 6**, e2e_tui 15, e2e_verbs 22, review_m0 8, review_m1 5, review_m2 2, review_m3 11 — all pass |
 | `bash scripts/remote-check.sh the maintainer` (Linux, HEAD `7da31b9`) | fmt OK, clippy OK; 259 unit; e2e 16, e2e_m3 13, e2e_m4 6, e2e_tui 15, e2e_verbs 22, review_m0 8, review_m1 5, review_m2 2, review_m3 11 — all pass, exit 0 |
 | `cargo build --release` | ok, `kelir.exe` 6.13 MB (budget 20 MB) |
-| `tests/review_m4.rs` (mine, 19 tests) | 12 pass, **7 fail on real bugs** (listed below) |
+| `tests/review_m4.rs` (mine, 19 tests) | Windows: 12 pass, **7 fail on real bugs** (R1, R2, R3, R5, R11, R18, R19); Linux: 14 pass, **5 fail** (R1, R2, R3, R5, R11) |
 
 Idle RSS was not re-measured (no change to the idle path; the session adds one 250 ms watcher task).
 
@@ -83,7 +83,7 @@ missing shell · R9 quoting battery · R10 32 kB command · R11 leftover `&` chi
 fails) · R12 graceful exit leaves a promoted job · R13 wake never between batch results · R14 `--json` pipe ·
 R15 garbage in `bg/` · R16 torn/deleted status mid-job · R17 call latency (prints, asserts < 2 s) ·
 R18 exec'd grandchildren die with a killed session (F1, fails) · R19 `cancel` takes exec'd grandchildren (F1, fails).
-Seven fail at HEAD; R1, R11 and R18 pass at `99b3040`. Running it on Linux: see the note in the hc message.
+Seven fail at HEAD on Windows; R1, R11 and R18 pass at `99b3040`. **On Linux (the maintainer)** 14 pass and 5 fail: R1, R2, R3, R5, R11 fail there too (F2, F3, F4, F5, F6 are not Windows-only), while R18/R19 pass (F1 is Windows-only: Unix `killpg` takes the whole group).
 
 ## Spec / task items not yet covered
 
