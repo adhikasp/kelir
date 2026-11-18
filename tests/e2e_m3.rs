@@ -391,6 +391,23 @@ async fn a_log_that_was_never_closed_resumes_without_a_new_task() {
         .await;
     assert_eq!(second.code, 0, "stderr: {}", second.stderr);
     assert_eq!(mock.request_count(), 2, "an unclosed log was not continued");
+    // S4: the request may not end on the assistant's final answer (providers
+    // read a trailing assistant message as prefill or refuse it), so the resume
+    // says what happened in a message of its own.
+    let resumed_request = mock.requests().pop().unwrap();
+    assert_eq!(
+        resumed_request.roles().last(),
+        Some(&"user"),
+        "the resumed request ends on the assistant's answer"
+    );
+    assert!(
+        resumed_request.messages().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("interrupted between turns"),
+        "{:?}",
+        resumed_request.messages().last()
+    );
     let log = sandbox.log(&id);
     assert_eq!(events_of(&log, "resumed").len(), 1);
     assert_eq!(events_of(&log, "turn_ended").len(), 2);
@@ -567,6 +584,173 @@ async fn the_auto_trigger_compacts_at_eighty_percent_of_the_window() {
             .iter()
             .any(|text| text.contains("SUMMARY: ran one command")),
         "the summary is not in the request after the auto compaction"
+    );
+}
+
+/// N1: an automatic compaction that cannot shrink the context is not worth a
+/// provider call. Here the cut only reaches the task, which is pinned anyway:
+/// the summary could only add. The trigger declines, the log says so, and the
+/// session finishes without a `compacted` event.
+#[tokio::test]
+async fn a_compaction_that_cannot_shrink_is_skipped() {
+    let bash = |id: &str, n: u32| {
+        Reply::Sse(sse(&tool_turn(
+            id,
+            "bash",
+            &json!({"command": format!("printf 'step{n}\\n'")}),
+        )))
+    };
+    let mock = Mock::start(vec![
+        bash("call_1", 1),
+        bash("call_2", 2),
+        Reply::Sse(sse(&text_turn("finished", 0))),
+    ])
+    .await;
+    // The window makes the trigger fire after the first step; `compact_keep`
+    // is the default 4, which here leaves the task as the whole range.
+    let sandbox = Sandbox::new("window = 100\n");
+    let run = sandbox
+        .kelir(&mock.base_url(), &["run", "--json", "the task"], &[])
+        .await;
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    let log = sandbox.log(&sandbox.only_session());
+    assert!(
+        events_of(&log, "compacted").is_empty(),
+        "a compaction that grows the context was recorded: {log:?}"
+    );
+    let skipped = events_of(&log, "error")
+        .into_iter()
+        .find(|event| event["where"] == "compact")
+        .unwrap_or_else(|| panic!("the skip is not in the log: {log:?}"));
+    assert!(
+        skipped["message"]
+            .as_str()
+            .unwrap()
+            .contains("would not be smaller"),
+        "{skipped}"
+    );
+    // No summarising request was paid for: every request carried the tool list.
+    assert!(
+        mock.requests()
+            .iter()
+            .all(|request| request.body.get("tools").is_some()),
+        "a summary was requested for a compaction that could not shrink"
+    );
+}
+
+/// N3: the "already running" check is connect-then-bind, so two resumes
+/// started together used to be able to fork the log. Repeated here because one
+/// pass proves nothing about a race.
+#[cfg(unix)]
+#[tokio::test]
+async fn simultaneous_resumes_never_both_write_the_log() {
+    for round in 0..3 {
+        let mut script = vec![Reply::Sse(sse(&tool_turn(
+            "call_1",
+            "bash",
+            &json!({"command": "printf 'x\\n'"}),
+        )))];
+        for _ in 0..8 {
+            script.push(Reply::SseAfter(
+                std::time::Duration::from_millis(250),
+                sse(&text_turn("finished", 0)),
+            ));
+        }
+        let mock = Mock::start(script).await;
+        let sandbox = Sandbox::new("");
+        let first = sandbox
+            .kelir(
+                &mock.base_url(),
+                &["run", "--json", "the task"],
+                &[("KELIR_CRASH_AT", "usage")],
+            )
+            .await;
+        assert_ne!(first.code, 0, "round {round}: the run did not crash");
+        let id = sandbox.only_session();
+        let args = ["resume", "--json", id.as_str()];
+        let url = mock.base_url();
+        let (a, b) = tokio::join!(
+            sandbox.kelir(&url, &args, &[]),
+            sandbox.kelir(&url, &args, &[]),
+        );
+        let log = sandbox.log(&id);
+        let seqs: Vec<u64> = log.iter().map(|e| e["seq"].as_u64().unwrap()).collect();
+        assert!(
+            seqs.windows(2).all(|w| w[1] == w[0] + 1),
+            "round {round}: two writers forked the log: {seqs:?}"
+        );
+        let resumed = events_of(&log, "resumed").len();
+        assert_eq!(resumed, 1, "round {round}: {resumed} resumes wrote the log");
+        assert!(
+            a.code == 0 || b.code == 0,
+            "round {round}: neither resume ran ({} / {})",
+            a.code,
+            b.code
+        );
+    }
+}
+
+/// N2: an agent-called `compact` is only a queued request in memory. A kill
+/// between the tool's `compaction queued` result and the boundary that would
+/// summarise must not lose it: the resume re-queues it.
+#[tokio::test]
+async fn a_queued_compaction_survives_a_crash_and_is_applied_on_resume() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_c",
+            "compact",
+            &json!({"focus": "the parser"}),
+        ))),
+        Reply::Sse(sse(&text_turn("SUMMARY: wrote the parser", 0))),
+        Reply::Sse(sse(&text_turn("done", 0))),
+    ])
+    .await;
+    let sandbox = Sandbox::new("compact_keep = 0\n");
+    let first = sandbox
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "the task"],
+            &[("KELIR_CRASH_AT", "tool_settled")],
+        )
+        .await;
+    assert_ne!(first.code, 0);
+    assert!(
+        first.stderr.contains("KELIR_CRASH_AT="),
+        "stderr: {}",
+        first.stderr
+    );
+    let id = sandbox.only_session();
+    let second = sandbox
+        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .await;
+    assert_eq!(second.code, 0, "stderr: {}", second.stderr);
+
+    let log = sandbox.log(&id);
+    let compacted = events_of(&log, "compacted");
+    assert_eq!(
+        compacted.len(),
+        1,
+        "the queued compaction was lost: {log:?}"
+    );
+    assert_eq!(compacted[0]["by"], "agent");
+    // N4: the summarising request's own spend is in the log, marked so a
+    // reader can tell it is not a step of the turn.
+    let summary_usage = events_of(&log, "usage")
+        .into_iter()
+        .find(|event| event["kind"] == "compact")
+        .unwrap_or_else(|| panic!("the summary's usage is not logged: {log:?}"));
+    assert_eq!(summary_usage["prompt_tokens"], 200);
+    let requests = mock.requests();
+    let summarising = requests
+        .iter()
+        .find(|request| request.body.get("tools").is_none())
+        .expect("no summarising request after the resume");
+    assert!(
+        summarising.messages()[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Focus for this summary: the parser"),
+        "the focus was lost"
     );
 }
 

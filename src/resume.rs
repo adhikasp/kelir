@@ -93,16 +93,33 @@ pub fn turn_in_flight(events: &[LogEvent]) -> bool {
 /// Does a resume have a turn to continue?
 ///
 /// Either a turn was running when the log stopped (no `turn_ended` after its
-/// last step), or the process never closed the log with `session_ended` — a
-/// kill between two turns is still an interrupted session. A log that ended
-/// cleanly continues only when the caller passes a new task.
+/// last step), the last turn ended `stopped` or `error` (SPEC's `resume`
+/// continues a stopped or crashed session, and a provider outage is the
+/// commonest reason to try again — M3 review S1), or the process never closed
+/// the log with `session_ended` — a kill between two turns is still an
+/// interrupted session. A log whose last turn ended `done` and was closed
+/// continues only when the caller passes a new task.
 pub fn interrupted(events: &[LogEvent]) -> bool {
     if turn_in_flight(events) {
+        return true;
+    }
+    if matches!(
+        last_turn_outcome(events).as_deref(),
+        Some("stopped") | Some("error")
+    ) {
         return true;
     }
     !events
         .iter()
         .any(|event| matches!(event.body, EventBody::SessionEnded { .. }))
+}
+
+/// The outcome of the last finished turn, if the log has one.
+pub fn last_turn_outcome(events: &[LogEvent]) -> Option<String> {
+    events.iter().rev().find_map(|event| match &event.body {
+        EventBody::TurnEnded { outcome, .. } => Some(outcome.clone()),
+        _ => None,
+    })
 }
 
 /// The seq the log continues from (0 for an empty log).
@@ -361,6 +378,49 @@ mod tests {
         assert!(interrupted(&crash));
         crash.push(ended("error"));
         assert!(interrupted(&crash), "the step after the last turn end");
+    }
+
+    #[test]
+    fn a_stopped_or_errored_turn_is_continued_even_when_the_log_was_closed() {
+        let ended_with = |outcome: &str| {
+            let mut events = vec![step(1), assistant(2, &[]), turn_ended(3)];
+            if let EventBody::TurnEnded { outcome: slot, .. } = &mut events[2].body {
+                *slot = outcome.to_string();
+            }
+            events
+        };
+        let mut stopped = ended_with("stopped");
+        stopped.push(LogEvent::new(
+            4,
+            EventBody::SessionEnded {
+                reason: "end".into(),
+            },
+        ));
+        assert!(
+            interrupted(&stopped),
+            "SPEC: resume continues a stopped session (M3 review S1)"
+        );
+        let mut failed = ended_with("error");
+        failed.push(LogEvent::new(
+            4,
+            EventBody::SessionEnded {
+                reason: "error".into(),
+            },
+        ));
+        assert!(
+            interrupted(&failed),
+            "a provider outage is the commonest reason to resume"
+        );
+        let mut done = ended_with("done");
+        done.push(LogEvent::new(
+            4,
+            EventBody::SessionEnded {
+                reason: "done".into(),
+            },
+        ));
+        assert!(!interrupted(&done), "a finished session waits for a task");
+        assert_eq!(last_turn_outcome(&done).as_deref(), Some("done"));
+        assert_eq!(last_turn_outcome(&[]), None);
     }
 
     #[test]

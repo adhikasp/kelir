@@ -44,6 +44,12 @@ const STOP_GRACE: Duration = Duration::from_millis(1500);
 /// and take them down too.
 const STOP_POLL: Duration = Duration::from_millis(25);
 
+/// What a resume says to a log whose last turn ended cleanly but was never
+/// closed: the model's last message is its own answer, and a request may not
+/// end on one (M3 review S4).
+const CONTINUE_NOTE: &str = "[kelir] the session was interrupted between turns; continue the task \
+                             from where it stopped.";
+
 type Inbox = mpsc::UnboundedReceiver<Incoming>;
 
 pub async fn run(args: RunArgs) -> u8 {
@@ -229,6 +235,10 @@ struct Session {
     /// of the context the auto trigger compares to the window. Reset after a
     /// compaction, so the next trigger uses the estimate of the smaller fold.
     last_prompt_tokens: Option<u64>,
+    /// The size at which an automatic compaction was declined because it would
+    /// not shrink the context (M3 review N1). The trigger stays quiet until the
+    /// context has grown past it, instead of paying for a summary every step.
+    compact_floor: Option<u64>,
     /// The tool names frozen at `session_started`; a resumed session sends the
     /// same list, so its cache prefix is unchanged.
     tool_names: Vec<String>,
@@ -236,6 +246,9 @@ struct Session {
     resumed: bool,
     /// The log was not closed cleanly: a turn is continued on resume.
     in_flight: bool,
+    /// The last streamed step failed with an error the provider called
+    /// retryable: a resumed turn may try the turn again (see [`Session::run`]).
+    retryable_failure: bool,
     /// The task words from the command line, for the `user` event a resume
     /// adds when it is given a new message.
     pending_task: String,
@@ -253,6 +266,21 @@ struct CompactedInfo {
     tokens_before: u64,
     tokens_after: u64,
     pinned: usize,
+}
+
+/// What one compaction attempt ended as.
+enum CompactRun {
+    /// Nothing old enough to summarise.
+    Nothing,
+    /// A `compacted` event was written.
+    Applied(CompactedInfo),
+    /// The context would not shrink, so nothing was written (N1); `would_be` is
+    /// the size the fold would have had.
+    Skipped { before: u64, would_be: u64 },
+    /// A verb interrupted the summarising request.
+    Stopped(String),
+    /// The `end` verb arrived during the summarising request.
+    End,
 }
 
 /// The result the `compact` tool call itself gets: the work happens at the next
@@ -361,6 +389,22 @@ async fn drive(opts: Options) -> u8 {
                 );
             }
             return failure.code();
+        }
+    };
+
+    // One session is one writer. Take the log's lock before anything is
+    // appended: on Unix the "already running" connect check and the bind are
+    // two steps, and two resumes started together can both pass the first one
+    // (M3 review N3). The guard lives until `drive` returns.
+    let _lock = match ipc::lock(&prepared.dir) {
+        Ok(lock) => lock,
+        Err(message) => {
+            let message = format!("session {} is already running ({message})", prepared.id);
+            eprintln!("kelir: {message}");
+            if opts.json {
+                print_result_event("error", 1, "", 0, None, Some(&message));
+            }
+            return 1;
         }
     };
 
@@ -582,21 +626,34 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
             crate::util::path_string(&events_path)
         )));
     }
-    // A live session owns its log; a second writer would fork the sequence.
-    if let Ok(stream) = ipc::connect(&dir, &id).await {
-        drop(stream);
-        return Err(Failure::Run(format!(
-            "session {id} is already running ({}); use `kelir ctl` or stop it first",
-            ipc::value(&dir, &id)
-        )));
-    }
-
     let read = read_events(&events_path).map_err(|error| {
         Failure::Run(format!(
             "cannot read {}: {error}",
             crate::util::path_string(&events_path)
         ))
     })?;
+    // A live session owns its log; a second writer would fork the sequence.
+    // The check is connect-then-lock, which is not one atomic step, so `drive`
+    // also takes an exclusive lock on the log; this early answer is what a
+    // caller sees. A session whose log already ends with `session_ended` is on
+    // its way out — `end` acks before the process releases its socket — so give
+    // it a moment instead of refusing to resume a session that has stopped.
+    let closed = read
+        .events
+        .last()
+        .map(|event| matches!(event.body, EventBody::SessionEnded { .. }))
+        .unwrap_or(false);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while ipc::connect(&dir, &id).await.is_ok() {
+        if !closed || Instant::now() >= deadline {
+            return Err(Failure::Run(format!(
+                "session {id} is already running ({}); use `kelir ctl` or stop it first",
+                ipc::value(&dir, &id)
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
     let events = read.events.clone();
     let (mut provider_name, mut model, tools, cwd) = events
         .iter()
@@ -713,6 +770,7 @@ impl Session {
             scheduler: Scheduler::default(),
             compact_request: None,
             last_prompt_tokens: None,
+            compact_floor: None,
             tool_names: prepared
                 .resume
                 .as_ref()
@@ -724,6 +782,7 @@ impl Session {
                 .as_ref()
                 .map(|read| read.in_flight)
                 .unwrap_or(false),
+            retryable_failure: false,
             pending_task: prepared.task.clone(),
         };
         if let Some(read) = prepared.resume {
@@ -766,8 +825,23 @@ impl Session {
     /// again), and add a new task if one was given.
     fn reopen(&mut self, read: Reopened) -> Result<(), String> {
         // Gaps in the log first: a torn last line and every line that never
-        // parsed are reported, never dropped silently.
+        // parsed are reported, never dropped silently — but a gap that a
+        // previous resume already reported is not reported again (M3 review
+        // S3: three resumes, one `error`).
+        let reported: Vec<String> = self
+            .events
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::Error {
+                    location, message, ..
+                } if location == "log" => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
         for damage in &read.damage {
+            if reported.contains(damage) {
+                continue;
+            }
             self.record(EventBody::Error {
                 location: "log".into(),
                 message: damage.clone(),
@@ -814,6 +888,18 @@ impl Session {
                 "kelir: resumed · {unknown} call(s) had an unknown outcome and were not re-run"
             )));
         }
+        // An agent-called compaction that was settled but never applied — a
+        // kill between the tool's `compaction queued` result and the boundary
+        // that summarises — is queued again here (M3 review N2), so the model's
+        // request survives the restart.
+        if self.compact_request.is_none()
+            && let Some(focus) = compact::queued_compaction(&self.events, &self.dir)
+        {
+            self.compact_request = Some(CompactRequest { by: "agent", focus });
+            self.emit(UiEvent::Info(
+                "kelir: resumed · a queued compaction is applied at the next step".to_string(),
+            ));
+        }
         if !self.pending_task.trim().is_empty() {
             // `kelir resume <id> <task>`: a new message on the existing log.
             // When a turn was in flight it lands after the unknown results the
@@ -825,8 +911,46 @@ impl Session {
                 delivery: delivery.to_string(),
                 attachments: Vec::new(),
             })?;
+        } else {
+            self.continue_a_turn_that_ends_on_an_answer()?;
         }
         self.sync();
+        Ok(())
+    }
+
+    /// S4: a kill can leave a log whose last message is the assistant's final
+    /// answer, and a request may not end on one — providers read a trailing
+    /// assistant message as prefill or refuse it. When the resume is about to
+    /// run a turn the log did not leave ready (an unclosed log, or a turn that
+    /// ended stopped or in error), it says what happened in a message of its
+    /// own instead.
+    fn continue_a_turn_that_ends_on_an_answer(&mut self) -> Result<(), String> {
+        if !self.pending_task.trim().is_empty() {
+            return Ok(());
+        }
+        let closed = self
+            .events
+            .iter()
+            .any(|event| matches!(event.body, EventBody::SessionEnded { .. }));
+        let continuing = !closed
+            || matches!(
+                resume::last_turn_outcome(&self.events).as_deref(),
+                Some("stopped") | Some("error")
+            );
+        if !continuing {
+            return Ok(());
+        }
+        let folded = crate::fold::fold(&self.events, &self.dir)?;
+        if folded.messages.last().map(|message| message.role.as_str()) != Some("assistant") {
+            return Ok(());
+        }
+        self.record(EventBody::User {
+            text: Payload::text(CONTINUE_NOTE),
+            from: "cli".into(),
+            delivery: "now".into(),
+            attachments: Vec::new(),
+        })?;
+        self.has_task = true;
         Ok(())
     }
 
@@ -1198,7 +1322,10 @@ impl Session {
     /// Compact the context if something asked for it: the `compact` tool, the
     /// `compact` verb, or the auto trigger at the configured fraction of the
     /// model's window.
-    async fn maybe_compact(&mut self) -> Result<(), String> {
+    ///
+    /// `Some(end)` when a verb interrupted the summarising request: the turn
+    /// ends there, exactly as `stop` during a step would.
+    async fn maybe_compact(&mut self, rx: &mut Inbox) -> Result<Option<TurnEnd>, String> {
         if self.compact_request.is_none() {
             // Nothing to compact before the first step: the estimate would be
             // little more than the system prompt, and the "conversation" is the
@@ -1214,7 +1341,14 @@ impl Session {
                 // covers the step after a compaction.
                 let tokens = self.last_prompt_tokens.unwrap_or(estimate);
                 let window = self.cfg.window(&self.model);
-                if compact::should_auto(window, self.cfg.auto_compact_at, tokens) {
+                // After a compaction that did not shrink anything, wait for the
+                // context to grow past it instead of paying for a summary on
+                // every step (M3 review N1).
+                let above_floor = self
+                    .compact_floor
+                    .map(|floor| tokens > floor)
+                    .unwrap_or(true);
+                if above_floor && compact::should_auto(window, self.cfg.auto_compact_at, tokens) {
                     self.compact_request = Some(CompactRequest {
                         by: "auto",
                         focus: None,
@@ -1223,20 +1357,53 @@ impl Session {
             }
         }
         let Some(request) = self.compact_request.take() else {
-            return Ok(());
+            return Ok(None);
         };
-        match self.compact(&request).await {
-            Ok(Some(info)) => {
+        match self.compact(rx, &request).await {
+            Ok(CompactRun::Applied(info)) => {
                 self.emit(UiEvent::Info(format!(
                     "» compacted through seq {}: ~{} → ~{} tokens ({} pinned) · cache restarts",
                     info.through_seq, info.tokens_before, info.tokens_after, info.pinned
                 )));
+                if info.tokens_after >= info.tokens_before {
+                    self.emit(UiEvent::Info(format!(
+                        "» compact: it did not shrink the context (~{} → ~{} tokens); the event \
+                         records both",
+                        info.tokens_before, info.tokens_after
+                    )));
+                }
             }
-            Ok(None) => {
+            Ok(CompactRun::Nothing) => {
                 self.emit(UiEvent::Info(
                     "» compact: nothing old enough to summarise".to_string(),
                 ));
             }
+            Ok(CompactRun::Skipped { before, would_be }) => {
+                // Cost control (N1): a summary that cannot shrink the context
+                // buys nothing, so it is not requested again until the context
+                // grows. The floor is on the scale the trigger measures with —
+                // the provider's own count when there is one — so the trigger
+                // goes quiet instead of repeating the decision every step.
+                let first_refusal = self.compact_floor.is_none();
+                self.compact_floor = Some(self.last_prompt_tokens.unwrap_or(before));
+                let message = format!(
+                    "automatic compaction skipped: the summary and pins would not be smaller \
+                     than the range they replace (~{before} → ~{would_be} tokens)"
+                );
+                self.emit(UiEvent::Info(format!("» compact skipped: {message}")));
+                // One line in the log per episode, not one per step: the
+                // exception is the decision, the repeats add nothing.
+                if first_refusal {
+                    self.record(EventBody::Error {
+                        location: "compact".into(),
+                        message,
+                        retryable: false,
+                    })?;
+                    self.sync();
+                }
+            }
+            Ok(CompactRun::Stopped(reason)) => return Ok(Some(TurnEnd::Stopped(reason))),
+            Ok(CompactRun::End) => return Ok(Some(TurnEnd::End)),
             Err(message) => {
                 // A failed summary is not a failed turn: the context stays as
                 // it was and the next step runs.
@@ -1248,27 +1415,61 @@ impl Session {
                 self.sync();
             }
         }
-        Ok(())
+        Ok(None)
     }
 
-    /// Summarise the prefix and write the `compacted` event.
+    /// The size of the request the fold would build with `preview` appended.
+    fn preview_tokens(&self, preview: &EventBody, seq: u64) -> Result<u64, String> {
+        let mut events = self.events.clone();
+        events.push(LogEvent::new(seq, preview.clone()));
+        let folded = crate::fold::fold(&events, &self.dir)?;
+        Ok(compact::estimate_tokens(&folded.request_messages()))
+    }
+
+    /// Summarise the range and write the `compacted` event.
     ///
-    /// The summarising request is a plain provider call: verbs are applied at
-    /// the boundary that started the compaction, so a `stop` arriving during it
-    /// is read at the next one.
-    async fn compact(&mut self, request: &CompactRequest) -> Result<Option<CompactedInfo>, String> {
+    /// The summarising request is a provider call like any other: verbs are
+    /// read while it is in flight, so a `stop` does not wait for a large
+    /// transcript to be summarised (M3 review S2), and the turn ends without a
+    /// `compacted` event.
+    async fn compact(
+        &mut self,
+        rx: &mut Inbox,
+        request: &CompactRequest,
+    ) -> Result<CompactRun, String> {
         let Some(plan) = compact::plan(&self.events, self.cfg.compact_keep) else {
-            return Ok(None);
+            return Ok(CompactRun::Nothing);
         };
-        let prefix: Vec<LogEvent> = self
-            .events
-            .iter()
-            .filter(|event| event.seq <= plan.through_seq)
-            .cloned()
-            .collect();
-        let folded = crate::fold::fold(&prefix, &self.dir)?;
-        let transcript = compact::render_transcript(&folded.messages);
-        let tokens_before = compact::estimate_tokens(&folded.request_messages());
+        // The transcript is the fold of the range, not the raw events: a
+        // compaction that covers an earlier one summarises its summary instead
+        // of losing it (B2).
+        let range = crate::fold::range_events(&self.events, plan.through_seq);
+        let folded_range = crate::fold::fold(&range, &self.dir)?;
+        let transcript = compact::render_transcript(&folded_range.messages);
+        // Both numbers describe the whole request the provider sees, so asking
+        // "did it shrink?" is a real question about the context (N1).
+        let whole = crate::fold::fold(&self.events, &self.dir)?;
+        let tokens_before = compact::estimate_tokens(&whole.request_messages());
+        let mut body = EventBody::Compacted {
+            through_seq: plan.through_seq,
+            summary: Payload::text(""),
+            pinned_seqs: plan.pinned_seqs.clone(),
+            by: request.by.to_string(),
+            tokens_before,
+            tokens_after: 0,
+            cache_restart: true,
+        };
+        // The smallest possible result: an empty summary. If even that is not
+        // smaller, no summary can be, so an automatic compaction declines
+        // before paying for one.
+        let smallest = self.preview_tokens(&body, self.writer.next_seq())?;
+        if request.by == "auto" && smallest >= tokens_before {
+            return Ok(CompactRun::Skipped {
+                before: tokens_before,
+                would_be: smallest,
+            });
+        }
+
         self.emit(UiEvent::Info(format!(
             "» compacting {} pinned message(s) through seq {} · ~{} tokens",
             plan.pinned_seqs.len(),
@@ -1282,47 +1483,66 @@ impl Session {
             &transcript,
             request.focus.as_deref(),
         );
-        let assembler = self
-            .client
-            .stream(&summarising)
-            .await
-            .map_err(|error| format!("the summarising request failed: {}", error.message))?;
+        let assembler = match self.stream(rx, &summarising, true).await? {
+            StreamEnd::Assembled(assembler) => assembler,
+            StreamEnd::Stopped(reason) => return Ok(CompactRun::Stopped(reason)),
+            StreamEnd::End => return Ok(CompactRun::End),
+        };
+        // The summary's spend belongs in the log like any step's, marked so a
+        // reader (and `kelir ls`) can tell it is not a step of the turn
+        // (M3 review N4).
+        if let Some(usage) = &assembler.usage {
+            self.record(EventBody::Usage {
+                step: self.step,
+                prompt_tokens: usage.prompt_tokens,
+                completion_tokens: usage.completion_tokens,
+                cached_tokens: usage.cached_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+                cost: usage.cost,
+                allowance: usage.allowance.clone(),
+                kind: Some("compact".into()),
+            })?;
+            self.emit(UiEvent::Usage {
+                prompt: usage.prompt_tokens,
+                completion: usage.completion_tokens,
+                cached: usage.cached_tokens,
+                cost: usage.cost,
+            });
+            self.sync();
+        }
         let summary = assembler.text.trim().to_string();
         if summary.is_empty() {
             return Err("the summarising request returned no text".to_string());
         }
-
-        let mut body = EventBody::Compacted {
-            through_seq: plan.through_seq,
-            summary: Payload::text(summary),
-            pinned_seqs: plan.pinned_seqs.clone(),
-            by: request.by.to_string(),
-            tokens_before,
-            tokens_after: 0,
-            cache_restart: true,
-        };
+        if let EventBody::Compacted { summary: slot, .. } = &mut body {
+            *slot = Payload::text(summary);
+        }
         // The size after: fold the log as it *will* be, so the number in the
         // event is the one the next request is built from.
-        let preview_event = LogEvent::new(self.writer.next_seq(), body.clone());
-        let mut preview = self.events.clone();
-        preview.push(preview_event);
-        let tokens_after =
-            compact::estimate_tokens(&crate::fold::fold(&preview, &self.dir)?.request_messages());
+        let tokens_after = self.preview_tokens(&body, self.writer.next_seq())?;
+        if request.by == "auto" && tokens_after >= tokens_before {
+            return Ok(CompactRun::Skipped {
+                before: tokens_before,
+                would_be: tokens_after,
+            });
+        }
         if let EventBody::Compacted {
             tokens_after: slot, ..
         } = &mut body
         {
             *slot = tokens_after;
         }
+        let pinned = plan.pinned_seqs.len();
         self.record(body)?;
         self.sync();
         // The next trigger measures the compacted fold, not the old size.
         self.last_prompt_tokens = None;
-        Ok(Some(CompactedInfo {
+        self.compact_floor = None;
+        Ok(CompactRun::Applied(CompactedInfo {
             through_seq: plan.through_seq,
             tokens_before,
             tokens_after,
-            pinned: plan.pinned_seqs.len(),
+            pinned,
         }))
     }
 
@@ -1332,7 +1552,9 @@ impl Session {
     /// queued. Ends with `session_ended`.
     async fn run(&mut self, rx: &mut Inbox) -> u8 {
         let mut code = 0u8;
-        let mut reason = "done".to_string();
+        // Every way out of the loop below sets it (the loop always runs at
+        // least one turn).
+        let mut reason;
         // A resumed session with nothing in flight and nothing new has no turn
         // to run: `kelir resume <id>` on a finished session reports and leaves.
         // A TUI resume still waits for the next message (`keep`).
@@ -1356,6 +1578,7 @@ impl Session {
                 }
             }
         }
+        let mut turn_retries = 0u32;
         loop {
             self.turn += 1;
             let end = self.drive_turn(rx).await;
@@ -1366,6 +1589,8 @@ impl Session {
                         final_text: self.final_text.clone().into(),
                     });
                     self.finish_turn("done");
+                    code = 0;
+                    reason = "done".into();
                     false
                 }
                 Ok(TurnEnd::Stopped(why)) => {
@@ -1410,8 +1635,24 @@ impl Session {
                 }
             };
             self.sync();
-            if matches!(end, Ok(TurnEnd::End)) || (failed && !self.keep) {
+            // A resumed turn that failed on an error the provider called
+            // retryable — an outage — gets the turn tried again: surviving one
+            // is what `resume` is for, and a provider often recovers within
+            // seconds. The budget is the same one a step gets, so a resume can
+            // never turn into a loop against a dead provider.
+            let retry_the_turn = failed
+                && !self.keep
+                && self.resumed
+                && self.retryable_failure
+                && turn_retries + 1 < provider::MAX_ATTEMPTS;
+            if matches!(end, Ok(TurnEnd::End)) || (failed && !self.keep && !retry_the_turn) {
                 break;
+            }
+            if retry_the_turn {
+                turn_retries += 1;
+                self.retryable_failure = false;
+                code = 0;
+                continue;
             }
             match self.take_turn_messages() {
                 Some(TurnStart::End) => {
@@ -1484,6 +1725,7 @@ impl Session {
 
     async fn drive_turn(&mut self, rx: &mut Inbox) -> Result<TurnEnd, String> {
         self.final_text.clear();
+        self.retryable_failure = false;
         self.emit(UiEvent::TurnStarted {
             turn: self.turn,
             provider: self.provider_name.clone(),
@@ -1508,8 +1750,11 @@ impl Session {
 
             // Compaction applies here and nowhere else: after the previous
             // batch settled, before the next request, never between a tool call
-            // and its result. All three triggers arrive as one request.
-            self.maybe_compact().await?;
+            // and its result. All three triggers arrive as one request. A
+            // `stop` or `end` during the summarising request ends the turn.
+            if let Some(end) = self.maybe_compact(rx).await? {
+                return Ok(end);
+            }
 
             let folded = crate::fold::fold(&self.events, &self.dir)?;
             let request =
@@ -1530,7 +1775,7 @@ impl Session {
                 model: self.model.clone(),
             });
 
-            let assembler = match self.stream(rx, &request).await? {
+            let assembler = match self.stream(rx, &request, false).await? {
                 StreamEnd::Assembled(assembler) => assembler,
                 StreamEnd::Stopped(reason) => return Ok(TurnEnd::Stopped(reason)),
                 StreamEnd::End => return Ok(TurnEnd::End),
@@ -1566,6 +1811,7 @@ impl Session {
                     cache_write_tokens: usage.cache_write_tokens,
                     cost: usage.cost,
                     allowance: usage.allowance.clone(),
+                    kind: None,
                 })?;
                 // The size of the context the provider just saw: what the auto
                 // trigger compares to the window.
@@ -1628,21 +1874,30 @@ impl Session {
     /// Stream one response, taking verbs while it is in flight. A `stop` ends
     /// the turn without committing the half-response; anything else waits for
     /// the next boundary.
+    ///
+    /// `summary` is the compaction's own request: its text is not rendered as
+    /// the answer being streamed, and the crash hook stays where a *step*
+    /// would land.
     async fn stream(
         &mut self,
         rx: &mut Inbox,
         request: &provider::BuiltRequest,
+        summary: bool,
     ) -> Result<StreamEnd, String> {
         let mut attempt = 0u32;
         let mut inbox_open = true;
+        // A summary is one request: retrying it buys nothing the second time
+        // (the provider is down or the prompt is too large) and it is spend the
+        // turn does not need. A step keeps the provider attempt budget.
+        let max_attempts = if summary { 1 } else { provider::MAX_ATTEMPTS };
         loop {
             let client = self.client.clone();
             // Live text goes to the UI as it arrives; the callback is a send to
             // an unbounded channel, so it can never stall the stream.
-            let ui = self.ui.clone();
+            let ui = if summary { None } else { self.ui.clone() };
             // Documented test hook: die with half a response streamed and
             // nothing committed, which is where a crash in the stream lands.
-            let crash_mid_stream = crash_armed("mid_stream");
+            let crash_mid_stream = !summary && crash_armed("mid_stream");
             let mut on_delta = move |delta: crate::stream::Delta| {
                 if let crate::stream::Delta::Text(text) = &delta {
                     if crash_mid_stream {
@@ -1675,13 +1930,16 @@ impl Session {
             match outcome.expect("the stream ended without a result") {
                 Ok(assembler) => return Ok(StreamEnd::Assembled(assembler)),
                 Err(error) => {
-                    let will_retry = error.retryable && attempt + 1 < provider::MAX_ATTEMPTS;
+                    let will_retry = error.retryable && attempt + 1 < max_attempts;
                     self.record(EventBody::Error {
                         location: "provider".into(),
                         message: error.message.clone(),
                         retryable: error.retryable,
                     })?;
                     if !will_retry {
+                        if !summary {
+                            self.retryable_failure = error.retryable;
+                        }
                         return Err(error.message);
                     }
                     self.sync();

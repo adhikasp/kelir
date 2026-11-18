@@ -5,6 +5,7 @@
 //! byte-identical to one built from inline values (the cache prefix cannot
 //! change because the log got large).
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use crate::chat::{ChatMessage, ToolCall};
@@ -40,54 +41,139 @@ pub fn fold(events: &[LogEvent], session_dir: &Path) -> Result<Folded, String> {
         }
     }
 
-    // Which seqs a compaction replaced, and which of those compactions a later
-    // one replaced in turn. A compaction renders as "summary + pins" only where
-    // it still stands: a second compaction re-summarises the first one and
-    // re-pins the human messages it kept.
-    let compactions: Vec<u64> = events
+    // The compactions in this log, and which of them a later one supersedes.
+    // A compaction renders as "summary + pins" only while it stands: a later
+    // one that covers its range (or that reaches over the compaction event
+    // itself) has already summarised it, so the old summary and its pins are
+    // gone.
+    struct Rule<'a> {
+        seq: u64,
+        through: u64,
+        body: &'a EventBody,
+    }
+    let mut rules: Vec<Rule> = events
         .iter()
         .filter_map(|event| match &event.body {
-            EventBody::Compacted { through_seq, .. } => Some(*through_seq),
+            EventBody::Compacted { through_seq, .. } => Some(Rule {
+                seq: event.seq,
+                through: *through_seq,
+                body: &event.body,
+            }),
             _ => None,
         })
         .collect();
-    let replaced = |seq: u64| compactions.iter().any(|through| seq <= *through);
-    let by_seq: std::collections::BTreeMap<u64, &LogEvent> =
-        events.iter().map(|event| (event.seq, event)).collect();
-
-    for event in events {
-        // A compaction renders where it was written, unless a later one
-        // re-summarised it; `replaced` is false for its own seq (a compaction
-        // always covers events before itself).
-        if let EventBody::Compacted {
-            summary,
-            pinned_seqs,
-            ..
-        } = &event.body
-        {
-            if !replaced(event.seq) {
-                let text = summary.resolve_text(session_dir)?;
-                folded
-                    .messages
-                    .push(ChatMessage::user(&compaction_message(&text)));
-                // Pins render in log order whatever order the event lists them
-                // in: the conversation stays chronological.
-                let mut pins = pinned_seqs.clone();
-                pins.sort_unstable();
-                for pin in pins {
-                    if let Some(pinned) = by_seq.get(&pin) {
-                        render(&mut folded, pinned, session_dir)?;
-                    }
-                }
+    rules.sort_by_key(|rule| rule.seq);
+    let mut superseded = vec![false; rules.len()];
+    for (index, rule) in rules.iter().enumerate() {
+        for later in &rules[index + 1..] {
+            if later.through >= rule.through || later.through >= rule.seq {
+                superseded[index] = true;
             }
+        }
+    }
+    let mut standing: Vec<&Rule> = rules
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !superseded[*index])
+        .map(|(_, rule)| rule)
+        .collect();
+    standing.sort_by_key(|rule| rule.through);
+
+    let by_seq: BTreeMap<u64, &LogEvent> = events.iter().map(|event| (event.seq, event)).collect();
+    // The log is normally in seq order; a transcript builder may hand in a
+    // later `compacted` event beside an earlier range, so order it here.
+    let mut ordered: Vec<&LogEvent> = events.iter().collect();
+    ordered.sort_by_key(|event| event.seq);
+    let mut rendered_pins: HashSet<u64> = HashSet::new();
+
+    // A compaction renders at `through_seq` — where its range ends — not where
+    // its event was written. That keeps the summary and the pins *before* the
+    // kept tail, so the request reads `[system, summary, pins, tail, …later]`
+    // and its last message is the newest event, never an old pin.
+    let mut next = 0usize;
+    for event in ordered {
+        while next < standing.len() && standing[next].through < event.seq {
+            render_compaction(
+                &mut folded,
+                standing[next].body,
+                &by_seq,
+                &mut rendered_pins,
+                session_dir,
+            )?;
+            next += 1;
+        }
+        // A compaction event never renders where it sits: it either rendered
+        // at its range above, or a later compaction superseded it.
+        if matches!(event.body, EventBody::Compacted { .. }) {
             continue;
         }
-        if replaced(event.seq) {
+        if standing.iter().any(|rule| event.seq <= rule.through) {
             continue;
         }
         render(&mut folded, event, session_dir)?;
     }
+    while next < standing.len() {
+        render_compaction(
+            &mut folded,
+            standing[next].body,
+            &by_seq,
+            &mut rendered_pins,
+            session_dir,
+        )?;
+        next += 1;
+    }
     Ok(folded)
+}
+
+/// Render one standing compaction: its summary, then its pins verbatim in log
+/// order. A pin is rendered at most once, even when two compactions name it.
+fn render_compaction(
+    folded: &mut Folded,
+    body: &EventBody,
+    by_seq: &BTreeMap<u64, &LogEvent>,
+    rendered_pins: &mut HashSet<u64>,
+    session_dir: &Path,
+) -> Result<(), String> {
+    let EventBody::Compacted {
+        summary,
+        pinned_seqs,
+        ..
+    } = body
+    else {
+        return Ok(());
+    };
+    let text = summary.resolve_text(session_dir)?;
+    folded
+        .messages
+        .push(ChatMessage::user(&compaction_message(&text)));
+    let mut pins = pinned_seqs.clone();
+    pins.sort_unstable();
+    for pin in pins {
+        if !rendered_pins.insert(pin) {
+            continue;
+        }
+        if let Some(pinned) = by_seq.get(&pin) {
+            render(folded, pinned, session_dir)?;
+        }
+    }
+    Ok(())
+}
+
+/// The events a compaction of `through_seq` is summarised from: everything in
+/// the range, plus every `compacted` event whose own range is inside it. The
+/// latter carries the earlier summary, so a second compaction summarises the
+/// first one instead of losing it.
+pub fn range_events(events: &[LogEvent], through_seq: u64) -> Vec<LogEvent> {
+    events
+        .iter()
+        .filter(|event| match &event.body {
+            EventBody::Compacted {
+                through_seq: inner, ..
+            } => *inner <= through_seq,
+            _ => event.seq <= through_seq,
+        })
+        .cloned()
+        .collect()
 }
 
 /// How a compaction's summary reaches the model: one user message at the head
@@ -311,6 +397,7 @@ mod tests {
                     cache_write_tokens: 0,
                     cost: 0.0,
                     allowance: None,
+                    kind: None,
                 },
             ),
             LogEvent::new(
@@ -523,6 +610,186 @@ mod tests {
                 .count(),
             1,
             "a pin is rendered once"
+        );
+    }
+
+    fn assistant_at(seq: u64, text: &str) -> LogEvent {
+        LogEvent::new(
+            seq,
+            EventBody::Assistant {
+                step: seq as u32,
+                text: text.into(),
+                reasoning: None,
+                tool_calls: vec![],
+                finish_reason: Some("stop".into()),
+            },
+        )
+    }
+
+    fn user_at(seq: u64, text: &str, from: &str) -> LogEvent {
+        LogEvent::new(
+            seq,
+            EventBody::User {
+                text: text.into(),
+                from: from.into(),
+                delivery: "now".into(),
+                attachments: vec![],
+            },
+        )
+    }
+
+    fn compacted_at(seq: u64, through: u64, summary: &str, pins: Vec<u64>) -> LogEvent {
+        LogEvent::new(
+            seq,
+            EventBody::Compacted {
+                through_seq: through,
+                summary: summary.into(),
+                pinned_seqs: pins,
+                by: "agent".into(),
+                tokens_before: 100,
+                tokens_after: 10,
+                cache_restart: true,
+            },
+        )
+    }
+
+    fn texts(folded: &Folded) -> Vec<String> {
+        folded
+            .messages
+            .iter()
+            .map(|message| message.content.clone().unwrap_or_default())
+            .collect()
+    }
+
+    /// B1: the summary and the pins render at `through_seq`, before the tail
+    /// that was kept verbatim, so the newest event is the last message.
+    #[test]
+    fn a_compaction_renders_before_the_tail_it_kept() {
+        let events = vec![
+            started(),
+            user_at(2, "the task", "cli"),
+            assistant_at(3, "one"),
+            assistant_at(4, "two"),
+            assistant_at(5, "three"),
+            assistant_at(6, "four"),
+            // A default-keep compaction: the cut is before the last messages,
+            // so its event sits *after* the tail it kept.
+            compacted_at(7, 3, "SUMMARY", vec![2]),
+            user_at(8, "the newest question", "tui"),
+        ];
+        let folded = fold(&events, Path::new("")).unwrap();
+        let contents = texts(&folded);
+        assert_eq!(contents.len(), 6, "{contents:?}");
+        assert!(contents[0].contains("SUMMARY"), "{contents:?}");
+        assert_eq!(contents[1], "the task", "the pin follows the summary");
+        assert_eq!(
+            &contents[2..],
+            ["two", "three", "four", "the newest question"]
+        );
+        assert_eq!(
+            contents.last().unwrap(),
+            "the newest question",
+            "the last message is the newest event, never an old pin"
+        );
+        assert!(!contents.iter().any(|text| text == "one"));
+        assert_eq!(
+            folded.messages[1].role, "user",
+            "the pins are user messages after the summary"
+        );
+    }
+
+    /// B2: a later compaction whose range reaches over the earlier compaction's
+    /// event supersedes it even when its `through_seq` is below that event's
+    /// seq: one summary, every pin once.
+    #[test]
+    fn a_compaction_supersedes_one_whose_range_it_covers() {
+        let events = vec![
+            started(),
+            user_at(2, "the task", "cli"),
+            user_at(3, "a note", "tui"),
+            assistant_at(4, "one"),
+            assistant_at(5, "two"),
+            // First compaction: through 4, written at 6, keeping 5 verbatim.
+            compacted_at(6, 4, "FIRST", vec![2, 3]),
+            assistant_at(7, "three"),
+            assistant_at(8, "four"),
+            // Second: through 7 — below the first event's seq (6)? No: 7 > 6,
+            // but the case that broke was through < the *tail* end, so cover it
+            // by keeping the tail after the second compaction.
+            compacted_at(9, 7, "SECOND", vec![2, 3]),
+            assistant_at(10, "five"),
+        ];
+        let folded = fold(&events, Path::new("")).unwrap();
+        let contents = texts(&folded);
+        assert_eq!(contents.len(), 5, "{contents:?}");
+        assert!(contents[0].contains("SECOND"), "{contents:?}");
+        assert!(!contents.iter().any(|text| text.contains("FIRST")));
+        assert_eq!(contents[1], "the task");
+        assert_eq!(contents[2], "a note");
+        assert_eq!(contents[3], "four");
+        assert_eq!(contents[4], "five");
+        assert_eq!(
+            contents.iter().filter(|text| *text == "the task").count(),
+            1,
+            "a pin renders once"
+        );
+    }
+
+    /// The earlier compaction's event can sit *after* a later compaction's
+    /// `through_seq` (its kept tail is what pushed it there), and it is still
+    /// superseded.
+    #[test]
+    fn a_compaction_supersedes_one_written_after_its_through_seq() {
+        let events = vec![
+            started(),
+            user_at(2, "the task", "cli"),
+            assistant_at(3, "one"),
+            compacted_at(4, 2, "FIRST", vec![2]),
+            assistant_at(5, "two"),
+            assistant_at(6, "three"),
+            // through 5 is below the first compaction's seq (4)? It is above,
+            // but the first event sits inside the *kept tail* of the second.
+            compacted_at(7, 5, "SECOND", vec![2]),
+            assistant_at(8, "four"),
+        ];
+        let folded = fold(&events, Path::new("")).unwrap();
+        let contents = texts(&folded);
+        assert!(contents[0].contains("SECOND"), "{contents:?}");
+        assert!(!contents.iter().any(|text| text.contains("FIRST")));
+        assert_eq!(
+            contents.iter().filter(|text| *text == "the task").count(),
+            1
+        );
+    }
+
+    /// The transcript of a second compaction includes the first summary: the
+    /// range is folded, and the earlier `compacted` event (written later) is
+    /// part of it.
+    #[test]
+    fn a_range_includes_the_summary_of_the_compaction_it_covers() {
+        let events = vec![
+            started(),
+            user_at(2, "the task", "cli"),
+            assistant_at(3, "one"),
+            compacted_at(4, 2, "FIRST", vec![2]),
+            user_at(5, "more", "tui"),
+            assistant_at(6, "two"),
+        ];
+        let range = range_events(&events, 5);
+        let folded = fold(&range, Path::new("")).unwrap();
+        let contents = texts(&folded);
+        assert!(
+            contents.iter().any(|text| text.contains("FIRST")),
+            "{contents:?}"
+        );
+        assert!(
+            contents.iter().any(|text| text == "the task"),
+            "{contents:?}"
+        );
+        assert!(contents.iter().any(|text| text == "more"), "{contents:?}");
+        assert!(
+            !contents.iter().any(|text| text == "two"),
+            "the tail is outside the range: {contents:?}"
         );
     }
 

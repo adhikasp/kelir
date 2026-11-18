@@ -239,6 +239,16 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   already running`. A stale `sock` (and a `sock.path` pointer) left by a dead
   process is replaced by the new bind — `ipc::bind` already removed the stale
   file on Unix, and a Windows pipe name does not outlive its process.
+- **On Unix "already running" is an exclusive `flock` on
+  `<session>/session.lock`, not only the connect check.** `bind` unlinks a
+  stale socket before listening, so connect-then-bind is two steps and two
+  resumes started together could both pass it (M3 review N3). The session
+  process holds the lock for its whole life; the loser exits 1 before it
+  writes a byte. Windows keeps the named pipe's first-instance rule (and a
+  no-op lock guard). A log that already ends with `session_ended` belongs to a
+  process that is tearing down (`end` acks before the socket closes), so a
+  resume waits up to 2 s for the socket to stop answering instead of reporting
+  a race as "already running".
 - **A crash leaves no `turn_ended` and no `session_ended`.** That was already
   true and is unchanged: the log simply stops. A resume does not invent them; it
   appends `resumed`, settles the unknown calls and continues the turn, and the
@@ -246,19 +256,37 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   continues when the log was **not closed cleanly** — a turn with no
   `turn_ended` after its last step, or (a kill between two turns) no
   `session_ended` at all — so a `kill -9` at any point during a task resumes it.
-  A session that ended cleanly (`done`, `stopped` or `error`, then
-  `session_ended`) continues only when the caller passes a new task.
+- **A turn that ended `stopped` or `error` is continued by `resume`** with no
+  new task (M3 review S1: SPEC's `resume` continues a stopped or crashed
+  session, and a provider outage is the commonest reason to resume). A turn that
+  ended `done` and was closed with `session_ended` still needs a new task.
+  A resumed turn that fails on an error the provider calls retryable is tried
+  again — the turn, not the step — while the provider attempt budget
+  (`provider::MAX_ATTEMPTS`, three) lasts, because surviving an outage is what
+  the resume is for. The one-shot exit code is that of the last attempt.
+- **A resumed request never ends on an assistant message.** When the log was not
+  closed and its last rendered message is the assistant's answer, the resume
+  appends one `user` event — `[kelir] the session was interrupted between turns;
+  continue the task from where it stopped.` (`from: "cli"`) — and runs a turn for
+  it. A trailing assistant message is prefill to some providers and a rejection
+  to others, and either way it is a paid, meaningless turn (M3 review S4).
 - **`compacted.cache_restart` is a field the spec's table does not list.** The
   spec asks that the cache restart is logged; the event carries
   `cache_restart: true` (it is inherent), the UI says so, and the next
-  `step_started.request_hash` differs because the prefix was rewritten. What is
-  *not* logged is the summarising request's own `usage`/cost: it is not a step,
-  so it has no step number to record and `kelir ls` does not count it yet.
+  `step_started.request_hash` differs because the prefix was rewritten.
+- **The summarising request's spend is a `usage` event with `kind: "compact"`.**
+  It is not a step, so it carries the *last* step number and the marker; a
+  reader (or a future `kelir ls`) tells the two apart by `kind` and the numbers
+  still add up (M3 review N4). Retrying a summary buys nothing — the provider is
+  down or the prompt is too large — so it is exactly one request, unlike a
+  step's three attempts.
 - **`tokens_before`/`tokens_after` are estimates**: four bytes per token, rounded
-  up, over the JSON the provider would receive (system message included, tools
-  not). The auto trigger uses the provider's own `usage.prompt_tokens` when the
-  log has one, and the same estimate otherwise (the first step, and the step
-  after a compaction).
+  up, over the JSON of the whole request the provider would receive (system
+  message included, tools not) — both sides of the comparison are the same
+  context's, so "did the compaction shrink it?" is a real question. The auto
+  trigger uses the provider's own `usage.prompt_tokens` when the log has one,
+  and the same estimate otherwise (the first step, and the step after a
+  compaction).
 - **Pins: the first `user` message whatever its `from`, plus every `user` whose
   `from` is a human.** `tui`, `ctl`, `cli` and `channel` count as a human (a
   person typed it, in the editor, in a shell or in a chat bridge); `job` and
@@ -266,21 +294,45 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   original `user` messages, verbatim (a spilled one is read back from its blob).
   The summary itself arrives as one `user` message:
   `[kelir compacted the earlier conversation]\n\n<summary>`.
+- **A compaction renders at `through_seq`, not where its event was written.**
+  The request after a compaction is `[system, summary, pins, kept tail, later
+  events]`: the summary and the pins come first, the tail that was kept verbatim
+  follows, and the last message is always the newest event — never an old pin —
+  and the message right after the system one is a `user` message (M3 review B1).
+  A `compacted` event whose `through_seq` is at the very end of the log renders
+  last, after nothing.
 - **A compaction keeps a tail verbatim** (`compact_keep`, default 4 messages) so
   the model still sees what it was doing; `fold` cannot cut between an assistant
   tool call and its result, so the cut moves back to that assistant when a
-  `tool_settled` would otherwise start the tail. A second compaction supersedes
-  the first (its summary and pins are inside the second's range, so they are
-  dropped) and re-pins the human messages it still finds in the log.
+  `tool_settled` would otherwise start the tail.
+- **A later compaction supersedes every earlier one whose range it covers** — a
+  later `through_seq` at or past the earlier one's, or past the earlier
+  `compacted` event itself (its kept tail is what put it there) — so one summary
+  stands and each pin renders once (M3 review B2). Its transcript is the *fold*
+  of the range, so the earlier summary is part of what the second one
+  summarises; the new `through_seq` never reaches back before an earlier
+  compaction's range.
+- **An automatic compaction is refused when it cannot shrink the context** (M3
+  review N1): if even an empty summary would leave the fold at least as large,
+  no summarising request is sent, the automatic trigger stays quiet until the
+  context grows past the size it refused at, and the refusal is one
+  `error {where: "compact", retryable: false}` event (the only log event that
+  can carry a decision). An explicit `compact` (human or agent) is always
+  honoured: `compacted.tokens_after >= tokens_before` is visible in the event,
+  and the UI says so.
+- **A queued `compact` survives a resume** (M3 review N2): a `compact` call whose
+  `tool_settled` says `compaction queued` with no `compacted` event after it is
+  re-queued by the resume, with the focus the call carried.
 - **The auto trigger never fires before the log's first step**, and only when a
   plan exists: at the first `before_step` the "conversation" is the task alone,
   and compacting it would cost a provider call to save nothing.
 - **The summarising request is sealed**: the `compact_prompt` as the system
   message and one user message (the focus line, then the transcript of the
   range), built by the same client — so it carries the session id and can hit
-  the parent's cache — with **no tools**. Verbs are not read while it is in
-  flight; a `stop` arriving then is applied at the next boundary, which is the
-  same boundary that would have sent the next step.
+  the parent's cache — with **no tools**. Verbs are read while it is in flight,
+  exactly as during a step (M3 review S2): `stop` ends the turn without a
+  `compacted` event (the half-summary is dropped), `end` closes the session, and
+  anything else waits for its boundary.
 - **`compact` applies at `before_step` only**, from all three triggers: the
   tool's result says `compaction queued …`, the verb is queued like `model`, and
   the auto trigger sets the same request. `kelir ctl <id> compact <focus>` now
@@ -300,8 +352,13 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   whole number of events ending on a newline (`a_batch_is_whole_on_disk…`). What
   a unit test cannot prove is the fsync itself under a power cut; the crash hook
   proves the ordering and that committed events survive the process dying. A
-  torn last line is reported on resume as `error {where: "log"}`, and a final
-  line that is a whole event without its newline is kept rather than dropped.
+  final line that is a whole event without its newline is kept (the newline is
+  added). A torn final line — anything shorter — is copied to
+  `events.jsonl.torn` and **cut off** when the log is opened, so the log holds
+  whole events only: no unparseable line for `jq` or the TUI, and never two
+  lines with the same `seq` (M3 review S3). The resume that finds it reports it
+  once as `error {where: "log"}`, after the cut, so a later resume reports
+  nothing, and damage a previous resume already reported is not reported again.
 - **The TUI no longer double-prints tool lines.** The session printed
   `→ bash … · ok · N B` on stdout while the TUI painted its own line for the
   same event; that write is now headless-only (`!json && !tui`), so the painter

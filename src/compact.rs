@@ -14,6 +14,7 @@
 //! first user message (the task) and every message a human typed.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::chat::ChatMessage;
 use crate::event::{EventBody, LogEvent};
@@ -148,7 +149,32 @@ pub fn plan(events: &[LogEvent], keep: usize) -> Option<Plan> {
     if cut == 0 {
         return None;
     }
-    let through_seq = bearing[cut - 1].seq;
+    let mut through_seq = bearing[cut - 1].seq;
+
+    // A compaction never reaches back before one that already stands: the new
+    // one has to cover it (its range and therefore its summary), or the fold
+    // would keep both summaries and pin the same messages twice (B2).
+    let floor = events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::Compacted { through_seq, .. } => Some(*through_seq),
+            _ => None,
+        })
+        .max();
+    if let Some(floor) = floor
+        && through_seq < floor
+    {
+        through_seq = floor;
+    }
+    // With the floor in force the tail can no longer be pulled back, so drop
+    // the orphan risk the other way: a tool result right after the cut moves
+    // into the range with it.
+    while let Some(next) = bearing.iter().find(|event| event.seq > through_seq) {
+        if !matches!(next.body, EventBody::ToolSettled { .. }) {
+            break;
+        }
+        through_seq = next.seq;
+    }
 
     let first_user = events
         .iter()
@@ -169,6 +195,58 @@ pub fn plan(events: &[LogEvent], keep: usize) -> Option<Plan> {
         through_seq,
         pinned_seqs,
     })
+}
+
+/// A `compact` call the log shows as queued but that was never applied: the
+/// process died between the tool's `compaction queued …` result and the
+/// boundary that would have summarised. A resume re-queues it (N2), so the
+/// model's request is not silently lost.
+///
+/// `None` means nothing is outstanding; `Some(focus)` is a queued compaction,
+/// with the focus the call carried when it had one.
+pub fn queued_compaction(events: &[LogEvent], session_dir: &Path) -> Option<Option<String>> {
+    let mut focus_by_call: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut pending: Option<Option<String>> = None;
+    for event in events {
+        match &event.body {
+            EventBody::Assistant { tool_calls, .. } => {
+                for call in tool_calls.iter().filter(|call| call.name == "compact") {
+                    let focus = call
+                        .args
+                        .resolve(session_dir)
+                        .ok()
+                        .and_then(|args| {
+                            args.get("focus")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string)
+                        })
+                        .filter(|focus| !focus.trim().is_empty());
+                    focus_by_call.insert(call.id.clone(), focus);
+                }
+            }
+            EventBody::ToolSettled {
+                call_id,
+                outcome,
+                result,
+                ..
+            } if outcome == "ok" => {
+                let Some(focus) = focus_by_call.get(call_id) else {
+                    continue;
+                };
+                let queued = result
+                    .resolve_text(session_dir)
+                    .map(|text| text.contains("compaction queued"))
+                    .unwrap_or(false);
+                if queued {
+                    pending = Some(focus.clone());
+                }
+            }
+            // Any compaction after the queue's own event settles it.
+            EventBody::Compacted { .. } => pending = None,
+            _ => {}
+        }
+    }
+    pending
 }
 
 /// The conversation as text, for the summarising request.
@@ -431,8 +509,128 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_never_reaches_back_before_a_compaction_that_stands() {
+        // A `compacted` event whose range ends at 4 is already in the log, but
+        // the raw count says the next cut is at 2. The new range must cover the
+        // old one, so its summary and pins are replaced, not repeated (B2).
+        let events = vec![
+            started(),
+            user(2, "the task", "cli"),
+            assistant_call(3, "a"),
+            settled(4, "a"),
+            LogEvent::new(
+                5,
+                EventBody::Compacted {
+                    through_seq: 4,
+                    summary: "FIRST".into(),
+                    pinned_seqs: vec![2],
+                    by: "agent".into(),
+                    tokens_before: 10,
+                    tokens_after: 5,
+                    cache_restart: true,
+                },
+            ),
+            assistant_text(6, "after"),
+        ];
+        let plan = plan(&events, 1).expect("a plan");
+        assert_eq!(plan.through_seq, 4, "the old range is covered");
+        assert_eq!(plan.pinned_seqs, vec![2]);
+    }
+
+    #[test]
+    fn a_queued_compaction_is_found_until_one_is_applied() {
+        let dir = std::path::Path::new("");
+        let mut events = vec![
+            started(),
+            user(2, "the task", "cli"),
+            LogEvent::new(
+                3,
+                EventBody::Assistant {
+                    step: 1,
+                    text: "".into(),
+                    reasoning: None,
+                    tool_calls: vec![LoggedToolCall {
+                        id: "call_c".into(),
+                        name: "compact".into(),
+                        args: Payload::value(json!({"focus": "the api shape"})),
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                },
+            ),
+            LogEvent::new(
+                4,
+                EventBody::ToolSettled {
+                    call_id: "call_c".into(),
+                    outcome: "ok".into(),
+                    exit_code: Some(0),
+                    bytes: 10,
+                    lines: 1,
+                    out_path: "out".into(),
+                    spilled: false,
+                    result: "compaction queued: …".into(),
+                },
+            ),
+        ];
+        assert_eq!(
+            queued_compaction(&events, dir),
+            Some(Some("the api shape".to_string())),
+            "a settle with no compaction after it is still queued"
+        );
+        events.push(LogEvent::new(
+            5,
+            EventBody::Compacted {
+                through_seq: 4,
+                summary: "SUMMARY".into(),
+                pinned_seqs: vec![2],
+                by: "agent".into(),
+                tokens_before: 10,
+                tokens_after: 5,
+                cache_restart: true,
+            },
+        ));
+        assert_eq!(queued_compaction(&events, dir), None, "already applied");
+    }
+
+    #[test]
+    fn a_compaction_that_failed_is_not_requeued() {
+        let events = vec![
+            started(),
+            user(2, "the task", "cli"),
+            LogEvent::new(
+                3,
+                EventBody::Assistant {
+                    step: 1,
+                    text: "".into(),
+                    reasoning: None,
+                    tool_calls: vec![LoggedToolCall {
+                        id: "call_c".into(),
+                        name: "compact".into(),
+                        args: Payload::value(json!({})),
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                },
+            ),
+            LogEvent::new(
+                4,
+                EventBody::ToolSettled {
+                    call_id: "call_c".into(),
+                    outcome: "disabled".into(),
+                    exit_code: None,
+                    bytes: 4,
+                    lines: 1,
+                    out_path: "out".into(),
+                    spilled: false,
+                    result: "disabled by user: compact".into(),
+                },
+            ),
+        ];
+        assert_eq!(queued_compaction(&events, std::path::Path::new("")), None);
+    }
+
+    #[test]
     fn the_transcript_names_roles_calls_and_outputs() {
         let messages = vec![
+            ChatMessage::user("the task"),
             ChatMessage::user("the task"),
             ChatMessage::assistant(
                 "looking",

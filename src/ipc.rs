@@ -34,6 +34,8 @@ use tokio::sync::{mpsc, oneshot};
 
 /// The socket's file name on Unix; on Windows the pipe name carries the id.
 pub const SOCKET_FILE: &str = "sock";
+/// The lock file that says "this session's log has a writer".
+pub const LOCK_FILE: &str = "session.lock";
 /// A Unix socket path must fit in `sun_path` (108 bytes on Linux, 104 on the
 /// BSDs and macOS); this leaves the last byte for the terminator.
 #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
@@ -234,6 +236,48 @@ fn name(dir: &Path, id: &str) -> Result<Name<'static>, String> {
         path.to_fs_name::<GenericFilePath>()
             .map_err(|error| format!("cannot name the session socket: {error}"))
     }
+}
+
+/// Exclusive ownership of one session's log, held for the life of the process.
+///
+/// On Unix `bind` unlinks a stale socket file before it listens, so two
+/// `resume`s started at the same moment can both pass the "already running"
+/// connect check and both bind: the check is connect-then-bind, not one atomic
+/// step (M3 review N3). An exclusive `flock` on `<session dir>/session.lock`
+/// is that step; the loser exits before it writes a byte. On Windows the named
+/// pipe's first-instance rule already makes `bind` the atomic test, so the
+/// guard carries no file there.
+pub struct SessionLock {
+    #[cfg(unix)]
+    _file: std::fs::File,
+}
+
+/// Take the session's write lock, or say who else has it.
+#[cfg(unix)]
+pub fn lock(dir: &Path) -> Result<SessionLock, String> {
+    use std::os::unix::io::AsRawFd as _;
+    let path = dir.join(LOCK_FILE);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| {
+            format!(
+                "cannot open the lock file {}: {error}",
+                crate::util::path_string(&path)
+            )
+        })?;
+    // SAFETY: `file` owns a valid descriptor for as long as the guard lives.
+    let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if taken != 0 {
+        return Err("another process is writing its log".to_string());
+    }
+    Ok(SessionLock { _file: file })
+}
+
+#[cfg(not(unix))]
+pub fn lock(_dir: &Path) -> Result<SessionLock, String> {
+    Ok(SessionLock {})
 }
 
 /// Bind the listener. Done before `session_started` is recorded, so a client
@@ -491,6 +535,64 @@ mod tests {
         assert_eq!(value(&dir, id), recorded.trim(), "clients read the record");
         let _ = std::fs::remove_file(recorded.trim());
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// N3: only one process can hold a session's log, and releasing the guard
+    /// releases the lock. Repeated, because a one-shot pass proves nothing.
+    #[cfg(unix)]
+    #[test]
+    fn only_one_holder_can_lock_a_session() {
+        let dir = temp_dir("lock");
+        for round in 0..5 {
+            let first = lock(&dir).unwrap_or_else(|error| panic!("round {round}: {error}"));
+            assert!(lock(&dir).is_err(), "round {round}: a second holder got in");
+            assert!(lock(&dir).is_err(), "round {round}: a third holder got in");
+            drop(first);
+            assert!(
+                lock(&dir).is_ok(),
+                "round {round}: the lock outlived its guard"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The race the connect-then-bind check cannot win: two lockers start
+    /// together. Exactly one wins, twenty times over.
+    #[cfg(unix)]
+    #[test]
+    fn simultaneous_lockers_have_exactly_one_winner() {
+        use std::sync::{Arc, Barrier};
+        for round in 0..20 {
+            let dir = temp_dir("lock-race");
+            let start = Arc::new(Barrier::new(2));
+            let held = Arc::new(Barrier::new(2));
+            let mut winners = 0usize;
+            std::thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for _ in 0..2 {
+                    let dir = dir.clone();
+                    let start = start.clone();
+                    let held = held.clone();
+                    handles.push(scope.spawn(move || {
+                        start.wait();
+                        let guard = lock(&dir).ok();
+                        // The loser's attempt lands while the winner still
+                        // holds the lock: both reach `held` before either drops.
+                        held.wait();
+                        let won = guard.is_some();
+                        drop(guard);
+                        won
+                    }));
+                }
+                for handle in handles {
+                    if handle.join().unwrap() {
+                        winners += 1;
+                    }
+                }
+            });
+            assert_eq!(winners, 1, "round {round}: {winners} winners");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[tokio::test]

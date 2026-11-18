@@ -11,7 +11,7 @@
 //! same as if it had been inline.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -472,6 +472,11 @@ pub enum EventBody {
         cost: f64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allowance: Option<Value>,
+        /// `None` for a model step. `"compact"` marks the summarising request,
+        /// which is not a step of the turn: it has no `step_started` of its
+        /// own, but its spend belongs in the log all the same (M3 review N4).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
     },
     /// Every verb received, applied or not.
     Verb {
@@ -601,20 +606,12 @@ impl EventLog {
         } else {
             1
         };
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        // A torn last line (crash mid-write) must not swallow the next event:
-        // start a fresh line before appending anything.
-        let len = file.metadata()?.len();
-        if len > 0 {
-            let mut probe = OpenOptions::new().read(true).open(path)?;
-            probe.seek(SeekFrom::Start(len - 1))?;
-            let mut last = [0u8; 1];
-            probe.read_exact(&mut last)?;
-            if last[0] != b'\n' {
-                file.write_all(b"\n")?;
-                file.flush()?;
-            }
-        }
+        // A torn last line (a crash mid-write) is cut off here, so the log holds
+        // whole events only: no unparseable line, and never two lines with the
+        // same seq (M3 review S3). The fragment goes to `events.jsonl.torn`
+        // first, so nothing is dropped silently.
+        remove_torn_tail(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
             path: path.to_path_buf(),
             file,
@@ -649,6 +646,52 @@ impl EventLog {
         self.file.flush()?;
         self.file.sync_all()
     }
+}
+
+/// Cut a torn final line off a log, keeping the fragment in a sidecar.
+///
+/// A final line that is a whole event without its terminator is *kept*: it is
+/// what a crash between a payload write and its newline leaves, and dropping it
+/// would lose a committed event. Anything shorter cannot be parsed, and is
+/// copied to `<log>.torn` before it is truncated away, so a reader of the log
+/// (`jq`, the TUI, the next resume) never sees it again.
+fn remove_torn_tail(path: &Path) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let bytes = std::fs::read(path)?;
+    if bytes.is_empty() || bytes.last() == Some(&b'\n') {
+        return Ok(());
+    }
+    let complete = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let tail = &bytes[complete..];
+    if serde_json::from_slice::<LogEvent>(tail).is_ok() {
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        return Ok(());
+    }
+    stash_tail(path, tail)?;
+    let file = OpenOptions::new().write(true).open(path)?;
+    file.set_len(complete as u64)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Copy a torn fragment to `<log>.torn`, one record per tear.
+fn stash_tail(path: &Path, tail: &[u8]) -> io::Result<()> {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".torn");
+    let mut file = OpenOptions::new().create(true).append(true).open(&name)?;
+    writeln!(file, "--- torn at {} ({} bytes) ---", now_ts(), tail.len())?;
+    file.write_all(tail)?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    file.sync_all()
 }
 
 /// The parsed log plus anything unreadable.
@@ -767,6 +810,17 @@ mod tests {
                 cache_write_tokens: 2,
                 cost: 0.001,
                 allowance: Some(json!({"remaining": 1})),
+                kind: None,
+            },
+            EventBody::Usage {
+                step: 1,
+                prompt_tokens: 40,
+                completion_tokens: 60,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+                cost: 0.002,
+                allowance: None,
+                kind: Some("compact".into()),
             },
             EventBody::ToolStarted {
                 call_id: "call_1".into(),
@@ -992,15 +1046,34 @@ mod tests {
         let read = read_events(&path).unwrap();
         assert_eq!(read.events.len(), 1);
         assert!(read.torn_last.is_some());
-        // Appending after a torn line starts a clean line and keeps seq going;
-        // the torn fragment stays in the file and is reported, not dropped.
+        // Reopening cuts the fragment off, so the log holds whole lines only:
+        // `jq` reads it, seq stays monotonic and the next resume reports
+        // nothing. The fragment itself is in the sidecar, not dropped.
         let mut log = EventLog::open(&path).unwrap();
         assert_eq!(log.append(started()).unwrap().seq, 2);
         let read = read_events(&path).unwrap();
         assert_eq!(read.events.len(), 2);
-        assert_eq!(read.bad_lines.len(), 1);
-        assert!(read.torn_last.is_none());
-        assert!(read.bad_lines[0].contains("assis"));
+        assert_eq!(read.events[1].seq, 2);
+        assert!(read.bad_lines.is_empty(), "{read:?}");
+        assert!(read.torn_last.is_none(), "{read:?}");
+        let sidecar = std::fs::read_to_string(path.with_file_name("events.jsonl.torn")).unwrap();
+        assert!(sidecar.contains("assis"), "{sidecar}");
+    }
+
+    #[test]
+    fn a_torn_tail_that_is_a_whole_event_keeps_its_newline() {
+        let dir = temp_dir("torn-whole");
+        let path = dir.join("events.jsonl");
+        let good = serde_json::to_string(&LogEvent::new(1, started())).unwrap();
+        let second = serde_json::to_string(&LogEvent::new(2, samples()[1].clone())).unwrap();
+        std::fs::write(&path, format!("{good}\n{second}")).unwrap();
+        let mut log = EventLog::open(&path).unwrap();
+        assert_eq!(log.append(started()).unwrap().seq, 3);
+        let read = read_events(&path).unwrap();
+        assert_eq!(read.events.len(), 3);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        assert!(!dir.join("events.jsonl.torn").exists());
     }
 
     #[test]
