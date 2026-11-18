@@ -776,6 +776,13 @@ pub fn start(
     let terminal = ratatui::try_init_with_options(ratatui::TerminalOptions {
         viewport: ratatui::Viewport::Inline(VIEWPORT_HEIGHT.min(height)),
     })?;
+    // Bracketed paste, so a pasted block of text arrives as one `Paste` event
+    // (with its newlines) instead of a burst of keystrokes whose Enter would
+    // submit it.
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::EnableBracketedPaste
+    );
     let mut app = App::new(
         width as usize,
         height.min(VIEWPORT_HEIGHT) as usize,
@@ -893,11 +900,13 @@ impl Tui {
         Ok(())
     }
 
-    /// Leave the terminal usable: raw mode off, and the shell's prompt on a
-    /// fresh line below where the viewport was.
+    /// Leave the terminal usable: raw mode off, bracketed paste off, and the
+    /// shell's prompt on a fresh line below where the viewport was.
     fn finish(&mut self) {
-        let _ = ratatui::try_restore();
         let mut stdout = std::io::stdout();
+        let _ =
+            ratatui::crossterm::execute!(stdout, ratatui::crossterm::event::DisableBracketedPaste);
+        let _ = ratatui::try_restore();
         let _ = stdout.write_all(b"\r\n");
         let _ = stdout.flush();
     }

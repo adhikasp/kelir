@@ -151,7 +151,9 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   covers the `Action` enum, which is exhaustive by construction.
 - **Enter sends, Alt-Enter or Shift-Enter adds a line, Ctrl-J adds a line
   everywhere.** A terminal does not distinguish Ctrl-Enter from Enter, so Ctrl-J
-  (the bare line feed) is the portable way to type a newline.
+  (the bare line feed) is the portable way to type a newline. Bracketed paste is
+  enabled while the TUI runs, so a pasted block arrives as one event (with its
+  newlines) instead of a burst whose first newline would submit it.
 - **`stop` with nothing running is dropped in idle, not queued.** A queued stop
   would apply at the next turn's first boundary and kill it, so Ctrl-C in an
   idle TUI would eat the next message. It is still logged as a `verb`; the UI is
