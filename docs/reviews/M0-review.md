@@ -159,3 +159,46 @@ session id, `User-Agent: kelir/0.1.0`, no `session_id` in the body).
 4. F5: line-ending-aware matching.
 5. F6: decide the shape (path under `commands/`) and spill oversized `args`, `text`, `reasoning`.
 6. N1 and the nits as time allows.
+
+## Re-verification (fix commits `c0c334b`, `3b2e5a8`)
+
+**Verdict: PASS.** All six should-fix findings are fixed and verified on the release binary;
+no item is still failing.
+
+**Gates** (re-run on `3b2e5a8`): `cargo fmt --check` clean; `cargo clippy --all-targets -- -D
+warnings` clean; `cargo test`: 110 unit, 16 e2e, 8 `review_m0` (all 8 now pass; before, 4
+failed). Release binary 4.75 MB.
+
+**F1-F6 on the release binary** (`scripts/live/m0b_recheck.sh`: a canned SSE server drives
+`target/release/kelir`; no model, no key):
+
+| # | result | evidence |
+|---|---|---|
+| F1 | fixed | `sleep 6.123 & echo started`: wall 0 s, result `started`. After kelir exited no `sleep.exe` was left (the session's Job Object closes on exit). |
+| F2 | fixed | `yes abcdefghij \| head -c 200000000`: 6 s -> 3 s, **peak working set 8 MB** (was 199 MB+), 200,000,000 bytes on disk, `bytes`/`lines` correct (18,181,819), `spilled: true`, notice 2.5 KB. |
+| F3 | fixed | call id `../../escaped`: dir is `commands/6-1-1`, nothing outside the session dir; `tool_settled.call_id` keeps the provider id as a label. |
+| F4 | fixed | two calls both with id `call_0`: `commands/6-1-1/out` = `first`, `commands/11-2-1/out` = `second`; each `out_path` points at its own bytes. |
+| F5 | fixed | `a\r\nb\nc\n` edited with `old: "b\nc"`: `ok`, file is `a \r \n B \n C \n` (each line keeps its own ending). |
+| F6 | fixed | 50,000-byte `edit` payload: `events.jsonl` is 4.6 KB; `assistant.tool_calls[0].args` is `{"spilled":true,"path":"blobs/4-tool_calls.0.args","bytes":50036,"preview":…}`, `tool_started.input` likewise; the file was written with all 50,000 bytes. The fold reads blobs back, and a unit test asserts the request bytes are identical to the inline form, so the cache prefix is unaffected. |
+
+Side effect to know about, not a defect: after `cmd &` the background child is left running
+until the session ends (the fix keeps the Job Object open), and its stdout pipe is dropped, so a
+child that keeps writing to the inherited pipe gets a broken pipe. Background jobs that must
+survive and log belong to `bg` (M4); `nohup cmd >log 2>&1 &` already works.
+
+**Live drive in a Herdr pane** (`hc run --bg --name live-m0b …`, key from the env file, never
+printed; `scripts/live/m0b_pane.sh`; pane exit code 0), OpenRouter,
+`deepseek/deepseek-v4.1-flash-1017`:
+
+- **S1 (edit + bash): PASS.** 3 steps, `tool_started`/`tool_settled` pairs, final answer,
+  `jq` works. Cached tokens 0 / 640 / 640 by step (prompts 642 / 739 / 792).
+- **S2 (add a flag + test): PASS.** 5 steps, cost $0.00108, 4 tests pass, only `greet.py` and
+  `test_greet.py` modified. `cached_tokens` per step: 0, **512**, 1024, 1024, 0. **`> 0` from
+  step 2: met.** Step 5 dropped to 0 with a growing 1866-token prompt; kelir's prefix is
+  byte-identical (verified by the e2e test and the earlier wire capture), so this is the
+  provider's cache routing, not a request change. Worth watching in later milestones, not a fail.
+- **F1 live: PASS.** The model ran `sleep 6 & echo started`; `tool_started` 13:45:23.02,
+  `tool_settled` 13:45:23.28, **0.25 s**, result `started\n`.
+
+Still open from the first review (unchanged, not in scope of this fix round): the Go provider is
+mock-verified only; Ctrl-C into a console untested; N1, N2, N4-N7 are nits not re-checked.
