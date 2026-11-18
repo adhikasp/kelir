@@ -512,7 +512,7 @@ async fn r10_a_spilled_human_message_is_pinned_verbatim() {
     let request = mock.requests().pop().unwrap();
     let all = contents(&request);
     assert!(
-        all.iter().any(|text| *text == big),
+        all.contains(&big),
         "the spilled human message is not verbatim in the request: {:?}",
         all.iter().map(|t| t.len()).collect::<Vec<_>>()
     );
