@@ -79,4 +79,38 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   user: …`. The `tools` array in the request is untouched, as the cache requires.
   A `stop` while calls run settles them as `stopped` (a process was running) or
   `skipped` (the task never started) — both readable by the model.
+- **`stop --call` has its own grace window, never the batch's.** The verb kills
+  one call's process tree, that call alone gets the 1.5 s window in which to
+  report back, and the batch waits for every other call to settle on its own.
+  `live_calls` holds only the calls that have not settled, so `stop --call` for
+  an unknown **or already settled** id is refused (`no running call with id …`)
+  and changes nothing.
+- **A stopped call keeps its partial output.** Its result is `stopped by user:
+  <reason>`, then `partial output: <bytes> bytes, <lines> lines; full output at
+  <path>`, then the last 1 KB of the file under `--- tail ---`; the
+  `tool_settled` event carries the same `bytes`, `lines` and `out_path`. A call
+  that printed nothing keeps the plain `stopped by user` result. The result is
+  still far under the 10 KB spill limit, so it is never itself spilled.
+- **`ctl latest` is the newest session and only it.** When that session is dead
+  the verb fails with `session … is not running` instead of falling through to
+  an older live session (where `latest end` could kill the wrong one). An exact
+  id and a unique prefix resolve as before.
+- **Unix: the state and session directories are 0700 and the socket is 0600.**
+  `say` is a prompt-injection channel into an autonomous agent, so a umask like
+  `002` must not let the group write to it. Windows keeps the default named-pipe
+  DACL, which already denies other users write.
+- **`stop` and `end` are read during the provider retry backoff.** The backoff
+  is a `select!` like the stream, so a verb does not wait 200–800 ms for the
+  retry to be attempted.
+- **A failed turn does not end a `--keep` session.** A provider refusal (for
+  example a mistyped `ctl model`) is logged as `error` and `turn_ended
+  outcome=error` as before, but the process keeps serving verbs and the next
+  `say` runs another turn; the exit code stays 0 when the session is later
+  ended with `end`. A one-shot run still exits 1.
+- **A call that cannot be put in a Job Object is refused, not run unmanaged**
+  (M1 review N7). On Windows the child is created suspended, so a failed
+  `AssignProcessToJobObject` (or a Job Object that cannot be created) terminates
+  it and returns a readable `error` result instead of leaving a process that
+  `stop` cannot reach. `kill_on_drop(true)` covers the remaining case of a call
+  task cancelled after its tree was killed.
 

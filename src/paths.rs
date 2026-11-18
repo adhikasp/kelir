@@ -74,6 +74,26 @@ pub fn session_dir(id: &str) -> PathBuf {
     sessions_dir().join(id)
 }
 
+/// Create a directory only the user can reach: mode 0700 on Unix, where a
+/// umask like `002` would otherwise make the session log and its socket
+/// group-readable. Windows inherits the profile's ACL, which already denies
+/// other users (M1 review N4).
+pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+        // `DirBuilder::mode` is filtered by the umask; an explicit chmod is not.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(path)?;
+    Ok(())
+}
+
 /// Session ids on disk, newest first. ULIDs sort by time, so the directory
 /// names sort into creation order.
 pub fn sessions_newest_first() -> Vec<String> {
@@ -97,7 +117,9 @@ pub fn sessions_newest_first_in(base: &Path) -> Vec<String> {
 /// Resolve `kelir ctl <session>`: an exact id, a unique prefix, or `latest`.
 ///
 /// Returns the candidates in the order to try them: one for an exact id, the
-/// matches for a prefix, every session (newest first) for `latest`.
+/// matches for a prefix, and the newest session alone for `latest` (a verb sent
+/// to `latest` must never land on an older session because the newest one is
+/// dead).
 pub fn session_candidates(spec: &str) -> Result<Vec<String>, String> {
     session_candidates_in(&sessions_dir(), spec)
 }
@@ -109,10 +131,12 @@ pub fn session_candidates_in(base: &Path, spec: &str) -> Result<Vec<String>, Str
     }
     let all = sessions_newest_first_in(base);
     if spec == "latest" {
-        if all.is_empty() {
+        let Some(newest) = all.first() else {
             return Err(format!("no sessions yet in {}", base.display()));
-        }
-        return Ok(all);
+        };
+        // `latest` is the newest session and only that one: `latest end` on a
+        // dead newest session reports it dead instead of killing an older one.
+        return Ok(vec![newest.clone()]);
     }
     if all.iter().any(|id| id == spec) {
         return Ok(vec![spec.to_string()]);
@@ -190,11 +214,12 @@ mod tests {
     }
 
     #[test]
-    fn latest_lists_every_session_newest_first() {
+    fn latest_is_the_newest_session_only() {
         let base = temp_sessions("latest", &["ses_01a", "ses_02b"]);
         assert_eq!(
             session_candidates_in(&base, "latest").unwrap(),
-            vec!["ses_02b".to_string(), "ses_01a".to_string()]
+            vec!["ses_02b".to_string()],
+            "a dead newest session must not fall through to an older one"
         );
     }
 

@@ -76,12 +76,39 @@ impl ToolOutcome {
 
     /// The turn was stopped (or this call was) while it ran.
     pub fn stopped(reason: &str) -> Self {
-        let result = if reason.is_empty() {
-            "stopped by user".to_string()
-        } else {
-            format!("stopped by user: {reason}")
-        };
-        Self::new("stopped", result, None)
+        Self::new("stopped", stopped_text(reason), None)
+    }
+
+    /// The same, for a call that had already written output: the model gets the
+    /// byte and line counts, the file and its tail, so the partial work is not
+    /// lost (M1 review N2).
+    pub fn stopped_with_output(
+        reason: &str,
+        out_path: &str,
+        bytes: u64,
+        lines: u64,
+        tail: &str,
+    ) -> Self {
+        let mut result = stopped_text(reason);
+        result.push_str(&format!(
+            "\npartial output: {bytes} bytes, {lines} lines; full output at {out_path}"
+        ));
+        if !tail.is_empty() {
+            result.push_str("\n--- tail ---\n");
+            result.push_str(tail);
+            if !tail.ends_with('\n') {
+                result.push('\n');
+            }
+        }
+        Self {
+            outcome: "stopped".into(),
+            exit_code: None,
+            bytes,
+            lines,
+            out_path: out_path.to_string(),
+            spilled: false,
+            result,
+        }
     }
 
     /// The turn was stopped before this call started.
@@ -118,6 +145,14 @@ impl ToolOutcome {
             spilled: false,
             result,
         }
+    }
+}
+
+fn stopped_text(reason: &str) -> String {
+    if reason.is_empty() {
+        "stopped by user".to_string()
+    } else {
+        format!("stopped by user: {reason}")
     }
 }
 
@@ -241,5 +276,45 @@ mod tests {
         assert!(disabled.result.contains("disabled by user"));
         assert!(disabled.result.contains("--enable bash"));
         assert_eq!(disabled.exit_code, None);
+    }
+
+    #[test]
+    fn a_stopped_call_reports_its_partial_output_and_out_path() {
+        let stopped = ToolOutcome::stopped_with_output(
+            "wrong approach",
+            "s/ses_1/commands/7-1-1/out",
+            42,
+            2,
+            "line one\nline two\n",
+        );
+        assert_eq!(stopped.outcome, "stopped");
+        assert_eq!(stopped.bytes, 42);
+        assert_eq!(stopped.lines, 2);
+        assert_eq!(stopped.out_path, "s/ses_1/commands/7-1-1/out");
+        assert!(
+            stopped
+                .result
+                .starts_with("stopped by user: wrong approach"),
+            "{}",
+            stopped.result
+        );
+        assert!(
+            stopped.result.contains("42 bytes, 2 lines"),
+            "{}",
+            stopped.result
+        );
+        assert!(
+            stopped.result.contains("s/ses_1/commands/7-1-1/out"),
+            "{}",
+            stopped.result
+        );
+        assert!(stopped.result.contains("line two"), "{}", stopped.result);
+        // A missing tail still names the counts and the file.
+        let bare = ToolOutcome::stopped_with_output("", "out", 5, 1, "");
+        assert_eq!(
+            bare.result,
+            "stopped by user\npartial output: 5 bytes, 1 lines; full output at out"
+        );
+        assert!(!bare.result.contains("--- tail ---"));
     }
 }

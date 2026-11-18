@@ -720,3 +720,152 @@ async fn every_bash_child_gets_kelir_sock() {
         assert!(result.contains(id), "{result}");
     }
 }
+
+/// A stopped call keeps its partial work reachable: the model gets the byte and
+/// line counts, the output file and its tail (M1 review N2).
+#[tokio::test]
+async fn a_stopped_call_reports_its_partial_output() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_talk",
+            "bash",
+            &serde_json::json!({"command": "printf 'before the stop\\n'; sleep 30"}),
+        ))),
+        Reply::Sse(sse(&text_turn("stopped, I saw what it printed", 0))),
+    ])
+    .await;
+    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+    session.wait_for("tool_started").await;
+    let out_path = wait_for_output(&session, "before the stop").await;
+
+    let answer = session
+        .ctl(&["stop", "--call", "call_talk", "wrong approach"])
+        .await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let ended = session.wait_for("turn_ended").await;
+    assert_eq!(ended["outcome"], "done", "the turn continues");
+
+    let log = session.log();
+    let settled = of_type(&log, "tool_settled")[0];
+    assert_eq!(settled["outcome"], "stopped");
+    let result = settled["result"].as_str().unwrap();
+    assert!(
+        result.starts_with("stopped by user: wrong approach"),
+        "{result}"
+    );
+    assert!(result.contains("partial output:"), "{result}");
+    assert!(result.contains("before the stop"), "{result}");
+    assert_eq!(settled["out_path"].as_str(), Some(out_path.as_str()));
+    assert!(settled["bytes"].as_u64().unwrap() > 0, "{settled}");
+    assert!(settled["lines"].as_u64().unwrap() >= 1, "{settled}");
+
+    // The model really sees it, in the next request.
+    let requests = mock.requests();
+    let tool_message = requests[1]
+        .messages()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .expect("a tool result in the next request");
+    let content = tool_message["content"].as_str().unwrap();
+    assert!(content.contains(&out_path), "{content}");
+    assert!(content.contains("before the stop"), "{content}");
+
+    session.end().await;
+}
+
+/// A model the provider rejects fails the turn, not the session: the next verb
+/// still gets an answer and a good model can be set again (M1 review N6).
+#[tokio::test]
+async fn a_rejected_model_fails_the_turn_but_not_a_keep_session() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&text_turn("first answer", 0))),
+        Reply::Http(400, "unknown model".to_string()),
+        Reply::Sse(sse(&text_turn("back on track", 0))),
+    ])
+    .await;
+    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+    session.wait_for("turn_ended").await;
+
+    assert_eq!(session.ctl(&["model", "typo/none"]).await.code, 0);
+    let answer = session.ctl(&["say", "try again"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let ended = session.wait_for("turn_ended").await;
+    assert_eq!(ended["outcome"], "error");
+    let log = session.log();
+    assert!(
+        log.iter().any(|event| event["type"] == "error"
+            && event["where"] == "provider"
+            && event["retryable"] == false),
+        "the provider refusal must be in the log: {log:#?}"
+    );
+    assert_eq!(
+        of_type(&log, "session_ended").len(),
+        0,
+        "a failed turn must not end a --keep session"
+    );
+
+    // Fix the model and carry on in the same process.
+    assert_eq!(session.ctl(&["model", "test/model"]).await.code, 0);
+    let answer = session.ctl(&["say", "try once more"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let ended = session.wait_for("turn_ended").await;
+    assert_eq!(ended["outcome"], "done");
+    let (code, stderr) = session.end().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// A `stop` sent during the provider retry backoff is obeyed at once instead of
+/// waiting the backoff out (M1 review N5).
+#[tokio::test]
+async fn stop_during_a_provider_backoff_is_obeyed_at_once() {
+    let mock = Mock::start(vec![
+        Reply::Http(500, "boom".to_string()),
+        Reply::Http(500, "boom".to_string()),
+        Reply::Http(500, "boom".to_string()),
+    ])
+    .await;
+    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+    let error = session.wait_for("error").await;
+    assert_eq!(error["retryable"], true, "{error}");
+
+    let started = Instant::now();
+    let answer = session.ctl(&["stop", "no point retrying"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let ended = session.wait_for("turn_ended").await;
+    let waited = started.elapsed();
+    assert_eq!(ended["outcome"], "stopped");
+    assert!(
+        waited < Duration::from_millis(1500),
+        "the stop waited {waited:?} for the retries"
+    );
+    assert!(
+        mock.request_count() <= 2,
+        "the stop was only read after the retries: {} requests",
+        mock.request_count()
+    );
+
+    session.end().await;
+}
+
+/// Poll until a call has written `needle` to its output file, and return the
+/// forward-slashed path the event log uses.
+async fn wait_for_output(session: &LiveSession, needle: &str) -> String {
+    let commands = session.session_dir.join("commands");
+    for _ in 0..250 {
+        if let Ok(entries) = std::fs::read_dir(&commands) {
+            for entry in entries.flatten() {
+                let out = entry.path().join("out");
+                if let Ok(text) = std::fs::read_to_string(&out) {
+                    if text.contains(needle) {
+                        return out.to_string_lossy().replace('\\', "/");
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "no call output containing {needle:?} under {}",
+        commands.display()
+    );
+}

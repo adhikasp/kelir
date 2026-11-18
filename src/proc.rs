@@ -73,8 +73,24 @@ impl ProcessGroup {
         self.state.pgid.store(pid, Ordering::SeqCst);
         #[cfg(windows)]
         {
-            if let Some(job) = &self.state.job {
-                job.assign(pid);
+            let Some(job) = &self.state.job else {
+                // Without a Job Object the call could not be stopped and its
+                // tree could outlive the session: refuse it instead of running
+                // something uncontrollable (M1 review N7).
+                win::terminate(pid);
+                return Err(format!(
+                    "cannot create a job object for the child process {pid}"
+                ));
+            };
+            if let Err(error) = job.assign(pid) {
+                // A call outside its Job Object cannot be stopped, so it is
+                // taken down here rather than left running unreachable
+                // (M1 review N7). The child is still suspended.
+                win::terminate(pid);
+                self.kill();
+                return Err(format!(
+                    "cannot put the child process {pid} in its job object: {error}"
+                ));
             }
             // A child that never resumes would hang the call forever.
             if let Err(error) = win::resume(pid) {
@@ -115,7 +131,7 @@ impl ProcessGroup {
         }
         #[cfg(windows)]
         if let Some(job) = &self.state.job {
-            job.terminate();
+            job.terminate_job();
         }
     }
 
@@ -240,7 +256,7 @@ mod win {
     };
     use windows_sys::Win32::System::Threading::{
         OpenProcess, OpenThread, PROCESS_SET_QUOTA, PROCESS_TERMINATE, ResumeThread,
-        THREAD_SUSPEND_RESUME,
+        THREAD_SUSPEND_RESUME, TerminateProcess,
     };
 
     pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -277,20 +293,42 @@ mod win {
             }
         }
 
-        pub fn assign(&self, pid: u32) {
+        pub fn assign(&self, pid: u32) -> Result<(), String> {
             unsafe {
                 let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
                 if process.is_null() {
-                    return;
+                    return Err(format!(
+                        "cannot open the process: {}",
+                        io::Error::last_os_error()
+                    ));
                 }
-                AssignProcessToJobObject(self.0, process);
+                let assigned = AssignProcessToJobObject(self.0, process);
                 CloseHandle(process);
+                if assigned == 0 {
+                    return Err(format!(
+                        "cannot assign it to the job: {}",
+                        io::Error::last_os_error()
+                    ));
+                }
             }
+            Ok(())
         }
 
-        pub fn terminate(&self) {
+        pub fn terminate_job(&self) {
             unsafe {
                 TerminateJobObject(self.0, 1);
+            }
+        }
+    }
+
+    /// Kill one process by id, for the case where it never made it into its
+    /// Job Object.
+    pub fn terminate(pid: u32) {
+        unsafe {
+            let process = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if !process.is_null() {
+                TerminateProcess(process, 1);
+                CloseHandle(process);
             }
         }
     }

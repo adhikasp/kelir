@@ -158,7 +158,7 @@ fn name(dir: &Path, id: &str) -> Result<Name<'static>, String> {
 /// that sees the event can connect.
 pub fn bind(dir: &Path, id: &str) -> Result<LocalListener, String> {
     let address = name(dir, id)?;
-    ListenerOptions::new()
+    let listener = ListenerOptions::new()
         .name(address)
         .create_tokio()
         .map_err(|error| {
@@ -166,7 +166,20 @@ pub fn bind(dir: &Path, id: &str) -> Result<LocalListener, String> {
                 "cannot listen on the session socket {}: {error}",
                 value(dir, id)
             )
-        })
+        })?;
+    // `say` is a prompt-injection channel into a fully autonomous agent, so the
+    // socket is the user's alone: 0600 on Unix (a umask like 002 would
+    // otherwise let the group steer it). The Windows pipe DACL already denies
+    // other users write (M1 review N4).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(
+            dir.join(SOCKET_FILE),
+            std::fs::Permissions::from_mode(0o600),
+        );
+    }
+    Ok(listener)
 }
 
 /// Accept connections forever. Every connection gets its own task; answers go

@@ -1,9 +1,10 @@
 //! `kelir ctl <session> <verb> [args…]`: send one verb to a running session.
 //!
-//! The session is resolved from the state dir (an exact id, a unique prefix, or
-//! `latest`, trying the newest first), the verb is validated locally, and the
-//! answer is printed as one JSON line. Exit 0 for `ok`, 1 for a refusal, 2 for
-//! a bad invocation.
+//! The session is resolved from the state dir: an exact id, a unique prefix, or
+//! `latest` (the newest session only, and an error when it is not running — a
+//! verb never lands on an older session by accident). The verb is validated
+//! locally, and the answer is printed as one JSON line. Exit 0 for `ok`, 1 for
+//! a refusal, 2 for a bad invocation.
 
 use crate::cli::CtlArgs;
 use crate::ipc::{self, Request};

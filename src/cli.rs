@@ -65,7 +65,8 @@ pub struct AskArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct CtlArgs {
-    /// Session id, a unique prefix, or `latest`.
+    /// Session id, a unique prefix, or `latest` (the newest session only; an
+    /// error if it is not running).
     #[arg(value_name = "SESSION")]
     pub session: String,
     /// The verb: say, later, stop, model, tools, end.

@@ -53,7 +53,11 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str) -> ToolOutcome {
         .env("KELIR_SOCK", &ctx.sock)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // The process tree is killed through its group, but if this call's
+        // task is ever cancelled the direct child must not outlive it (M1
+        // review F1).
+        .kill_on_drop(true);
 
     let group = ProcessGroup::new();
     group.configure(&mut process);

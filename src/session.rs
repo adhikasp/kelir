@@ -27,9 +27,12 @@ use crate::provider::{self, Client};
 use crate::tools::{self, Ctx, ToolOutcome};
 use crate::verbs::{self, Boundary, Pending, Scheduler, Verb};
 
-/// How long a stopped call may take to report back before the batch settles it
-/// on the user's behalf. The kill is immediate; this is for the process tree to
-/// unwind. The `say --now` requirement is "within 2 s".
+/// How long a stopped call may take to report back before the session settles
+/// it on the user's behalf. The kill is immediate; this is for the process tree
+/// to unwind. The `say --now` requirement is "within 2 s".
+///
+/// It is armed **per call**: a `stop --call` never bounds a sibling's run
+/// (M1 review F1).
 const STOP_GRACE: Duration = Duration::from_millis(1500);
 /// While a stop is settling, look for calls that started just after the kill
 /// and take them down too.
@@ -125,7 +128,8 @@ struct Session {
     /// Tools turned off for the rest of the session. The list sent to the
     /// provider never changes.
     disabled: BTreeSet<String>,
-    /// The provider call ids in the batch that is running right now.
+    /// The provider call ids of this batch that have **not** settled yet, so a
+    /// `stop --call` for a call that is done is refused (M1 review F2).
     live_calls: Vec<String>,
     /// Verbs waiting for their boundary.
     scheduler: Scheduler,
@@ -270,7 +274,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let client = Client::new(provider_cfg, &id, cfg.cache_ttl.clone())
         .map_err(|error| Failure::Usage(error.message))?;
     let dir = crate::paths::session_dir(&id);
-    std::fs::create_dir_all(dir.join("commands")).map_err(|error| {
+    crate::paths::create_private_dir(&dir.join("commands")).map_err(|error| {
         Failure::Run(format!(
             "cannot create the session directory {}: {error}",
             dir.display()
@@ -439,8 +443,8 @@ impl Session {
         let from = request.from.clone();
         let name = request.verb.clone();
         let mut parsed = verbs::parse(&name, &request.args);
-        // `stop --call` for a call that is not running is a refusal, not a
-        // silent no-op.
+        // `stop --call` for a call that is not running (`live_calls` holds only
+        // the unsettled calls of the batch) is a refusal, not a silent no-op.
         if let Ok(Verb::Stop {
             call: Some(call), ..
         }) = &parsed
@@ -461,7 +465,10 @@ impl Session {
             boundary,
             error: error.clone(),
         });
-        let pending = match (parsed, recorded) {
+        // The ack must not outrun the log: a crash right after `{"ok": true}`
+        // may not lose a verb the client believes was accepted (M1 review N1).
+        self.sync();
+        match (parsed, recorded) {
             (Ok(verb), Ok(event)) => {
                 let pending = Pending {
                     seq: event.seq,
@@ -479,9 +486,7 @@ impl Session {
                 let _ = reply.send(Response::error(message));
                 None
             }
-        };
-        self.sync();
-        pending
+        }
     }
 
     /// Apply the verbs due at `boundary`.
@@ -639,13 +644,18 @@ impl Session {
                         outcome: "error".into(),
                         final_text: String::new().into(),
                     });
-                    code = 1;
+                    // A long-lived session survives a failed turn: the error is
+                    // in the log and the next `say` gets another chance (M1
+                    // review N6). A one-shot run still exits 1.
+                    if !self.keep {
+                        code = 1;
+                    }
                     reason = "error".into();
                     true
                 }
             };
             self.sync();
-            if failed || matches!(end, Ok(TurnEnd::End)) {
+            if matches!(end, Ok(TurnEnd::End)) || (failed && !self.keep) {
                 break;
             }
             match self.take_turn_messages() {
@@ -826,6 +836,7 @@ impl Session {
         request: &provider::BuiltRequest,
     ) -> Result<StreamEnd, String> {
         let mut attempt = 0u32;
+        let mut inbox_open = true;
         loop {
             let client = self.client.clone();
             let future = client.stream(request);
@@ -836,19 +847,10 @@ impl Session {
             while outcome.is_none() && interrupt.is_none() {
                 tokio::select! {
                     result = &mut future => outcome = Some(result),
-                    incoming = rx.recv() => {
-                        if let Some(incoming) = incoming {
-                            if let Some(pending) = self.accept(incoming) {
-                                match pending.verb {
-                                    Verb::Stop { call: None, reason } => {
-                                        interrupt = Some(StreamEnd::Stopped(
-                                            reason.unwrap_or_else(|| "stopped by user".into()),
-                                        ));
-                                    }
-                                    Verb::End => interrupt = Some(StreamEnd::End),
-                                    _ => self.scheduler.push(pending),
-                                }
-                            }
+                    incoming = rx.recv(), if inbox_open => {
+                        match incoming {
+                            Some(incoming) => self.take_interrupt(incoming, &mut interrupt),
+                            None => inbox_open = false,
                         }
                     }
                 }
@@ -869,9 +871,42 @@ impl Session {
                         return Err(error.message);
                     }
                     self.sync();
-                    tokio::time::sleep(provider::backoff(attempt)).await;
+                    // The backoff is not dead time: a `stop` or an `end` must
+                    // not wait it out (M1 review N5).
+                    let backoff = tokio::time::sleep(provider::backoff(attempt));
+                    tokio::pin!(backoff);
+                    while interrupt.is_none() {
+                        tokio::select! {
+                            _ = &mut backoff => break,
+                            incoming = rx.recv(), if inbox_open => {
+                                match incoming {
+                                    Some(incoming) => self.take_interrupt(incoming, &mut interrupt),
+                                    None => inbox_open = false,
+                                }
+                            }
+                        }
+                    }
+                    if let Some(end) = interrupt {
+                        return Ok(end);
+                    }
                     attempt += 1;
                 }
+            }
+        }
+    }
+
+    /// Handle one verb that arrived while a request was in flight. `stop` and
+    /// `end` interrupt now; anything else waits for its boundary.
+    fn take_interrupt(&mut self, incoming: Incoming, interrupt: &mut Option<StreamEnd>) {
+        if let Some(pending) = self.accept(incoming) {
+            match pending.verb {
+                Verb::Stop { call: None, reason } => {
+                    *interrupt = Some(StreamEnd::Stopped(
+                        reason.unwrap_or_else(|| "stopped by user".into()),
+                    ));
+                }
+                Verb::End => *interrupt = Some(StreamEnd::End),
+                _ => self.scheduler.push(pending),
             }
         }
     }
@@ -935,18 +970,39 @@ impl Session {
         let mut slots: Vec<Option<(ToolOutcome, Duration)>> = (0..count).map(|_| None).collect();
         // Killed calls: their result becomes `stopped by user: <reason>`.
         let mut forced: Vec<Option<String>> = (0..count).map(|_| None).collect();
+        // A grace window per killed call, never one for the batch: a sibling
+        // that legitimately runs longer must not be cut off (M1 review F1).
+        let mut deadlines: Vec<Option<Instant>> = (0..count).map(|_| None).collect();
         let mut batch = Batch::default();
-        let mut deadline: Option<Instant> = None;
 
         while slots.iter().any(Option::is_none) {
-            if deadline.is_some_and(|end| Instant::now() >= end) {
-                break;
+            // A call whose own window ran out is settled here; the rest of the
+            // batch is untouched.
+            let now = Instant::now();
+            for index in 0..count {
+                let Some(end) = deadlines[index] else {
+                    continue;
+                };
+                if now < end || slots[index].is_some() {
+                    continue;
+                }
+                deadlines[index] = None;
+                let reason = forced[index].clone().unwrap_or_default();
+                slots[index] = Some((ToolOutcome::stopped(&reason), Duration::ZERO));
+                handles[index].abort();
+                self.settle_call(&plan[index].1.id);
             }
             tokio::select! {
                 item = done_rx.recv() => match item {
                     Some((index, outcome, elapsed)) => {
+                        if let Some(deadline) = deadlines.get_mut(index) {
+                            *deadline = None;
+                        }
                         if let Some(slot) = slots.get_mut(index) {
                             *slot = Some((outcome, elapsed));
+                        }
+                        if let Some((_, call)) = plan.get(index) {
+                            self.settle_call(&call.id);
                         }
                     }
                     None => break,
@@ -962,35 +1018,40 @@ impl Session {
                                 self.ctx.running.kill(&plan[index].0);
                                 if slots[index].is_none() {
                                     forced[index].get_or_insert(reason);
+                                    deadlines[index] = Some(Instant::now() + STOP_GRACE);
                                 }
-                                deadline = Some(Instant::now() + STOP_GRACE);
                             }
                         }
                         Verb::Stop { call: None, reason } => {
                             let reason = reason.unwrap_or_default();
-                            self.kill_batch(&plan, &slots, &gates, &mut forced, &reason);
+                            self.kill_batch(
+                                &plan,
+                                &slots,
+                                &gates,
+                                &mut forced,
+                                &mut deadlines,
+                                &reason,
+                            );
                             batch.stopped = Some(reason);
-                            deadline = Some(Instant::now() + STOP_GRACE);
                         }
                         Verb::Say { now: true, .. } => {
                             // Stop the running calls, settle, and let the
                             // message in at the after_tools boundary.
-                            self.kill_batch(&plan, &slots, &gates, &mut forced, "");
+                            self.kill_batch(&plan, &slots, &gates, &mut forced, &mut deadlines, "");
                             self.scheduler.push(pending);
-                            deadline = Some(Instant::now() + STOP_GRACE);
                         }
                         Verb::End => {
-                            self.kill_batch(&plan, &slots, &gates, &mut forced, "");
+                            self.kill_batch(&plan, &slots, &gates, &mut forced, &mut deadlines, "");
                             batch.end = true;
-                            deadline = Some(Instant::now() + STOP_GRACE);
                         }
                         _ => self.scheduler.push(pending),
                     }
                 }
-                _ = tokio::time::sleep(STOP_POLL), if deadline.is_some() => {
+                _ = tokio::time::sleep(STOP_POLL), if deadlines.iter().any(Option::is_some) => {
                     // A call that started just after the kill is taken down too,
                     // so no orphan keeps working after the turn moved on.
-                    self.retake(&plan, &mut forced);
+                    let reason = batch.stopped.as_deref().unwrap_or("");
+                    self.retake(&plan, &slots, &deadlines, &mut forced, reason);
                 }
             }
         }
@@ -1014,8 +1075,11 @@ impl Session {
             };
             *slot = Some((outcome, Duration::ZERO));
         }
+        // Every call of the batch has settled: none is a `stop --call` target
+        // any more, and the next batch repopulates the list.
+        self.live_calls.clear();
 
-        for (index, ((_, call), slot)) in plan.iter().zip(slots).enumerate() {
+        for (index, ((dir, call), slot)) in plan.iter().zip(slots).enumerate() {
             let (mut outcome, elapsed) = slot.unwrap_or_else(|| {
                 (
                     ToolOutcome::error("the call never reported a result"),
@@ -1023,7 +1087,9 @@ impl Session {
                 )
             });
             if let Some(reason) = &forced[index] {
-                outcome = ToolOutcome::stopped(reason);
+                // The call was stopped: keep the partial output the model can
+                // still use, and say where the whole of it is (M1 review N2).
+                outcome = self.stopped_outcome(dir, reason);
             }
             self.record(EventBody::ToolSettled {
                 call_id: call.id.clone(),
@@ -1050,6 +1116,28 @@ impl Session {
         Ok(batch)
     }
 
+    /// One call is done: it is no longer a target for `stop --call`.
+    fn settle_call(&mut self, call_id: &str) {
+        self.live_calls.retain(|id| id != call_id);
+    }
+
+    /// The `stopped` result of a call that had already written output: the
+    /// byte and line counts, the file, and the last 1 KB, so the model can pick
+    /// up the partial work (M1 review N2).
+    fn stopped_outcome(&self, dir: &str, reason: &str) -> ToolOutcome {
+        let out_path = self.ctx.call_dir(dir).join("out");
+        match crate::spill::partial(&out_path) {
+            Ok(partial) if partial.bytes > 0 => ToolOutcome::stopped_with_output(
+                reason,
+                &crate::util::path_string(&out_path),
+                partial.bytes,
+                partial.lines,
+                &partial.tail,
+            ),
+            _ => ToolOutcome::stopped(reason),
+        }
+    }
+
     /// Kill every call that has a process, and gate the ones that do not.
     /// Calls already settled keep their real result.
     fn kill_batch(
@@ -1058,6 +1146,7 @@ impl Session {
         slots: &[Option<(ToolOutcome, Duration)>],
         gates: &[Arc<AtomicBool>],
         forced: &mut [Option<String>],
+        deadlines: &mut [Option<Instant>],
         reason: &str,
     ) {
         let running = self.ctx.running.keys();
@@ -1070,15 +1159,33 @@ impl Session {
                 self.ctx.running.kill(dir);
                 forced[index] = Some(reason.to_string());
             }
+            // Every unsettled call gets its own window, whether or not it had
+            // a process yet: one that starts just after the gate closed is
+            // taken down by the poll, and a task that never reports back must
+            // not hold the batch open.
+            deadlines[index] = Some(Instant::now() + STOP_GRACE);
         }
     }
 
     /// Take down calls that registered a process after the kill.
-    fn retake(&self, plan: &[(String, ToolCall)], forced: &mut [Option<String>]) {
+    fn retake(
+        &self,
+        plan: &[(String, ToolCall)],
+        slots: &[Option<(ToolOutcome, Duration)>],
+        deadlines: &[Option<Instant>],
+        forced: &mut [Option<String>],
+        reason: &str,
+    ) {
         let running = self.ctx.running.keys();
         for (index, (dir, _)) in plan.iter().enumerate() {
-            if forced[index].is_some() && running.iter().any(|key| key == dir) {
+            if slots[index].is_some() || deadlines[index].is_none() {
+                continue;
+            }
+            if running.iter().any(|key| key == dir) {
                 self.ctx.running.kill(dir);
+                if forced[index].is_none() {
+                    forced[index] = Some(reason.to_string());
+                }
             }
         }
     }

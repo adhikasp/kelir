@@ -25,6 +25,65 @@ pub fn count_lines(bytes: &[u8]) -> u64 {
     }
 }
 
+/// Line count from a streaming read: newlines, plus one for an unterminated
+/// final line.
+fn line_count(bytes: u64, newlines: u64, last: Option<u8>) -> u64 {
+    if bytes == 0 {
+        0
+    } else if last == Some(b'\n') {
+        newlines
+    } else {
+        newlines + 1
+    }
+}
+
+/// What a stopped call had already written when its process tree was killed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Partial {
+    pub bytes: u64,
+    pub lines: u64,
+    /// Up to the last [`TAIL_BYTES`] bytes, lossily decoded.
+    pub tail: String,
+}
+
+/// Read a tool's output file to describe its partial output: counts, and a tail
+/// of at most [`TAIL_BYTES`]. Streamed in 8 KB chunks, so memory stays bounded
+/// whatever the file size.
+pub fn partial(path: &Path) -> std::io::Result<Partial> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut buffer = [0u8; 8192];
+    let mut bytes = 0u64;
+    let mut newlines = 0u64;
+    let mut last = None;
+    let mut tail: VecDeque<u8> = VecDeque::with_capacity(TAIL_BYTES);
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let chunk = &buffer[..read];
+        bytes += read as u64;
+        newlines += chunk.iter().filter(|byte| **byte == b'\n').count() as u64;
+        last = chunk.last().copied();
+        if chunk.len() >= TAIL_BYTES {
+            tail.clear();
+            tail.extend(&chunk[chunk.len() - TAIL_BYTES..]);
+        } else {
+            tail.extend(chunk.iter().copied());
+            while tail.len() > TAIL_BYTES {
+                tail.pop_front();
+            }
+        }
+    }
+    let tail: Vec<u8> = tail.iter().copied().collect();
+    Ok(Partial {
+        bytes,
+        lines: line_count(bytes, newlines, last),
+        tail: String::from_utf8_lossy(&tail).into_owned(),
+    })
+}
+
 /// A bounded view of one command's output.
 #[derive(Debug)]
 pub struct Capture {
@@ -77,13 +136,7 @@ impl Capture {
     }
 
     pub fn lines(&self) -> u64 {
-        if self.bytes == 0 {
-            0
-        } else if self.last == Some(b'\n') {
-            self.newlines
-        } else {
-            self.newlines + 1
-        }
+        line_count(self.bytes, self.newlines, self.last)
     }
 
     pub fn spilled(&self) -> bool {
@@ -305,5 +358,42 @@ mod tests {
         let sed = result.find("sed -n").unwrap();
         let rg = result.find("rg -n").unwrap();
         assert!(sed < rg);
+    }
+
+    fn temp_out(name: &str, bytes: &[u8]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("kelir-partial-{name}-{}", ulid::Ulid::new()));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn partial_output_is_counted_and_tailed_within_a_kilobyte() {
+        let mut bytes = b"first line\n".to_vec();
+        bytes.extend(vec![b'-'; 20_000]);
+        bytes.extend(b"LAST LINE\n");
+        let path = temp_out("big", &bytes);
+        let partial = partial(&path).unwrap();
+        assert_eq!(partial.bytes, bytes.len() as u64);
+        assert_eq!(partial.lines, count_lines(&bytes));
+        assert!(partial.tail.ends_with("LAST LINE\n"));
+        assert_eq!(partial.tail.len(), TAIL_BYTES);
+        assert!(!partial.tail.contains("first line"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn partial_output_of_a_small_file_is_the_whole_file() {
+        let path = temp_out("small", b"one\ntwo");
+        let partial = partial(&path).unwrap();
+        assert_eq!(partial.bytes, 7);
+        assert_eq!(partial.lines, 2);
+        assert_eq!(partial.tail, "one\ntwo");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn partial_output_of_a_missing_file_is_an_error() {
+        let path = std::env::temp_dir().join(format!("kelir-none-{}", ulid::Ulid::new()));
+        assert!(partial(&path).is_err());
     }
 }
