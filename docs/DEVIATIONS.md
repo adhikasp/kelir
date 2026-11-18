@@ -235,7 +235,7 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   never kills a call it cannot reach; the resume reports that call as unknown,
   which is exactly the case the unknown outcome exists for.
 - **A live session is refused, not taken over.** `resume` connects to the
-  session socket first; if something answers, it exits 2 with `session … is
+  session socket first; if something answers, it exits 1 with `session … is
   already running`. A stale `sock` (and a `sock.path` pointer) left by a dead
   process is replaced by the new bind — `ipc::bind` already removed the stale
   file on Unix, and a Windows pipe name does not outlive its process.

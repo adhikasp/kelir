@@ -291,7 +291,7 @@ async fn resume_refuses_a_session_that_is_still_running() {
             &[],
         )
         .await;
-    assert_eq!(attempt.code, 2, "stdout: {}", attempt.stdout);
+    assert_eq!(attempt.code, 1, "stdout: {}", attempt.stdout);
     assert!(
         attempt.stderr.contains("already running"),
         "stderr: {}",

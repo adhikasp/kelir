@@ -573,11 +573,11 @@ struct ReopenedSession {
 
 /// Read a session's log and prove it is not already running.
 async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
-    let id = crate::paths::resolve_session(spec).map_err(Failure::Usage)?;
+    let id = crate::paths::resolve_session(spec).map_err(Failure::Run)?;
     let dir = crate::paths::session_dir(&id);
     let events_path = dir.join("events.jsonl");
     if !events_path.is_file() {
-        return Err(Failure::Usage(format!(
+        return Err(Failure::Run(format!(
             "session {id} has no event log ({})",
             crate::util::path_string(&events_path)
         )));
@@ -585,7 +585,7 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
     // A live session owns its log; a second writer would fork the sequence.
     if let Ok(stream) = ipc::connect(&dir, &id).await {
         drop(stream);
-        return Err(Failure::Usage(format!(
+        return Err(Failure::Run(format!(
             "session {id} is already running ({}); use `kelir ctl` or stop it first",
             ipc::value(&dir, &id)
         )));
@@ -616,7 +616,7 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
             _ => None,
         })
         .ok_or_else(|| {
-            Failure::Usage(format!(
+            Failure::Run(format!(
                 "session {id} has no session_started event; its log is not a kelir session"
             ))
         })?;
