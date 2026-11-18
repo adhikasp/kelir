@@ -49,6 +49,45 @@ fn bytes_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
+/// Kill one process, the platform's way (`SIGKILL` takes the whole group only
+/// where the test wants that; here it is exactly one pid).
+fn force_kill(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+    }
+}
+
+/// Kill what a call's shim left behind when the test has to clean up by hand
+/// (a promoted call whose shim the test killed): the command's whole tree, not
+/// just its pid. Wine-free Windows needs the parent walk (`taskkill /T`); Unix
+/// the process group the shim led.
+fn force_kill_tree(command: u32, shim: u32) {
+    #[cfg(windows)]
+    {
+        // Windows walks the parent links; the shim is only the group on Unix.
+        let _ = shim;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &command.to_string()])
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &format!("-{shim}")])
+            .output();
+        force_kill(command);
+    }
+}
+
 /// Poll `check` every 100 ms until it holds, or fail with `what`.
 async fn wait_until(what: &str, timeout: Duration, mut check: impl FnMut() -> bool) {
     let deadline = Instant::now() + timeout;
@@ -474,4 +513,135 @@ async fn a_session_killed_mid_call_leaves_no_orphan_behind() {
         bytes_len(&ticks) == first
     })
     .await;
+}
+
+/// A `kelir bg run` made inside a call is an explicit job: it outlives the
+/// session that started it, and no call's tree may take it down. On Windows the
+/// call's Job Object forbids breakaway (it must, or the call's own tree could
+/// not be cancelled), so the shim is started by the session, which is outside
+/// the job; on Unix `setsid` does the same work.
+#[tokio::test]
+async fn a_bg_run_inside_a_call_outlives_a_killed_session() {
+    let marker = format!("kelir-m4-survive-{}", std::process::id());
+    let mock = Mock::start(vec![Reply::Sse(sse(&tool_turn(
+        "call_keep",
+        "bash",
+        &json!({"command": format!(
+            "\"$KELIR_BIN\" bg run \"pwd > job-cwd.txt; sleep 40 # {marker}\""
+        )}),
+    )))])
+    .await;
+    let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+    let settled = live.wait_for("tool_settled").await;
+    assert_eq!(settled["outcome"], "ok", "{settled}");
+    // A job runs where `kelir bg run` was invoked, even when the shim is
+    // started by the session (which is in its own directory) — M4 review F2.
+    wait_until(
+        "the job to run in the call's cwd",
+        Duration::from_secs(20),
+        || live.cwd.join("job-cwd.txt").is_file(),
+    )
+    .await;
+    let seen = std::fs::read_to_string(live.cwd.join("job-cwd.txt")).unwrap_or_default();
+    assert!(
+        seen.trim().ends_with("work"),
+        "the job ran in {:?}, not in the call's cwd {}",
+        seen.trim(),
+        live.cwd.display()
+    );
+    let id = text_of(&settled, "result")
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next())
+        .expect("the job id on the first line")
+        .to_string();
+    assert!(id.starts_with("bg_"), "{settled}");
+
+    let status_file = live.session_dir.join("bg").join(format!("{id}.status"));
+    wait_until("the job to start", Duration::from_secs(20), || {
+        std::fs::read_to_string(&status_file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .map(|status| status["state"] == "running" && status["pid"].is_u64())
+            .unwrap_or(false)
+    })
+    .await;
+    let status: Value =
+        serde_json::from_str(&std::fs::read_to_string(&status_file).unwrap()).unwrap();
+    let pid = status["pid"].as_u64().expect("the command's pid") as u32;
+    let shim = status["shim"].as_u64().expect("the shim's pid") as u32;
+
+    live.kill().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let alive = pid_alive(pid);
+
+    // Clean up whatever happened before asserting.
+    let _ = std::process::Command::new(env!("CARGO_BIN_EXE_kelir"))
+        .args(["bg", "cancel", &id])
+        .env("KELIR_STATE_DIR", &live.state)
+        .env("KELIR_CONFIG", &live.config)
+        .env("KELIR_CONFIG_DIR", live.state.join("no-config"))
+        .output();
+    for _ in 0..20 {
+        if !pid_alive(pid) {
+            break;
+        }
+        force_kill_tree(pid, shim);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        alive,
+        "the `bg run` job started inside a call died with the session (pid {pid})"
+    );
+}
+
+/// A job whose shim is killed from outside (`taskkill /F /IM kelir.exe`, an OOM
+/// kill) can never settle by itself: the session records it as `lost` and wakes
+/// the model instead of leaving it `running` for ever (M4 review F4).
+#[tokio::test]
+async fn a_job_whose_shim_is_killed_settles_as_lost_and_wakes_the_model() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_lost",
+            "bash",
+            &json!({"command": "sleep 300"}),
+        ))),
+        Reply::Sse(sse(&text_turn("promoted, carrying on", 0))),
+        Reply::Sse(sse(&text_turn("heard it was lost", 0))),
+    ])
+    .await;
+    let mut live = LiveSession::start(
+        &mock,
+        &["run", "--keep", "--json", "go"],
+        "promote_after = 1\n",
+    )
+    .await;
+    let settled = live.wait_for("tool_settled").await;
+    assert_eq!(settled["outcome"], "promoted", "{settled}");
+    let id = promoted_id(&settled);
+    live.wait_for("bg_started").await;
+    live.wait_for("turn_ended").await;
+
+    let status_file = live.session_dir.join("bg").join(format!("{id}.status"));
+    let status: Value =
+        serde_json::from_str(&std::fs::read_to_string(&status_file).unwrap()).unwrap();
+    let shim = status["shim"].as_u64().expect("the shim's pid") as u32;
+    let command = status["pid"].as_u64().expect("the command's pid") as u32;
+    force_kill(shim);
+
+    // The watcher notices within its poll and settles the job, which starts the
+    // turn that reads the wake message.
+    let lost = live.wait_for("bg_settled").await;
+    assert_eq!(lost["bg_id"], id.as_str(), "{lost}");
+    assert_eq!(lost["state"], "lost", "{lost}");
+    let wake = live.wait_for("user").await;
+    assert_eq!(wake["from"], "job", "{wake}");
+    assert!(text_of(&wake, "text").contains("was lost"), "{wake}");
+    live.wait_for("turn_ended").await;
+
+    // The command outlived its shim; the status names no job object a reader
+    // may trust with a recycled pid, so the test takes the tree down itself.
+    force_kill_tree(command, shim);
+    let (code, stderr) = live.end().await;
+    assert_eq!(code, 0, "{stderr}");
 }

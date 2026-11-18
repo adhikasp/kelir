@@ -1178,6 +1178,23 @@ impl Session {
         let Incoming { request, reply } = incoming;
         let from = request.from.clone();
         let name = request.verb.clone();
+        // `bg-spawn` is the one thing a job cannot do itself: on Windows a
+        // `kelir bg run` inside a call sits in the call's Job Object, which
+        // forbids breakaway (it has to — an escapable job cannot be
+        // cancelled), so the session, which is outside it, starts the shim.
+        // There is nothing to log: the job's own status file is the record.
+        if name == "bg-spawn" {
+            let answer = if from == "job" {
+                match crate::bg::spawn_shim_for_client(&request.args) {
+                    Ok(id) => crate::ipc::Response::ok("bg-spawn", 0, "now", json!({"id": id})),
+                    Err(error) => crate::ipc::Response::error(error),
+                }
+            } else {
+                crate::ipc::Response::error("bg-spawn: an internal verb; jobs report themselves")
+            };
+            let _ = reply.send(answer);
+            return None;
+        }
         // The `bg` verb is internal: jobs report themselves (the socket path
         // from `kelir bg run`, or the session's own watcher). A human or a gate
         // cannot fabricate one, so the log's `bg_` events are the shim's word.
@@ -1375,6 +1392,10 @@ impl Session {
     /// socket and the watcher, or a watcher restarted by a resume) is recorded
     /// once.
     fn note_bg(&mut self, status: &crate::bg::Status) -> Result<bool, String> {
+        // A job whose shim is gone can never settle on its own: it is recorded
+        // as `lost` rather than left running for ever (M4 review F4).
+        let status = status.observed();
+        let status = &status;
         let started = self.events.iter().any(|event| {
             matches!(&event.body, EventBody::BgStarted { bg_id, .. } if bg_id == &status.id)
         });
@@ -2303,6 +2324,8 @@ impl Session {
         // any more, and the next batch repopulates the list.
         self.live_calls.clear();
 
+        // Calls that became background jobs, recorded after the whole batch.
+        let mut promoted: Vec<String> = Vec::new();
         for (index, ((dir, call), slot)) in plan.iter().zip(slots).enumerate() {
             let (mut outcome, elapsed) = slot.unwrap_or_else(|| {
                 (
@@ -2329,12 +2352,12 @@ impl Session {
             // of the log should see the job, not have to infer it from the
             // `promoted` outcome. The status file the shim already wrote is
             // the truth (`bg_started`, and the wake message if it settled
-            // while the model was still reading this result).
-            if outcome.outcome == "promoted"
-                && let Some(status) =
-                    crate::bg::Status::read(&crate::bg::status_path(&self.dir.join("bg"), dir))
-            {
-                let _ = self.note_bg(&status);
+            // while the model was still reading this result). It is recorded
+            // after the whole batch's results, never between them: a wake
+            // message is a `user` event, and a call's results must stay
+            // contiguous (M4 review N5).
+            if outcome.outcome == "promoted" {
+                promoted.push(dir.clone());
             }
             // The TUI renders its own line from `UiEvent::ToolSettled`; only the
             // headless path prints here, so the painter is the only writer.
@@ -2360,6 +2383,16 @@ impl Session {
             });
         }
         self.sync();
+        // Now that the batch's results are all in the log, a promoted call's
+        // job can be recorded (`bg_started`, and the wake message if it settled
+        // while the model was reading the result).
+        for dir in promoted {
+            if let Some(status) =
+                crate::bg::Status::read(&crate::bg::status_path(&self.dir.join("bg"), &dir))
+            {
+                let _ = self.note_bg(&status);
+            }
+        }
         // Documented test hook: die with the batch committed, which is where a
         // crash after `tool_settled` lands.
         crash_at("tool_settled");

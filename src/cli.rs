@@ -180,8 +180,9 @@ pub enum BgCommand {
 
 #[derive(Debug, Args, Clone)]
 pub struct BgRunArgs {
-    /// The command, run by the configured shell. Words are joined with spaces,
-    /// so quote a multi-word command as one argument.
+    /// The command, run by the configured shell. One argument is a command line
+    /// as written, so shell syntax is allowed; several arguments are literal
+    /// words, quoted so their boundaries survive.
     #[arg(
         required = true,
         trailing_var_arg = true,

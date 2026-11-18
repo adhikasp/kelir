@@ -13,9 +13,14 @@
 //! code before it is inside the job (M0 review N2). The shim opens the same job
 //! by name, assigns the command to it and keeps its own handle: a promoted job
 //! therefore survives the session closing its handle, and `kelir bg cancel` can
-//! open the job by name from another process. The job is **not**
-//! `KILL_ON_JOB_CLOSE`: a shim watches its owner and kills a tree the session
-//! did not get to kill, which is the same guarantee on both platforms.
+//! open the job by name from another process. The job is **not** breakaway-OK —
+//! an msys `spawn` asks for `CREATE_BREAKAWAY_FROM_JOB` whenever the job allows
+//! it, which is exactly how exec'd grandchildren (`sleep.exe`, a nested
+//! `bash.exe`) used to escape a cancel (M4 review F1). It **is**
+//! `KILL_ON_JOB_CLOSE` until promotion, so a session that is killed outright
+//! still takes a leftover `cmd &` child with it (M4 review F6); promotion
+//! clears the flag before the session closes its handle. A shim also watches
+//! its owner, which is the same guarantee on both platforms.
 //!
 //! A [`ProcessGroup`] is a cheap, cloneable handle: the call holds one to kill
 //! its own tree, and the session keeps another so a leftover background child
@@ -142,12 +147,16 @@ impl ProcessGroup {
 
     /// The session stops owning the tree: a promoted job keeps running after
     /// the session exits, so neither `Drop` nor a late `kill` may take it down.
-    /// On Windows the session's job handle is closed here; the shim holds its
-    /// own, so the job survives.
+    /// On Windows the job stops being kill-on-close (the session's handle is
+    /// about to close, and the tree must outlive it) and the session's handle
+    /// is closed here; the shim holds its own, so the job survives.
     pub fn detach(&self) {
         self.state.detached.store(true, Ordering::SeqCst);
         #[cfg(windows)]
         if let Ok(mut job) = self.state.job.lock() {
+            if let Some(job) = job.as_ref() {
+                job.set_kill_on_close(false);
+            }
             // Dropping the handle without terminating is the handover.
             let _ = job.take();
         }
@@ -289,6 +298,101 @@ impl Running {
     }
 }
 
+/// When the process `pid` started, as the OS records it.
+///
+/// A status file outlives its shim (`taskkill /F`, an OOM kill, a reboot) and
+/// the pid can belong to something else by the time a reader asks, so a reader
+/// that is about to signal a pid compares this with the status's `started`
+/// first (M4 review F5). `None` when the process is gone, or when the platform
+/// cannot say (there is no `/proc` on macOS), in which case the caller falls
+/// back to plain liveness.
+pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
+    #[cfg(windows)]
+    {
+        win::start_time(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_start_time(pid)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Linux: `/proc/<pid>/stat` field 22 is the start time in clock ticks since
+/// boot; `/proc/stat`'s `btime` is when the boot was.
+#[cfg(target_os = "linux")]
+fn linux_start_time(pid: u32) -> Option<std::time::SystemTime> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name is in parentheses and may itself contain `)` and
+    // spaces, so the fields are counted from the last `)`.
+    let after = stat.rsplit_once(')')?.1;
+    // `after` starts with field 3 (`state`); `starttime` is field 22.
+    let ticks: u64 = after.split_whitespace().nth(19)?.parse().ok()?;
+    let boot = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime ")?.trim().parse::<u64>().ok())?;
+    // `sysconf(_SC_CLK_TCK)` is 100 on every Linux kelir runs on, but asking
+    // costs nothing and a wrong constant would make every identity check fail.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let hz = if hz > 0 { hz as u64 } else { 100 };
+    let offset = boot + ticks / hz;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(offset))
+}
+
+/// How many processes are in process group `pgid`, **not counting the caller**.
+/// `None` when the platform cannot say, so a caller never mistakes "I cannot
+/// tell" for "the group is empty".
+///
+/// This is what lets a finished call's shim stay behind as its tree's owner: it
+/// exits as soon as nothing is left, and while something is left a `SIGKILL` of
+/// the session still takes the tree down (M4 review F6).
+#[cfg(target_os = "linux")]
+pub fn group_others(pgid: u32) -> Option<usize> {
+    if pgid == 0 {
+        return None;
+    }
+    let me = std::process::id();
+    let mut others = 0;
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(after) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
+            continue;
+        };
+        // Field 8 after the name is `pgrp`; `after` starts at field 3.
+        if after
+            .split_whitespace()
+            .nth(2)
+            .and_then(|field| field.parse::<u32>().ok())
+            == Some(pgid)
+        {
+            others += 1;
+        }
+    }
+    Some(others)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn group_others(_pgid: u32) -> Option<usize> {
+    None
+}
+
 /// Windows: the shim's Job Object, and the two raw calls the session needs to
 /// spawn a suspended child into it.
 #[cfg(windows)]
@@ -303,13 +407,14 @@ pub mod win {
         CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
     };
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, OpenJobObjectW,
         SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, OpenThread, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-        ResumeThread, THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
+        OpenProcess, OpenThread, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+        PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, ResumeThread, THREAD_SUSPEND_RESUME,
+        TerminateProcess, WaitForSingleObject,
     };
 
     pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -323,8 +428,7 @@ pub mod win {
 
     /// A Job Object handle. The session holds one per call; the call's shim
     /// opens its own by name, which is what lets a promoted job outlive the
-    /// session's handle. The job is not kill-on-close: whoever stops the call
-    /// terminates it explicitly, and the shim watches its owner.
+    /// session's handle.
     #[derive(Debug)]
     pub struct Job(HANDLE);
 
@@ -334,29 +438,46 @@ pub mod win {
 
     impl Job {
         /// Create (or open) the named job for one call.
-        pub fn create_named(name: &str) -> Option<Job> {
+        ///
+        /// `kill_on_close` is on for a call's job (a session that is killed
+        /// outright still has its job handles closed by the kernel, which takes
+        /// a leftover `cmd &` child with it) and off for a job that has to
+        /// outlive anything (`kelir bg run`, a promoted call).
+        pub fn create_named(name: &str, kill_on_close: bool) -> Option<Job> {
             let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-            unsafe {
+            let job = unsafe {
                 let handle = CreateJobObjectW(std::ptr::null(), wide.as_ptr());
                 if handle.is_null() {
                     return None;
                 }
-                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-                // Descendants may break away so a `kelir bg run` inside a call
-                // is never trapped in the call's job; the job itself does not
-                // kill on close (the shim watches its owner instead).
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
-                let ok = SetInformationJobObject(
-                    handle,
+                Job(handle)
+            };
+            if !job.set_kill_on_close(kill_on_close) {
+                return None;
+            }
+            Some(job)
+        }
+
+        /// Turn kill-on-close on or off. On is the default for a call: closing
+        /// the last handle terminates the job's processes. Off is what a
+        /// promotion does, because the tree is handed to the shim from then on.
+        pub fn set_kill_on_close(&self, on: bool) -> bool {
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            // Nothing else is set on purpose: no breakaway (a descendant that
+            // could leave the job could not be cancelled — M4 review F1), no
+            // memory or process limits.
+            info.BasicLimitInformation.LimitFlags = if on {
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            } else {
+                0
+            };
+            unsafe {
+                SetInformationJobObject(
+                    self.0,
                     JobObjectExtendedLimitInformation,
                     &info as *const _ as *const c_void,
                     std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                );
-                if ok == 0 {
-                    CloseHandle(handle);
-                    return None;
-                }
-                Some(Job(handle))
+                ) != 0
             }
         }
 
@@ -416,6 +537,44 @@ pub mod win {
                 TerminateProcess(process, 1);
                 CloseHandle(process);
             }
+        }
+    }
+
+    /// When the process was created: the kernel's own answer, which is the same
+    /// clock a status file's `started` comes from. `None` when the process is
+    /// gone or not ours to look at.
+    pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+        // 1601-01-01, the FILETIME epoch, in seconds since the Unix epoch.
+        const FILETIME_UNIX_EPOCH: u64 = 11_644_473_600;
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return None;
+            }
+            let (mut creation, mut exit, mut kernel, mut user): (
+                FILETIME,
+                FILETIME,
+                FILETIME,
+                FILETIME,
+            ) = std::mem::zeroed();
+            let ok = GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user);
+            CloseHandle(process);
+            if ok == 0 {
+                return None;
+            }
+            let ticks = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+            let seconds = ticks / 10_000_000;
+            if seconds < FILETIME_UNIX_EPOCH {
+                return None;
+            }
+            Some(
+                std::time::UNIX_EPOCH
+                    + std::time::Duration::from_secs(seconds - FILETIME_UNIX_EPOCH)
+                    + std::time::Duration::from_nanos(ticks % 10_000_000 * 100),
+            )
         }
     }
 

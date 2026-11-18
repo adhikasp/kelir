@@ -52,6 +52,10 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
         call: Some(call_id.to_string()),
         job: Some(bg::job_name(&ctx.session_id, dir)),
         sock: Some(ctx.sock.clone()),
+        // The call runs where the session (or `--cwd`, or a resumed session's
+        // log) says, not in whatever directory the session process happens to
+        // have (M4 review F2).
+        cwd: Some(ctx.cwd.clone()),
     };
     let mut process = match bg::shim_command(&launch) {
         Ok(process) => process,
@@ -62,7 +66,10 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
     #[cfg(windows)]
     let group = {
         use crate::proc::win::Job;
-        match Job::create_named(launch.job.as_deref().unwrap_or_default()) {
+        // Kill-on-close: a session that is killed outright still takes this
+        // call's tree with it, including a child the command left behind
+        // (M4 review F6). Promotion clears the flag before the session lets go.
+        match Job::create_named(launch.job.as_deref().unwrap_or_default(), true) {
             Some(job) => group.with_job(job),
             // A call whose tree is not in a Job Object could not be stopped
             // (M1 review N7): refuse it instead of running it unreachable.
@@ -114,11 +121,25 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
     let mut tail = Tail::new(&out_path);
     let started = Instant::now();
     let mut promotion_tried = false;
+    // The shim's own exit, when it got there first: on Unix an unpromoted call
+    // whose tree still holds a child (`cmd &`) leaves the shim behind as the
+    // tree's owner, so settlement is what the *status file* says, not the shim
+    // process (M4 review F6).
+    let mut shim_exit = None;
     loop {
         tail.drain_into(&mut capture).await;
+        if bg::Status::read(&bg::status_path(&bg_dir, dir))
+            .map(|status| status.settled())
+            .unwrap_or(false)
+        {
+            break;
+        }
         match child.try_wait() {
-            Ok(Some(_)) => break,
             Ok(None) => {}
+            Ok(Some(status)) => {
+                shim_exit = Some(status);
+                break;
+            }
             Err(error) => {
                 guard.armed = false;
                 ctx.running.remove(dir);
@@ -157,23 +178,66 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
                     ),
                 };
             }
-            // It finished (or the shim never acknowledged): the session still
-            // owns the tree, so the call settles normally.
+            // It finished, or the shim never acknowledged: the session still
+            // owns the tree, so the call settles normally — and the marker goes,
+            // so a shim that looks later cannot promote a call the model has
+            // already been answered (M4 review N4).
+            let _ = std::fs::remove_file(bg::promote_path(&bg_dir, dir));
         }
         tokio::time::sleep(bg::POLL).await;
     }
     tail.drain_into(&mut capture).await;
+
+    // The command's own exit code and output are in the status file the shim
+    // wrote before it exited (or before it stayed behind as the tree's owner);
+    // the shim's own exit code is only a fallback.
+    let status = bg::Status::read(&bg::status_path(&bg_dir, dir));
+    let settled = status
+        .as_ref()
+        .map(|status| status.settled())
+        .unwrap_or(false);
+    if let Some(error) = status.as_ref().and_then(|status| status.error.clone()) {
+        guard.armed = false;
+        ctx.running.remove(dir);
+        return ToolOutcome::error(format!("the command did not run: {error}"));
+    }
+    if !settled && shim_exit.is_some() {
+        // The shim died (a `taskkill /F`, an OOM kill) before the command
+        // settled: nothing will ever write this call's result. Take what is
+        // left of the tree down rather than leave a working orphan behind, and
+        // say the outcome is unknown instead of hanging (M4 review F4).
+        let out = crate::util::path_string(&out_path);
+        let (bytes, lines) = (capture.bytes(), capture.lines());
+        let mut result = "the call's shim exited before the command settled: no result was \
+                          recorded and the outcome is unknown. Its process tree was stopped."
+            .to_string();
+        if bytes > 0 {
+            result.push_str(&format!(
+                "\npartial output: {bytes} bytes, {lines} lines; full output at {out}"
+            ));
+            let tail_text = capture.tail_text();
+            if !tail_text.is_empty() {
+                result.push_str("\n--- tail ---\n");
+                result.push_str(&tail_text);
+            }
+        }
+        // `guard` is still armed: returning kills the group.
+        ctx.running.remove(dir);
+        return ToolOutcome {
+            outcome: "unknown".into(),
+            exit_code: None,
+            bytes,
+            lines,
+            out_path: out,
+            spilled: false,
+            result,
+        };
+    }
     // The call is over: a child the command deliberately left running (`cmd &`)
     // belongs to the session now, not to this task.
     guard.armed = false;
     ctx.running.remove(dir);
 
-    // The command's own exit code and output are in the status file the shim
-    // wrote before it exited; the shim's own exit code is only a fallback.
-    let status = bg::Status::read(&bg::status_path(&bg_dir, dir));
-    if let Some(error) = status.as_ref().and_then(|status| status.error.clone()) {
-        return ToolOutcome::error(format!("the command did not run: {error}"));
-    }
     let exit_code = status
         .as_ref()
         .and_then(|status| status.exit_code)
@@ -209,17 +273,34 @@ async fn wait_for_promotion(
 ) -> bool {
     let deadline = Instant::now() + bg::PROMOTE_ACK;
     loop {
-        if bg::Status::read(&bg::status_path(bg_dir, id))
+        let status = bg::Status::read(&bg::status_path(bg_dir, id));
+        // The acknowledgement is the flag in the status file.
+        if status
+            .as_ref()
             .map(|status| status.promoted)
             .unwrap_or(false)
         {
             return true;
         }
-        if Instant::now() >= deadline {
+        // The command finished while we waited: there is nothing to hand over.
+        if status
+            .as_ref()
+            .map(|status| status.settled())
+            .unwrap_or(false)
+        {
             return false;
         }
+        if Instant::now() >= deadline {
+            // One last look, so a shim that acknowledged at the edge of the
+            // window is honoured instead of being demoted (M4 review N4).
+            return bg::Status::read(&bg::status_path(bg_dir, id))
+                .map(|status| status.promoted)
+                .unwrap_or(false);
+        }
         if let Ok(Some(_)) = child.try_wait() {
-            return false;
+            return bg::Status::read(&bg::status_path(bg_dir, id))
+                .map(|status| status.promoted)
+                .unwrap_or(false);
         }
         tail.drain_into(capture).await;
         tokio::time::sleep(bg::POLL).await;
