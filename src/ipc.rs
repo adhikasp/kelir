@@ -8,8 +8,16 @@
 //! on Windows; both open with the same code, so `kelir ctl` never needs to know
 //! which platform the session runs on. The address is also exported to every
 //! bash child as `KELIR_SOCK`.
+//!
+//! A Unix socket path has to fit in `sun_path` (~108 bytes) and only the
+//! listener may clean up a stale file, so the address is resolved once here and
+//! both sides read the same answer: when `<session dir>/sock` is too long the
+//! session binds a short path in `$XDG_RUNTIME_DIR` (or the temp dir) and
+//! records it in `<session dir>/sock.path`.
 
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[cfg(not(windows))]
@@ -26,7 +34,18 @@ use tokio::sync::{mpsc, oneshot};
 
 /// The socket's file name on Unix; on Windows the pipe name carries the id.
 pub const SOCKET_FILE: &str = "sock";
+/// A Unix socket path must fit in `sun_path` (108 bytes on Linux, 104 on the
+/// BSDs and macOS); this leaves the last byte for the terminator.
+#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
+const MAX_SOCKET_PATH: usize = 107;
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+const MAX_SOCKET_PATH: usize = 103;
+/// Where a session records the socket path it bound when that is not
+/// `<session dir>/sock` (see [`socket_path`]).
+#[cfg(unix)]
+pub const SOCKET_POINTER_FILE: &str = "sock.path";
 /// Named-pipe prefix on Windows.
+#[cfg(windows)]
 const PIPE_PREFIX: &str = "kelir-";
 /// How long a client waits for a connection or an answer.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -112,11 +131,69 @@ pub struct Incoming {
     pub reply: oneshot::Sender<Response>,
 }
 
+// The address: a path on Unix, a name on Windows.
+
+/// True when `path` fits in `sun_path`.
+#[cfg(unix)]
+fn fits(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    path.as_os_str().as_bytes().len() <= MAX_SOCKET_PATH
+}
+
+/// A short place for a socket whose session dir path does not fit:
+/// `$XDG_RUNTIME_DIR` (per-user, 0700) when it exists, else the temp dir. Only
+/// the session id goes in the file name, so the result stays short whatever
+/// the state dir looks like. The socket is chmod 0600 either way, and a shared
+/// temp dir is only used when there is no runtime dir.
+#[cfg(unix)]
+fn fallback_path(id: &str) -> PathBuf {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    base.join(format!("kelir-{id}.sock"))
+}
+
+/// The path a session's socket lives at.
+///
+/// `<session dir>/sock` is the address in every normal case. `sun_path` is
+/// only ~108 bytes though, and a state dir can be deeper than that (a deep
+/// home, or `KELIR_STATE_DIR` pointing somewhere long), so a session that
+/// cannot use the canonical path binds a short one and records it in
+/// `<session dir>/sock.path`; the record wins over any guess a client makes.
+#[cfg(unix)]
+fn socket_path(dir: &Path, id: &str) -> PathBuf {
+    if let Ok(recorded) = std::fs::read_to_string(dir.join(SOCKET_POINTER_FILE)) {
+        let recorded = PathBuf::from(recorded.trim());
+        if !recorded.as_os_str().is_empty() {
+            return recorded;
+        }
+    }
+    let canonical = dir.join(SOCKET_FILE);
+    if fits(&canonical) {
+        canonical
+    } else {
+        fallback_path(id)
+    }
+}
+
+/// Record the socket path when it is not the canonical one, so `kelir ctl` and
+/// every bash child holding `KELIR_SOCK` open the socket that was really bound.
+#[cfg(unix)]
+fn record_socket_path(dir: &Path, path: &Path) {
+    let pointer = dir.join(SOCKET_POINTER_FILE);
+    if path == dir.join(SOCKET_FILE) {
+        let _ = std::fs::remove_file(pointer);
+    } else {
+        let _ = std::fs::write(pointer, crate::util::path_string(path));
+    }
+}
+
 /// The address of a session's socket, for `KELIR_SOCK`, error messages and the
 /// client.
 #[cfg(unix)]
-pub fn value(dir: &Path, _id: &str) -> String {
-    crate::util::path_string(&dir.join(SOCKET_FILE))
+pub fn value(dir: &Path, id: &str) -> String {
+    crate::util::path_string(&socket_path(dir, id))
 }
 
 #[cfg(windows)]
@@ -132,10 +209,15 @@ pub fn value(dir: &Path, _id: &str) -> String {
 fn name(dir: &Path, id: &str) -> Result<Name<'static>, String> {
     #[cfg(unix)]
     {
-        let path = dir.join(SOCKET_FILE);
-        // A stale file from a session that died without cleaning up would make
-        // bind fail; it cannot be a live listener, since the session dir is new.
-        let _ = std::fs::remove_file(&path);
+        let path = socket_path(dir, id);
+        if !fits(&path) {
+            return Err(format!(
+                "the session socket path {} is {} bytes and a Unix socket takes at most \
+                 {MAX_SOCKET_PATH}; set KELIR_STATE_DIR to a shorter directory",
+                crate::util::path_string(&path),
+                path.as_os_str().len(),
+            ));
+        }
         path.to_fs_name::<GenericFilePath>()
             .map_err(|error| format!("cannot name the session socket: {error}"))
     }
@@ -157,6 +239,14 @@ fn name(dir: &Path, id: &str) -> Result<Name<'static>, String> {
 /// Bind the listener. Done before `session_started` is recorded, so a client
 /// that sees the event can connect.
 pub fn bind(dir: &Path, id: &str) -> Result<LocalListener, String> {
+    #[cfg(unix)]
+    let path = socket_path(dir, id);
+    // Only the listener cleans up: a stale file from a session that died without
+    // cleaning up would make bind fail, and it cannot be a live listener, since
+    // the session dir is new. A *client* must never unlink the path — doing that
+    // is what made every round trip fail on Linux.
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(&path);
     let address = name(dir, id)?;
     let listener = ListenerOptions::new()
         .name(address)
@@ -174,10 +264,8 @@ pub fn bind(dir: &Path, id: &str) -> Result<LocalListener, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(
-            dir.join(SOCKET_FILE),
-            std::fs::Permissions::from_mode(0o600),
-        );
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        record_socket_path(dir, &path);
     }
     Ok(listener)
 }
@@ -241,7 +329,8 @@ async fn connection(stream: LocalStream, tx: mpsc::UnboundedSender<Incoming>) {
     }
 }
 
-/// Connect to a session's socket.
+/// Connect to a session's socket. Read-only as far as the filesystem goes: the
+/// listener owns the path, so a client never creates or removes it.
 pub async fn connect(dir: &Path, id: &str) -> Result<LocalStream, String> {
     let address = name(dir, id)?;
     let options = ConnectOptions::new().name(address);
@@ -291,6 +380,7 @@ pub async fn request(dir: &Path, id: &str, request: &Request) -> Result<Response
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     #[test]
     fn a_request_defaults_its_sender() {
@@ -324,17 +414,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_round_trip_carries_the_request_to_the_session() {
-        let dir = std::env::temp_dir().join(format!("kelir-ipc-{}", ulid::Ulid::new()));
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kelir-ipc-{name}-{}", ulid::Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
-        let id = "ses_ipc_test";
-        let listener = bind(&dir, id).unwrap();
+        dir
+    }
+
+    /// Bind, answer one request, and return the answer.
+    async fn round_trip(dir: &Path, id: &str) -> Response {
+        let listener = bind(dir, id).unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
         serve(listener, tx);
-
-        let addr = value(&dir, id);
-        let task = tokio::spawn(async move {
+        tokio::spawn(async move {
             let incoming = rx.recv().await.unwrap();
             assert_eq!(incoming.request.verb, "say");
             incoming
@@ -342,21 +433,67 @@ mod tests {
                 .send(Response::ok("say", 3, "queued", json!({})))
                 .unwrap();
         });
-
-        let response = request(&dir, id, &Request::new("say", json!({"text": "hi"}), "ctl"))
+        request(dir, id, &Request::new("say", json!({"text": "hi"}), "ctl"))
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_round_trip_carries_the_request_to_the_session() {
+        let dir = temp_dir("round-trip");
+        let id = "ses_ipc_test";
+        let response = round_trip(&dir, id).await;
         assert!(response.ok);
         assert_eq!(response.seq, Some(3));
-        task.await.unwrap();
-        assert!(addr.contains(id));
+        assert!(value(&dir, id).contains(id));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The regression behind the first Linux round: `connect` used to unlink
+    /// the socket path on its way in, so every client deleted the listener and
+    /// got `No such file or directory (os error 2)`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_client_leaves_the_listener_path_alone() {
+        let dir = temp_dir("client-unlink");
+        let id = "ses_ipc_client";
+        let listener = bind(&dir, id).unwrap();
+        let sock = dir.join(SOCKET_FILE);
+        assert!(sock.exists(), "bind creates the socket file");
+        let _ = connect(&dir, id).await;
+        assert!(sock.exists(), "a client removed the live socket file");
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A state dir deeper than `sun_path` still gets a working socket: the
+    /// session binds a short recorded path, and the client reads the record.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_too_long_session_dir_binds_a_short_recorded_socket() {
+        let parent = temp_dir("long");
+        let id = "ses_ipc_long";
+        let dir = parent.join("d".repeat(MAX_SOCKET_PATH));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!fits(&dir.join(SOCKET_FILE)), "the dir is not long enough");
+        if !fits(&fallback_path(id)) {
+            // The temp dir itself is too long for a socket; nothing to prove.
+            let _ = std::fs::remove_dir_all(&parent);
+            return;
+        }
+
+        let response = round_trip(&dir, id).await;
+        assert!(response.ok);
+        let recorded = std::fs::read_to_string(dir.join(SOCKET_POINTER_FILE)).unwrap();
+        assert!(fits(Path::new(recorded.trim())), "{recorded}");
+        assert_eq!(value(&dir, id), recorded.trim(), "clients read the record");
+        let _ = std::fs::remove_file(recorded.trim());
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     #[tokio::test]
     async fn an_unknown_socket_is_a_clean_error() {
-        let dir = std::env::temp_dir().join(format!("kelir-ipc-dead-{}", ulid::Ulid::new()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("dead");
         let error = connect(&dir, "ses_dead").await.unwrap_err();
         assert!(!error.is_empty());
         let _ = std::fs::remove_dir_all(&dir);

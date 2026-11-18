@@ -187,7 +187,7 @@ struct Batch {
 }
 
 async fn drive(opts: Options) -> u8 {
-    let prepared = match prepare(&opts).await {
+    let mut prepared = match prepare(&opts).await {
         Ok(prepared) => prepared,
         Err(failure) => {
             eprintln!("kelir: {}", failure.message());
@@ -218,6 +218,10 @@ async fn drive(opts: Options) -> u8 {
             return 1;
         }
     };
+    // On Unix a session dir whose path does not fit in `sun_path` binds a
+    // shorter socket and records it (M1 Linux round 1); take the address that
+    // was really bound for `KELIR_SOCK`.
+    prepared.sock = ipc::value(&prepared.dir, &prepared.id);
 
     let mut session = match Session::start(prepared) {
         Ok(session) => session,
@@ -281,6 +285,8 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         ))
     })?;
     let system_text = render_system(&cfg.system_prompt, &cwd);
+    // The address this session is expected to use; `drive` re-reads it after
+    // `ipc::bind`, because Unix may fall back to a shorter socket path.
     let sock = ipc::value(&dir, &id);
 
     Ok(Prepared {
