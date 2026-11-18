@@ -1178,7 +1178,14 @@ impl Session {
         let Incoming { request, reply } = incoming;
         let from = request.from.clone();
         let name = request.verb.clone();
-        let mut parsed = verbs::parse(&name, &request.args);
+        // The `bg` verb is internal: jobs report themselves (the socket path
+        // from `kelir bg run`, or the session's own watcher). A human or a gate
+        // cannot fabricate one, so the log's `bg_` events are the shim's word.
+        let mut parsed = if name == "bg" && from != "job" {
+            Err("bg: an internal verb; jobs report themselves".to_string())
+        } else {
+            verbs::parse(&name, &request.args)
+        };
         // `stop --call` for a call that is not running (`live_calls` holds only
         // the unsettled calls of the batch) is a refusal, not a silent no-op.
         if let Ok(Verb::Stop {

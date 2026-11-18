@@ -655,6 +655,10 @@ fn fail(dir: &Path, status: &Status, message: &str) {
 /// Take a tree down from inside the shim (the session died) or from `cancel`.
 #[cfg(unix)]
 fn kill_tree(pgid: u32, _job: &Option<String>) {
+    if pgid == 0 {
+        // `kill(0, …)` would signal the caller's own process group.
+        return;
+    }
     // The shim leads the group; the command inherited it, so this is the whole
     // tree — including the shim itself.
     unsafe {
@@ -671,7 +675,9 @@ fn kill_tree(pid: u32, job: &Option<String>) {
         job.terminate_job();
         return;
     }
-    crate::proc::win::terminate(pid);
+    if pid != 0 {
+        crate::proc::win::terminate(pid);
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1233,6 +1239,14 @@ mod tests {
         // Path traversal is refused rather than resolved.
         assert!(find("../escape").is_none());
         assert!(find("").is_none());
+    }
+
+    /// A status file with no pid must not turn `cancel` into "signal my own
+    /// process group" (`kill(0, …)` is every process in it, including the test).
+    #[cfg(unix)]
+    #[test]
+    fn killing_group_zero_does_nothing() {
+        kill_tree(0, &None);
     }
 
     #[test]

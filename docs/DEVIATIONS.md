@@ -415,7 +415,9 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
 - **The `bg` verb is internal but logged like every other verb** (`name: "bg"`,
   `args` = the status, `from: "job"`, `boundary: "now"`). It applies at the first
   boundary it can get and never between a tool call and its result; a malformed
-  report is refused (`bg: not a job status: …`), not half-applied.
+  report is refused (`bg: not a job status: …`), not half-applied. A report from
+  anyone but `job` is refused as well (`bg: an internal verb; jobs report
+  themselves`), so a `ctl` client cannot fabricate a job in the log.
 - **The wake is `bg_settled` plus a `user` event with `from: "job"`**, written at
   the next boundary (or immediately when the session is idle, which starts a
   turn). The message is the spec's intent: `[bg job <id> exited 0 after 3.0s]`,

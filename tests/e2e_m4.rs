@@ -339,6 +339,47 @@ async fn a_job_started_inside_a_call_is_recorded_and_wakes_the_model() {
     assert_eq!(code, 0, "{stderr}");
 }
 
+/// The `bg` verb is the shim's word only: a client cannot fabricate a job, so
+/// the log's `bg_started`/`bg_settled` events can be trusted.
+#[tokio::test]
+async fn a_client_cannot_fabricate_a_background_job() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_1",
+            "bash",
+            &json!({"command": "echo hi"}),
+        ))),
+        Reply::Sse(sse(&text_turn("done", 0))),
+    ])
+    .await;
+    let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+    live.wait_for("tool_settled").await;
+    live.wait_for("turn_ended").await;
+    let fake = json!({
+        "id": "bg_fake",
+        "state": "exited",
+        "started": "2026-11-19T00:00:00Z",
+        "exit_code": 0,
+    });
+    let refused = live.ctl(&["bg", &fake.to_string()]).await;
+    assert_eq!(refused.code, 1, "{}{}", refused.stdout, refused.stderr);
+    let answer = refused.response();
+    assert_eq!(answer["ok"], false, "{answer}");
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("internal verb"),
+        "{answer}"
+    );
+    assert!(
+        !live.log().iter().any(|event| event["type"] == "bg_started"),
+        "a fabricated job reached the log"
+    );
+    let (code, stderr) = live.end().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
 /// `cancel` takes down the job's whole tree — here two loops that are children
 /// of the job's shell — and records `cancelled`. The proof is the work: neither
 /// loop writes another byte afterwards.
