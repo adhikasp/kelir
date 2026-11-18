@@ -7,6 +7,7 @@
 pub mod chat;
 pub mod cli;
 pub mod commands;
+pub mod compact;
 pub mod config;
 pub mod ctl;
 pub mod editor;
@@ -17,6 +18,7 @@ pub mod ipc;
 pub mod paths;
 pub mod proc;
 pub mod provider;
+pub mod resume;
 pub mod scrollback;
 pub mod session;
 pub mod spill;

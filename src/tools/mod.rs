@@ -74,6 +74,12 @@ impl ToolOutcome {
         Self::new("error", message.into(), None)
     }
 
+    /// A successful result the session produced itself (the `compact` tool: the
+    /// compaction happens at the next boundary, not inside the call).
+    pub fn ok(result: String) -> Self {
+        Self::new("ok", result, None)
+    }
+
     /// The turn was stopped (or this call was) while it ran.
     pub fn stopped(reason: &str) -> Self {
         Self::new("stopped", stopped_text(reason), None)
@@ -193,6 +199,21 @@ pub fn specs() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "compact",
+                "description": "Compact this session's context: the earlier conversation is replaced by a summary, keeping the task and the messages a human typed. Use it when the history has grown long and the details no longer matter. It applies at the next step.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "focus": {"type": "string", "description": "What the summary must not lose (optional)."}
+                    },
+                    "required": [],
+                    "additionalProperties": false
+                }
+            }
+        }),
     ]
 }
 
@@ -233,7 +254,7 @@ mod tests {
     #[test]
     fn specs_are_openai_function_tools() {
         let specs = specs();
-        assert_eq!(specs.len(), 2);
+        assert_eq!(specs.len(), 3);
         for spec in &specs {
             assert_eq!(spec["type"], "function");
             let function = &spec["function"];
@@ -245,7 +266,31 @@ mod tests {
 
     #[test]
     fn names_are_stable_and_ordered() {
-        assert_eq!(names(), vec!["bash".to_string(), "edit".to_string()]);
+        assert_eq!(
+            names(),
+            vec![
+                "bash".to_string(),
+                "edit".to_string(),
+                "compact".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn compact_takes_an_optional_focus_and_nothing_else() {
+        let spec = specs()
+            .into_iter()
+            .find(|spec| spec["function"]["name"] == "compact")
+            .expect("a compact tool");
+        assert_eq!(spec["function"]["parameters"]["required"], json!([]));
+        assert_eq!(
+            spec["function"]["parameters"]["properties"]["focus"]["type"],
+            "string"
+        );
+        assert_eq!(
+            spec["function"]["parameters"]["additionalProperties"],
+            false
+        );
     }
 
     #[test]

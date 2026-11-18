@@ -152,6 +152,37 @@ pub fn session_candidates_in(base: &Path, spec: &str) -> Result<Vec<String>, Str
     }
 }
 
+/// Resolve `kelir resume <spec>`: an exact id, a unique prefix, or `latest`
+/// (the newest session, dead or alive — resuming is how a dead one continues).
+pub fn resolve_session(spec: &str) -> Result<String, String> {
+    resolve_session_in(&sessions_dir(), spec)
+}
+
+pub fn resolve_session_in(base: &Path, spec: &str) -> Result<String, String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err("no session given (an id, a unique prefix, or `latest`)".into());
+    }
+    let all = sessions_newest_first_in(base);
+    if spec == "latest" {
+        return all
+            .first()
+            .cloned()
+            .ok_or_else(|| format!("no sessions yet in {}", base.display()));
+    }
+    if all.iter().any(|id| id == spec) {
+        return Ok(spec.to_string());
+    }
+    let matches: Vec<&String> = all.iter().filter(|id| id.starts_with(spec)).collect();
+    match matches.len() {
+        0 => Err(format!("no session matches `{spec}`")),
+        1 => Ok(matches[0].clone()),
+        count => Err(format!(
+            "`{spec}` matches {count} sessions; give more of the id"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +252,29 @@ mod tests {
             vec!["ses_02b".to_string()],
             "a dead newest session must not fall through to an older one"
         );
+    }
+
+    #[test]
+    fn resume_resolves_one_session_and_refuses_an_ambiguous_prefix() {
+        let base = temp_sessions("resume", &["ses_aaa1", "ses_aaa2", "ses_bbb"]);
+        assert_eq!(
+            resolve_session_in(&base, "ses_bbb").unwrap(),
+            "ses_bbb".to_string()
+        );
+        assert_eq!(
+            resolve_session_in(&base, "ses_b").unwrap(),
+            "ses_bbb".to_string()
+        );
+        assert_eq!(
+            resolve_session_in(&base, "latest").unwrap(),
+            "ses_bbb".to_string()
+        );
+        let error = resolve_session_in(&base, "ses_aaa").unwrap_err();
+        assert!(error.contains("matches 2 sessions"), "{error}");
+        assert!(resolve_session_in(&base, "ses_zzz").is_err());
+        assert!(resolve_session_in(&base, " ").is_err());
+        let empty = temp_sessions("resume-empty", &[]);
+        assert!(resolve_session_in(&empty, "latest").is_err());
     }
 
     #[test]

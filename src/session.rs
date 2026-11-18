@@ -18,14 +18,17 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::VERSION;
 use crate::chat::ToolCall;
-use crate::cli::{AskArgs, CommonArgs, RunArgs};
+use crate::cli::{AskArgs, CommonArgs, ResumeArgs, RunArgs};
+use crate::compact;
 use crate::config::{self, Config};
 use crate::event::{
-    Blobs, EventBody, EventLog, LogEvent, LoggedToolCall, Payload, SystemInfo, spill_payloads,
+    Blobs, EventBody, EventLog, LogEvent, LoggedToolCall, Payload, SystemInfo, read_events,
+    spill_payloads,
 };
 use crate::herdr::{Herdr, State as HerdrState};
 use crate::ipc::{self, Incoming, Request, Response};
 use crate::provider::{self, Client};
+use crate::resume::{self, UnsettledCall};
 use crate::tools::{self, Ctx, ToolOutcome};
 use crate::tui::{self, UiEvent};
 use crate::verbs::{self, Boundary, Pending, Scheduler, Verb};
@@ -51,6 +54,21 @@ pub async fn run(args: RunArgs) -> u8 {
         tui: false,
         common: args.common,
         task: args.task,
+        resume: args.resume,
+    })
+    .await
+}
+
+/// `kelir resume <id> [task]`: continue a session from its log.
+pub async fn resume(args: ResumeArgs) -> u8 {
+    drive(Options {
+        json: args.json,
+        ask: false,
+        keep: args.keep,
+        tui: false,
+        common: args.common,
+        task: args.task,
+        resume: Some(args.id),
     })
     .await
 }
@@ -63,6 +81,7 @@ pub async fn ask(args: AskArgs) -> u8 {
         tui: false,
         common: args.common,
         task: args.question,
+        resume: None,
     })
     .await
 }
@@ -76,10 +95,6 @@ pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
         );
         return 2;
     }
-    if args.resume.is_some() {
-        eprintln!("kelir: --resume arrives with M3 (resume); start a new session for now");
-        return 2;
-    }
     drive(Options {
         json: false,
         ask: false,
@@ -91,6 +106,7 @@ pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
         // The TUI has no task: the first turn starts when a human sends a
         // message. `TuiArgs` has no positional, so there is none to reject.
         task: Vec::new(),
+        resume: args.resume,
     })
     .await
 }
@@ -105,6 +121,8 @@ struct Options {
     common: CommonArgs,
     /// The task words from the command line (`run`, `ask`); empty for the TUI.
     task: Vec<String>,
+    /// Continue this session (id or unique prefix) from its log.
+    resume: Option<String>,
 }
 
 enum Failure {
@@ -145,6 +163,27 @@ struct Prepared {
     keep: bool,
     tui: bool,
     herdr: Option<Herdr>,
+    resume: Option<Reopened>,
+}
+
+/// What a resume reads out of the log before the session continues it.
+struct Reopened {
+    events: Vec<LogEvent>,
+    /// A turn was running when the process died: continue it from the model's
+    /// next step.
+    in_flight: bool,
+    /// Calls the log shows as requested but never settled.
+    unsettled: Vec<UnsettledCall>,
+    /// Torn or unreadable log lines, reported as `error` events.
+    damage: Vec<String>,
+    step: u32,
+    turns: u32,
+    /// The tool names frozen at `session_started`, so a resumed session sends
+    /// the same tool list (and keeps its cache prefix).
+    tools: Vec<String>,
+    /// The frozen system text; kept so the log is never rewritten.
+    system_text: String,
+    cwd: PathBuf,
 }
 
 struct Session {
@@ -184,6 +223,74 @@ struct Session {
     live_calls: Vec<String>,
     /// Verbs waiting for their boundary.
     scheduler: Scheduler,
+    /// A compaction waiting for its boundary (`before_step`).
+    compact_request: Option<CompactRequest>,
+    /// The last `usage.prompt_tokens` for the current model: the honest size
+    /// of the context the auto trigger compares to the window. Reset after a
+    /// compaction, so the next trigger uses the estimate of the smaller fold.
+    last_prompt_tokens: Option<u64>,
+    /// The tool names frozen at `session_started`; a resumed session sends the
+    /// same list, so its cache prefix is unchanged.
+    tool_names: Vec<String>,
+    /// This process reopened the log instead of writing `session_started`.
+    resumed: bool,
+    /// A turn was running when the previous process died.
+    in_flight: bool,
+    /// The task words from the command line, for the `user` event a resume
+    /// adds when it is given a new message.
+    pending_task: String,
+}
+
+/// A compaction asked for by someone; it applies at the next `before_step`.
+struct CompactRequest {
+    by: &'static str,
+    focus: Option<String>,
+}
+
+/// What a compaction did, for the UI line.
+struct CompactedInfo {
+    through_seq: u64,
+    tokens_before: u64,
+    tokens_after: u64,
+    pinned: usize,
+}
+
+/// The result the `compact` tool call itself gets: the work happens at the next
+/// boundary, not inside the call.
+fn compact_queued(focus: &Option<String>) -> String {
+    match focus {
+        Some(focus) => format!(
+            "compaction queued (focus: {focus}): the earlier conversation is summarised at the \
+             next step; the task and the messages a human typed stay verbatim"
+        ),
+        None => "compaction queued: the earlier conversation is summarised at the next step; the \
+                 task and the messages a human typed stay verbatim"
+            .to_string(),
+    }
+}
+
+/// Is this process armed to die at `point`? The documented test hook
+/// (`KELIR_CRASH_AT=<point>`) is a no-op unless it names this point exactly.
+fn crash_armed(point: &str) -> bool {
+    std::env::var_os("KELIR_CRASH_AT")
+        .map(|value| value.to_string_lossy().trim() == point)
+        .unwrap_or(false)
+}
+
+/// Die the way a crash does: abort, no unwinding, no `session_ended`.
+fn crash_now(point: &str) -> ! {
+    let _ = writeln!(
+        std::io::stderr(),
+        "kelir: KELIR_CRASH_AT={point}: aborting (test hook)"
+    );
+    let _ = std::io::stderr().flush();
+    std::process::abort()
+}
+
+fn crash_at(point: &str) {
+    if crash_armed(point) {
+        crash_now(point);
+    }
 }
 
 /// What a turn ended as.
@@ -274,7 +381,7 @@ async fn drive(opts: Options) -> u8 {
     // was really bound for `KELIR_SOCK`.
     prepared.sock = ipc::value(&prepared.dir, &prepared.id);
 
-    let mut session = match Session::start(prepared) {
+    let mut session = match Session::open(prepared) {
         Ok(session) => session,
         Err(message) => {
             eprintln!("kelir: {message}");
@@ -293,13 +400,24 @@ async fn drive(opts: Options) -> u8 {
     let mut tui = None;
     if opts.tui {
         let (to_tui, from_session) = mpsc::unbounded_channel::<UiEvent>();
-        let banner = vec![
+        let mut banner = vec![
             format!("kelir · {} · {}", session.provider_name, session.model),
             format!("session {}", session.id),
             format!("cwd {}", crate::util::path_string(&session.ctx.cwd)),
             "Enter sends · Alt-Enter adds a line · /help shows the commands".to_string(),
-            String::new(),
         ];
+        if session.resumed {
+            banner.push(format!(
+                "resumed from the event log · {} turn(s) recorded{}",
+                session.turn,
+                if session.in_flight {
+                    " · continuing the turn that was cut off"
+                } else {
+                    ""
+                }
+            ));
+        }
+        banner.push(String::new());
         match tui::start(from_session, to_tui.clone(), tx.clone(), &banner) {
             Ok(handle) => {
                 session.ui = Some(to_tui.clone());
@@ -344,6 +462,39 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let common = &opts.common;
     let cfg = config::load(common.config.as_deref())
         .map_err(|error| Failure::Usage(error.to_string()))?;
+
+    // A resume takes its id, cwd, model and tool list from the log; only the
+    // config (windows, prompts, provider keys) comes from today's machine.
+    if let Some(spec) = &opts.resume {
+        let reopened = reopen(spec, &cfg).await?;
+        let task = if opts.task.is_empty() {
+            String::new()
+        } else {
+            task_text(&opts.task).await.map_err(Failure::Usage)?
+        };
+        let herdr = Herdr::detect(opts.json);
+        return Ok(Prepared {
+            json: opts.json,
+            ask: opts.ask,
+            keep: opts.keep,
+            tui: opts.tui,
+            herdr,
+            system_text: reopened.reopened.system_text.clone(),
+            cwd: reopened.reopened.cwd.clone(),
+            cfg,
+            provider_name: reopened.provider_name,
+            model: reopened.model,
+            client: reopened.client,
+            id: reopened.id,
+            dir: reopened.dir,
+            task,
+            // `drive` binds the socket and takes the address it really bound,
+            // which also replaces a stale `sock` left by the dead process.
+            sock: String::new(),
+            resume: Some(reopened.reopened),
+        });
+    }
+
     let provider_name = common
         .provider
         .clone()
@@ -406,11 +557,121 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         cwd,
         system_text,
         sock,
+        resume: None,
+    })
+}
+
+/// What [`reopen`] hands back: the session's identity, provider and log state.
+struct ReopenedSession {
+    id: String,
+    dir: PathBuf,
+    provider_name: String,
+    model: String,
+    client: Client,
+    reopened: Reopened,
+}
+
+/// Read a session's log and prove it is not already running.
+async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
+    let id = crate::paths::resolve_session(spec).map_err(Failure::Usage)?;
+    let dir = crate::paths::session_dir(&id);
+    let events_path = dir.join("events.jsonl");
+    if !events_path.is_file() {
+        return Err(Failure::Usage(format!(
+            "session {id} has no event log ({})",
+            crate::util::path_string(&events_path)
+        )));
+    }
+    // A live session owns its log; a second writer would fork the sequence.
+    if let Ok(stream) = ipc::connect(&dir, &id).await {
+        drop(stream);
+        return Err(Failure::Usage(format!(
+            "session {id} is already running ({}); use `kelir ctl` or stop it first",
+            ipc::value(&dir, &id)
+        )));
+    }
+
+    let read = read_events(&events_path).map_err(|error| {
+        Failure::Run(format!(
+            "cannot read {}: {error}",
+            crate::util::path_string(&events_path)
+        ))
+    })?;
+    let events = read.events.clone();
+    let (mut provider_name, mut model, tools, cwd) = events
+        .iter()
+        .find_map(|event| match &event.body {
+            EventBody::SessionStarted {
+                provider,
+                model,
+                tools,
+                cwd,
+                ..
+            } => Some((
+                provider.clone(),
+                model.clone(),
+                tools.clone(),
+                PathBuf::from(cwd),
+            )),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            Failure::Usage(format!(
+                "session {id} has no session_started event; its log is not a kelir session"
+            ))
+        })?;
+    // A `model` verb's swap is recorded by the next `step_started`.
+    for event in &events {
+        if let EventBody::StepStarted {
+            provider,
+            model: step_model,
+            ..
+        } = &event.body
+        {
+            provider_name = provider.clone();
+            model = step_model.clone();
+        }
+    }
+    let provider_cfg = cfg
+        .provider(&provider_name)
+        .map_err(|error| Failure::Usage(error.to_string()))?;
+    let client = Client::new(provider_cfg, &id, cfg.cache_ttl.clone())
+        .map_err(|error| Failure::Usage(error.message))?;
+    let system_text = events
+        .iter()
+        .find_map(|event| match &event.body {
+            EventBody::SessionStarted { system, .. } => Some(system.text.resolve_text(&dir)),
+            _ => None,
+        })
+        .unwrap_or_else(|| Ok(String::new()))
+        .unwrap_or_default();
+
+    Ok(ReopenedSession {
+        id: id.clone(),
+        dir: dir.clone(),
+        provider_name,
+        model,
+        client,
+        reopened: Reopened {
+            in_flight: resume::turn_in_flight(&events),
+            unsettled: resume::unsettled(&events),
+            damage: resume::log_damage(&read),
+            step: resume::last_step(&events),
+            turns: resume::turns_done(&events),
+            tools: if tools.is_empty() {
+                tools::names()
+            } else {
+                tools
+            },
+            system_text,
+            cwd,
+            events,
+        },
     })
 }
 
 impl Session {
-    fn start(prepared: Prepared) -> Result<Self, String> {
+    fn open(prepared: Prepared) -> Result<Self, String> {
         let events_path = prepared.dir.join("events.jsonl");
         let writer = EventLog::open(&events_path)
             .map_err(|error| format!("cannot open {}: {error}", events_path.display()))?;
@@ -421,12 +682,17 @@ impl Session {
             prepared.cfg.spill_limit,
             prepared.sock.clone(),
         );
+        let reopened = prepared.resume.is_some();
         let mut session = Session {
             id: prepared.id.clone(),
             dir: prepared.dir.clone(),
             writer,
             blobs: Blobs::new(&prepared.dir),
-            events: Vec::new(),
+            events: prepared
+                .resume
+                .as_ref()
+                .map(|read| read.events.clone())
+                .unwrap_or_default(),
             cfg: prepared.cfg.clone(),
             provider_name: prepared.provider_name.clone(),
             model: prepared.model.clone(),
@@ -440,12 +706,32 @@ impl Session {
             herdr: prepared.herdr,
             has_task: !prepared.task.trim().is_empty(),
             final_text: String::new(),
-            step: 0,
-            turn: 0,
+            step: prepared.resume.as_ref().map(|read| read.step).unwrap_or(0),
+            turn: prepared.resume.as_ref().map(|read| read.turns).unwrap_or(0),
             disabled: BTreeSet::new(),
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
+            compact_request: None,
+            last_prompt_tokens: None,
+            tool_names: prepared
+                .resume
+                .as_ref()
+                .map(|read| read.tools.clone())
+                .unwrap_or_else(tools::names),
+            resumed: reopened,
+            in_flight: prepared
+                .resume
+                .as_ref()
+                .map(|read| read.in_flight)
+                .unwrap_or(false),
+            pending_task: prepared.task.clone(),
         };
+        if let Some(read) = prepared.resume {
+            // A turn that was in flight continues without a new task.
+            session.has_task |= read.in_flight;
+            session.reopen(read)?;
+            return Ok(session);
+        }
         let hash = crate::util::fnv1a64_hex(prepared.system_text.as_bytes());
         session.record(EventBody::SessionStarted {
             id: prepared.id.clone(),
@@ -461,7 +747,7 @@ impl Session {
                 hash,
             },
             sources: Vec::new(),
-            tools: tools::names(),
+            tools: session.tool_names.clone(),
         })?;
         if session.has_task {
             session.record(EventBody::User {
@@ -473,6 +759,106 @@ impl Session {
         }
         session.sync();
         Ok(session)
+    }
+
+    /// Pick the log up where it stopped: report the damage, mark the resume,
+    /// settle the calls nobody settled (as *unknown*, never by running them
+    /// again), and add a new task if one was given.
+    fn reopen(&mut self, read: Reopened) -> Result<(), String> {
+        // Gaps in the log first: a torn last line and every line that never
+        // parsed are reported, never dropped silently.
+        for damage in &read.damage {
+            self.record(EventBody::Error {
+                location: "log".into(),
+                message: damage.clone(),
+                retryable: false,
+            })?;
+        }
+        let from_seq = resume::last_seq(&read.events);
+        self.record(EventBody::Resumed {
+            from_seq,
+            unsettled: read
+                .unsettled
+                .iter()
+                .map(|call| call.call_id.clone())
+                .collect(),
+        })?;
+        self.sync();
+
+        // A call the log shows as requested or started, with no result, gets
+        // exactly one synthetic result. Re-running it is what a naive replay
+        // does; it is how `rm -rf` runs twice.
+        let mut unknown = 0usize;
+        for call in &read.unsettled {
+            let partial = self.interrupted_output(call);
+            let result = resume::unknown_result(
+                partial
+                    .as_ref()
+                    .map(|(path, bytes, lines)| (path.as_str(), *bytes, *lines)),
+            );
+            let (out_path, bytes, lines) = partial.unwrap_or_default();
+            self.record(EventBody::ToolSettled {
+                call_id: call.call_id.clone(),
+                outcome: "unknown".into(),
+                exit_code: None,
+                bytes,
+                lines,
+                out_path,
+                spilled: false,
+                result: Payload::text(result),
+            })?;
+            unknown += 1;
+        }
+        if unknown > 0 {
+            self.emit(UiEvent::Info(format!(
+                "kelir: resumed · {unknown} call(s) had an unknown outcome and were not re-run"
+            )));
+        }
+        if !self.pending_task.trim().is_empty() {
+            // `kelir resume <id> <task>`: a new message on the existing log.
+            // When a turn was in flight it lands after the unknown results the
+            // model must read first, so it is `next` rather than `now`.
+            let delivery = if read.in_flight { "next" } else { "now" };
+            self.record(EventBody::User {
+                text: self.pending_task.clone().into(),
+                from: "cli".into(),
+                delivery: delivery.to_string(),
+                attachments: Vec::new(),
+            })?;
+        }
+        self.sync();
+        Ok(())
+    }
+
+    /// The partial output of a call the previous process started, when its
+    /// `commands/<seq>-*` directory still has one. The model gets the counts
+    /// and the path; the result still says the outcome is unknown.
+    fn interrupted_output(&self, call: &UnsettledCall) -> Option<(String, u64, u64)> {
+        if !call.started {
+            return None;
+        }
+        // The last start for this id, in case a provider reuses call ids.
+        let seq = self
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.body {
+                EventBody::ToolStarted { call_id, .. } if *call_id == call.call_id => {
+                    Some(event.seq)
+                }
+                _ => None,
+            })?;
+        let prefix = format!("{seq}-");
+        let entry = std::fs::read_dir(self.dir.join("commands"))
+            .ok()?
+            .flatten()
+            .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))?;
+        let out = entry.path().join("out");
+        let partial = crate::spill::partial(&out).ok()?;
+        if partial.bytes == 0 {
+            return None;
+        }
+        Some((crate::util::path_string(&out), partial.bytes, partial.lines))
     }
 
     /// Append one event. Oversized payloads go to `blobs/` first, named by the
@@ -701,18 +1087,19 @@ impl Session {
                 }
                 Verb::End => applied.end = true,
                 Verb::Compact { focus } => {
-                    let message = match focus {
-                        Some(focus) => {
-                            format!("compact is not implemented until M3 (focus: {focus})")
-                        }
-                        None => "compact is not implemented until M3".to_string(),
-                    };
-                    self.emit(UiEvent::Info(format!("kelir: {message}")));
-                    self.record(EventBody::Error {
-                        location: "verb".into(),
-                        message,
-                        retryable: false,
-                    })?;
+                    // Applies at `before_step`: the compaction needs a provider
+                    // call and must never land between a tool call and its
+                    // result.
+                    self.emit(UiEvent::Info(match &focus {
+                        Some(focus) => format!("» compact: {focus}"),
+                        None => "» compact".to_string(),
+                    }));
+                    if self.compact_request.is_none() {
+                        self.compact_request = Some(CompactRequest {
+                            by: "user",
+                            focus: focus.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -791,6 +1178,154 @@ impl Session {
         Ok(())
     }
 
+    // ---------------------------------------------------------- compaction
+
+    /// The tool list sent to the provider: the specs for the names frozen at
+    /// `session_started`, in that order. A session started before a tool existed
+    /// keeps its old list, so the request prefix (and its cache) is unchanged.
+    fn tool_specs(&self) -> Vec<Value> {
+        let all = tools::specs();
+        self.tool_names
+            .iter()
+            .filter_map(|name| {
+                all.iter()
+                    .find(|spec| spec["function"]["name"].as_str() == Some(name.as_str()))
+                    .cloned()
+            })
+            .collect()
+    }
+
+    /// Compact the context if something asked for it: the `compact` tool, the
+    /// `compact` verb, or the auto trigger at the configured fraction of the
+    /// model's window.
+    async fn maybe_compact(&mut self) -> Result<(), String> {
+        if self.compact_request.is_none() {
+            // Nothing to compact before the first step: the estimate would be
+            // little more than the system prompt, and the "conversation" is the
+            // task alone.
+            let has_history = self
+                .events
+                .iter()
+                .any(|event| matches!(event.body, EventBody::StepStarted { .. }));
+            if has_history && compact::plan(&self.events, self.cfg.compact_keep).is_some() {
+                let folded = crate::fold::fold(&self.events, &self.dir)?;
+                let estimate = compact::estimate_tokens(&folded.request_messages());
+                // The provider's own count is the honest size; the estimate
+                // covers the step after a compaction.
+                let tokens = self.last_prompt_tokens.unwrap_or(estimate);
+                let window = self.cfg.window(&self.model);
+                if compact::should_auto(window, self.cfg.auto_compact_at, tokens) {
+                    self.compact_request = Some(CompactRequest {
+                        by: "auto",
+                        focus: None,
+                    });
+                }
+            }
+        }
+        let Some(request) = self.compact_request.take() else {
+            return Ok(());
+        };
+        match self.compact(&request).await {
+            Ok(Some(info)) => {
+                self.emit(UiEvent::Info(format!(
+                    "» compacted through seq {}: ~{} → ~{} tokens ({} pinned) · cache restarts",
+                    info.through_seq, info.tokens_before, info.tokens_after, info.pinned
+                )));
+            }
+            Ok(None) => {
+                self.emit(UiEvent::Info(
+                    "» compact: nothing old enough to summarise".to_string(),
+                ));
+            }
+            Err(message) => {
+                // A failed summary is not a failed turn: the context stays as
+                // it was and the next step runs.
+                self.record(EventBody::Error {
+                    location: "compact".into(),
+                    message,
+                    retryable: true,
+                })?;
+                self.sync();
+            }
+        }
+        Ok(())
+    }
+
+    /// Summarise the prefix and write the `compacted` event.
+    ///
+    /// The summarising request is a plain provider call: verbs are applied at
+    /// the boundary that started the compaction, so a `stop` arriving during it
+    /// is read at the next one.
+    async fn compact(&mut self, request: &CompactRequest) -> Result<Option<CompactedInfo>, String> {
+        let Some(plan) = compact::plan(&self.events, self.cfg.compact_keep) else {
+            return Ok(None);
+        };
+        let prefix: Vec<LogEvent> = self
+            .events
+            .iter()
+            .filter(|event| event.seq <= plan.through_seq)
+            .cloned()
+            .collect();
+        let folded = crate::fold::fold(&prefix, &self.dir)?;
+        let transcript = compact::render_transcript(&folded.messages);
+        let tokens_before = compact::estimate_tokens(&folded.request_messages());
+        self.emit(UiEvent::Info(format!(
+            "» compacting {} pinned message(s) through seq {} · ~{} tokens",
+            plan.pinned_seqs.len(),
+            plan.through_seq,
+            tokens_before
+        )));
+        let summarising = compact::summarise_request(
+            &self.client,
+            &self.model,
+            &self.cfg.compact_prompt,
+            &transcript,
+            request.focus.as_deref(),
+        );
+        let assembler = self
+            .client
+            .stream(&summarising)
+            .await
+            .map_err(|error| format!("the summarising request failed: {}", error.message))?;
+        let summary = assembler.text.trim().to_string();
+        if summary.is_empty() {
+            return Err("the summarising request returned no text".to_string());
+        }
+
+        let mut body = EventBody::Compacted {
+            through_seq: plan.through_seq,
+            summary: Payload::text(summary),
+            pinned_seqs: plan.pinned_seqs.clone(),
+            by: request.by.to_string(),
+            tokens_before,
+            tokens_after: 0,
+            cache_restart: true,
+        };
+        // The size after: fold the log as it *will* be, so the number in the
+        // event is the one the next request is built from.
+        let preview_event = LogEvent::new(self.writer.next_seq(), body.clone());
+        let mut preview = self.events.clone();
+        preview.push(preview_event);
+        let tokens_after =
+            compact::estimate_tokens(&crate::fold::fold(&preview, &self.dir)?.request_messages());
+        if let EventBody::Compacted {
+            tokens_after: slot, ..
+        } = &mut body
+        {
+            *slot = tokens_after;
+        }
+        self.record(body)?;
+        self.sync();
+        // The next trigger measures the compacted fold, not the old size.
+        self.last_prompt_tokens = None;
+        Ok(Some(CompactedInfo {
+            through_seq: plan.through_seq,
+            tokens_before,
+            tokens_after,
+            pinned: plan.pinned_seqs.len(),
+        }))
+    }
+
     // --------------------------------------------------------------- turns
 
     /// Run the session: one turn, then more when `--keep` or when messages are
@@ -798,6 +1333,16 @@ impl Session {
     async fn run(&mut self, rx: &mut Inbox) -> u8 {
         let mut code = 0u8;
         let mut reason = "done".to_string();
+        // A resumed session with nothing in flight and nothing new has no turn
+        // to run: `kelir resume <id>` on a finished session reports and leaves.
+        // A TUI resume still waits for the next message (`keep`).
+        if self.resumed && !self.in_flight && !self.has_task && !self.keep {
+            let _ = self.record(EventBody::SessionEnded {
+                reason: "resumed".into(),
+            });
+            self.sync();
+            return 0;
+        }
         // A TUI session starts with no task: wait for the first message.
         if !self.has_task && self.keep {
             match self.idle(rx).await {
@@ -918,6 +1463,9 @@ impl Session {
                 if matches!(pending.verb, Verb::Stop { call: None, .. }) {
                     self.emit(UiEvent::Info("» stop: nothing is running".into()));
                 } else {
+                    if matches!(pending.verb, Verb::Compact { .. }) {
+                        self.emit(UiEvent::Info("» compact: applies at the next step".into()));
+                    }
                     self.scheduler.push(pending);
                 }
             }
@@ -958,10 +1506,15 @@ impl Session {
                 return Ok(TurnEnd::Stopped(reason));
             }
 
+            // Compaction applies here and nowhere else: after the previous
+            // batch settled, before the next request, never between a tool call
+            // and its result. All three triggers arrive as one request.
+            self.maybe_compact().await?;
+
             let folded = crate::fold::fold(&self.events, &self.dir)?;
             let request =
                 self.client
-                    .build(&self.model, &folded.request_messages(), &tools::specs());
+                    .build(&self.model, &folded.request_messages(), &self.tool_specs());
             let request_text = serde_json::to_string(&request.body).unwrap_or_default();
             self.step += 1;
             let step = self.step;
@@ -1014,6 +1567,9 @@ impl Session {
                     cost: usage.cost,
                     allowance: usage.allowance.clone(),
                 })?;
+                // The size of the context the provider just saw: what the auto
+                // trigger compares to the window.
+                self.last_prompt_tokens = Some(usage.prompt_tokens);
                 self.emit(UiEvent::Usage {
                     prompt: usage.prompt_tokens,
                     completion: usage.completion_tokens,
@@ -1025,6 +1581,9 @@ impl Session {
             // said in `turn_ended.final_text`.
             self.final_text = text.clone();
             self.sync();
+            // Documented test hook: die where a crash would leave the log
+            // between an assistant message and its tool calls.
+            crash_at("usage");
 
             if !self.json && self.echo_assistant && !text.is_empty() {
                 println!("{text}");
@@ -1081,11 +1640,17 @@ impl Session {
             // Live text goes to the UI as it arrives; the callback is a send to
             // an unbounded channel, so it can never stall the stream.
             let ui = self.ui.clone();
+            // Documented test hook: die with half a response streamed and
+            // nothing committed, which is where a crash in the stream lands.
+            let crash_mid_stream = crash_armed("mid_stream");
             let mut on_delta = move |delta: crate::stream::Delta| {
-                if let Some(ui) = &ui
-                    && let crate::stream::Delta::Text(text) = delta
-                {
-                    let _ = ui.send(UiEvent::Delta(text));
+                if let crate::stream::Delta::Text(text) = &delta {
+                    if crash_mid_stream {
+                        crash_now("mid_stream");
+                    }
+                    if let Some(ui) = &ui {
+                        let _ = ui.send(UiEvent::Delta(text.clone()));
+                    }
                 }
             };
             let future = client.stream_with(request, &mut on_delta);
@@ -1188,6 +1753,10 @@ impl Session {
             ));
         }
         self.sync();
+        // Documented test hook: die after the intent is durable, before any
+        // process started, which is where a crash right after the log write
+        // lands.
+        crash_at("tool_started");
 
         let count = plan.len();
         let (done_tx, mut done_rx) =
@@ -1204,14 +1773,33 @@ impl Session {
             let name = call.name.clone();
             let args = call.args.clone();
             let disabled = self.disabled.contains(&call.name);
+            // `compact` is a native tool whose work is the session's: a request
+            // for the next boundary, answered here like any other call.
+            let preset = if disabled {
+                Some(ToolOutcome::disabled(&name))
+            } else if name == "compact" {
+                let focus = call
+                    .args
+                    .get("focus")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|focus| !focus.trim().is_empty());
+                self.compact_request = Some(CompactRequest {
+                    by: "agent",
+                    focus: focus.clone(),
+                });
+                Some(ToolOutcome::ok(compact_queued(&focus)))
+            } else {
+                None
+            };
             let gate = gates[index].clone();
             let tx = done_tx.clone();
             handles.push(tokio::spawn(async move {
                 let started = Instant::now();
                 let outcome = if gate.load(Ordering::SeqCst) {
                     ToolOutcome::skipped("stopped before it started")
-                } else if disabled {
-                    ToolOutcome::disabled(&name)
+                } else if let Some(preset) = preset {
+                    preset
                 } else {
                     tools::dispatch(&name, &args, &ctx, &dir).await
                 };
@@ -1219,6 +1807,12 @@ impl Session {
             }));
         }
         drop(done_tx);
+        // Documented test hook: die with the calls running and their side
+        // effects already made, which is where a crash mid-tool lands.
+        if crash_armed("mid_tool") {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            crash_now("mid_tool");
+        }
 
         let mut slots: Vec<Option<(ToolOutcome, Duration)>> = (0..count).map(|_| None).collect();
         // Killed calls: their result becomes `stopped by user: <reason>`.
@@ -1354,7 +1948,9 @@ impl Session {
                 spilled: outcome.spilled,
                 result: outcome.result.clone().into(),
             })?;
-            if !self.json {
+            // The TUI renders its own line from `UiEvent::ToolSettled`; only the
+            // headless path prints here, so the painter is the only writer.
+            if !self.json && !self.tui {
                 println!(
                     "→ {} {} · {} · {} B · {:.1}s",
                     call.name,
@@ -1376,6 +1972,9 @@ impl Session {
             });
         }
         self.sync();
+        // Documented test hook: die with the batch committed, which is where a
+        // crash after `tool_settled` lands.
+        crash_at("tool_settled");
         Ok(batch)
     }
 

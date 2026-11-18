@@ -54,7 +54,7 @@ async fn plain_answer_streams_events_and_usage() {
     assert_eq!(started["provider"], "openrouter");
     assert_eq!(started["model"], "test/model");
     assert_eq!(started["depth"], 0);
-    assert_eq!(started["tools"], json!(["bash", "edit"]));
+    assert_eq!(started["tools"], json!(["bash", "edit", "compact"]));
     assert!(started["system"]["hash"].as_str().unwrap().len() == 16);
     assert!(
         started["system"]["text"]
@@ -92,7 +92,7 @@ async fn plain_answer_streams_events_and_usage() {
     assert!(request.body.get("provider").is_none());
     assert!(request.body.get("cache_control").is_none());
     assert_eq!(request.body["session_id"], started["id"]);
-    assert_eq!(request.body["tools"].as_array().unwrap().len(), 2);
+    assert_eq!(request.body["tools"].as_array().unwrap().len(), 3);
     assert_eq!(request.body["messages"][0]["role"], "system");
     assert_eq!(request.body["messages"][1]["role"], "user");
     assert_eq!(request.body["messages"][1]["content"], "say hi");

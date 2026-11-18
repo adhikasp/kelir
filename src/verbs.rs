@@ -58,9 +58,8 @@ pub enum Verb {
         disable: Vec<String>,
         enable: Vec<String>,
     },
-    /// `compact [focus]`: the verb exists from M2 (the TUI's `/compact` sends
-    /// it); the compactor itself lands in M3 and answers with a note until
-    /// then.
+    /// `compact [focus]`: summarise the earlier conversation at the next
+    /// `before_step` boundary.
     Compact {
         focus: Option<String>,
     },
@@ -192,8 +191,8 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             Ok(Verb::Tools { disable, enable })
         }
         "end" => Ok(Verb::End),
-        // Parsed from M2 so the TUI's `/compact` is a real verb from the start;
-        // the boundary it applies at answers with a note until M3.
+        // Applies at the next `before_step`: the summary is a provider call and
+        // must not land inside a tool batch.
         "compact" => Ok(Verb::Compact {
             focus: string_arg(args, "focus").filter(|focus| !focus.trim().is_empty()),
         }),
@@ -231,6 +230,7 @@ pub fn cli_args(
                     args
                 }
                 "model" if !text.trim().is_empty() => json!({"model": text}),
+                "compact" if !text.trim().is_empty() => json!({"focus": text}),
                 _ => json!({}),
             }
         }
@@ -498,6 +498,25 @@ mod tests {
 
         let args = cli_args("tools", &[], false, None, None, &["bash".to_string()], &[]).unwrap();
         assert_eq!(args, json!({"disable": ["bash"]}));
+    }
+
+    #[test]
+    fn compact_words_become_the_focus() {
+        let words = vec!["the".to_string(), "failing".to_string(), "test".to_string()];
+        let args = cli_args("compact", &words, false, None, None, &[], &[]).unwrap();
+        assert_eq!(args, json!({"focus": "the failing test"}));
+        assert_eq!(
+            parse("compact", &args).unwrap(),
+            Verb::Compact {
+                focus: Some("the failing test".into())
+            }
+        );
+        let args = cli_args("compact", &[], false, None, None, &[], &[]).unwrap();
+        assert_eq!(args, json!({}));
+        assert_eq!(
+            parse("compact", &args).unwrap(),
+            Verb::Compact { focus: None }
+        );
     }
 
     #[test]

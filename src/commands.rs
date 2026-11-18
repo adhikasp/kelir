@@ -191,7 +191,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/compact [focus]",
-        "compact the context (the compactor arrives in M3)",
+        "summarise the earlier context, keeping the task and your messages",
     ),
     ("/quit", "end the session (a second Ctrl-C does the same)"),
     ("/help", "this list"),

@@ -625,6 +625,125 @@ impl LiveSession {
     }
 }
 
+// ------------------------------------------------------- a reusable sandbox
+
+/// One state dir, cwd and config shared by several `kelir` invocations, so a
+/// test can crash a run and resume the same session.
+pub struct Sandbox {
+    _temp: Option<tempfile::TempDir>,
+    pub cwd: PathBuf,
+    pub config: PathBuf,
+    pub state: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct Output {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl Output {
+    pub fn json_lines(&self) -> Vec<Value> {
+        self.stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str(line)
+                    .unwrap_or_else(|_| panic!("stdout line is not JSON: {line}"))
+            })
+            .collect()
+    }
+
+    pub fn result(&self) -> Option<Value> {
+        self.json_lines()
+            .into_iter()
+            .find(|line| line["type"] == "result")
+    }
+}
+
+impl Sandbox {
+    pub fn new(extra_config: &str) -> Sandbox {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config = temp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!("provider = \"openrouter\"\nmodel = \"test/model\"\n{extra_config}"),
+        )
+        .unwrap();
+        let state = temp.path().join("state");
+        Sandbox {
+            _temp: Some(temp),
+            cwd,
+            config,
+            state,
+        }
+    }
+
+    /// The same dirs as a running [`LiveSession`], for a second process (a
+    /// resume) on its log.
+    pub fn from_live(live: &LiveSession) -> Sandbox {
+        Sandbox {
+            _temp: None,
+            cwd: live.cwd.clone(),
+            config: live.config.clone(),
+            state: live.state.clone(),
+        }
+    }
+
+    /// Run the real binary against `base_url`, capturing stdout and stderr.
+    pub async fn kelir(&self, base_url: &str, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let mut command = live_command(&self.cwd, &self.config, &self.state, base_url);
+        command.args(args);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+            .await
+            .expect("kelir did not finish within 60 s")
+            .expect("run kelir");
+        Output {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    pub fn session_ids(&self) -> Vec<String> {
+        kelir::paths::sessions_newest_first_in(&self.state.join("sessions"))
+    }
+
+    pub fn only_session(&self) -> String {
+        let ids = self.session_ids();
+        assert_eq!(ids.len(), 1, "expected one session, got {ids:?}");
+        ids[0].clone()
+    }
+
+    pub fn session_dir(&self, id: &str) -> PathBuf {
+        self.state.join("sessions").join(id)
+    }
+
+    /// The log as it is on disk, skipping a line a crash left torn (a resume
+    /// reports those; the test still wants the rest).
+    pub fn log(&self, id: &str) -> Vec<Value> {
+        std::fs::read_to_string(self.session_dir(id).join("events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
+
+    /// The lines of a file the tools wrote, 0 when it does not exist.
+    pub fn lines_in(&self, name: &str) -> usize {
+        std::fs::read_to_string(self.cwd.join(name))
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    }
+}
+
 fn live_command(
     cwd: &PathBuf,
     config: &PathBuf,

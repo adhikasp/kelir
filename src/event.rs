@@ -341,6 +341,23 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             outcome,
             final_text: spill_payload(blobs, seq, "final_text", final_text)?,
         },
+        EventBody::Compacted {
+            through_seq,
+            summary,
+            pinned_seqs,
+            by,
+            tokens_before,
+            tokens_after,
+            cache_restart,
+        } => EventBody::Compacted {
+            through_seq,
+            summary: spill_payload(blobs, seq, "summary", summary)?,
+            pinned_seqs,
+            by,
+            tokens_before,
+            tokens_after,
+            cache_restart,
+        },
         EventBody::Verb {
             name,
             args,
@@ -492,6 +509,29 @@ pub enum EventBody {
         outcome: String,
         final_text: Payload,
     },
+    /// A compaction: everything up to `through_seq` is replaced by `summary`,
+    /// except the pinned messages. `by` is `user`, `agent` or `auto`; the cache
+    /// restart is inherent (it is the reason the field is here) and recorded so
+    /// a reader of the log does not have to infer it from the seq numbers.
+    Compacted {
+        through_seq: u64,
+        summary: Payload,
+        #[serde(default)]
+        pinned_seqs: Vec<u64>,
+        by: String,
+        tokens_before: u64,
+        tokens_after: u64,
+        #[serde(default)]
+        cache_restart: bool,
+    },
+    /// A session reopened from its log: where it continued from, and which
+    /// calls were started but never settled (they are reported to the model as
+    /// unknown outcomes and never re-run).
+    Resumed {
+        from_seq: u64,
+        #[serde(default)]
+        unsettled: Vec<String>,
+    },
     Error {
         #[serde(rename = "where")]
         location: String,
@@ -533,6 +573,8 @@ impl LogEvent {
             EventBody::ToolStarted { .. } => "tool_started",
             EventBody::ToolSettled { .. } => "tool_settled",
             EventBody::TurnEnded { .. } => "turn_ended",
+            EventBody::Compacted { .. } => "compacted",
+            EventBody::Resumed { .. } => "resumed",
             EventBody::Error { .. } => "error",
             EventBody::SessionEnded { .. } => "session_ended",
         }
@@ -648,7 +690,14 @@ pub fn read_events(path: &Path) -> io::Result<LogRead> {
         }
     }
     if last_complete < bytes.len() {
-        out.torn_last = Some(String::from_utf8_lossy(&bytes[last_complete..]).into_owned());
+        let tail = &bytes[last_complete..];
+        // A crash can land between the payload and its newline. If what is
+        // there is a whole event, keep it: losing a complete event would be
+        // worse than a missing terminator. Anything less is torn.
+        match serde_json::from_slice::<LogEvent>(tail) {
+            Ok(event) => out.events.push(event),
+            Err(_) => out.torn_last = Some(String::from_utf8_lossy(tail).into_owned()),
+        }
     }
     Ok(out)
 }
@@ -738,6 +787,19 @@ mod tests {
             EventBody::TurnEnded {
                 outcome: "done".into(),
                 final_text: "done".into(),
+            },
+            EventBody::Compacted {
+                through_seq: 7,
+                summary: "we did the first half".into(),
+                pinned_seqs: vec![2],
+                by: "agent".into(),
+                tokens_before: 900,
+                tokens_after: 120,
+                cache_restart: true,
+            },
+            EventBody::Resumed {
+                from_seq: 9,
+                unsettled: vec!["call_1".into()],
             },
             EventBody::Error {
                 location: "provider".into(),
@@ -954,6 +1016,69 @@ mod tests {
         assert_eq!(read.events.len(), 2);
         assert_eq!(read.bad_lines.len(), 1);
         assert!(read.torn_last.is_none());
+    }
+
+    #[test]
+    fn a_torn_line_is_handled_at_every_byte_offset() {
+        let dir = temp_dir("torn-offsets");
+        let good = serde_json::to_string(&LogEvent::new(1, started())).unwrap();
+        let second = serde_json::to_string(&LogEvent::new(2, samples()[1].clone())).unwrap();
+        for cut in 0..=second.len() {
+            let path = dir.join(format!("events-{cut}.jsonl"));
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(good.as_bytes());
+            bytes.push(b'\n');
+            bytes.extend_from_slice(&second.as_bytes()[..cut]);
+            std::fs::write(&path, &bytes).unwrap();
+            // The only cut that parses is the whole line (a crash between the
+            // payload and its newline); it is kept, and every shorter prefix is
+            // reported as torn.
+            let kept = usize::from(cut == second.len());
+            let read = read_events(&path).unwrap();
+            assert_eq!(read.events.len(), 1 + kept, "cut {cut}: {read:?}");
+            assert_eq!(read.events[0].seq, 1);
+            if cut > 0 && kept == 0 {
+                assert!(
+                    read.torn_last.is_some() || read.bad_lines.len() == 1,
+                    "cut {cut}: {read:?}"
+                );
+            }
+            // Reopening after the fragment starts a clean line and keeps seq
+            // monotonic: the next event is never swallowed by the fragment.
+            let next = 2 + kept as u64;
+            let mut log = EventLog::open(&path).unwrap();
+            assert_eq!(log.append(started()).unwrap().seq, next, "cut {cut}");
+            log.sync().unwrap();
+            let read = read_events(&path).unwrap();
+            assert_eq!(read.events.len(), 2 + kept, "cut {cut}: {read:?}");
+            assert_eq!(read.events.last().unwrap().seq, next);
+        }
+    }
+
+    #[test]
+    fn a_batch_is_whole_on_disk_before_sync_returns() {
+        let dir = temp_dir("batch");
+        let path = dir.join("events.jsonl");
+        let mut log = EventLog::open(&path).unwrap();
+        for body in samples().into_iter().take(4) {
+            log.append(body).unwrap();
+        }
+        log.sync().unwrap();
+        // A fresh read (a new process, a new handle) sees every event of the
+        // batch and nothing partial: the file ends on a line boundary.
+        let read = read_events(&path).unwrap();
+        assert_eq!(read.events.len(), 4);
+        assert!(read.torn_last.is_none(), "{read:?}");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        // Every line is a whole event, in seq order.
+        assert_eq!(
+            read.events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
     }
 
     #[test]

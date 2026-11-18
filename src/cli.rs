@@ -28,6 +28,8 @@ pub enum Command {
     Ask(AskArgs),
     /// Start the interactive session (the default with no subcommand).
     Tui(TuiArgs),
+    /// Continue a session from its log (never re-runs a tool call).
+    Resume(ResumeArgs),
     /// Send a verb to a running session and print its answer.
     Ctl(CtlArgs),
 }
@@ -61,6 +63,28 @@ pub struct RunArgs {
     /// Stay alive after the turn ends, accepting `say`, `later` and `end`.
     #[arg(long)]
     pub keep: bool,
+    /// Continue a session from its log instead of starting one.
+    #[arg(long, value_name = "ID")]
+    pub resume: Option<String>,
+}
+
+/// `kelir resume <id> [task]`: continue a session from its log.
+#[derive(Debug, Args, Clone)]
+pub struct ResumeArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Session id, or a unique prefix of one.
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// A message to add before the turn continues. Read from stdin with `-`.
+    #[arg(value_name = "TASK")]
+    pub task: Vec<String>,
+    /// Stream the event log as NDJSON on stdout.
+    #[arg(long)]
+    pub json: bool,
+    /// Stay alive after the turn ends.
+    #[arg(long)]
+    pub keep: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -77,7 +101,7 @@ pub struct AskArgs {
 pub struct TuiArgs {
     #[command(flatten)]
     pub common: CommonArgs,
-    /// Continue a session from its log (arrives with M3).
+    /// Continue a session from its log.
     #[arg(long, value_name = "ID")]
     pub resume: Option<String>,
 }
@@ -198,6 +222,35 @@ mod tests {
         match cli.command {
             Some(Command::Ctl(args)) => assert_eq!(args.disable, vec!["bash".to_string()]),
             _ => panic!("expected ctl"),
+        }
+    }
+
+    #[test]
+    fn resume_parses_an_id_a_task_and_the_flags() {
+        let cli = Cli::parse_from(["kelir", "resume", "--json", "ses_01", "carry", "on"]);
+        match cli.command {
+            Some(Command::Resume(args)) => {
+                assert_eq!(args.id, "ses_01");
+                assert_eq!(args.task, vec!["carry".to_string(), "on".to_string()]);
+                assert!(args.json);
+                assert!(!args.keep);
+            }
+            _ => panic!("expected resume"),
+        }
+        // `kelir resume <id>` alone: continue whatever the log left in flight.
+        let cli = Cli::parse_from(["kelir", "resume", "ses_01"]);
+        match cli.command {
+            Some(Command::Resume(args)) => assert!(args.task.is_empty()),
+            _ => panic!("expected resume"),
+        }
+        // The same thing as a flag on `run`.
+        let cli = Cli::parse_from(["kelir", "run", "--resume", "ses_01", "more"]);
+        match cli.command {
+            Some(Command::Run(args)) => {
+                assert_eq!(args.resume.as_deref(), Some("ses_01"));
+                assert_eq!(args.task, vec!["more".to_string()]);
+            }
+            _ => panic!("expected run"),
         }
     }
 

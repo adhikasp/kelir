@@ -196,4 +196,105 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   is written first; the first turn begins when the first `say` arrives, so the
   log and the request sequence are the same as any other session's.
 
+## M3
 
+- **`resumed.from_seq` is the seq of the last event before the resume**, i.e.
+  the point the log continues from (0 when the log only has `session_started`).
+  The resume event's own seq is the first one the resumed process writes.
+  `unsettled` lists the call ids in the order the model asked for them.
+- **A call with no result is settled `unknown`, never re-run.** Every
+  `tool_started` without a `tool_settled` *and* every `tool_calls` entry of an
+  assistant message without one gets exactly one synthetic `tool_settled` with
+  `outcome: "unknown"` and the result `unknown outcome: kelir was interrupted
+  while this call was running; it may or may not have completed. Check before
+  retrying.` When the interrupted call had already written output, one more line
+  follows: `partial output: N bytes, M lines; full output at <path>` (the
+  `commands/<seq>-*` directory the log names). The second class — asked for but
+  never started, which is the crash right after `usage` — is settled too,
+  because an assistant tool call with no `tool` message is a request every
+  provider rejects; its sentence is the same, since it may or may not have run.
+- **The tool list of a resumed session is the one in `session_started`.** The
+  specs are filtered to the recorded names, so a session started before
+  `compact` existed keeps its two-tool list and its cache prefix. A disabled
+  tool is *not* replayed into a resume (the list never changed anyway, but a
+  `tools --disable` is forgotten).
+- **A resume takes its id, cwd, provider, model and counters from the log, not
+  from flags.** `--cwd`, `--model` and `--provider` are ignored with `--resume`;
+  the config (windows, prompts, keys) is today's machine's. The model/provider
+  are the last `step_started`'s, so a `model` verb swap survives the resume.
+  `step` and `turn` continue from the log instead of restarting.
+- **`kelir resume <id>` on a finished session with no task does nothing.** It
+  appends the `resumed` event and one `session_ended {reason: "resumed"}`, exits
+  0 and makes no provider request. With a task (`kelir resume <id> <task>`,
+  `kelir run --resume <id> <task>`) the message is appended (delivery `next`
+  when a turn was in flight, so it lands after the unknown results) and one turn
+  runs.
+- **A live session is refused, not taken over.** `resume` connects to the
+  session socket first; if something answers, it exits 2 with `session … is
+  already running`. A stale `sock` (and a `sock.path` pointer) left by a dead
+  process is replaced by the new bind — `ipc::bind` already removed the stale
+  file on Unix, and a Windows pipe name does not outlive its process.
+- **A crash leaves no `turn_ended` and no `session_ended`.** That was already
+  true and is unchanged: the log simply stops. A resume does not invent them; it
+  appends `resumed`, settles the unknown calls and continues the turn, and the
+  `turn_ended` in the log after that is the resumed turn's own. `turn_in_flight`
+  is "an event that belongs to a turn (user, step, assistant, usage, tool) after
+  the last `turn_ended`", so a crash between turns resumes without running one.
+- **`compacted.cache_restart` is a field the spec's table does not list.** The
+  spec asks that the cache restart is logged; the event carries
+  `cache_restart: true` (it is inherent), the UI says so, and the next
+  `step_started.request_hash` differs because the prefix was rewritten. What is
+  *not* logged is the summarising request's own `usage`/cost: it is not a step,
+  so it has no step number to record and `kelir ls` does not count it yet.
+- **`tokens_before`/`tokens_after` are estimates**: four bytes per token, rounded
+  up, over the JSON the provider would receive (system message included, tools
+  not). The auto trigger uses the provider's own `usage.prompt_tokens` when the
+  log has one, and the same estimate otherwise (the first step, and the step
+  after a compaction).
+- **Pins: the first `user` message whatever its `from`, plus every `user` whose
+  `from` is a human.** `tui`, `ctl`, `cli` and `channel` count as a human (a
+  person typed it, in the editor, in a shell or in a chat bridge); `job` and
+  `gate` do not. Pins are rendered after the summary, in log order, as the
+  original `user` messages, verbatim (a spilled one is read back from its blob).
+  The summary itself arrives as one `user` message:
+  `[kelir compacted the earlier conversation]\n\n<summary>`.
+- **A compaction keeps a tail verbatim** (`compact_keep`, default 4 messages) so
+  the model still sees what it was doing; `fold` cannot cut between an assistant
+  tool call and its result, so the cut moves back to that assistant when a
+  `tool_settled` would otherwise start the tail. A second compaction supersedes
+  the first (its summary and pins are inside the second's range, so they are
+  dropped) and re-pins the human messages it still finds in the log.
+- **The auto trigger never fires before the log's first step**, and only when a
+  plan exists: at the first `before_step` the "conversation" is the task alone,
+  and compacting it would cost a provider call to save nothing.
+- **The summarising request is sealed**: the `compact_prompt` as the system
+  message and one user message (the focus line, then the transcript of the
+  range), built by the same client — so it carries the session id and can hit
+  the parent's cache — with **no tools**. Verbs are not read while it is in
+  flight; a `stop` arriving then is applied at the next boundary, which is the
+  same boundary that would have sent the next step.
+- **`compact` applies at `before_step` only**, from all three triggers: the
+  tool's result says `compaction queued …`, the verb is queued like `model`, and
+  the auto trigger sets the same request. `kelir ctl <id> compact <focus>` now
+  carries the focus (before M3 the CLI dropped the words for this verb).
+- **`KELIR_CRASH_AT=<point>` is a test-only injection.** A scripted test names
+  one of `tool_started` (after the intent is fsync'd, before any process
+  starts), `mid_tool` (150 ms after the calls start, side effects already made),
+  `tool_settled` (after the batch is committed), `mid_stream` (on the first text
+  delta, nothing committed) or `usage` (after the assistant and its usage are
+  committed, before the tool calls). It prints one line to stderr and calls
+  `std::process::abort()`; any other value, and an unset variable, do nothing.
+  The process really dies (SIGABRT on Unix, `0xC0000409` on Windows), which is
+  what lets `tests/e2e_m3.rs` prove a resume does not re-run a command.
+- **fsync is per batch, and a batch is atomic on disk.** `EventLog::sync` (flush
+  + `sync_all`) runs after every batch, after every verb ack and after the
+  `resumed`/unknown block. A reader that never saw the writer's memory sees a
+  whole number of events ending on a newline (`a_batch_is_whole_on_disk…`). What
+  a unit test cannot prove is the fsync itself under a power cut; the crash hook
+  proves the ordering and that committed events survive the process dying. A
+  torn last line is reported on resume as `error {where: "log"}`, and a final
+  line that is a whole event without its newline is kept rather than dropped.
+- **The TUI no longer double-prints tool lines.** The session printed
+  `→ bash … · ok · N B` on stdout while the TUI painted its own line for the
+  same event; that write is now headless-only (`!json && !tui`), so the painter
+  stays the only writer to the terminal.

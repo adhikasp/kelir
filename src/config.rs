@@ -46,6 +46,16 @@ pub struct Config {
     pub cache_ttl: Option<String>,
     pub system_prompt: String,
     pub providers: BTreeMap<String, ProviderConfig>,
+    /// Context window override for every model (`window`), when set.
+    pub window: Option<u64>,
+    /// Per-model window overrides (`[model_windows]`).
+    pub model_windows: BTreeMap<String, u64>,
+    /// Fraction of the window at which compaction triggers automatically.
+    pub auto_compact_at: f64,
+    /// The summary prompt (`compact_prompt`/`compact.md`, else embedded).
+    pub compact_prompt: String,
+    /// Messages kept verbatim after a compaction.
+    pub compact_keep: usize,
 }
 
 #[derive(Debug)]
@@ -70,6 +80,11 @@ struct RawConfig {
     cache_ttl: Option<String>,
     prompt: Option<String>,
     providers: BTreeMap<String, RawProvider>,
+    window: Option<u64>,
+    model_windows: BTreeMap<String, u64>,
+    auto_compact_at: Option<f64>,
+    compact_prompt: Option<String>,
+    compact_keep: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -191,6 +206,13 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     }
 
     let system_prompt = load_prompt(raw.prompt.as_deref())?;
+    let compact_prompt = load_compact_prompt(raw.compact_prompt.as_deref())?;
+    let auto_compact_at = raw.auto_compact_at.unwrap_or(crate::compact::AUTO_FRACTION);
+    if !(0.0..=1.0).contains(&auto_compact_at) || auto_compact_at == 0.0 {
+        return Err(ConfigError(format!(
+            "auto_compact_at must be between 0 and 1 (got {auto_compact_at})"
+        )));
+    }
 
     Ok(Config {
         provider: raw.provider.unwrap_or_else(|| PROVIDER_OPENROUTER.into()),
@@ -203,6 +225,11 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         cache_ttl: raw.cache_ttl,
         system_prompt,
         providers,
+        window: raw.window,
+        model_windows: raw.model_windows,
+        auto_compact_at,
+        compact_prompt,
+        compact_keep: raw.compact_keep.unwrap_or(crate::compact::DEFAULT_KEEP),
     })
 }
 
@@ -221,6 +248,12 @@ impl Config {
             provider.base_url = url;
         }
         Ok(provider)
+    }
+
+    /// The model's context window: `[model_windows]`, then `window`, then the
+    /// built-in per-model table, then 128 000.
+    pub fn window(&self, model: &str) -> u64 {
+        crate::compact::window_for(model, &self.model_windows, self.window)
     }
 }
 
@@ -310,6 +343,26 @@ fn load_prompt(configured: Option<&str>) -> Result<String, ConfigError> {
         }
     }
     Ok(DEFAULT_PROMPT.to_string())
+}
+
+/// The compaction prompt: `compact_prompt` (a path), else `compact.md` in the
+/// config dir, else the embedded default.
+fn load_compact_prompt(configured: Option<&str>) -> Result<String, ConfigError> {
+    if let Some(path) = configured {
+        let path = PathBuf::from(path);
+        return std::fs::read_to_string(&path).map_err(|error| {
+            ConfigError(format!(
+                "cannot read compact_prompt {}: {error}",
+                path.display()
+            ))
+        });
+    }
+    let candidate = paths::config_dir().join("compact.md");
+    if candidate.is_file() {
+        return std::fs::read_to_string(&candidate)
+            .map_err(|error| ConfigError(format!("cannot read {}: {error}", candidate.display())));
+    }
+    Ok(crate::compact::DEFAULT_COMPACT_PROMPT.to_string())
 }
 
 /// The shell used when the config names none.
@@ -446,6 +499,62 @@ extra_headers = { "x-extra" = "yes" }
         assert_eq!(base["a"].as_integer(), Some(2));
         assert_eq!(base["t"]["x"].as_integer(), Some(1));
         assert_eq!(base["t"]["y"].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn compaction_keys_are_read_and_defaulted() {
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.window, None);
+        assert_eq!(cfg.auto_compact_at, 0.8);
+        assert_eq!(cfg.compact_keep, crate::compact::DEFAULT_KEEP);
+        assert!(
+            !cfg.compact_prompt.trim().is_empty(),
+            "a prompt is always resolved"
+        );
+        assert_eq!(cfg.window("deepseek/deepseek-chat"), 128_000);
+
+        let path = temp_config(
+            r#"
+window = 64000
+auto_compact_at = 0.5
+compact_keep = 0
+[model_windows]
+"deepseek/deepseek-chat" = 32000
+"#,
+        );
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.auto_compact_at, 0.5);
+        assert_eq!(cfg.compact_keep, 0);
+        assert_eq!(cfg.window("deepseek/deepseek-chat"), 32_000);
+        assert_eq!(cfg.window("other/model"), 64_000);
+    }
+
+    #[test]
+    fn a_bad_auto_fraction_is_refused() {
+        let path = temp_config("auto_compact_at = 1.5\n");
+        let error = load(Some(&path)).unwrap_err();
+        assert!(error.to_string().contains("auto_compact_at"), "{error}");
+        let path = temp_config("auto_compact_at = 0\n");
+        assert!(load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn a_compact_prompt_file_replaces_the_default() {
+        let dir = std::env::temp_dir().join(format!("kelir-compact-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prompt = dir.join("compact.md");
+        std::fs::write(&prompt, "SUMMARISE HARD").unwrap();
+        let path = temp_config(&format!(
+            "compact_prompt = {:?}\n",
+            prompt.to_string_lossy()
+        ));
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.compact_prompt, "SUMMARISE HARD");
+        // A configured path that does not exist is an error, not a silent
+        // fallback to the default prompt.
+        let path = temp_config("compact_prompt = \"does/not/exist.md\"\n");
+        assert!(load(Some(&path)).is_err());
     }
 
     #[test]

@@ -31,59 +31,121 @@ impl Folded {
 
 pub fn fold(events: &[LogEvent], session_dir: &Path) -> Result<Folded, String> {
     let mut folded = Folded::default();
+    // The system message is frozen in `session_started` and never compacted
+    // away, so it is read before the range logic.
     for event in events {
-        match &event.body {
-            EventBody::SessionStarted { system, .. } => {
-                folded.system = system.text.resolve_text(session_dir)?;
-            }
-            EventBody::User { text, .. } => {
-                folded
-                    .messages
-                    .push(ChatMessage::user(&text.resolve_text(session_dir)?));
-            }
-            EventBody::Source {
-                kind,
-                name,
-                text,
-                path,
-            } => {
-                let body = match text {
-                    Some(text) => text.resolve_text(session_dir)?,
-                    None => path.clone().unwrap_or_default(),
-                };
-                folded.messages.push(ChatMessage::user(&format!(
-                    "[source: {kind} {name}]\n{body}"
-                )));
-            }
-            EventBody::Assistant {
-                text, tool_calls, ..
-            } => {
-                let text = text.resolve_text(session_dir)?;
-                let mut calls = Vec::with_capacity(tool_calls.len());
-                for call in tool_calls {
-                    calls.push(ToolCall {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        args: call.args.resolve(session_dir)?,
-                    });
-                }
-                if text.is_empty() && calls.is_empty() {
-                    continue;
-                }
-                folded.messages.push(ChatMessage::assistant(&text, &calls));
-            }
-            EventBody::ToolSettled {
-                call_id, result, ..
-            } => {
-                folded.messages.push(ChatMessage::tool(
-                    call_id,
-                    &result.resolve_text(session_dir)?,
-                ));
-            }
-            _ => {}
+        if let EventBody::SessionStarted { system, .. } = &event.body {
+            folded.system = system.text.resolve_text(session_dir)?;
+            break;
         }
     }
+
+    // Which seqs a compaction replaced, and which of those compactions a later
+    // one replaced in turn. A compaction renders as "summary + pins" only where
+    // it still stands: a second compaction re-summarises the first one and
+    // re-pins the human messages it kept.
+    let compactions: Vec<u64> = events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::Compacted { through_seq, .. } => Some(*through_seq),
+            _ => None,
+        })
+        .collect();
+    let replaced = |seq: u64| compactions.iter().any(|through| seq <= *through);
+    let by_seq: std::collections::BTreeMap<u64, &LogEvent> =
+        events.iter().map(|event| (event.seq, event)).collect();
+
+    for event in events {
+        // A compaction renders where it was written, unless a later one
+        // re-summarised it; `replaced` is false for its own seq (a compaction
+        // always covers events before itself).
+        if let EventBody::Compacted {
+            summary,
+            pinned_seqs,
+            ..
+        } = &event.body
+        {
+            if !replaced(event.seq) {
+                let text = summary.resolve_text(session_dir)?;
+                folded
+                    .messages
+                    .push(ChatMessage::user(&compaction_message(&text)));
+                // Pins render in log order whatever order the event lists them
+                // in: the conversation stays chronological.
+                let mut pins = pinned_seqs.clone();
+                pins.sort_unstable();
+                for pin in pins {
+                    if let Some(pinned) = by_seq.get(&pin) {
+                        render(&mut folded, pinned, session_dir)?;
+                    }
+                }
+            }
+            continue;
+        }
+        if replaced(event.seq) {
+            continue;
+        }
+        render(&mut folded, event, session_dir)?;
+    }
     Ok(folded)
+}
+
+/// How a compaction's summary reaches the model: one user message at the head
+/// of the retained conversation. The pins follow it, verbatim.
+pub fn compaction_message(summary: &str) -> String {
+    format!("[kelir compacted the earlier conversation]\n\n{summary}")
+}
+
+fn render(folded: &mut Folded, event: &LogEvent, session_dir: &Path) -> Result<(), String> {
+    match &event.body {
+        EventBody::SessionStarted { .. } | EventBody::Compacted { .. } => {}
+        EventBody::User { text, .. } => {
+            folded
+                .messages
+                .push(ChatMessage::user(&text.resolve_text(session_dir)?));
+        }
+        EventBody::Source {
+            kind,
+            name,
+            text,
+            path,
+        } => {
+            let body = match text {
+                Some(text) => text.resolve_text(session_dir)?,
+                None => path.clone().unwrap_or_default(),
+            };
+            folded.messages.push(ChatMessage::user(&format!(
+                "[source: {kind} {name}]\n{body}"
+            )));
+        }
+        EventBody::Assistant {
+            text, tool_calls, ..
+        } => {
+            let text = text.resolve_text(session_dir)?;
+            let mut calls = Vec::with_capacity(tool_calls.len());
+            for call in tool_calls {
+                calls.push(ToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    args: call.args.resolve(session_dir)?,
+                });
+            }
+            if text.is_empty() && calls.is_empty() {
+                return Ok(());
+            }
+            folded.messages.push(ChatMessage::assistant(&text, &calls));
+        }
+        EventBody::ToolSettled {
+            call_id, result, ..
+        } => {
+            folded.messages.push(ChatMessage::tool(
+                call_id,
+                &result.resolve_text(session_dir)?,
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -312,6 +374,156 @@ mod tests {
         let folded = fold(&log, &dir).unwrap();
         assert_eq!(folded.messages[0].content.as_deref(), Some(big.as_str()));
         assert!(serde_json::to_string(&log[1]).unwrap().len() < 2_000);
+    }
+
+    #[test]
+    fn a_compaction_replaces_its_range_and_pins_verbatim_in_order() {
+        fn user_from(seq: u64, text: &str, from: &str) -> LogEvent {
+            LogEvent::new(
+                seq,
+                EventBody::User {
+                    text: text.into(),
+                    from: from.into(),
+                    delivery: "now".into(),
+                    attachments: vec![],
+                },
+            )
+        }
+        fn assistant(seq: u64, text: &str) -> LogEvent {
+            LogEvent::new(
+                seq,
+                EventBody::Assistant {
+                    step: seq as u32,
+                    text: text.into(),
+                    reasoning: None,
+                    tool_calls: vec![],
+                    finish_reason: Some("stop".into()),
+                },
+            )
+        }
+        let events = vec![
+            started(),
+            user_from(2, "the task", "cli"),
+            user_from(3, "a hint from a job", "job"),
+            assistant(4, "step one"),
+            user_from(5, "human steering", "ctl"),
+            assistant(6, "step two"),
+            LogEvent::new(
+                7,
+                EventBody::Compacted {
+                    through_seq: 6,
+                    summary: "SUMMARY".into(),
+                    pinned_seqs: vec![5, 2],
+                    by: "agent".into(),
+                    tokens_before: 900,
+                    tokens_after: 90,
+                    cache_restart: true,
+                },
+            ),
+            user_from(8, "after the compaction", "tui"),
+        ];
+        let folded = fold(&events, Path::new("")).unwrap();
+        assert_eq!(folded.system, "SYS", "the system prefix survives");
+        let contents: Vec<&str> = folded
+            .messages
+            .iter()
+            .map(|message| message.content.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(contents.len(), 4, "{contents:?}");
+        assert!(contents[0].contains("SUMMARY"), "{}", contents[0]);
+        // Pins keep their log order (2 then 5), verbatim.
+        assert_eq!(contents[1], "the task");
+        assert_eq!(contents[2], "human steering");
+        assert_eq!(contents[3], "after the compaction");
+        // Everything in the range that was not pinned is gone.
+        assert!(!contents.iter().any(|text| text.contains("step one")));
+        assert!(!contents.iter().any(|text| text.contains("step two")));
+        assert!(
+            !contents
+                .iter()
+                .any(|text| text.contains("a hint from a job"))
+        );
+    }
+
+    #[test]
+    fn a_second_compaction_supersedes_the_first_and_re_pins() {
+        let events = vec![
+            started(),
+            user("the task"),
+            LogEvent::new(
+                3,
+                EventBody::Assistant {
+                    step: 1,
+                    text: "one".into(),
+                    reasoning: None,
+                    tool_calls: vec![],
+                    finish_reason: Some("stop".into()),
+                },
+            ),
+            LogEvent::new(
+                4,
+                EventBody::Compacted {
+                    through_seq: 3,
+                    summary: "FIRST".into(),
+                    pinned_seqs: vec![2],
+                    by: "auto".into(),
+                    tokens_before: 10,
+                    tokens_after: 5,
+                    cache_restart: true,
+                },
+            ),
+            LogEvent::new(
+                5,
+                EventBody::User {
+                    text: "more".into(),
+                    from: "tui".into(),
+                    delivery: "now".into(),
+                    attachments: vec![],
+                },
+            ),
+            LogEvent::new(
+                6,
+                EventBody::Assistant {
+                    step: 2,
+                    text: "two".into(),
+                    reasoning: None,
+                    tool_calls: vec![],
+                    finish_reason: Some("stop".into()),
+                },
+            ),
+            LogEvent::new(
+                7,
+                EventBody::Compacted {
+                    through_seq: 6,
+                    summary: "SECOND".into(),
+                    pinned_seqs: vec![2, 5],
+                    by: "user".into(),
+                    tokens_before: 20,
+                    tokens_after: 6,
+                    cache_restart: true,
+                },
+            ),
+        ];
+        let folded = fold(&events, Path::new("")).unwrap();
+        let contents: Vec<&str> = folded
+            .messages
+            .iter()
+            .map(|message| message.content.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(contents.len(), 3, "{contents:?}");
+        assert!(contents[0].contains("SECOND"));
+        assert!(!contents[0].contains("FIRST"), "the old summary is gone");
+        assert_eq!(contents[1], "the task");
+        assert_eq!(contents[2], "more");
+        assert_eq!(
+            folded
+                .messages
+                .iter()
+                .filter(|message| message.content.as_deref() == Some("the task"))
+                .count(),
+            1,
+            "a pin is rendered once"
+        );
     }
 
     #[test]
