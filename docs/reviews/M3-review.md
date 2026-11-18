@@ -14,8 +14,8 @@ result, and the task finished with a clean counter. **Compaction is broken in it
 configuration.** Every compaction e2e test sets `compact_keep = 0`, which hides it. With the
 default `compact_keep = 4`, `fold` puts the summary and pins *after* the kept tail (B1), and a
 second compaction close to the first keeps the old summary and re-pins the same messages (B2).
-Live, that made the context grow with each compaction (`tokens_after > tokens_before` 5 times
-of 6) and the auto trigger fire on nearly every turn. `cargo test` is **red on purpose** until
+Live, that made the context grow with each compaction (`tokens_after > tokens_before` in 4 of 5
+compactions) and the auto trigger fire on nearly every turn. `cargo test` is **red on purpose** until
 these are fixed: `tests/review_m3.rs` has 6 failing tests, each proving one finding.
 
 ## Gates (run independently)
@@ -65,7 +65,7 @@ or docs; no new dependencies.
 
 ## Test pyramid
 
-- **Unit (226, +34):** fold with `compacted` (single and superseded), torn line at every byte
+- **Unit (226, +31):** fold with `compacted` (single and superseded), torn line at every byte
   offset, unsettled pairing by occurrence, resume synthesis, 80 % arithmetic, sealed request.
   Good, except that the fold tests only use a compaction whose range ends right before it
   (empty tail), which is why B1/B2 passed.
