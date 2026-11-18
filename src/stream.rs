@@ -7,8 +7,7 @@
 
 use serde_json::Value;
 
-use crate::chat::parse_arguments;
-use crate::event::LoggedToolCall;
+use crate::chat::{ToolCall, parse_arguments};
 use crate::sse::SseEvent;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -135,13 +134,13 @@ impl Assembler {
     }
 
     /// The assembled tool calls, in the order the model emitted them.
-    pub fn tool_calls(&self) -> Vec<LoggedToolCall> {
+    pub fn tool_calls(&self) -> Vec<ToolCall> {
         let mut calls = self.calls.clone();
         calls.sort_by_key(|c| c.index);
         calls
             .into_iter()
             .enumerate()
-            .map(|(position, call)| LoggedToolCall {
+            .map(|(position, call)| ToolCall {
                 id: if call.id.is_empty() {
                     format!("call_{position}")
                 } else {

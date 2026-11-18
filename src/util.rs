@@ -27,6 +27,12 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
     out
 }
 
+/// A path as one string with forward slashes everywhere, so logs, notices and
+/// `sed`/`rg` hints read the same on every platform.
+pub fn path_string(path: &std::path::Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,5 +51,11 @@ mod tests {
         assert_eq!(truncate_chars("abcdef", 3), "abc…");
         // "é" is two bytes: cutting at 1 must not split it.
         assert_eq!(truncate_chars("ééé", 5), "éé…");
+    }
+
+    #[test]
+    fn path_string_uses_forward_slashes() {
+        let path = std::path::Path::new("state").join("sessions").join("ses_1");
+        assert_eq!(path_string(&path), "state/sessions/ses_1");
     }
 }

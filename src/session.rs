@@ -12,9 +12,12 @@ use tokio::io::AsyncReadExt as _;
 use tokio::sync::mpsc;
 
 use crate::VERSION;
+use crate::chat::ToolCall;
 use crate::cli::{AskArgs, CommonArgs, RunArgs};
 use crate::config::{self, Config};
-use crate::event::{EventBody, EventLog, LogEvent, LoggedToolCall, SystemInfo};
+use crate::event::{
+    Blobs, EventBody, EventLog, LogEvent, LoggedToolCall, Payload, SystemInfo, spill_payloads,
+};
 use crate::provider::{self, Client};
 use crate::tools::{self, Ctx, ToolOutcome};
 
@@ -82,6 +85,7 @@ struct Session {
     id: String,
     dir: PathBuf,
     writer: EventLog,
+    blobs: Blobs,
     events: Vec<LogEvent>,
     cfg: Config,
     provider_name: String,
@@ -98,6 +102,17 @@ async fn drive(opts: Options) -> u8 {
         Ok(prepared) => prepared,
         Err(failure) => {
             eprintln!("kelir: {}", failure.message());
+            // A scripted caller reads the result line, even for a usage error.
+            if opts.json {
+                print_result_event(
+                    "error",
+                    failure.code(),
+                    "",
+                    0,
+                    None,
+                    Some(failure.message()),
+                );
+            }
             return failure.code();
         }
     };
@@ -106,6 +121,9 @@ async fn drive(opts: Options) -> u8 {
         Ok(session) => session,
         Err(message) => {
             eprintln!("kelir: {message}");
+            if opts.json {
+                print_result_event("error", 1, "", 0, None, Some(&message));
+            }
             return 1;
         }
     };
@@ -115,7 +133,7 @@ async fn drive(opts: Options) -> u8 {
             let final_text = session.final_text.clone();
             let _ = session.record(EventBody::TurnEnded {
                 outcome: "done".into(),
-                final_text: final_text.clone(),
+                final_text: final_text.clone().into(),
             });
             let _ = session.record(EventBody::SessionEnded {
                 reason: "done".into(),
@@ -130,7 +148,7 @@ async fn drive(opts: Options) -> u8 {
             eprintln!("kelir: {message}");
             let _ = session.record(EventBody::TurnEnded {
                 outcome: "error".into(),
-                final_text: String::new(),
+                final_text: String::new().into(),
             });
             let _ = session.record(EventBody::SessionEnded {
                 reason: "error".into(),
@@ -204,16 +222,17 @@ impl Session {
         let events_path = prepared.dir.join("events.jsonl");
         let writer = EventLog::open(&events_path)
             .map_err(|error| format!("cannot open {}: {error}", events_path.display()))?;
-        let ctx = Ctx {
-            session_dir: prepared.dir.clone(),
-            cwd: prepared.cwd.clone(),
-            shell: prepared.cfg.shell.clone(),
-            spill_limit: prepared.cfg.spill_limit,
-        };
+        let ctx = Ctx::new(
+            prepared.dir.clone(),
+            prepared.cwd.clone(),
+            prepared.cfg.shell.clone(),
+            prepared.cfg.spill_limit,
+        );
         let mut session = Session {
             id: prepared.id.clone(),
             dir: prepared.dir.clone(),
             writer,
+            blobs: Blobs::new(&prepared.dir),
             events: Vec::new(),
             cfg: prepared.cfg.clone(),
             provider_name: prepared.provider_name.clone(),
@@ -229,20 +248,20 @@ impl Session {
             id: prepared.id.clone(),
             parent: None,
             depth: 0,
-            cwd: prepared.cwd.display().to_string(),
+            cwd: crate::util::path_string(&prepared.cwd),
             os: std::env::consts::OS.to_string(),
             kelir_version: VERSION.to_string(),
             provider: prepared.provider_name.clone(),
             model: prepared.model.clone(),
             system: SystemInfo {
-                text: prepared.system_text.clone(),
+                text: prepared.system_text.clone().into(),
                 hash,
             },
             sources: Vec::new(),
             tools: tools::names(),
         })?;
         session.record(EventBody::User {
-            text: prepared.task.clone(),
+            text: prepared.task.clone().into(),
             from: "cli".into(),
             delivery: "now".into(),
             attachments: Vec::new(),
@@ -251,7 +270,11 @@ impl Session {
         Ok(session)
     }
 
+    /// Append one event. Oversized payloads go to `blobs/` first, named by the
+    /// seq the event is about to get.
     fn record(&mut self, body: EventBody) -> Result<LogEvent, String> {
+        let seq = self.writer.next_seq();
+        let body = spill_payloads(body, &self.blobs, seq)?;
         let event = self
             .writer
             .append(body)
@@ -283,21 +306,44 @@ impl Session {
             .iter()
             .filter(|event| matches!(event.body, EventBody::StepStarted { .. }))
             .count();
-        let value = json!({
-            "type": "result",
-            "outcome": if exit_code == 0 { "done" } else { "error" },
-            "exit_code": exit_code,
-            "final_text": self.final_text,
-            "steps": steps,
-            "session": self.id,
-            "session_dir": self.dir.display().to_string(),
-            "kelir_version": VERSION,
-        });
-        let stdout = std::io::stdout();
-        let mut lock = stdout.lock();
-        let _ = writeln!(lock, "{value}");
-        let _ = lock.flush();
+        print_result_event(
+            if exit_code == 0 { "done" } else { "error" },
+            exit_code,
+            &self.final_text,
+            steps,
+            Some((&self.id, &self.dir)),
+            None,
+        );
     }
+}
+
+fn print_result_event(
+    outcome: &str,
+    exit_code: u8,
+    final_text: &str,
+    steps: usize,
+    session: Option<(&str, &Path)>,
+    error: Option<&str>,
+) {
+    let mut value = json!({
+        "type": "result",
+        "outcome": outcome,
+        "exit_code": exit_code,
+        "final_text": final_text,
+        "steps": steps,
+        "kelir_version": VERSION,
+    });
+    if let Some((id, dir)) = session {
+        value["session"] = json!(id);
+        value["session_dir"] = json!(crate::util::path_string(dir));
+    }
+    if let Some(message) = error {
+        value["error"] = json!(message);
+    }
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    let _ = writeln!(lock, "{value}");
+    let _ = lock.flush();
 }
 
 async fn drive_turn(session: &mut Session) -> Result<(), String> {
@@ -315,7 +361,7 @@ async fn drive_turn(session: &mut Session) -> Result<(), String> {
             return Err(format!("step limit {} reached", session.cfg.max_steps));
         }
 
-        let folded = crate::fold::fold(&session.events);
+        let folded = crate::fold::fold(&session.events, &session.dir)?;
         let messages = folded.request_messages();
         let request = session.client.build(&session.model, &messages, &tool_specs);
         let request_text = serde_json::to_string(&request.body).unwrap_or_default();
@@ -332,13 +378,20 @@ async fn drive_turn(session: &mut Session) -> Result<(), String> {
 
         session.record(EventBody::Assistant {
             step,
-            text: text.clone(),
+            text: text.clone().into(),
             reasoning: if assembler.reasoning.is_empty() {
                 None
             } else {
-                Some(assembler.reasoning.clone())
+                Some(assembler.reasoning.clone().into())
             },
-            tool_calls: calls.clone(),
+            tool_calls: calls
+                .iter()
+                .map(|call| LoggedToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    args: Payload::value(call.args.clone()),
+                })
+                .collect(),
             finish_reason: assembler.finish_reason.clone(),
         })?;
         if let Some(usage) = &assembler.usage {
@@ -364,7 +417,7 @@ async fn drive_turn(session: &mut Session) -> Result<(), String> {
             return Ok(());
         }
 
-        run_tools(session, &calls).await?;
+        run_tools(session, step, &calls).await?;
     }
 }
 
@@ -394,42 +447,66 @@ async fn stream_with_retry(
     }
 }
 
-async fn run_tools(session: &mut Session, calls: &[LoggedToolCall]) -> Result<(), String> {
-    for call in calls {
-        session.record(EventBody::ToolStarted {
+async fn run_tools(session: &mut Session, step: u32, calls: &[ToolCall]) -> Result<(), String> {
+    // `tool_started` first (intent, in call order), then the output directory
+    // name derives from that event's seq: monotonic and filesystem-safe. The
+    // provider's call id stays a label in the events.
+    let mut planned: Vec<(ToolCall, String)> = Vec::with_capacity(calls.len());
+    for (index, call) in calls.iter().enumerate() {
+        let started = session.record(EventBody::ToolStarted {
             call_id: call.id.clone(),
             name: call.name.clone(),
-            input: call.args.clone(),
+            input: Payload::value(call.args.clone()),
             pid: None,
         })?;
+        planned.push((
+            call.clone(),
+            format!("{}-{}-{}", started.seq, step, index + 1),
+        ));
     }
     session.sync();
 
     let ctx = session.ctx.clone();
-    let (tx, mut rx) = mpsc::channel::<(usize, (ToolOutcome, Duration))>(calls.len().max(1) * 2);
-    let mut handles = Vec::with_capacity(calls.len());
-    for (index, call) in calls.iter().enumerate() {
+    let (tx, mut rx) = mpsc::channel::<(usize, (ToolOutcome, Duration))>(planned.len().max(1) * 2);
+    let mut handles = Vec::with_capacity(planned.len());
+    for (index, (call, dir)) in planned.iter().enumerate() {
         let ctx = ctx.clone();
         let call = call.clone();
+        let dir = dir.clone();
         let tx = tx.clone();
         handles.push(tokio::spawn(async move {
             let started = Instant::now();
-            let outcome = tools::dispatch(&call.name, &call.args, &ctx, &call.id).await;
+            let outcome = tools::dispatch(&call.name, &call.args, &ctx, &dir).await;
             let _ = tx.send((index, (outcome, started.elapsed()))).await;
         }));
     }
     drop(tx);
 
-    let mut collected = Vec::with_capacity(calls.len());
-    while let Some(item) = rx.recv().await {
-        collected.push(item);
+    let mut slots: Vec<Option<(ToolOutcome, Duration)>> =
+        (0..planned.len()).map(|_| None).collect();
+    while let Some((index, item)) = rx.recv().await {
+        if let Some(slot) = slots.get_mut(index) {
+            *slot = Some(item);
+        }
     }
     for handle in handles {
         let _ = handle.await;
     }
 
-    // Results are committed in call order, never completion order.
-    for (call, (outcome, elapsed)) in calls.iter().zip(order_results(collected)) {
+    // Results are committed in call order, never completion order. A call that
+    // never settled (a panicked or cancelled task) still gets its event, so the
+    // next request is well formed.
+    let settled = settle_in_order(slots, |index| {
+        (
+            ToolOutcome::error(format!(
+                "tool task for call {} did not settle (panicked or cancelled)",
+                index + 1
+            )),
+            Duration::ZERO,
+        )
+    });
+
+    for ((call, _dir), (outcome, elapsed)) in planned.iter().zip(settled) {
         session.record(EventBody::ToolSettled {
             call_id: call.id.clone(),
             outcome: outcome.outcome.clone(),
@@ -438,7 +515,7 @@ async fn run_tools(session: &mut Session, calls: &[LoggedToolCall]) -> Result<()
             lines: outcome.lines,
             out_path: outcome.out_path.clone(),
             spilled: outcome.spilled,
-            result: outcome.result.clone(),
+            result: outcome.result.clone().into(),
         })?;
         if !session.json {
             println!(
@@ -455,11 +532,13 @@ async fn run_tools(session: &mut Session, calls: &[LoggedToolCall]) -> Result<()
     Ok(())
 }
 
-/// Sort finished calls back into call order.
-pub fn order_results<T>(incoming: Vec<(usize, T)>) -> Vec<T> {
-    let mut items = incoming;
-    items.sort_by_key(|(index, _)| *index);
-    items.into_iter().map(|(_, item)| item).collect()
+/// Put finished calls back in call order and give every empty slot an error.
+pub fn settle_in_order<T>(slots: Vec<Option<T>>, make_error: impl Fn(usize) -> T) -> Vec<T> {
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| slot.unwrap_or_else(|| make_error(index)))
+        .collect()
 }
 
 fn compact_input(args: &Value) -> String {
@@ -480,7 +559,7 @@ fn render_system(base: &str, cwd: &Path) -> String {
     format!(
         "{}\n\n# Environment\ncwd: {}\nos: {}\ndate: {}\n",
         base.trim_end(),
-        cwd.display(),
+        crate::util::path_string(cwd),
         std::env::consts::OS,
         today()
     )
@@ -513,17 +592,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn results_are_ordered_by_call_not_completion() {
-        // The second call finished first.
-        let incoming = vec![(2, "third"), (0, "first"), (1, "second")];
-        assert_eq!(order_results(incoming), vec!["first", "second", "third"]);
+    fn settled_results_are_given_in_call_order() {
+        // The second call finished first; the third never settled.
+        let slots = vec![Some("first".to_string()), None, Some("third".to_string())];
+        let settled = settle_in_order(slots, |index| format!("error {index}"));
+        assert_eq!(
+            settled,
+            vec![
+                "first".to_string(),
+                "error 1".to_string(),
+                "third".to_string()
+            ]
+        );
     }
 
     #[test]
-    fn ordering_keeps_type_and_handles_one_call() {
-        let incoming = vec![(0, 42u8)];
-        assert_eq!(order_results(incoming), vec![42u8]);
-        assert_eq!(order_results::<u8>(vec![]), Vec::<u8>::new());
+    fn every_call_settles_even_when_the_batch_is_empty() {
+        let settled: Vec<u8> = settle_in_order(Vec::new(), |_| 0);
+        assert!(settled.is_empty());
     }
 
     #[test]

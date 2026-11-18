@@ -5,8 +5,11 @@ pub mod bash;
 pub mod edit;
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
+
+use crate::proc::ProcessGroup;
 
 #[derive(Debug, Clone)]
 pub struct Ctx {
@@ -14,12 +17,32 @@ pub struct Ctx {
     pub cwd: PathBuf,
     pub shell: Vec<String>,
     pub spill_limit: usize,
+    /// Process groups of every call this session started. Holding them keeps
+    /// the Windows Job Objects open past the call (a leftover background child
+    /// is not killed by returning) and closes them when the session ends.
+    pub groups: Arc<Mutex<Vec<ProcessGroup>>>,
 }
 
 impl Ctx {
-    /// `<session>/commands/<call-id>`.
-    pub fn call_dir(&self, call_id: &str) -> PathBuf {
-        self.session_dir.join("commands").join(call_id)
+    pub fn new(session_dir: PathBuf, cwd: PathBuf, shell: Vec<String>, spill_limit: usize) -> Self {
+        Self {
+            session_dir,
+            cwd,
+            shell,
+            spill_limit,
+            groups: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// `<session>/commands/<dir>`, where `<dir>` is kelir's own
+    /// `<seq>-<step>-<n>` name: monotonic, filesystem-safe, and never derived
+    /// from a provider-supplied id.
+    pub fn call_dir(&self, dir: &str) -> PathBuf {
+        self.session_dir.join("commands").join(dir)
+    }
+
+    pub fn keep_group(&self, group: ProcessGroup) {
+        self.groups.lock().unwrap().push(group);
     }
 }
 
@@ -97,14 +120,14 @@ pub fn names() -> Vec<String> {
 }
 
 /// Run one tool call. Never fails: any problem becomes an `error` outcome the
-/// model can read.
-pub async fn dispatch(name: &str, args: &Value, ctx: &Ctx, call_id: &str) -> ToolOutcome {
+/// model can read. `dir` is kelir's `<seq>-<step>-<n>` output directory name.
+pub async fn dispatch(name: &str, args: &Value, ctx: &Ctx, dir: &str) -> ToolOutcome {
     match name {
         "bash" => match args.get("command").and_then(|v| v.as_str()) {
-            Some(command) if !command.trim().is_empty() => bash::run(command, ctx, call_id).await,
+            Some(command) if !command.trim().is_empty() => bash::run(command, ctx, dir).await,
             _ => ToolOutcome::error("bash: missing non-empty `command`"),
         },
-        "edit" => edit::run(args, ctx, call_id),
+        "edit" => edit::run(args, ctx, dir),
         other => ToolOutcome::error(format!("unknown tool: {other}")),
     }
 }
@@ -112,6 +135,15 @@ pub async fn dispatch(name: &str, args: &Value, ctx: &Ctx, call_id: &str) -> Too
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ctx() -> Ctx {
+        Ctx::new(
+            PathBuf::from("s").join("ses_1"),
+            PathBuf::from("."),
+            vec!["bash".into(), "-c".into()],
+            10_240,
+        )
+    }
 
     #[test]
     fn specs_are_openai_function_tools() {
@@ -132,14 +164,9 @@ mod tests {
     }
 
     #[test]
-    fn call_dir_is_under_commands() {
-        let ctx = Ctx {
-            session_dir: PathBuf::from("s").join("ses_1"),
-            cwd: PathBuf::from("."),
-            shell: vec!["bash".into(), "-c".into()],
-            spill_limit: 10_240,
-        };
-        let dir = ctx.call_dir("call_9");
-        assert!(dir.ends_with(PathBuf::from("commands").join("call_9")));
+    fn call_dir_is_under_commands_without_the_call_id() {
+        let dir = ctx().call_dir("12-3-2");
+        assert!(dir.ends_with(PathBuf::from("commands").join("12-3-2")));
+        assert!(!dir.to_string_lossy().contains("call_"));
     }
 }

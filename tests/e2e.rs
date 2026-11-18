@@ -5,19 +5,8 @@
 
 mod support;
 
-use std::path::Path;
-
 use serde_json::{Value, json};
 use support::*;
-
-fn heads_back_path(value: &Value, tail: &[&str]) -> bool {
-    let path = Path::new(value.as_str().unwrap_or(""));
-    let mut expected = std::path::PathBuf::new();
-    for part in tail {
-        expected.push(part);
-    }
-    path.ends_with(expected)
-}
 
 #[tokio::test]
 async fn plain_answer_streams_events_and_usage() {
@@ -144,11 +133,16 @@ async fn one_bash_call_then_answer() {
     assert_eq!(settled["result"], "kelir-ok\n");
     assert_eq!(settled["spilled"], false);
     assert_eq!(settled["bytes"], 9);
-    assert!(heads_back_path(
-        &settled["out_path"],
-        &["commands", "call_1", "out"]
-    ));
-    assert_eq!(run.command_out("call_1"), "kelir-ok\n");
+
+    // The output dir is kelir's own `<seq>-<step>-<n>`, never the provider id.
+    let out_path = settled["out_path"].as_str().unwrap();
+    let started_seq = started["seq"].as_u64().unwrap();
+    assert!(
+        out_path.contains(&format!("/commands/{started_seq}-1-1/out")),
+        "{out_path}"
+    );
+    assert!(!out_path.contains("call_1"), "{out_path}");
+    assert_eq!(std::fs::read_to_string(out_path).unwrap(), "kelir-ok\n");
 
     assert_eq!(run.events_of("step_started").len(), 2);
     assert_eq!(run.events_of("assistant").len(), 2);
@@ -258,7 +252,7 @@ async fn big_output_spills_to_a_notice() {
         Reply::Sse(sse(&tool_turn(
             "call_big",
             "bash",
-            &json!({"command": "yes x | head -c 20000"}),
+            &json!({"command": "yes x | head -c 12000000"}),
         ))),
         Reply::Sse(sse(&text_turn("ok", 10))),
     ])
@@ -276,18 +270,20 @@ async fn big_output_spills_to_a_notice() {
     let settled = run.one_event("tool_settled");
     assert_eq!(settled["outcome"], "ok");
     assert_eq!(settled["spilled"], true);
-    assert_eq!(settled["bytes"], 20_000);
+    assert_eq!(settled["bytes"], 12_000_000);
 
     let result = settled["result"].as_str().unwrap();
     assert!(result.contains("output spilled"), "{result}");
-    assert!(result.contains("20000 bytes"), "{result}");
+    assert!(result.contains("12000000 bytes"), "{result}");
     assert!(result.contains("first 1024 bytes"), "{result}");
     assert!(result.contains("last 1024 bytes"), "{result}");
-    assert!(result.contains("hint: rg -n"), "{result}");
+    assert!(result.contains("hint: sed -n"), "{result}");
+    assert!(result.contains("rg -n"), "{result}");
     assert!(!result.contains(&"x".repeat(5_000)));
 
-    let out = std::fs::read(run.session_dir.join("commands/call_big/out")).unwrap();
-    assert_eq!(out.len(), 20_000);
+    // Every byte reached the file; the capture kept only a bounded window.
+    let out = std::fs::read(settled["out_path"].as_str().unwrap()).unwrap();
+    assert_eq!(out.len(), 12_000_000);
 }
 
 #[tokio::test]
@@ -422,6 +418,108 @@ async fn go_headers_carry_the_session_id_and_kelir_user_agent() {
     );
     assert!(request.body.get("session_id").is_none());
     assert!(request.body.get("cache_control").is_none());
+}
+
+#[tokio::test]
+async fn a_fifty_kilobyte_edit_argument_is_spilled_but_honoured() {
+    let big = "z".repeat(50_000);
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_big",
+            "edit",
+            &json!({"path": "big.txt", "old": "", "new": big}),
+        ))),
+        Reply::Sse(sse(&text_turn("wrote it", 0))),
+    ])
+    .await;
+    let run = run_task(&mock, &["run", "--json", "write a big file"], &[], None, "").await;
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+
+    // The log holds blob references, not the 50 KB call twice over.
+    let started = run.one_event("tool_started");
+    let input = &started["input"];
+    assert_eq!(input["spilled"], true, "{input}");
+    let blob_path = input["path"].as_str().unwrap();
+    assert!(blob_path.starts_with("blobs/"), "{blob_path}");
+    assert!(blob_path.contains("-input"), "{blob_path}");
+    assert!(input["bytes"].as_u64().unwrap() > 50_000);
+    let blob = std::fs::read_to_string(run.session_dir.join(blob_path)).unwrap();
+    assert!(blob.contains(&"z".repeat(1_000)));
+
+    let assistant = run.events_of("assistant")[0];
+    assert_eq!(assistant["tool_calls"][0]["args"]["spilled"], true);
+    assert!(
+        assistant["tool_calls"][0]["args"]["path"]
+            .as_str()
+            .unwrap()
+            .contains("-tool_calls.0.args")
+    );
+    let log_size = std::fs::metadata(run.session_dir.join("events.jsonl"))
+        .unwrap()
+        .len();
+    assert!(log_size < 40_000, "events.jsonl grew to {log_size} bytes");
+
+    // The edit still ran, and the next request carried the same arguments.
+    let written = std::fs::read_to_string(run.cwd.join("big.txt")).unwrap();
+    assert_eq!(written.len(), 50_000);
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 2);
+    let arguments = requests[1].messages()[2]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .unwrap();
+    let parsed: Value = serde_json::from_str(arguments).unwrap();
+    assert_eq!(parsed["new"].as_str().unwrap().len(), 50_000);
+
+    // The spilled prefix still matches step 1's request byte for byte.
+    let first = requests[0].body["messages"].as_array().unwrap();
+    let second = requests[1].body["messages"].as_array().unwrap();
+    assert_eq!(&second[..first.len()], first.as_slice());
+}
+
+#[tokio::test]
+async fn usage_errors_still_emit_a_result_event_in_json_mode() {
+    let mock = Mock::start(vec![]).await;
+    let run = run_task(&mock, &["run", "--json"], &[], Some(""), "").await;
+    assert_eq!(run.code, 2, "stderr: {}", run.stderr);
+    let lines = run.json_lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let result = run.result();
+    assert_eq!(result["type"], "result");
+    assert_eq!(result["outcome"], "error");
+    assert_eq!(result["exit_code"], 2);
+    assert!(
+        result["error"].as_str().unwrap().contains("no task"),
+        "{result}"
+    );
+    assert_eq!(mock.request_count(), 0);
+}
+
+#[tokio::test]
+async fn a_background_child_survives_the_call() {
+    // F1's other half: returning at shell exit must not kill the `&` child.
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "bg",
+            "bash",
+            &json!({"command": "(sleep 1; printf 'alive\\n' > bg.txt) & printf 'started\\n'"}),
+        ))),
+        Reply::Sse(sse(&tool_turn(
+            "wait",
+            "bash",
+            &json!({"command": "i=0; while [ $i -lt 40 ] && [ ! -f bg.txt ]; do sleep 0.1; i=$((i+1)); done; cat bg.txt"}),
+        ))),
+        Reply::Sse(sse(&text_turn("done", 0))),
+    ])
+    .await;
+    let run = run_task(&mock, &["run", "--json", "background"], &[], None, "").await;
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    let settled = run.events_of("tool_settled");
+    assert_eq!(settled.len(), 2);
+    assert_eq!(settled[0]["result"], "started\n");
+    assert_eq!(
+        settled[1]["result"], "alive\n",
+        "the background child was killed when the first call returned"
+    );
 }
 
 #[tokio::test]

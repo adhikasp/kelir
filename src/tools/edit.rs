@@ -1,7 +1,10 @@
 //! `edit`: exact string replacement in one file.
 //!
-//! `old` must match exactly once unless `replace_all` is set. The file's line
-//! endings are preserved: a CRLF file is matched and rewritten with CRLF.
+//! `old` must match exactly once unless `replace_all` is set. The literal text
+//! is tried first, so a file with mixed line endings is edited exactly as
+//! written. Only when the literal does not match is the pattern retried with
+//! the file's line endings (CRLF or LF); the inserted text then follows the
+//! matched region, and untouched regions keep their own endings.
 //! `old: ""` creates a missing file. The changed line numbers come back so the
 //! model (and a gate) can look at the right place.
 
@@ -12,7 +15,7 @@ use serde_json::Value;
 use crate::spill;
 use crate::tools::{Ctx, ToolOutcome};
 
-pub fn run(args: &Value, ctx: &Ctx, call_id: &str) -> ToolOutcome {
+pub fn run(args: &Value, ctx: &Ctx, dir: &str) -> ToolOutcome {
     let outcome = match edit(args, ctx) {
         Ok(text) => ToolOutcome {
             outcome: "ok".into(),
@@ -25,9 +28,9 @@ pub fn run(args: &Value, ctx: &Ctx, call_id: &str) -> ToolOutcome {
         },
         Err(message) => ToolOutcome::error(message),
     };
-    match persist(&outcome.result, ctx, call_id) {
+    match persist(&outcome.result, ctx, dir) {
         Ok(path) => ToolOutcome {
-            out_path: path.display().to_string(),
+            out_path: crate::util::path_string(&path),
             ..outcome
         },
         Err(message) => ToolOutcome::error(message),
@@ -84,15 +87,7 @@ fn edit(args: &Value, ctx: &Ctx) -> Result<String, String> {
         ));
     }
 
-    // A CRLF file is matched with CRLF: same-looking text works whether the
-    // model wrote \n or \r\n, and the untouched lines keep their endings.
-    let crlf = content.contains("\r\n");
-    let (needle, replacement) = if crlf {
-        (to_crlf(old), to_crlf(new))
-    } else {
-        (old.to_string(), new.to_string())
-    };
-
+    let (needle, replacement) = match_line_endings(&content, old, new);
     let matches = find_matches(&content, &needle);
     if matches.is_empty() {
         return Err(format!("edit: `old` not found in {display}"));
@@ -131,8 +126,31 @@ fn edit(args: &Value, ctx: &Ctx) -> Result<String, String> {
     ))
 }
 
-fn persist(text: &str, ctx: &Ctx, call_id: &str) -> Result<PathBuf, String> {
-    let dir = ctx.call_dir(call_id);
+/// The pattern to use: the literal text if it occurs, else the same text with
+/// the file's line endings. The replacement only gets converted when the
+/// fallback was needed, so an inserted region follows the region it replaces
+/// and nothing else is rewritten.
+fn match_line_endings(content: &str, old: &str, new: &str) -> (String, String) {
+    if !find_matches(content, old).is_empty() {
+        return (old.to_string(), new.to_string());
+    }
+    if content.contains("\r\n") {
+        let candidate = to_crlf(old);
+        if !find_matches(content, &candidate).is_empty() {
+            return (candidate, to_crlf(new));
+        }
+    }
+    if old.contains("\r\n") {
+        let candidate = old.replace("\r\n", "\n");
+        if !find_matches(content, &candidate).is_empty() {
+            return (candidate, new.replace("\r\n", "\n"));
+        }
+    }
+    (old.to_string(), new.to_string())
+}
+
+fn persist(text: &str, ctx: &Ctx, dir: &str) -> Result<PathBuf, String> {
+    let dir = ctx.call_dir(dir);
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("edit: cannot create {}: {error}", dir.display()))?;
     let path = dir.join("out");
@@ -204,12 +222,12 @@ mod tests {
         let session = dir.path().join("state").join("ses_test");
         std::fs::create_dir_all(&session).unwrap();
         Fixture {
-            ctx: Ctx {
-                session_dir: session,
-                cwd: dir.path().to_path_buf(),
-                shell: vec!["bash".into(), "-c".into()],
-                spill_limit: 10_240,
-            },
+            ctx: Ctx::new(
+                session,
+                dir.path().to_path_buf(),
+                vec!["bash".into(), "-c".into()],
+                10_240,
+            ),
             _dir: dir,
         }
     }
@@ -222,7 +240,7 @@ mod tests {
     fn replaces_one_occurrence_and_reports_the_line() {
         let f = fixture();
         std::fs::write(f.ctx.cwd.join("a.txt"), "one\ntwo\nthree\n").unwrap();
-        let outcome = run(&edit_args("a.txt", "two", "TWO"), &f.ctx, "call_1");
+        let outcome = run(&edit_args("a.txt", "two", "TWO"), &f.ctx, "9-1-1");
         assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
         assert_eq!(
             std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
@@ -230,7 +248,9 @@ mod tests {
         );
         assert!(outcome.result.contains("line 2"), "{}", outcome.result);
         assert!(
-            outcome.out_path.ends_with("call_1/out") || outcome.out_path.ends_with("call_1\\out")
+            outcome.out_path.ends_with("9-1-1/out"),
+            "{}",
+            outcome.out_path
         );
         assert!(std::path::Path::new(&outcome.out_path).exists());
     }
@@ -290,6 +310,50 @@ mod tests {
         let outcome = run(&edit_args("win.txt", "b\nc", "b\nC"), &f.ctx, "c");
         assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
         assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nb\r\nC\r\n");
+    }
+
+    #[test]
+    fn mixed_endings_match_the_literal_text() {
+        let f = fixture();
+        let path = f.ctx.cwd.join("mixed.txt");
+        std::fs::write(&path, b"a\r\nb\nc\n").unwrap();
+        let outcome = run(&edit_args("mixed.txt", "b\nc", "B\nC"), &f.ctx, "c");
+        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
+        // Literal match: the LF region stays LF, the CRLF line is untouched.
+        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nB\nC\n");
+    }
+
+    #[test]
+    fn mixed_endings_fall_back_only_where_needed() {
+        let f = fixture();
+        let path = f.ctx.cwd.join("mixed.txt");
+        std::fs::write(&path, b"a\r\nb\nc\n").unwrap();
+        // "a\nb" does not occur literally (a is CRLF); the CRLF retry finds it
+        // and inserts CRLF, leaving the LF lines alone.
+        let outcome = run(&edit_args("mixed.txt", "a\nb", "A\nB"), &f.ctx, "c");
+        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
+        assert_eq!(std::fs::read(&path).unwrap(), b"A\r\nB\nc\n");
+    }
+
+    #[test]
+    fn crlf_old_in_an_lf_file_falls_back() {
+        let f = fixture();
+        let path = f.ctx.cwd.join("unix.txt");
+        std::fs::write(&path, b"a\nb\nc\n").unwrap();
+        let outcome = run(&edit_args("unix.txt", "b\r\nc", "B\r\nC"), &f.ctx, "c");
+        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
+        assert_eq!(std::fs::read(&path).unwrap(), b"a\nB\nC\n");
+    }
+
+    #[test]
+    fn a_literal_match_inserts_the_text_verbatim() {
+        let f = fixture();
+        let path = f.ctx.cwd.join("mixed.txt");
+        std::fs::write(&path, b"x\r\ny\n").unwrap();
+        let outcome = run(&edit_args("mixed.txt", "x", "1\n2"), &f.ctx, "c");
+        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
+        // "x" matched literally inside the CRLF region: inserted text is verbatim.
+        assert_eq!(std::fs::read(&path).unwrap(), b"1\n2\r\ny\n");
     }
 
     #[test]

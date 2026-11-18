@@ -243,8 +243,8 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::ToolCall;
     use crate::config::ProviderKind;
-    use crate::event::LoggedToolCall;
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -400,7 +400,7 @@ mod tests {
         let step_one = build_request(&openrouter(), "s", "m", &messages, &tools, None);
         let first_prefix = step_one.body["messages"].as_array().unwrap().clone();
 
-        let call = LoggedToolCall {
+        let call = ToolCall {
             id: "call_1".into(),
             name: "bash".into(),
             args: json!({"command": "ls"}),

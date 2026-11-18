@@ -6,7 +6,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::event::LoggedToolCall;
+/// A tool call with its arguments resolved (never spilled): what the loop
+/// executes and what the request carries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub args: Value,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiFunction {
@@ -54,7 +61,7 @@ impl ChatMessage {
 
     /// An assistant turn. A turn that only calls tools has `content: null`,
     /// which OpenAI-compatible APIs accept and expect.
-    pub fn assistant(text: &str, calls: &[LoggedToolCall]) -> Self {
+    pub fn assistant(text: &str, calls: &[ToolCall]) -> Self {
         let content = if text.is_empty() && !calls.is_empty() {
             None
         } else {
@@ -83,8 +90,8 @@ impl ChatMessage {
     }
 }
 
-impl From<&LoggedToolCall> for ApiToolCall {
-    fn from(call: &LoggedToolCall) -> Self {
+impl From<&ToolCall> for ApiToolCall {
+    fn from(call: &ToolCall) -> Self {
         ApiToolCall {
             id: call.id.clone(),
             kind: "function".into(),
@@ -119,8 +126,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn call(id: &str, args: Value) -> LoggedToolCall {
-        LoggedToolCall {
+    fn call(id: &str, args: Value) -> ToolCall {
+        ToolCall {
             id: id.into(),
             name: "bash".into(),
             args,
