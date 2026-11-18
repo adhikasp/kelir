@@ -440,13 +440,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_round_trip_carries_the_request_to_the_session() {
-        let dir = temp_dir("round-trip");
         let id = "ses_ipc_test";
+        // Shaped like a real session dir, so the address carries the id.
+        let dir = temp_dir("round-trip").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
         let response = round_trip(&dir, id).await;
         assert!(response.ok);
         assert_eq!(response.seq, Some(3));
         assert!(value(&dir, id).contains(id));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
     /// The regression behind the first Linux round: `connect` used to unlink
