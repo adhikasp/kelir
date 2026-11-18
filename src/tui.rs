@@ -262,6 +262,22 @@ pub fn tail_of(bytes: &[u8], max: usize) -> String {
     }
 }
 
+/// Read only the end of a call's output file: a 200 MB log costs one `seek`
+/// and `max` bytes, not a 200 MB allocation.
+pub fn read_tail(path: &std::path::Path, max: usize) -> std::io::Result<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    // One byte more than asked: `tail_of` then knows the window started
+    // mid-file and drops the partial first line.
+    let window = max as u64 + 1;
+    let start = len.saturating_sub(window);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity((len - start) as usize);
+    file.read_to_end(&mut bytes)?;
+    Ok(tail_of(&bytes, max))
+}
+
 // --------------------------------------------------------------------- app
 
 pub struct App {
@@ -515,8 +531,8 @@ impl App {
             return;
         }
         let text = match &self.last_out {
-            Some(path) => match std::fs::read(path) {
-                Ok(bytes) => tail_of(&bytes, TAIL_BYTES),
+            Some(path) => match read_tail(std::path::Path::new(path), TAIL_BYTES) {
+                Ok(text) => text,
                 Err(error) => format!("cannot read {path}: {error}"),
             },
             None => "no tool output yet".to_string(),
@@ -1020,6 +1036,26 @@ mod tests {
         assert_eq!(tail_of(bytes, 10), "three\n");
         // Not a boundary in sight: the whole (short) tail is shown.
         assert_eq!(tail_of(b"0123456789abcdef", 8), "89abcdef");
+    }
+
+    #[test]
+    fn reading_a_tail_seeks_instead_of_reading_the_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out");
+        let mut text = String::new();
+        for index in 0..10_000 {
+            text.push_str(&format!("line {index}\n"));
+        }
+        std::fs::write(&path, &text).unwrap();
+        let tail = read_tail(&path, 100).unwrap();
+        assert!(tail.len() <= 100, "{}", tail.len());
+        assert!(tail.ends_with("line 9999\n"), "{tail:?}");
+        assert!(!tail.contains("line 0\n"), "{tail:?}");
+        // A short file is read whole, and a missing one is an error.
+        let short = dir.path().join("short");
+        std::fs::write(&short, "a\nb\n").unwrap();
+        assert_eq!(read_tail(&short, 100).unwrap(), "a\nb\n");
+        assert!(read_tail(&dir.path().join("missing"), 100).is_err());
     }
 
     #[test]
