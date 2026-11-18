@@ -554,27 +554,28 @@ async fn r12_a_graceful_exit_leaves_a_promoted_job_running() {
     let settled = live.wait_for("tool_settled").await;
     assert_eq!(settled["outcome"], "promoted", "{settled}");
     live.wait_for("turn_ended").await;
-    let jobfile = live.cwd.join("job.txt");
+    let out_path = settled["out_path"].as_str().unwrap_or("").to_string();
+    let id = Path::new(&out_path)
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap();
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(live.session_dir.join("bg").join(format!("{id}.status"))).unwrap(),
+    )
+    .unwrap();
+    let pid = status["pid"].as_u64().expect("job pid") as u32;
+    let shim = status["shim"].as_u64().expect("shim pid") as u32;
     let (code, stderr) = live.end().await;
     assert_eq!(code, 0, "{stderr}");
-    let before = bytes_len(&jobfile);
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let after = bytes_len(&jobfile);
-    // Cancel it so the test does not leave a process grinding.
-    let id = {
-        let out_path = settled["out_path"].as_str().unwrap_or("").to_string();
-        Path::new(&out_path)
-            .parent()
-            .and_then(|dir| dir.file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
+    let (command_alive, shim_alive) = (pid_alive(pid), pid_alive(shim));
+    force_kill(pid);
+    force_kill(shim);
     assert!(
-        after > before,
-        "the promoted job stopped when the session exited gracefully ({before} -> {after})"
+        command_alive && shim_alive,
+        "the promoted job stopped when the session exited gracefully (command {command_alive}, shim {shim_alive})"
     );
-    // (cleanup is by the job finishing: 100 x 0.2 s)
-    let _ = id;
 }
 
 /// R13 (F6): a batch of two parallel calls where the first is promoted and its
