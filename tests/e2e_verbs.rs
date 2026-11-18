@@ -890,3 +890,35 @@ async fn wait_for_output(session: &LiveSession, needle: &str) -> String {
         commands.display()
     );
 }
+
+/// A `stop` that arrives while the session is idle has nothing to stop: it is
+/// dropped, the answer says `dropped` rather than `now`, and it must not stop
+/// the next turn (M2 review N1).
+#[tokio::test]
+async fn a_stop_in_idle_is_answered_as_dropped() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&text_turn("first", 0))),
+        Reply::Sse(sse(&text_turn("second", 0))),
+    ])
+    .await;
+    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+    session.wait_for("turn_ended").await;
+
+    let answer = session.ctl(&["stop"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let response = answer.response();
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(response["applies"], "dropped", "{response}");
+    let verb = of_type(&session.log(), "verb")[0].clone();
+    assert_eq!(verb["name"], "stop");
+    assert_eq!(verb["boundary"], "dropped", "{verb}");
+
+    // The dropped stop did not arm anything: the next message runs a turn.
+    let answer = session.ctl(&["say", "keep going"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let ended = session.wait_for("turn_ended").await;
+    assert_eq!(ended["outcome"], "done");
+    assert_eq!(mock.request_count(), 2);
+
+    session.end().await;
+}

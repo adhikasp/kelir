@@ -12,7 +12,10 @@ use clap::{Args, Parser, Subcommand};
     disable_help_subcommand = true
 )]
 pub struct Cli {
-    /// No subcommand is the interactive session (`kelir tui`).
+    /// Flags for the default session (`kelir --model x`): no subcommand is the
+    /// interactive session (`kelir tui`).
+    #[command(flatten)]
+    pub tui: TuiArgs,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -43,15 +46,15 @@ pub struct CommonArgs {
     /// Config file to use instead of the machine/project search.
     #[arg(long)]
     pub config: Option<PathBuf>,
-    /// The task. Read from stdin when omitted.
-    #[arg(value_name = "TASK")]
-    pub task: Vec<String>,
 }
 
 #[derive(Debug, Args, Clone)]
 pub struct RunArgs {
     #[command(flatten)]
     pub common: CommonArgs,
+    /// The task. Read from stdin when omitted.
+    #[arg(value_name = "TASK")]
+    pub task: Vec<String>,
     /// Stream the event log as NDJSON on stdout.
     #[arg(long)]
     pub json: bool,
@@ -64,6 +67,9 @@ pub struct RunArgs {
 pub struct AskArgs {
     #[command(flatten)]
     pub common: CommonArgs,
+    /// The question. Read from stdin when omitted.
+    #[arg(value_name = "QUESTION")]
+    pub question: Vec<String>,
 }
 
 /// `kelir` with no subcommand, or `kelir tui`.
@@ -74,6 +80,22 @@ pub struct TuiArgs {
     /// Continue a session from its log (arrives with M3).
     #[arg(long, value_name = "ID")]
     pub resume: Option<String>,
+}
+
+impl TuiArgs {
+    /// Flags given before the subcommand (`kelir --model x tui`) fill in what
+    /// the subcommand did not set, so both spellings mean the same session.
+    pub fn with_fallback(self, outer: Self) -> Self {
+        Self {
+            common: CommonArgs {
+                model: self.common.model.or(outer.common.model),
+                provider: self.common.provider.or(outer.common.provider),
+                cwd: self.common.cwd.or(outer.common.cwd),
+                config: self.common.config.or(outer.common.config),
+            },
+            resume: self.resume.or(outer.resume),
+        }
+    }
 }
 
 #[derive(Debug, Args, Clone)]
@@ -117,7 +139,7 @@ mod tests {
                 assert!(args.json);
                 assert!(!args.keep);
                 assert_eq!(args.common.model.as_deref(), Some("m"));
-                assert_eq!(args.common.task, vec!["say hi".to_string()]);
+                assert_eq!(args.task, vec!["say hi".to_string()]);
             }
             _ => panic!("expected run"),
         }
@@ -136,7 +158,7 @@ mod tests {
     fn task_words_are_joined_later() {
         let cli = Cli::parse_from(["kelir", "run", "fix", "the", "bug"]);
         match cli.command {
-            Some(Command::Run(args)) => assert_eq!(args.common.task.len(), 3),
+            Some(Command::Run(args)) => assert_eq!(args.task.len(), 3),
             _ => panic!("expected run"),
         }
     }
@@ -182,5 +204,40 @@ mod tests {
     #[test]
     fn an_unknown_subcommand_is_a_usage_error() {
         assert!(Cli::try_parse_from(["kelir", "frobnicate"]).is_err());
+    }
+
+    #[test]
+    fn bare_kelir_takes_the_tui_flags() {
+        // `kelir --model x` is the default session with a model, not a usage
+        // error (M2 review N2).
+        let cli = Cli::parse_from(["kelir", "--model", "m", "--provider", "p"]);
+        assert!(cli.command.is_none(), "no subcommand is the TUI");
+        assert_eq!(cli.tui.common.model.as_deref(), Some("m"));
+        assert_eq!(cli.tui.common.provider.as_deref(), Some("p"));
+        let cli = Cli::parse_from(["kelir", "--resume", "ses_01"]);
+        assert_eq!(cli.tui.resume.as_deref(), Some("ses_01"));
+    }
+
+    #[test]
+    fn the_tui_subcommand_and_the_flags_before_it_are_the_same_session() {
+        let cli = Cli::parse_from(["kelir", "--model", "a", "tui", "--provider", "b"]);
+        let outer = cli.tui;
+        match cli.command {
+            Some(Command::Tui(args)) => {
+                let args = args.with_fallback(outer);
+                assert_eq!(args.common.model.as_deref(), Some("a"));
+                assert_eq!(args.common.provider.as_deref(), Some("b"));
+            }
+            _ => panic!("expected tui"),
+        }
+        // The subcommand's own flag wins over the same flag before it.
+        let cli = Cli::parse_from(["kelir", "--model", "a", "tui", "--model", "b"]);
+        let outer = cli.tui;
+        match cli.command {
+            Some(Command::Tui(args)) => {
+                assert_eq!(args.with_fallback(outer).common.model.as_deref(), Some("b"));
+            }
+            _ => panic!("expected tui"),
+        }
     }
 }

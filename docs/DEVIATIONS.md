@@ -116,24 +116,42 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
 
 ## M2
 
-- **The OSC 7501 record format, as written.** `ESC ] 7501 ;` then `;`-separated
-  `key=value` pairs, terminated by ST (`ESC \`, safer than BEL inside a TUI):
-  `state=<idle|working|done|error>;app=kelir[;id=<session id>][;msg=<base64>]`.
-  This is what `claude-code` emits (its writer was read out of the binary:
-  `state` first, then `app`, then `id`/`kind`/`progress`/`title`/`msg`, with
-  `msg` and `title` base64 because the payload may not contain a space or a
-  `;`), and it is what the Herdr core on this machine parses (`crates/herdr-core/
-  src/status.rs`: `state`, `msg`, `progress`, the words `idle, working, done,
-  blocked, error`, both terminators). `hc get <terminal>` decodes `msg`, so the
-  encoding is observable rather than assumed. Every change writes **two**
-  records: one with no `id` (Herdr's *root* record — the pane's `status`, which
-  is what the app draws) and one with `id=<session id>` (an entry in `records`,
-  which is the "resume label" Herdr's resume mods read). kelir never sends
-  `blocked`.
+- **The OSC 7501 record is exactly `ESC ] 7501 ; state=<word> ESC \` — nothing
+  else.** Herdr `0.1.21` accepts only that shape. M2's first writer carried
+  `app=kelir[;id=<session>][;msg=<base64>]` (what `claude-code` emits and what
+  the spec's "Herdr status" paragraph describes); on this Herdr every record
+  with an extra key, a trailing `;` or another separator is dropped whole and
+  the pane's `status` stays `null`, so the milestone's acceptance — a kelir pane
+  shows working / done — did not hold (M2 review B1). Measured, not assumed:
+  `scripts/live/m2_osc_probe.py` in plain panes sent each variant and `hc get`
+  showed `{'state': 'working'}` only for the bare form (also on a Linux core);
+  `scripts/live/m2_status_check.sh` then drove the real TUI in a pane and
+  `hc get` flipped `working` → `done`. Consequences, recorded because they
+  differ from the spec: no `app=kelir` identity, no `id=<session>` resume
+  label, no `msg` on `error` (the reason is in the log and on the pane's own
+  screen). A second, labelled record is ignored by 0.1.21 but does not clear
+  the status either; it is not sent until a Herdr version accepts it, since
+  nothing reads it today.
+- **`kelir --model x` is `kelir tui --model x`.** The TUI's flags (model,
+  provider, cwd, config, resume) are flattened onto `kelir` itself, so the
+  default surface takes them; flags given before the subcommand fill in what
+  `tui` did not set (`kelir --model a tui --provider b`). `tui` has no task
+  positional: the first message is typed in the editor, and a word after `tui`
+  is a usage error from the parser (M2 review N2).
+- **`KELIR_TEST_PANIC=1` is a test-only injection.** When set, the TUI panics
+  right after its first paint (raw mode on, bracketed paste on, a painted
+  viewport), which is the path a real crash takes. `tests/e2e_tui.rs` uses it
+  to assert the restore, and `scripts/live/m2_status_check.sh` with
+  `M2_CHECK_INPUT=1` checks in a Herdr pane that the shell still echoes a typed
+  line afterwards. Nothing else reads the variable; a normal run never panics
+  on purpose.
 - **The status writer is on for `kelir run` too**, not only the TUI: whenever
   stdout is a TTY (or `KELIR_HERDR=1`) and `--json` is off. A headless agent in
   a Herdr pane is still an agent. `--json` is always excluded, because NDJSON on
-  stdout must stay parseable; `KELIR_HERDR=0` turns it off.
+  stdout must stay parseable; `KELIR_HERDR=0` turns it off. While the TUI runs,
+  only the TUI task writes to stdout — the session hands it the record as a
+  `UiEvent` and it is written between two paints — so an OSC can never land
+  inside a crossterm CSI sequence (M2 review F2).
 - **`compact` is a parsed verb from M2, with the compactor in M3.** The TUI's
   `/compact` must be a verb like every other action, so `verbs::parse` accepts
   `compact [focus]`; applying it records an `error` event (`compact is not
@@ -156,15 +174,24 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   newlines) instead of a burst whose first newline would submit it.
 - **`stop` with nothing running is dropped in idle, not queued.** A queued stop
   would apply at the next turn's first boundary and kill it, so Ctrl-C in an
-  idle TUI would eat the next message. It is still logged as a `verb`; the UI is
-  told "nothing is running".
+  idle TUI would eat the next message. It is still logged as a `verb`
+  (`boundary: "dropped"`), the verb's answer says `applies: "dropped"` rather
+  than `now` — for `ctl` clients and the TUI alike — and the UI is told
+  "nothing is running" (M2 review N1).
 - **The inline viewport is a fixed 8 rows** (four live rows, a three-row editor,
   the status line), and a terminal shorter than that gets fewer. Streaming text
   that no longer fits is written into the scrollback as it arrives, so a long
   answer scrolls like normal terminal output instead of growing the repaint area.
-- **The TUI ends the session if it dies.** A panic or a terminal error in the
-  UI task sends the `end` verb, so a broken UI cannot leave a pane hanging with
-  no way in; the terminal itself is restored by ratatui's panic hook.
+- **The TUI ends the session if it dies, and leaves the shell a clean
+  terminal.** A panic or a terminal error in the UI task sends the `end` verb,
+  so a broken UI cannot leave a pane hanging with no way in. On both paths —
+  `/quit`, a double Ctrl-C, and a panic — the viewport rows are erased (never
+  the scrollback above them), the cursor is shown and put on the first free row
+  below, bracketed paste is turned off and raw mode is dropped, so the shell's
+  next output starts on a new line instead of overwriting the banner (M2 review
+  F3, N5). The panic hook does this itself and then ratatui's hook; the normal
+  exit does not call `try_restore`, which would emit `LeaveAlternateScreen` for
+  a screen the inline viewport never entered.
 - **A TUI session starts with no task and no `user` event.** `session_started`
   is written first; the first turn begins when the first `say` arrives, so the
   log and the request sequence are the same as any other session's.

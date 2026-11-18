@@ -11,10 +11,13 @@
 
 use std::collections::VecDeque;
 use std::io::Write as _;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
+use ratatui::crossterm::cursor::{MoveTo, Show};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::terminal::{Clear, ClearType};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
@@ -24,6 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::commands::{self, Action, Parsed};
 use crate::editor::{Editor, Key, Outcome};
+use crate::herdr::{self, State as HerdrState};
 use crate::ipc::{Incoming, Request, Response};
 use crate::scrollback::{self, Live};
 
@@ -82,6 +86,11 @@ pub enum UiEvent {
     Error(String),
     /// The answer to a verb the TUI sent.
     Reply(Response),
+    /// Herdr's pane status. The session sends it here instead of writing it to
+    /// stdout, so the TUI task is the only writer while the viewport is up.
+    Herdr {
+        state: HerdrState,
+    },
     TurnEnded {
         outcome: String,
         final_text: String,
@@ -295,6 +304,8 @@ pub struct App {
     note: String,
     last_out: Option<String>,
     last_ctrl_c: Option<Instant>,
+    /// OSC 7501 records waiting to be written between two paints.
+    status_records: Vec<String>,
     pub quit: bool,
     to_tui: mpsc::UnboundedSender<UiEvent>,
     verbs: mpsc::UnboundedSender<Incoming>,
@@ -320,6 +331,7 @@ impl App {
             note: String::new(),
             last_out: None,
             last_ctrl_c: None,
+            status_records: Vec::new(),
             quit: false,
             to_tui,
             verbs,
@@ -344,6 +356,11 @@ impl App {
             rows.append(&mut self.scroll);
         }
         rows
+    }
+
+    /// Herdr records queued for the next write between two paints.
+    pub fn take_status_records(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.status_records)
     }
 
     /// Wrap `text` and queue it for the scrollback.
@@ -432,8 +449,12 @@ impl App {
             }
             UiEvent::Reply(response) => {
                 if response.ok {
-                    // A `say`/`later` was already echoed as the user's line.
-                    let quiet = matches!(response.verb.as_deref(), Some("say") | Some("later"));
+                    // A `say`/`later` was already echoed as the user's line,
+                    // and an idle `stop` was already answered on screen as
+                    // dropped; neither needs a second line.
+                    let quiet = matches!(response.verb.as_deref(), Some("say") | Some("later"))
+                        || (response.verb.as_deref() == Some("stop")
+                            && response.applies.as_deref() == Some("dropped"));
                     if !quiet {
                         let verb = response.verb.unwrap_or_else(|| "verb".into());
                         let applies = response.applies.unwrap_or_else(|| "queued".into());
@@ -456,6 +477,7 @@ impl App {
                 self.status.running = 0;
                 self.note.clear();
             }
+            UiEvent::Herdr { state } => self.status_records.push(herdr::record(state)),
             UiEvent::Quit => self.quit = true,
         }
     }
@@ -642,10 +664,16 @@ fn live_rows(width: usize, height: usize) -> usize {
 
 // -------------------------------------------------------------------- draw
 
+/// The top row of the last painted inline viewport, for the panic hook: a
+/// panic erases the same rows a clean exit does. `u16::MAX` means "never
+/// painted".
+static VIEWPORT_Y: AtomicU16 = AtomicU16::new(u16::MAX);
+
 /// Paint the viewport. Everything else goes through `insert_before`.
 pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     app.set_size(area.width as usize, area.height as usize);
+    VIEWPORT_Y.store(area.y, Ordering::Relaxed);
     let areas = layout(area);
     if app.show_tail {
         render_tail(app, frame, area, areas.status);
@@ -776,6 +804,7 @@ pub fn start(
     let terminal = ratatui::try_init_with_options(ratatui::TerminalOptions {
         viewport: ratatui::Viewport::Inline(VIEWPORT_HEIGHT.min(height)),
     })?;
+    install_panic_hook();
     // Bracketed paste, so a pasted block of text arrives as one `Paste` event
     // (with its newlines) instead of a burst of keystrokes whose Enter would
     // submit it.
@@ -822,13 +851,48 @@ pub fn start(
     })
 }
 
+/// On a panic, do what [`Tui::finish`] does with the last painted viewport
+/// (erase it, put the cursor on the next line, show it, turn paste and raw mode
+/// off) before ratatui's hook and the original hook print the message.
+/// `KELIR_TEST_PANIC` exercises this path in `tests/e2e_tui.rs`.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let mut stdout = std::io::stdout();
+        let top = VIEWPORT_Y.load(Ordering::Relaxed);
+        if top != u16::MAX {
+            let _ = ratatui::crossterm::execute!(
+                stdout,
+                MoveTo(0, top),
+                Clear(ClearType::FromCursorDown)
+            );
+        }
+        let _ = ratatui::crossterm::execute!(
+            stdout,
+            ratatui::crossterm::event::DisableBracketedPaste,
+            Show,
+            ratatui::crossterm::style::Print("\r\n")
+        );
+        let _ = stdout.flush();
+        let _ = ratatui::crossterm::terminal::disable_raw_mode();
+        previous(info);
+    }));
+}
+
 impl Tui {
     /// Draw, then wait for the next key or session event. Returns when the
     /// session says goodbye.
     pub async fn run(mut self) -> std::io::Result<()> {
         loop {
+            self.flush_status()?;
             self.flush_scroll()?;
             self.draw()?;
+            // A documented, test-only panic with the terminal fully owned (raw
+            // mode on, bracketed paste on, a painted viewport): it exercises
+            // the restore path a real crash takes (`tests/e2e_tui.rs`).
+            if std::env::var_os("KELIR_TEST_PANIC").is_some() {
+                panic!("KELIR_TEST_PANIC: injected panic to prove the terminal is restored");
+            }
             if self.app.quit {
                 break;
             }
@@ -894,21 +958,53 @@ impl Tui {
         })
     }
 
+    /// Write Herdr's status records between two complete frames, from the task
+    /// that paints. Nothing else writes to stdout while the viewport is up, so
+    /// an OSC can never land inside one of crossterm's CSI sequences (M2
+    /// review F2).
+    fn flush_status(&mut self) -> std::io::Result<()> {
+        let records = self.app.take_status_records();
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut stdout = std::io::stdout();
+        for record in records {
+            stdout.write_all(record.as_bytes())?;
+        }
+        stdout.flush()
+    }
+
     fn draw(&mut self) -> std::io::Result<()> {
         let app = &mut self.app;
         self.terminal.draw(|frame| render(app, frame))?;
         Ok(())
     }
 
-    /// Leave the terminal usable: raw mode off, bracketed paste off, and the
-    /// shell's prompt on a fresh line below where the viewport was.
+    /// Leave the terminal usable: raw mode off, bracketed paste off, the
+    /// viewport erased, and the cursor on the first free row below it so the
+    /// shell's prompt cannot overwrite a committed line (M2 review F3).
     fn finish(&mut self) {
         let mut stdout = std::io::stdout();
         let _ =
             ratatui::crossterm::execute!(stdout, ratatui::crossterm::event::DisableBracketedPaste);
-        let _ = ratatui::try_restore();
-        let _ = stdout.write_all(b"\r\n");
+        // Erase the inline area only: everything above it is the turn history
+        // (the banner included) and stays.
+        let top = VIEWPORT_Y.load(Ordering::Relaxed);
+        if top != u16::MAX {
+            let _ = ratatui::crossterm::execute!(
+                stdout,
+                MoveTo(0, top),
+                Clear(ClearType::FromCursorDown)
+            );
+        }
+        // The cursor is at the (now blank) viewport's first row; one newline
+        // puts the shell prompt below it. When the viewport reached the bottom
+        // row, that newline scrolls the screen once, which is exactly the free
+        // line the prompt needs.
+        let _ =
+            ratatui::crossterm::execute!(stdout, Show, ratatui::crossterm::style::Print("\r\n"));
         let _ = stdout.flush();
+        let _ = ratatui::crossterm::terminal::disable_raw_mode();
     }
 }
 
@@ -1165,6 +1261,42 @@ mod tests {
             vec!["kelir: nothing to stop".to_string()]
         );
         assert_eq!(app.note(), "nothing to stop");
+    }
+
+    #[test]
+    fn a_dropped_stop_is_not_echoed_twice() {
+        // The session already put "» stop: nothing is running" on screen; the
+        // reply must not add a second line (and must not say "now").
+        let mut app = app();
+        app.apply(UiEvent::Reply(Response::ok(
+            "stop",
+            3,
+            "dropped",
+            json!({}),
+        )));
+        assert!(app.take_scroll().is_empty());
+        // A stop that really applied is still echoed.
+        app.apply(UiEvent::Reply(Response::ok("stop", 4, "now", json!({}))));
+        assert_eq!(app.take_scroll(), vec!["» stop: now".to_string()]);
+    }
+
+    #[test]
+    fn herdr_records_are_queued_exactly_and_drained_by_the_painter() {
+        let mut app = app();
+        for (state, word) in [
+            (HerdrState::Working, "working"),
+            (HerdrState::Done, "done"),
+            (HerdrState::Idle, "idle"),
+            (HerdrState::Error, "error"),
+        ] {
+            app.apply(UiEvent::Herdr { state });
+            assert_eq!(
+                app.take_status_records(),
+                vec![format!("\u{1b}]7501;state={word}\u{1b}\\")],
+                "{word}"
+            );
+        }
+        assert!(app.take_status_records().is_empty());
     }
 
     #[tokio::test]

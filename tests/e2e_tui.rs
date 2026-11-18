@@ -60,6 +60,24 @@ fn new_app() -> App {
     App::new(60, VIEWPORT_HEIGHT as usize, to_tui, verbs)
 }
 
+/// Every OSC 7501 record in a byte stream, exactly as it went out. Herdr
+/// 0.1.21 requires `ESC ] 7501 ; state=<word> ESC \` with nothing else, so the
+/// whole record is the assertion.
+fn herdr_records(screen: &str) -> Vec<String> {
+    let mut records = Vec::new();
+    let mut rest = screen;
+    while let Some(index) = rest.find("\u{1b}]7501;") {
+        let tail = &rest[index..];
+        let Some(end) = tail.find("\u{1b}\\") else {
+            records.push(format!("unterminated: {tail:?}"));
+            break;
+        };
+        records.push(tail[..end + 2].to_string());
+        rest = &tail[end + 2..];
+    }
+    records
+}
+
 #[test]
 fn snapshot_the_idle_viewport() {
     let mut app = new_app();
@@ -289,8 +307,15 @@ async fn kelir_tui_without_a_tty_is_a_usage_error() {
 async fn kelir_tui_refuses_a_task_before_it_opens_the_terminal() {
     let mock = Mock::start(vec![]).await;
     let run = run_task(&mock, &["tui", "do", "it"], &[], None, "").await;
+    // `tui` has no task argument: the first message is typed in the editor.
+    // The CLI rejects the word before a terminal is opened or a session made.
     assert_eq!(run.code, 2, "stderr: {}", run.stderr);
-    assert!(run.stderr.contains("no terminal"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("unexpected argument 'do'"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(mock.request_count(), 0, "nothing was sent to a provider");
 }
 
 // -------------------------------------------------------------------- PTY
@@ -467,15 +492,15 @@ async fn the_tui_runs_a_turn_in_a_pty() {
     assert_eq!(run.code, 0, "screen: {:?}", run.screen);
     // The answer was rendered (the scrollback ends up in the pty's output).
     assert!(run.screen.contains("PARROT"), "screen: {:?}", run.screen);
-    // The status records went out: working at the turn, done at its end.
-    assert!(
-        run.screen.contains("\u{1b}]7501;state=working"),
-        "no working report: {:?}",
-        run.screen
-    );
-    assert!(
-        run.screen.contains("\u{1b}]7501;state=done"),
-        "no done report: {:?}",
+    // Herdr's status: exactly one record per change, in the only form this
+    // Herdr accepts (`state=<word>` and nothing else).
+    assert_eq!(
+        herdr_records(&run.screen),
+        vec![
+            "\u{1b}]7501;state=working\u{1b}\\".to_string(),
+            "\u{1b}]7501;state=done\u{1b}\\".to_string(),
+        ],
+        "screen: {:?}",
         run.screen
     );
 
@@ -520,8 +545,8 @@ async fn the_tui_runs_a_turn_in_a_pty() {
     assert_eq!(verb["name"], "say");
 }
 
-/// The failure word: `error`, with the reason base64-encoded in `msg`, goes out
-/// over the same OSC record — and a failed turn does not end the session.
+/// The failure word: `error` goes out over the same OSC record — and a failed
+/// turn does not end the session.
 #[tokio::test]
 async fn the_tui_reports_an_error_to_herdr() {
     let mock = Mock::start(vec![
@@ -555,16 +580,13 @@ async fn the_tui_reports_an_error_to_herdr() {
     .expect("the pty driver");
 
     assert_eq!(run.code, 0, "screen: {:?}", run.screen);
-    assert!(
-        run.screen.contains("\u{1b}]7501;state=working"),
-        "no working report: {:?}",
-        run.screen
-    );
-    // `msg` is base64 on the wire; the app word and the state are plain.
-    assert!(
-        run.screen
-            .contains("\u{1b}]7501;state=error;app=kelir;msg="),
-        "no error report: {:?}",
+    assert_eq!(
+        herdr_records(&run.screen),
+        vec![
+            "\u{1b}]7501;state=working\u{1b}\\".to_string(),
+            "\u{1b}]7501;state=error\u{1b}\\".to_string(),
+        ],
+        "screen: {:?}",
         run.screen
     );
     let text = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
@@ -617,4 +639,135 @@ async fn a_ctrl_c_before_the_first_message_does_not_stop_the_turn() {
             .any(|event| event["type"] == "verb" && event["name"] == "stop"),
         "{text}"
     );
+}
+
+/// N5: a panic while the TUI owns the terminal must leave the terminal usable.
+/// `KELIR_TEST_PANIC` panics right after raw mode is on, so this drives the
+/// real panic path: the hook has to turn bracketed paste off, show the cursor,
+/// leave the alternate screen (ratatui's own hook) and drop raw mode.
+#[tokio::test]
+async fn a_panic_in_the_tui_restores_the_terminal() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let (screen, code) = tokio::task::spawn_blocking(move || panic_in_a_pty(cwd, config, state))
+        .await
+        .expect("the pty driver");
+
+    // The session treats a dead UI like `/quit`: it ends and exits cleanly
+    // instead of running on with nobody watching.
+    assert_eq!(
+        code, 0,
+        "a panic must not hang or crash the session: {screen:?}"
+    );
+    let message = screen
+        .find("KELIR_TEST_PANIC: injected panic")
+        .unwrap_or_else(|| panic!("no panic message: {screen:?}"));
+    // The teardown ran: bracketed paste was turned off after being turned on,
+    // before the message was printed. (Cursor visibility is a WinAPI call on
+    // Windows, so it is not in the byte stream; the live drive in
+    // `scripts/live/m2_status_check.sh` checks the shell is usable after an
+    // exit, and `a_ctrl_c...`/`the_tui_runs_a_turn_in_a_pty` check the clean
+    // path.)
+    let paste_on = screen.rfind("\u{1b}[?2004h").expect("paste was never on");
+    let paste_off = screen
+        .rfind("\u{1b}[?2004l")
+        .expect("bracketed paste left on");
+    assert!(
+        paste_on < paste_off && paste_off < message,
+        "the teardown did not run before the panic message: {screen:?}"
+    );
+}
+
+/// Start the TUI with `KELIR_TEST_PANIC=1` and collect what the terminal saw.
+fn panic_in_a_pty(
+    cwd: std::path::PathBuf,
+    config: std::path::PathBuf,
+    state: std::path::PathBuf,
+) -> (String, u64) {
+    let pair = portable_pty::native_pty_system()
+        .openpty(portable_pty::PtySize {
+            rows: 40,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open a pty");
+    let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_kelir"));
+    command.cwd(&cwd);
+    command.env("KELIR_CONFIG", &config);
+    command.env("KELIR_CONFIG_DIR", state.join("no-config"));
+    command.env("KELIR_STATE_DIR", &state);
+    command.env("KELIR_BASE_URL", "http://127.0.0.1:9");
+    command.env("OPENROUTER_API_KEY", "test-openrouter-key");
+    command.env("TERM", "xterm-256color");
+    command.env("KELIR_TEST_PANIC", "1");
+    let mut child = pair.slave.spawn_command(command).expect("spawn kelir");
+    drop(pair.slave);
+    let writer = Arc::new(Mutex::new(pair.master.take_writer().expect("pty writer")));
+    let mut reader = pair.master.try_clone_reader().expect("pty reader");
+    let screen = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let sink = screen.clone();
+    let responder = writer.clone();
+    let reader_task = std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    let bytes = &chunk[..n];
+                    sink.lock().unwrap().extend_from_slice(bytes);
+                    let text = String::from_utf8_lossy(bytes);
+                    let mut replies = Vec::new();
+                    for _ in 0..text.matches("\u{1b}[6n").count() {
+                        replies.extend_from_slice(b"\x1b[1;1R");
+                    }
+                    for _ in 0..text.matches("\u{1b}[c").count() {
+                        replies.extend_from_slice(b"\x1b[?1;2c");
+                    }
+                    if !replies.is_empty() {
+                        let mut out = responder.lock().unwrap();
+                        let _ = out.write_all(&replies);
+                        let _ = out.flush();
+                    }
+                }
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.exit_code() as u64,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.clone_killer().kill();
+                panic!(
+                    "kelir did not exit after the panic: {:?}",
+                    String::from_utf8_lossy(&screen.lock().unwrap())
+                );
+            }
+        }
+    };
+    drop(reader_task);
+    // The panic message comes from the default hook after ours; give the pty
+    // reader a moment to drain it before the snapshot.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline
+        && !String::from_utf8_lossy(&screen.lock().unwrap()).contains("KELIR_TEST_PANIC")
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    (
+        String::from_utf8_lossy(&screen.lock().unwrap()).into_owned(),
+        code,
+    )
 }

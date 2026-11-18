@@ -50,6 +50,7 @@ pub async fn run(args: RunArgs) -> u8 {
         keep: args.keep,
         tui: false,
         common: args.common,
+        task: args.task,
     })
     .await
 }
@@ -61,6 +62,7 @@ pub async fn ask(args: AskArgs) -> u8 {
         keep: false,
         tui: false,
         common: args.common,
+        task: args.question,
     })
     .await
 }
@@ -78,10 +80,6 @@ pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
         eprintln!("kelir: --resume arrives with M3 (resume); start a new session for now");
         return 2;
     }
-    if !args.common.task.is_empty() {
-        eprintln!("kelir: `tui` takes no task: type the first message in the editor");
-        return 2;
-    }
     drive(Options {
         json: false,
         ask: false,
@@ -90,6 +88,9 @@ pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
         keep: true,
         tui: true,
         common: args.common,
+        // The TUI has no task: the first turn starts when a human sends a
+        // message. `TuiArgs` has no positional, so there is none to reject.
+        task: Vec::new(),
     })
     .await
 }
@@ -102,6 +103,8 @@ struct Options {
     /// rendered through `tui::UiEvent`s instead of stdout.
     tui: bool,
     common: CommonArgs,
+    /// The task words from the command line (`run`, `ask`); empty for the TUI.
+    task: Vec<String>,
 }
 
 enum Failure {
@@ -369,7 +372,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let task = if opts.tui {
         String::new()
     } else {
-        task_text(&common.task).await.map_err(Failure::Usage)?
+        task_text(&opts.task).await.map_err(Failure::Usage)?
     };
     let id = new_session_id();
     let client = Client::new(provider_cfg, &id, cfg.cache_ttl.clone())
@@ -385,7 +388,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     // The address this session is expected to use; `drive` re-reads it after
     // `ipc::bind`, because Unix may fall back to a shorter socket path.
     let sock = ipc::value(&dir, &id);
-    let herdr = Herdr::detect(&id, opts.json);
+    let herdr = Herdr::detect(opts.json);
 
     Ok(Prepared {
         json: opts.json,
@@ -508,14 +511,28 @@ impl Session {
     }
 
     /// Report Herdr status (no-op unless a writer was opened).
-    fn report(&mut self, state: HerdrState, msg: Option<&str>) {
-        if let Some(herdr) = &mut self.herdr {
-            herdr.report(state, msg);
+    ///
+    /// In the TUI the record travels as a [`UiEvent`] and the TUI task writes
+    /// it between paints: one thread owns the terminal, so an OSC can never
+    /// split a crossterm sequence (M2 review F2). Non-TUI paths (`run`,
+    /// `run --keep`) write it here, as before.
+    fn report(&mut self, state: HerdrState) {
+        let Some(herdr) = &self.herdr else {
+            return;
+        };
+        let state = crate::herdr::state_for(state, herdr.telegram());
+        if self.tui {
+            self.emit(UiEvent::Herdr { state });
+        } else if let Some(herdr) = &mut self.herdr {
+            herdr.report(state);
         }
     }
 
     /// One turn is over: the UI gets its outcome, Herdr gets its word.
-    fn finish_turn(&mut self, outcome: &str, message: Option<&str>) {
+    ///
+    /// Herdr 0.1.21 takes no `msg` on the record (it drops the whole record),
+    /// so a failed turn's reason stays in the log and on the pane's screen.
+    fn finish_turn(&mut self, outcome: &str) {
         self.emit(UiEvent::TurnEnded {
             outcome: outcome.to_string(),
             final_text: self.final_text.clone(),
@@ -525,7 +542,7 @@ impl Session {
             "error" => HerdrState::Error,
             _ => HerdrState::Idle,
         };
-        self.report(state, message);
+        self.report(state);
     }
 
     fn print_result(&self, exit_code: u8) {
@@ -580,6 +597,13 @@ impl Session {
     /// Log the verb (applied or not), validate it and answer the client. The
     /// verb is *applied* later, at its boundary.
     fn accept(&mut self, incoming: Incoming) -> Option<Pending> {
+        self.accept_as(incoming, None)
+    }
+
+    /// `accept`, with the answer's `applies` word overridden. The idle loop
+    /// uses it for a `stop` that has nothing to stop: the verb is dropped, so
+    /// the answer says `dropped`, not `now` (M2 review N1).
+    fn accept_as(&mut self, incoming: Incoming, applies: Option<&'static str>) -> Option<Pending> {
         let Incoming { request, reply } = incoming;
         let from = request.from.clone();
         let name = request.verb.clone();
@@ -593,10 +617,11 @@ impl Session {
         {
             parsed = Err(format!("no running call with id `{call}`"));
         }
-        let boundary = match &parsed {
-            Ok(verb) => verb.scope().to_string(),
-            Err(_) => "rejected".to_string(),
+        let scope = match &parsed {
+            Ok(verb) => applies.unwrap_or_else(|| verb.scope()),
+            Err(_) => "rejected",
         };
+        let boundary = scope.to_string();
         let error = parsed.as_ref().err().cloned();
         let recorded = self.record(EventBody::Verb {
             name: name.clone(),
@@ -615,7 +640,7 @@ impl Session {
                     verb: verb.clone(),
                     from,
                 };
-                let _ = reply.send(Response::ok(&name, event.seq, verb.scope(), self.state()));
+                let _ = reply.send(Response::ok(&name, event.seq, scope, self.state()));
                 Some(pending)
             }
             (Ok(_), Err(message)) => {
@@ -795,7 +820,7 @@ impl Session {
                         outcome: "done".into(),
                         final_text: self.final_text.clone().into(),
                     });
-                    self.finish_turn("done", None);
+                    self.finish_turn("done");
                     false
                 }
                 Ok(TurnEnd::Stopped(why)) => {
@@ -806,8 +831,7 @@ impl Session {
                         outcome: "stopped".into(),
                         final_text: self.final_text.clone().into(),
                     });
-                    let message = (!why.is_empty()).then(|| why.clone());
-                    self.finish_turn("stopped", message.as_deref());
+                    self.finish_turn("stopped");
                     reason = "stopped".into();
                     false
                 }
@@ -816,7 +840,7 @@ impl Session {
                         outcome: "stopped".into(),
                         final_text: self.final_text.clone().into(),
                     });
-                    self.finish_turn("stopped", None);
+                    self.finish_turn("stopped");
                     reason = "end".into();
                     false
                 }
@@ -829,7 +853,7 @@ impl Session {
                         outcome: "error".into(),
                         final_text: String::new().into(),
                     });
-                    self.finish_turn("error", Some(message));
+                    self.finish_turn("error");
                     // A long-lived session survives a failed turn: the error is
                     // in the log and the next `say` gets another chance (M1
                     // review N6). A one-shot run still exits 1.
@@ -883,9 +907,14 @@ impl Session {
             let Some(incoming) = rx.recv().await else {
                 return Idle::End;
             };
-            if let Some(pending) = self.accept(incoming) {
-                // Nothing is running in idle, so a `stop` has nothing to stop;
-                // queueing it would stop the *next* turn at its first boundary.
+            // Nothing is running in idle, so a `stop` has nothing to stop:
+            // queueing it would stop the *next* turn at its first boundary, and
+            // answering "now" would be a lie. It is dropped, and both the
+            // screen and the client are told so (M2 review N1).
+            let bare_stop =
+                incoming.request.verb == "stop" && incoming.request.args.get("call").is_none();
+            let pending = self.accept_as(incoming, bare_stop.then_some("dropped"));
+            if let Some(pending) = pending {
                 if matches!(pending.verb, Verb::Stop { call: None, .. }) {
                     self.emit(UiEvent::Info("» stop: nothing is running".into()));
                 } else {
@@ -912,7 +941,7 @@ impl Session {
             provider: self.provider_name.clone(),
             model: self.model.clone(),
         });
-        self.report(HerdrState::Working, None);
+        self.report(HerdrState::Working);
         let mut turn_steps = 0u32;
         loop {
             turn_steps += 1;

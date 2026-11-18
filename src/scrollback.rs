@@ -81,13 +81,28 @@ fn wrap_line(line: &str, width: usize, out: &mut Vec<String>) {
 }
 
 /// A streamed message and the row the scrollback has reached.
+///
+/// Wrapping is incremental: each character is fed through the same break rules
+/// as [`wrap`] exactly once, and rows that can no longer change are kept. Only
+/// a resize re-wraps the whole message. Re-wrapping the whole text on every
+/// frame was O(n²) in the length of one answer (M2 review N4).
 #[derive(Debug, Clone)]
 pub struct Live {
+    /// The whole message, kept only so a resize can re-wrap it.
     text: String,
     width: usize,
     rows: usize,
     /// Rows already handed to the scrollback.
     emitted: usize,
+    /// Rows of complete text: no future delta can change them.
+    settled: Vec<String>,
+    /// The line being written, its column count, and the last space in it.
+    open: Vec<char>,
+    column: usize,
+    last_space: Option<usize>,
+    /// Characters fed through the wrapper (a test asserts it is linear).
+    #[cfg(test)]
+    wrapped: usize,
 }
 
 impl Live {
@@ -97,18 +112,103 @@ impl Live {
             width: width.max(1),
             rows: rows.max(1),
             emitted: 0,
+            settled: Vec::new(),
+            open: Vec::new(),
+            column: 0,
+            last_space: None,
+            #[cfg(test)]
+            wrapped: 0,
         }
     }
 
-    /// A resize re-wraps; rows already committed stay as they were.
+    /// A resize re-wraps once, from scratch; rows already committed stay as
+    /// they were.
     pub fn resize(&mut self, width: usize, rows: usize) {
-        self.width = width.max(1);
-        self.rows = rows.max(1);
+        let width = width.max(1);
+        let rows = rows.max(1);
+        if self.width == width && self.rows == rows {
+            return;
+        }
+        self.width = width;
+        self.rows = rows;
+        let text = std::mem::take(&mut self.text);
+        self.settled.clear();
+        self.open.clear();
+        self.column = 0;
+        self.last_space = None;
+        self.text.push_str(&text);
+        for c in text.chars() {
+            self.feed(c);
+        }
         self.emitted = self.emitted.min(self.total());
     }
 
     pub fn push(&mut self, delta: &str) {
         self.text.push_str(delta);
+        for c in delta.chars() {
+            self.feed(c);
+        }
+    }
+
+    /// One character through the wrap rules of [`wrap`].
+    fn feed(&mut self, c: char) {
+        #[cfg(test)]
+        {
+            self.wrapped += 1;
+        }
+        if c == '\n' {
+            self.end_row();
+            return;
+        }
+        let width = width_of(c);
+        if self.column + width > self.width && !self.open.is_empty() && c != ' ' {
+            match self.last_space.filter(|space| *space > 0) {
+                Some(space) => {
+                    // Break at the last space: the head is a finished row, the
+                    // tail (after the space, and any spaces after it) carries
+                    // over and this character joins it.
+                    let head: String = self.open[..space].iter().collect();
+                    self.settled.push(head.trim_end().to_string());
+                    let mut tail: Vec<char> = self.open[space + 1..].to_vec();
+                    while tail.first() == Some(&' ') {
+                        tail.remove(0);
+                    }
+                    tail.push(c);
+                    self.column = tail.iter().map(|c| width_of(*c)).sum();
+                    self.last_space = tail.iter().rposition(|c| *c == ' ');
+                    self.open = tail;
+                    return;
+                }
+                None => {
+                    // No space to break at: the row is full.
+                    self.end_row();
+                    self.open.push(c);
+                    self.column = width;
+                    self.last_space = None;
+                    return;
+                }
+            }
+        }
+        self.open.push(c);
+        self.column += width;
+        if c == ' ' {
+            self.last_space = Some(self.open.len() - 1);
+        }
+    }
+
+    /// Finish the open line: it becomes a row even when it is empty (a
+    /// newline, and the end of the message, both do that in [`wrap`]).
+    fn end_row(&mut self) {
+        let row: String = self.open.iter().collect();
+        self.settled.push(row.trim_end().to_string());
+        self.open.clear();
+        self.column = 0;
+        self.last_space = None;
+    }
+
+    /// The open line as it would be displayed (trailing spaces trimmed).
+    fn open_row(&self) -> String {
+        self.open.iter().collect::<String>().trim_end().to_string()
     }
 
     pub fn text(&self) -> &str {
@@ -123,24 +223,23 @@ impl Live {
         if self.text.is_empty() {
             return 0;
         }
-        wrap(&self.text, self.width).len()
+        self.settled.len() + 1
     }
 
     /// Rows that no longer fit in the live area, in order, each exactly once.
     pub fn due(&mut self) -> Vec<String> {
-        if self.text.is_empty() {
-            return Vec::new();
-        }
-        let wrapped = wrap(&self.text, self.width);
+        let total = self.total();
         let keep = self.rows;
-        if wrapped.len() <= keep {
+        if total <= keep {
             return Vec::new();
         }
-        let up_to = wrapped.len() - keep;
+        let up_to = total - keep;
         if up_to <= self.emitted {
             return Vec::new();
         }
-        let out = wrapped[self.emitted..up_to].to_vec();
+        // `keep` is at least one row and the open line is exactly one row, so
+        // `up_to` never reaches it: only settled rows are committed.
+        let out = self.settled[self.emitted..up_to].to_vec();
         self.emitted = up_to;
         out
     }
@@ -150,24 +249,36 @@ impl Live {
         if self.text.is_empty() {
             return Vec::new();
         }
-        wrap(&self.text, self.width)
-            .into_iter()
-            .skip(self.emitted)
-            .collect()
+        let mut rows = self.settled[self.emitted.min(self.settled.len())..].to_vec();
+        rows.push(self.open_row());
+        rows
     }
 
     /// The message is finished: everything left goes to the scrollback, and
     /// the buffer is ready for the next message.
     pub fn finish(&mut self) -> Vec<String> {
-        let wrapped = if self.text.is_empty() {
-            Vec::new()
-        } else {
-            wrap(&self.text, self.width)
-        };
-        let out: Vec<String> = wrapped.iter().skip(self.emitted).cloned().collect();
+        if !self.text.is_empty() {
+            self.end_row();
+        }
+        let out = self.settled[self.emitted.min(self.settled.len())..].to_vec();
         self.text.clear();
+        self.settled.clear();
+        self.open.clear();
+        self.column = 0;
+        self.last_space = None;
         self.emitted = 0;
+        #[cfg(test)]
+        {
+            self.wrapped = 0;
+        }
         out
+    }
+
+    /// Test hook: how many characters have been fed through the wrapper. It
+    /// equals the length of the message when nothing was re-wrapped.
+    #[cfg(test)]
+    pub fn wrapped_chars(&self) -> usize {
+        self.wrapped
     }
 }
 
@@ -257,5 +368,53 @@ mod tests {
         assert_eq!(live.due(), vec!["aa", "aa"]);
         assert_eq!(live.view(), vec!["aa"]);
         assert_eq!(live.finish(), vec!["aa"]);
+    }
+
+    #[test]
+    fn streamed_text_wraps_exactly_like_wrap() {
+        let text = "a bb ccc  dd\n\nee f\n\n  leading\ntrailing   \nwide 日本語 x\n\nlast";
+        for width in [1, 2, 3, 5, 13, 40, 80] {
+            let mut live = Live::new(width, 2);
+            let mut rows = Vec::new();
+            for c in text.chars() {
+                live.push(&c.to_string());
+                rows.extend(live.due());
+            }
+            rows.extend(live.finish());
+            assert_eq!(rows, wrap(text, width), "width {width}");
+        }
+    }
+
+    #[test]
+    fn a_one_megabyte_message_is_wrapped_once() {
+        // A single long answer in 1 KB deltas: the old `due()` re-wrapped the
+        // whole message every frame (O(n²)); this proves every character goes
+        // through the wrapper once.
+        let mut text = String::with_capacity(1 << 20);
+        let mut index = 0;
+        while text.len() < (1 << 20) {
+            text.push_str(&format!("word{index} "));
+            index += 1;
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let expected = wrap(&text, 80);
+        let mut live = Live::new(80, 4);
+        let mut rows = Vec::new();
+        for chunk in chars.chunks(1024) {
+            let delta: String = chunk.iter().collect();
+            live.push(&delta);
+            rows.extend(live.due());
+        }
+        assert_eq!(
+            live.wrapped_chars(),
+            chars.len(),
+            "characters went through the wrapper more than once"
+        );
+        rows.extend(live.finish());
+        assert!(rows.len() > 1000, "{} rows", rows.len());
+        for row in &rows {
+            assert!(display_width(row) <= 80, "{row:?}");
+        }
+        assert_eq!(rows, expected);
     }
 }
