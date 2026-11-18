@@ -1324,6 +1324,12 @@ async fn cancel(id: &str) -> u8 {
 
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
+    // `kill(0, …)` signals the caller's own process group, so pid 0 is not a
+    // process here: no status names the shim as 0, and asking must not answer
+    // "alive" for "my own group".
+    if pid == 0 {
+        return false;
+    }
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
