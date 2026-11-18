@@ -622,20 +622,41 @@ async fn two_clients_can_send_at_once() {
         "the log's seq must stay monotonic: {seqs:?}"
     );
 
-    // Both messages reach a request, in the end.
-    session.wait_for("step_started").await;
+    // Both messages reach a request, in the end. The session starts a turn on
+    // the first message it sees, so the second `say` may arrive too late for
+    // that step and get its own turn: wait on the events that say both were
+    // folded in, then on the turn that carries the last one.
+    let mut delivered: Vec<String> = Vec::new();
+    while delivered.len() < 2 {
+        let event = session.next_event().await;
+        if event["type"] == "user" {
+            let text = event["text"].as_str().unwrap_or_default();
+            if text == "one" || text == "two" {
+                delivered.push(text.to_string());
+            }
+        }
+    }
+    session.wait_for("turn_ended").await;
+    let seen: Vec<String> = mock
+        .requests()
+        .iter()
+        .flat_map(|request| {
+            request
+                .messages()
+                .iter()
+                .filter(|message| message["role"] == "user")
+                .filter_map(|message| message["content"].as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        })
+        .collect();
+    for text in ["one", "two"] {
+        assert!(
+            seen.iter().any(|seen| seen == text),
+            "the `{text}` message must reach the model: {seen:?}"
+        );
+    }
     let _ = session.ctl(&["end"]).await;
     let _ = session.finish().await;
-    let seen = mock.requests().iter().any(|request| {
-        let texts: Vec<&str> = request
-            .messages()
-            .iter()
-            .filter(|message| message["role"] == "user")
-            .filter_map(|message| message["content"].as_str())
-            .collect();
-        texts.contains(&"one") && texts.contains(&"two")
-    });
-    assert!(seen, "both messages must reach the model");
 }
 
 /// A bad verb is refused by `ctl` itself, before it ever reaches the session.
