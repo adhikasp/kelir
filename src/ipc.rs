@@ -392,6 +392,18 @@ pub async fn connect(dir: &Path, id: &str) -> Result<LocalStream, String> {
 /// One request/answer round trip, for `kelir ctl`.
 pub async fn request(dir: &Path, id: &str, request: &Request) -> Result<Response, String> {
     let stream = connect(dir, id).await?;
+    round_trip(stream, request).await
+}
+
+/// The same round trip to an address taken from `KELIR_SOCK`, so a process that
+/// only inherited the variable (a bash child, the `kelir bg` CLI) can talk to
+/// its session without knowing the session dir or id.
+pub async fn request_value(address: &str, request: &Request) -> Result<Response, String> {
+    let stream = connect_value(address).await?;
+    round_trip(stream, request).await
+}
+
+async fn round_trip(stream: LocalStream, request: &Request) -> Result<Response, String> {
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read);
     let mut line = serde_json::to_string(request)
@@ -420,6 +432,40 @@ pub async fn request(dir: &Path, id: &str, request: &Request) -> Result<Response
     match tokio::time::timeout(IO_TIMEOUT, answer).await {
         Ok(result) => result,
         Err(_) => Err("the session did not answer in time".to_string()),
+    }
+}
+
+/// Connect to an address as exported in `KELIR_SOCK`: a Unix socket path or a
+/// Windows pipe name (`\\.\pipe\kelir-<id>`).
+pub async fn connect_value(address: &str) -> Result<LocalStream, String> {
+    let address = address.trim();
+    #[cfg(unix)]
+    let options = {
+        let name = Path::new(address)
+            .to_fs_name::<GenericFilePath>()
+            .map_err(|error| format!("cannot name the session socket: {error}"))?;
+        ConnectOptions::new().name(name)
+    };
+    #[cfg(windows)]
+    let options = {
+        let pipe = address.trim_start_matches(r"\\.\pipe\").to_string();
+        let name = pipe
+            .to_ns_name::<GenericNamespaced>()
+            .map_err(|error| format!("cannot name the session pipe: {error}"))?;
+        ConnectOptions::new().name(name)
+    };
+    #[cfg(not(any(unix, windows)))]
+    let options = {
+        let name = Path::new(address)
+            .to_fs_name::<GenericFilePath>()
+            .map_err(|error| format!("cannot name the session socket: {error}"))?;
+        ConnectOptions::new().name(name)
+    };
+    let connect = options.connect_tokio();
+    match tokio::time::timeout(IO_TIMEOUT, connect).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("connecting timed out".to_string()),
     }
 }
 
@@ -604,5 +650,30 @@ mod tests {
         let error = connect(&dir, "ses_dead").await.unwrap_err();
         assert!(!error.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `KELIR_SOCK` alone must be enough to reach the session: `kelir bg` has
+    /// nothing else to go on inside a bash call.
+    #[tokio::test]
+    async fn the_exported_socket_value_reaches_the_session() {
+        let id = "ses_ipc_value";
+        let dir = temp_dir("value").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let listener = bind(&dir, id).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
+        serve(listener, tx);
+        tokio::spawn(async move {
+            if let Some(incoming) = rx.recv().await {
+                assert_eq!(incoming.request.verb, "bg");
+                assert_eq!(incoming.request.from, "job");
+                let _ = incoming.reply.send(Response::ok("bg", 4, "now", json!({})));
+            }
+        });
+        let answer = request_value(&value(&dir, id), &Request::new("bg", json!({}), "job"))
+            .await
+            .unwrap();
+        assert!(answer.ok);
+        assert_eq!(answer.seq, Some(4));
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 }

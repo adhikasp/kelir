@@ -32,6 +32,11 @@ pub enum Command {
     Resume(ResumeArgs),
     /// Send a verb to a running session and print its answer.
     Ctl(CtlArgs),
+    /// Background jobs: run, ls, out, wait, cancel.
+    Bg(BgArgs),
+    /// Internal: the background-job shim. Not for humans.
+    #[command(hide = true, name = "bg-shim")]
+    BgShim(BgShimArgs),
 }
 
 #[derive(Debug, Args, Clone, Default)]
@@ -151,6 +156,107 @@ pub struct CtlArgs {
     pub enable: Vec<String>,
 }
 
+/// `kelir bg …` inside a bash call (or standalone): jobs live in the session's
+/// `bg/` when `KELIR_SESSION_DIR` is set, else in the state dir.
+#[derive(Debug, Args, Clone)]
+pub struct BgArgs {
+    #[command(subcommand)]
+    pub command: BgCommand,
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub enum BgCommand {
+    /// Start a job and return at once: `<cmd…>` runs in the configured shell.
+    Run(BgRunArgs),
+    /// List the jobs of this session (or the state dir's).
+    Ls,
+    /// Print a job's output (`--follow` streams it until the job settles).
+    Out(BgOutArgs),
+    /// Wait for a job to settle.
+    Wait(BgWaitArgs),
+    /// Kill a job's whole process tree and record it as `cancelled`.
+    Cancel(BgCancelArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct BgRunArgs {
+    /// The command, run by the configured shell. Words are joined with spaces,
+    /// so quote a multi-word command as one argument.
+    #[arg(
+        required = true,
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "COMMAND"
+    )]
+    pub command: Vec<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct BgOutArgs {
+    /// The job id (`bg_<ulid>`, or a promoted call's output dir name).
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// Keep printing as the job writes, until it settles.
+    #[arg(long)]
+    pub follow: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct BgWaitArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// Give up after this many seconds instead of waiting forever.
+    #[arg(long, value_name = "SECONDS")]
+    pub timeout: Option<u64>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct BgCancelArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+}
+
+/// `kelir bg-shim`: started by the session (for every bash call) and by
+/// `kelir bg run`. Everything it needs is in its arguments, so a shim is a
+/// self-contained, detachable process.
+#[derive(Debug, Args, Clone)]
+pub struct BgShimArgs {
+    /// The `bg/` directory the status file lives in.
+    #[arg(long, value_name = "DIR")]
+    pub dir: PathBuf,
+    /// The job id (also the status file's stem).
+    #[arg(long, value_name = "ID")]
+    pub id: String,
+    /// The file the command's stdout and stderr go to.
+    #[arg(long, value_name = "FILE")]
+    pub out: PathBuf,
+    /// The command, as one shell command line.
+    #[arg(long, value_name = "CMD", allow_hyphen_values = true)]
+    pub cmd: String,
+    /// The shell program (`bash`).
+    #[arg(long, value_name = "PROGRAM")]
+    pub shell: String,
+    /// An argument of the shell's argv, before the command (`-c`).
+    #[arg(long = "shell-arg", value_name = "ARG", allow_hyphen_values = true)]
+    pub shell_args: Vec<String>,
+    /// `job` (`kelir bg run`) or `call` (a bash call's command).
+    #[arg(long, value_name = "KIND", default_value = "job")]
+    pub kind: String,
+    /// The pid of the session that owns this call: if it dies without
+    /// promoting the call, the shim takes the tree down.
+    #[arg(long, value_name = "PID")]
+    pub owner: Option<u32>,
+    /// The provider call id of the bash call that started this job.
+    #[arg(long, value_name = "CALL_ID")]
+    pub call: Option<String>,
+    /// The Windows job object the call's tree lives in.
+    #[arg(long, value_name = "NAME")]
+    pub job: Option<String>,
+    /// The session socket, exported to the command as `KELIR_SOCK`.
+    #[arg(long, value_name = "ADDRESS")]
+    pub sock: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +363,102 @@ mod tests {
     #[test]
     fn an_unknown_subcommand_is_a_usage_error() {
         assert!(Cli::try_parse_from(["kelir", "frobnicate"]).is_err());
+    }
+
+    #[test]
+    fn bg_parses_run_ls_out_wait_and_cancel() {
+        let cli = Cli::parse_from(["kelir", "bg", "run", "sleep", "60"]);
+        match cli.command {
+            Some(Command::Bg(args)) => match args.command {
+                BgCommand::Run(run) => assert_eq!(run.command, vec!["sleep", "60"]),
+                other => panic!("expected run, got {other:?}"),
+            },
+            _ => panic!("expected bg"),
+        }
+        // A quoted command, with flags inside it, stays one argument.
+        let cli = Cli::parse_from(["kelir", "bg", "run", "sleep 3; echo --ok"]);
+        match cli.command {
+            Some(Command::Bg(args)) => match args.command {
+                BgCommand::Run(run) => assert_eq!(run.command, vec!["sleep 3; echo --ok"]),
+                other => panic!("expected run, got {other:?}"),
+            },
+            _ => panic!("expected bg"),
+        }
+        assert!(Cli::try_parse_from(["kelir", "bg", "run"]).is_err());
+        assert!(matches!(
+            Cli::parse_from(["kelir", "bg", "ls"]).command,
+            Some(Command::Bg(BgArgs {
+                command: BgCommand::Ls
+            }))
+        ));
+        let cli = Cli::parse_from(["kelir", "bg", "out", "bg_1", "--follow"]);
+        match cli.command {
+            Some(Command::Bg(args)) => match args.command {
+                BgCommand::Out(out) => {
+                    assert_eq!(out.id, "bg_1");
+                    assert!(out.follow);
+                }
+                other => panic!("expected out, got {other:?}"),
+            },
+            _ => panic!("expected bg"),
+        }
+        let cli = Cli::parse_from(["kelir", "bg", "wait", "bg_1", "--timeout", "5"]);
+        match cli.command {
+            Some(Command::Bg(args)) => match args.command {
+                BgCommand::Wait(wait) => assert_eq!(wait.timeout, Some(5)),
+                other => panic!("expected wait, got {other:?}"),
+            },
+            _ => panic!("expected bg"),
+        }
+        let cli = Cli::parse_from(["kelir", "bg", "cancel", "bg_1"]);
+        match cli.command {
+            Some(Command::Bg(args)) => match args.command {
+                BgCommand::Cancel(cancel) => assert_eq!(cancel.id, "bg_1"),
+                other => panic!("expected cancel, got {other:?}"),
+            },
+            _ => panic!("expected bg"),
+        }
+    }
+
+    #[test]
+    fn the_shim_parses_its_scripted_arguments() {
+        let cli = Cli::parse_from([
+            "kelir",
+            "bg-shim",
+            "--dir",
+            "s/ses_1/bg",
+            "--id",
+            "11-2-1",
+            "--out",
+            "s/ses_1/commands/11-2-1/out",
+            "--cmd",
+            "sleep 60",
+            "--shell",
+            "bash",
+            "--shell-arg",
+            "-c",
+            "--kind",
+            "call",
+            "--owner",
+            "1234",
+            "--call",
+            "call_1",
+            "--job",
+            "kelir-bg-ses_1-11-2-1",
+        ]);
+        match cli.command {
+            Some(Command::BgShim(args)) => {
+                assert_eq!(args.id, "11-2-1");
+                assert_eq!(args.cmd, "sleep 60");
+                assert_eq!(args.shell, "bash");
+                assert_eq!(args.shell_args, vec!["-c"]);
+                assert_eq!(args.kind, "call");
+                assert_eq!(args.owner, Some(1234));
+                assert_eq!(args.call.as_deref(), Some("call_1"));
+                assert_eq!(args.job.as_deref(), Some("kelir-bg-ses_1-11-2-1"));
+            }
+            _ => panic!("expected bg-shim"),
+        }
     }
 
     #[test]

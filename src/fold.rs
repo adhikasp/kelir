@@ -793,6 +793,66 @@ mod tests {
         );
     }
 
+    /// `bg_settled` is a record of what happened, not a message: the model
+    /// reads the `user` event that follows it (from `job`), so a job's
+    /// completion renders exactly once — the same way live and on resume, which
+    /// is what makes a resume's folded `bg_settled` visible at all.
+    #[test]
+    fn a_settled_job_renders_as_the_message_that_follows_it() {
+        let dir = temp_dir("bg");
+        let events = vec![
+            started(),
+            user_at(2, "start the job", "cli"),
+            assistant_at(3, "on it"),
+            LogEvent::new(
+                4,
+                EventBody::BgStarted {
+                    bg_id: "bg_1".into(),
+                    call_id: Some("call_1".into()),
+                    cmd: "sleep 60".into(),
+                    pid: Some(7),
+                    out_path: "bg/bg_1.out".into(),
+                },
+            ),
+            LogEvent::new(
+                5,
+                EventBody::BgSettled {
+                    bg_id: "bg_1".into(),
+                    call_id: Some("call_1".into()),
+                    cmd: "sleep 60".into(),
+                    exit_code: Some(0),
+                    state: "exited".into(),
+                    out_path: "bg/bg_1.out".into(),
+                },
+            ),
+            user_at(6, "[bg job bg_1 exited 0] ...", "job"),
+        ];
+        let folded = fold(&events, &dir).unwrap();
+        let contents = texts(&folded);
+        assert_eq!(
+            contents,
+            vec!["start the job", "on it", "[bg job bg_1 exited 0] ..."]
+        );
+        assert_eq!(
+            folded.messages.last().unwrap().role,
+            "user",
+            "a request may not end on the assistant's message here"
+        );
+        assert_eq!(
+            contents
+                .iter()
+                .filter(|text| text.contains("bg job"))
+                .count(),
+            1,
+            "the job is reported once, not once per event"
+        );
+        // A `bg_settled` with no message (a session that died before writing
+        // one) adds nothing: the resume writes the message, not the fold.
+        let only_events: Vec<LogEvent> = events.iter().take(5).cloned().collect();
+        let folded = fold(&only_events, &dir).unwrap();
+        assert_eq!(texts(&folded), vec!["start the job", "on it"]);
+    }
+
     #[test]
     fn a_missing_blob_is_an_error_not_a_silent_truncation() {
         let dir = temp_dir("missing");

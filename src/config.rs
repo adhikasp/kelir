@@ -56,6 +56,10 @@ pub struct Config {
     pub compact_prompt: String,
     /// Messages kept verbatim after a compaction.
     pub compact_keep: usize,
+    /// A bash call still running after this long is promoted to a background
+    /// job instead of being killed (`config.toml` `promote_after`, seconds;
+    /// `KELIR_PROMOTE_AFTER` overrides it; zero disables promotion).
+    pub promote_after: std::time::Duration,
 }
 
 #[derive(Debug)]
@@ -85,6 +89,7 @@ struct RawConfig {
     auto_compact_at: Option<f64>,
     compact_prompt: Option<String>,
     compact_keep: Option<usize>,
+    promote_after: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -230,7 +235,25 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         auto_compact_at,
         compact_prompt,
         compact_keep: raw.compact_keep.unwrap_or(crate::compact::DEFAULT_KEEP),
+        promote_after: promote_after(raw.promote_after)?,
     })
+}
+
+/// Seconds between `config.toml` and `KELIR_PROMOTE_AFTER`. Zero disables
+/// promotion: a long call then runs to completion, as it did before M4.
+fn promote_after(configured: Option<u64>) -> Result<std::time::Duration, ConfigError> {
+    let seconds = match std::env::var_os("KELIR_PROMOTE_AFTER") {
+        Some(value) => {
+            let text = value.to_string_lossy().trim().to_string();
+            text.parse::<u64>().map_err(|_| {
+                ConfigError(format!(
+                    "KELIR_PROMOTE_AFTER must be a whole number of seconds (got `{text}`)"
+                ))
+            })?
+        }
+        None => configured.unwrap_or(600),
+    };
+    Ok(std::time::Duration::from_secs(seconds))
 }
 
 impl Config {
@@ -528,6 +551,17 @@ compact_keep = 0
         assert_eq!(cfg.compact_keep, 0);
         assert_eq!(cfg.window("deepseek/deepseek-chat"), 32_000);
         assert_eq!(cfg.window("other/model"), 64_000);
+    }
+
+    #[test]
+    fn promotion_after_is_ten_minutes_by_default_and_configurable() {
+        // The environment override is the test hook; it wins over the file.
+        let path = temp_config("promote_after = 30\n");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.promote_after, std::time::Duration::from_secs(30));
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.promote_after, std::time::Duration::from_secs(600));
     }
 
     #[test]

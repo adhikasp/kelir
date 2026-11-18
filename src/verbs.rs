@@ -63,6 +63,12 @@ pub enum Verb {
     Compact {
         focus: Option<String>,
     },
+    /// A job reported itself or changed state: `kelir bg run` sends this over
+    /// the session socket, and the session's own watcher sends the same thing
+    /// for a job that settled. It is bookkeeping, so it applies at the first
+    /// boundary it can get (and immediately when the session is idle); the wake
+    /// message it records is the one that starts a turn.
+    Bg(Box<crate::bg::Status>),
     End,
 }
 
@@ -70,7 +76,7 @@ impl Verb {
     /// Where the verb is meant to apply; this is what the `verb` event says.
     pub fn scope(&self) -> &'static str {
         match self {
-            Verb::Say { now: true, .. } | Verb::Stop { .. } | Verb::End => "now",
+            Verb::Say { now: true, .. } | Verb::Stop { .. } | Verb::End | Verb::Bg(..) => "now",
             Verb::Say { .. } => "queued",
             Verb::Later { .. } => "turn_end",
             Verb::Model { .. } | Verb::Tools { .. } | Verb::Compact { .. } => "next_step",
@@ -80,8 +86,9 @@ impl Verb {
     /// Does it apply at this boundary?
     pub fn applies_at(&self, boundary: Boundary) -> bool {
         match self {
-            // `say` and `stop` take the first boundary they can get.
-            Verb::Say { .. } | Verb::Stop { .. } | Verb::End => true,
+            // `say`, `stop` and a job's own report take the first boundary they
+            // can get.
+            Verb::Say { .. } | Verb::Stop { .. } | Verb::End | Verb::Bg(..) => true,
             Verb::Later { .. } => boundary == Boundary::TurnEnd,
             Verb::Model { .. } | Verb::Tools { .. } | Verb::Compact { .. } => {
                 boundary == Boundary::BeforeStep
@@ -196,6 +203,17 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
         "compact" => Ok(Verb::Compact {
             focus: string_arg(args, "focus").filter(|focus| !focus.trim().is_empty()),
         }),
+        // A job's status file, as sent by `kelir bg run` or the session's own
+        // watcher. The parser is strict: a malformed report is refused and
+        // nothing is recorded.
+        "bg" => {
+            let status: crate::bg::Status = serde_json::from_value(args.clone())
+                .map_err(|error| format!("bg: not a job status: {error}"))?;
+            if status.id.trim().is_empty() {
+                return Err("bg: the job has no id".into());
+            }
+            Ok(Verb::Bg(Box::new(status)))
+        }
         other => Err(format!(
             "unknown verb `{other}` (say, later, stop, model, tools, compact, end)"
         )),
@@ -411,6 +429,45 @@ mod tests {
         assert!(parse("tools", &json!({})).is_err());
         let error = parse("tools", &json!({"disable": "spawn"})).unwrap_err();
         assert!(error.contains("unknown tool"), "{error}");
+    }
+
+    /// The job report is a verb so that it arrives through the same channel as
+    /// everything else (the socket, or the session's own watcher) and is logged
+    /// like everything else.
+    #[test]
+    fn a_job_status_is_a_verb_that_applies_at_the_first_boundary() {
+        let status = crate::bg::Status {
+            id: "bg_1".into(),
+            state: "exited".into(),
+            pid: Some(42),
+            shim: Some(41),
+            exit_code: Some(0),
+            started: "2026-11-19T10:00:00Z".into(),
+            finished: Some("2026-11-19T10:00:02Z".into()),
+            cmd: "sleep 2".into(),
+            out: "bg/bg_1.out".into(),
+            kind: "job".into(),
+            promoted: false,
+            call: None,
+            job: None,
+            error: None,
+        };
+        let args = serde_json::to_value(&status).unwrap();
+        let verb = parse("bg", &args).unwrap();
+        assert_eq!(verb, Verb::Bg(Box::new(status)));
+        assert_eq!(verb.scope(), "now");
+        for boundary in [
+            Boundary::BeforeStep,
+            Boundary::AfterTools,
+            Boundary::AfterStep,
+            Boundary::TurnEnd,
+        ] {
+            assert!(verb.applies_at(boundary), "{boundary:?}");
+        }
+        // A report that is not a status file is refused, not half-applied.
+        let error = parse("bg", &json!({"id": "", "state": "exited"})).unwrap_err();
+        assert!(error.contains("bg:"), "{error}");
+        assert!(parse("bg", &json!({"type": "nonsense"})).is_err());
     }
 
     #[test]

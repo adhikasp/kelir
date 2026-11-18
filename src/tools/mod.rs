@@ -19,6 +19,11 @@ pub struct Ctx {
     /// The address of the session socket, exported to every child as
     /// `KELIR_SOCK` (`kelir mcp` and `kelir bg` use it; tests assert it).
     pub sock: String,
+    /// This session's id: the bash call's job object name is derived from it.
+    pub session_id: String,
+    /// A call still running after this long is promoted to a background job
+    /// (`promote_after` in the config; zero disables it).
+    pub promote_after: std::time::Duration,
     /// Process groups of every call this session started. Holding them keeps
     /// the Windows Job Objects open past the call (a leftover background child
     /// is not killed by returning) and closes them when the session ends.
@@ -41,6 +46,8 @@ impl Ctx {
             shell,
             spill_limit,
             sock,
+            session_id: String::new(),
+            promote_after: std::time::Duration::from_secs(600),
             groups: SessionGroups::new(),
             running: Running::new(),
         }
@@ -225,11 +232,20 @@ pub fn names() -> Vec<String> {
 }
 
 /// Run one tool call. Never fails: any problem becomes an `error` outcome the
-/// model can read. `dir` is kelir's `<seq>-<step>-<n>` output directory name.
-pub async fn dispatch(name: &str, args: &Value, ctx: &Ctx, dir: &str) -> ToolOutcome {
+/// model can read. `dir` is kelir's `<seq>-<step>-<n>` output directory name and
+/// `call_id` is the provider's call id (recorded with a promoted job).
+pub async fn dispatch(
+    name: &str,
+    args: &Value,
+    ctx: &Ctx,
+    dir: &str,
+    call_id: &str,
+) -> ToolOutcome {
     match name {
         "bash" => match args.get("command").and_then(|v| v.as_str()) {
-            Some(command) if !command.trim().is_empty() => bash::run(command, ctx, dir).await,
+            Some(command) if !command.trim().is_empty() => {
+                bash::run(command, ctx, dir, call_id).await
+            }
             _ => ToolOutcome::error("bash: missing non-empty `command`"),
         },
         "edit" => edit::run(args, ctx, dir),

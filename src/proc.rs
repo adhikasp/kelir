@@ -1,16 +1,28 @@
 //! Tool-child process grouping, so a stop can kill a whole tree.
 //!
-//! Unix: the child leads its own process group (`process_group(0)`), which
-//! `killpg` signals. Windows: the child is created **suspended**, assigned to a
-//! Job Object with kill-on-close, and only then resumed, so it cannot run user
-//! code before it is inside the job (M0 review N2).
+//! Every tool child is `kelir bg-shim`, which owns the command it runs (M4):
+//! the shim puts the command in its own process group on Unix and in a Job
+//! Object on Windows, so the shim can take the tree down by itself, and its
+//! owner can signal intent by killing the shim's group / job.
+//!
+//! *Unix:* the shim leads its own process group (`process_group(0)`), which
+//! `killpg` signals; the command and everything it spawns inherit that group.
+//!
+//! *Windows:* the session creates a **named** Job Object per call, assigns the
+//! suspended shim to it and only then resumes it, so the shim cannot run user
+//! code before it is inside the job (M0 review N2). The shim opens the same job
+//! by name, assigns the command to it and keeps its own handle: a promoted job
+//! therefore survives the session closing its handle, and `kelir bg cancel` can
+//! open the job by name from another process. The job is **not**
+//! `KILL_ON_JOB_CLOSE`: a shim watches its owner and kills a tree the session
+//! did not get to kill, which is the same guarantee on both platforms.
 //!
 //! A [`ProcessGroup`] is a cheap, cloneable handle: the call holds one to kill
 //! its own tree, and the session keeps another so a leftover background child
 //! survives the call and is cleaned up when the session ends.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::process::Command;
@@ -23,12 +35,14 @@ pub struct ProcessGroup {
 #[derive(Debug)]
 struct GroupState {
     killed: AtomicBool,
-    #[cfg(unix)]
-    pgid: std::sync::atomic::AtomicU32,
+    /// The tree was promoted to a background job: the session no longer owns
+    /// it, so its `Drop`/`kill` must not take it down.
+    detached: AtomicBool,
+    /// Unix: the process group to signal. Windows: the shim's pid, whose job
+    /// object holds the tree.
+    pid: AtomicU32,
     #[cfg(windows)]
-    job: Option<win::Job>,
-    #[cfg(not(any(unix, windows)))]
-    _none: (),
+    job: Mutex<Option<win::Job>>,
 }
 
 impl ProcessGroup {
@@ -36,14 +50,22 @@ impl ProcessGroup {
         Self {
             state: Arc::new(GroupState {
                 killed: AtomicBool::new(false),
-                #[cfg(unix)]
-                pgid: std::sync::atomic::AtomicU32::new(0),
+                detached: AtomicBool::new(false),
+                pid: AtomicU32::new(0),
                 #[cfg(windows)]
-                job: win::Job::create(),
-                #[cfg(not(any(unix, windows)))]
-                _none: (),
+                job: Mutex::new(None),
             }),
         }
+    }
+
+    /// On Windows, bind the group to the named job the session created for
+    /// this call. Unix needs nothing: the shim's own group is the tree.
+    #[cfg(windows)]
+    pub fn with_job(self, job: win::Job) -> Self {
+        if let Ok(mut slot) = self.state.job.lock() {
+            *slot = Some(job);
+        }
+        self
     }
 
     /// Apply the platform's grouping flags to a command before spawning.
@@ -69,20 +91,17 @@ impl ProcessGroup {
     /// Bind the group to the freshly spawned child. On Windows this is where
     /// the suspended child enters the Job Object and is allowed to run.
     pub fn spawned(&self, pid: u32) -> Result<(), String> {
-        #[cfg(unix)]
-        self.state.pgid.store(pid, Ordering::SeqCst);
+        self.state.pid.store(pid, Ordering::SeqCst);
         #[cfg(windows)]
         {
-            let Some(job) = &self.state.job else {
-                // Without a Job Object the call could not be stopped and its
-                // tree could outlive the session: refuse it instead of running
-                // something uncontrollable (M1 review N7).
-                win::terminate(pid);
-                return Err(format!(
-                    "cannot create a job object for the child process {pid}"
-                ));
+            let assigned = match self.state.job.lock() {
+                Ok(job) => match job.as_ref() {
+                    Some(job) => job.assign(pid),
+                    None => Err("the call has no job object".to_string()),
+                },
+                Err(_) => Err("the call's job object is poisoned".to_string()),
             };
-            if let Err(error) = job.assign(pid) {
+            if let Err(error) = assigned {
                 // A call outside its Job Object cannot be stopped, so it is
                 // taken down here rather than left running unreachable
                 // (M1 review N7). The child is still suspended.
@@ -108,8 +127,12 @@ impl ProcessGroup {
         Ok(())
     }
 
-    /// Kill the whole tree. Idempotent; returns true the first time.
+    /// Kill the whole tree. Idempotent; returns true the first time. A
+    /// detached (promoted) group is left alone.
     pub fn kill(&self) -> bool {
+        if self.state.detached.load(Ordering::SeqCst) {
+            return false;
+        }
         if self.state.killed.swap(true, Ordering::SeqCst) {
             return false;
         }
@@ -117,26 +140,52 @@ impl ProcessGroup {
         true
     }
 
+    /// The session stops owning the tree: a promoted job keeps running after
+    /// the session exits, so neither `Drop` nor a late `kill` may take it down.
+    /// On Windows the session's job handle is closed here; the shim holds its
+    /// own, so the job survives.
+    pub fn detach(&self) {
+        self.state.detached.store(true, Ordering::SeqCst);
+        #[cfg(windows)]
+        if let Ok(mut job) = self.state.job.lock() {
+            // Dropping the handle without terminating is the handover.
+            let _ = job.take();
+        }
+    }
+
     /// Signal the tree now, whatever `killed` says.
     fn terminate(&self) {
+        let pid = self.state.pid.load(Ordering::SeqCst);
+        if pid == 0 {
+            return;
+        }
         #[cfg(unix)]
         {
-            let pgid = self.state.pgid.load(Ordering::SeqCst);
-            if pgid > 0 {
-                // Safe: `killpg` on a group this session created.
-                unsafe {
-                    libc::killpg(pgid as libc::pid_t, libc::SIGKILL);
-                }
+            // Safe: `killpg` on a group this session created.
+            unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
             }
         }
         #[cfg(windows)]
-        if let Some(job) = &self.state.job {
-            job.terminate_job();
+        {
+            if let Ok(job) = self.state.job.lock()
+                && let Some(job) = job.as_ref()
+            {
+                job.terminate_job();
+                return;
+            }
+            // Without a job handle the shim itself is the only thing left to
+            // signal; its own Job Object is closed with it.
+            win::terminate(pid);
         }
     }
 
     pub fn is_killed(&self) -> bool {
         self.state.killed.load(Ordering::SeqCst)
+    }
+
+    pub fn is_detached(&self) -> bool {
+        self.state.detached.load(Ordering::SeqCst)
     }
 }
 
@@ -240,29 +289,42 @@ impl Running {
     }
 }
 
+/// Windows: the shim's Job Object, and the two raw calls the session needs to
+/// spawn a suspended child into it.
 #[cfg(windows)]
-mod win {
+pub mod win {
     use std::ffi::c_void;
     use std::io;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
     };
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, OpenJobObjectW,
         SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, OpenThread, PROCESS_SET_QUOTA, PROCESS_TERMINATE, ResumeThread,
-        THREAD_SUSPEND_RESUME, TerminateProcess,
+        OpenProcess, OpenThread, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+        ResumeThread, THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
     };
 
     pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
+    pub const DETACHED_PROCESS: u32 = 0x0000_0008;
+    pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
-    /// A Job Object handle. Closing it (Drop) kills every process still inside.
+    /// Assign, query, terminate and change the job: everything the shim and the
+    /// canceller need by name (`JOB_OBJECT_ALL_ACCESS`).
+    const JOB_ACCESS: u32 = 0x001F_001F;
+
+    /// A Job Object handle. The session holds one per call; the call's shim
+    /// opens its own by name, which is what lets a promoted job outlive the
+    /// session's handle. The job is not kill-on-close: whoever stops the call
+    /// terminates it explicitly, and the shim watches its owner.
     #[derive(Debug)]
     pub struct Job(HANDLE);
 
@@ -271,14 +333,19 @@ mod win {
     unsafe impl Sync for Job {}
 
     impl Job {
-        pub fn create() -> Option<Job> {
+        /// Create (or open) the named job for one call.
+        pub fn create_named(name: &str) -> Option<Job> {
+            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
             unsafe {
-                let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                let handle = CreateJobObjectW(std::ptr::null(), wide.as_ptr());
                 if handle.is_null() {
                     return None;
                 }
                 let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                // Descendants may break away so a `kelir bg run` inside a call
+                // is never trapped in the call's job; the job itself does not
+                // kill on close (the shim watches its owner instead).
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
                 let ok = SetInformationJobObject(
                     handle,
                     JobObjectExtendedLimitInformation,
@@ -287,6 +354,18 @@ mod win {
                 );
                 if ok == 0 {
                     CloseHandle(handle);
+                    return None;
+                }
+                Some(Job(handle))
+            }
+        }
+
+        /// Open a job another process created, by name.
+        pub fn open(name: &str) -> Option<Job> {
+            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe {
+                let handle = OpenJobObjectW(JOB_ACCESS, 0, wide.as_ptr());
+                if handle.is_null() {
                     return None;
                 }
                 Some(Job(handle))
@@ -321,8 +400,15 @@ mod win {
         }
     }
 
-    /// Kill one process by id, for the case where it never made it into its
-    /// Job Object.
+    impl Drop for Job {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    /// Kill one process by id.
     pub fn terminate(pid: u32) {
         unsafe {
             let process = OpenProcess(PROCESS_TERMINATE, 0, pid);
@@ -333,7 +419,32 @@ mod win {
         }
     }
 
-    impl Drop for Job {
+    /// Watch another process without polling: the handle is signalled when it
+    /// exits. Used by the shim to tell a session that died (a `kill -9`, a
+    /// closed terminal) from one that promoted it and walked away.
+    #[derive(Debug)]
+    pub struct OwnerWatch(HANDLE);
+
+    unsafe impl Send for OwnerWatch {}
+    unsafe impl Sync for OwnerWatch {}
+
+    impl OwnerWatch {
+        pub fn open(pid: u32) -> Option<Self> {
+            unsafe {
+                let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+                if process.is_null() {
+                    return None;
+                }
+                Some(OwnerWatch(process))
+            }
+        }
+
+        pub fn gone(&self) -> bool {
+            unsafe { WaitForSingleObject(self.0, 0) == WAIT_OBJECT_0 }
+        }
+    }
+
+    impl Drop for OwnerWatch {
         fn drop(&mut self) {
             unsafe {
                 CloseHandle(self.0);
@@ -393,6 +504,15 @@ mod tests {
     }
 
     #[test]
+    fn a_detached_group_is_never_killed() {
+        let group = ProcessGroup::new();
+        group.detach();
+        assert!(group.is_detached());
+        assert!(!group.kill(), "a promoted job is not the session's to kill");
+        assert!(!group.is_killed());
+    }
+
+    #[test]
     fn the_running_registry_tracks_and_kills_keys() {
         let running = Running::new();
         assert!(running.keys().is_empty());
@@ -415,5 +535,21 @@ mod tests {
             assert!(!observed.is_killed());
         }
         assert!(observed.is_killed());
+    }
+
+    #[test]
+    fn a_kept_group_that_was_promoted_survives_the_session() {
+        let group = ProcessGroup::new();
+        let observed = group.clone();
+        {
+            let groups = SessionGroups::new();
+            groups.keep(group);
+            // Promotion detaches it: the session no longer owns the job.
+            observed.detach();
+        }
+        assert!(
+            !observed.is_killed(),
+            "a promoted job died with the session"
+        );
     }
 }

@@ -334,6 +334,36 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             spilled,
             result: spill_payload(blobs, seq, "result", result)?,
         },
+        // A background job's command line is the only field that could grow:
+        // the rest are ids, paths and numbers.
+        EventBody::BgStarted {
+            bg_id,
+            call_id,
+            cmd,
+            pid,
+            out_path,
+        } => EventBody::BgStarted {
+            bg_id,
+            call_id,
+            cmd: spill_payload(blobs, seq, "bg.cmd", cmd)?,
+            pid,
+            out_path,
+        },
+        EventBody::BgSettled {
+            bg_id,
+            call_id,
+            cmd,
+            exit_code,
+            state,
+            out_path,
+        } => EventBody::BgSettled {
+            bg_id,
+            call_id,
+            cmd: spill_payload(blobs, seq, "bg.cmd", cmd)?,
+            exit_code,
+            state,
+            out_path,
+        },
         EventBody::TurnEnded {
             outcome,
             final_text,
@@ -514,6 +544,34 @@ pub enum EventBody {
         outcome: String,
         final_text: Payload,
     },
+    /// A background job exists: an explicit `kelir bg run` (which reports
+    /// itself over the session socket) or a bash call promoted past
+    /// `promote_after`. `bg_id` is the job's id: the call's output directory
+    /// name for a promoted call, `bg_<ulid>` for an explicit job. `call_id` is
+    /// the provider call id of the bash call that started it, when there was
+    /// one.
+    BgStarted {
+        bg_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        cmd: Payload,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pid: Option<u32>,
+        out_path: String,
+    },
+    /// A background job settled (exited or was cancelled) while this session
+    /// owned its log. `state` is `exited` or `cancelled`; the wake-up message
+    /// the model reads is the `user` event that follows it.
+    BgSettled {
+        bg_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        cmd: Payload,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        state: String,
+        out_path: String,
+    },
     /// A compaction: everything up to `through_seq` is replaced by `summary`,
     /// except the pinned messages. `by` is `user`, `agent` or `auto`; the cache
     /// restart is inherent (it is the reason the field is here) and recorded so
@@ -578,6 +636,8 @@ impl LogEvent {
             EventBody::ToolStarted { .. } => "tool_started",
             EventBody::ToolSettled { .. } => "tool_settled",
             EventBody::TurnEnded { .. } => "turn_ended",
+            EventBody::BgStarted { .. } => "bg_started",
+            EventBody::BgSettled { .. } => "bg_settled",
             EventBody::Compacted { .. } => "compacted",
             EventBody::Resumed { .. } => "resumed",
             EventBody::Error { .. } => "error",
@@ -841,6 +901,21 @@ mod tests {
             EventBody::TurnEnded {
                 outcome: "done".into(),
                 final_text: "done".into(),
+            },
+            EventBody::BgStarted {
+                bg_id: "bg_01".into(),
+                call_id: Some("call_1".into()),
+                cmd: "sleep 60".into(),
+                pid: Some(4242),
+                out_path: "bg/bg_01.out".into(),
+            },
+            EventBody::BgSettled {
+                bg_id: "bg_01".into(),
+                call_id: None,
+                cmd: "sleep 60".into(),
+                exit_code: Some(0),
+                state: "exited".into(),
+                out_path: "bg/bg_01.out".into(),
             },
             EventBody::Compacted {
                 through_seq: 7,

@@ -438,6 +438,10 @@ async fn drive(opts: Options) -> u8 {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
     ipc::serve(listener, tx.clone());
+    // Background jobs: `kelir bg run` reports itself over the socket, and this
+    // watcher is the safety net that also catches a promoted call settling
+    // while the session runs. Both arrive as one `bg` verb (see [`Session::note_bg`]).
+    watch_bg(session.dir.join("bg"), tx.clone());
 
     // The interactive session: the TUI runs as a task beside the loop, and all
     // it can do is send verbs into the same channel the socket feeds.
@@ -500,6 +504,39 @@ async fn drive(opts: Options) -> u8 {
     }
     session.print_result(code);
     code
+}
+
+/// Watch this session's `bg/` for jobs that start or settle, and push each
+/// change into the same channel the socket feeds. The session stays the only
+/// writer of the log: the watcher only says what happened, and the session
+/// records it at the next boundary (or immediately when it is idle).
+fn watch_bg(dir: PathBuf, tx: mpsc::UnboundedSender<Incoming>) {
+    tokio::spawn(async move {
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        loop {
+            tokio::time::sleep(crate::bg::WATCH).await;
+            for status in crate::bg::list(&dir) {
+                if !status.is_job() {
+                    continue;
+                }
+                if !seen.insert((status.id.clone(), status.state.clone())) {
+                    continue;
+                }
+                let Ok(args) = serde_json::to_value(&status) else {
+                    continue;
+                };
+                let (reply, _answer) = oneshot::channel();
+                let incoming = Incoming {
+                    request: Request::new("bg", args, "job"),
+                    reply,
+                };
+                if tx.send(incoming).is_err() {
+                    return;
+                }
+            }
+        }
+    });
 }
 
 async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
@@ -732,13 +769,18 @@ impl Session {
         let events_path = prepared.dir.join("events.jsonl");
         let writer = EventLog::open(&events_path)
             .map_err(|error| format!("cannot open {}: {error}", events_path.display()))?;
-        let ctx = Ctx::new(
-            prepared.dir.clone(),
-            prepared.cwd.clone(),
-            prepared.cfg.shell.clone(),
-            prepared.cfg.spill_limit,
-            prepared.sock.clone(),
-        );
+        let ctx = {
+            let mut ctx = Ctx::new(
+                prepared.dir.clone(),
+                prepared.cwd.clone(),
+                prepared.cfg.shell.clone(),
+                prepared.cfg.spill_limit,
+                prepared.sock.clone(),
+            );
+            ctx.session_id = prepared.id.clone();
+            ctx.promote_after = prepared.cfg.promote_after;
+            ctx
+        };
         let reopened = prepared.resume.is_some();
         let mut session = Session {
             id: prepared.id.clone(),
@@ -898,6 +940,25 @@ impl Session {
             self.compact_request = Some(CompactRequest { by: "agent", focus });
             self.emit(UiEvent::Info(
                 "kelir: resumed · a queued compaction is applied at the next step".to_string(),
+            ));
+        }
+        // Background jobs that started or settled while no session was running:
+        // the shim's status file is the record, and this is where it reaches the
+        // log (`bg_started`, `bg_settled` and the message that wakes the model).
+        let mut woke = false;
+        for status in crate::bg::list(&self.dir.join("bg")) {
+            if !status.is_job() {
+                continue;
+            }
+            woke |= self.note_bg(&status)?;
+        }
+        if woke {
+            // A job settling while the session was down *is* something to do:
+            // the resumed turn reads the message like any other.
+            self.has_task = true;
+            self.emit(UiEvent::Info(
+                "kelir: resumed · a background job settled while this session was not running"
+                    .to_string(),
             ));
         }
         if !self.pending_task.trim().is_empty() {
@@ -1225,6 +1286,11 @@ impl Session {
                         });
                     }
                 }
+                Verb::Bg(status) => {
+                    if self.note_bg(&status)? {
+                        applied.messages += 1;
+                    }
+                }
             }
         }
         self.sync();
@@ -1258,6 +1324,7 @@ impl Session {
     fn take_turn_messages(&mut self) -> Option<TurnStart> {
         let mut messages = Vec::new();
         let mut end = false;
+        let mut woke = false;
         for pending in self.scheduler.due(Boundary::TurnEnd) {
             match pending.verb {
                 Verb::Say { text, now } => messages.push(Message {
@@ -1270,6 +1337,9 @@ impl Session {
                     delivery: "later",
                     from: pending.from,
                 }),
+                // A job report that arrived while the turn was ending: the
+                // wake message is written here, and the next turn reads it.
+                Verb::Bg(status) => woke |= self.note_bg(&status).unwrap_or(false),
                 Verb::End => end = true,
                 Verb::Stop { .. }
                 | Verb::Model { .. }
@@ -1279,11 +1349,52 @@ impl Session {
         }
         if end {
             Some(TurnStart::End)
-        } else if messages.is_empty() {
-            None
-        } else {
+        } else if !messages.is_empty() {
             Some(TurnStart::Messages(messages))
+        } else if woke {
+            // The message is already in the log; the turn reads it from the
+            // fold like any other.
+            Some(TurnStart::Messages(Vec::new()))
+        } else {
+            None
         }
+    }
+
+    /// Record what a job's status file says: `bg_started` once, and — when it
+    /// settled — `bg_settled` plus the `user` message from `job` that wakes the
+    /// agent. Returns whether a wake message was written.
+    ///
+    /// The log is the record and the dedupe: a report that arrives twice (the
+    /// socket and the watcher, or a watcher restarted by a resume) is recorded
+    /// once.
+    fn note_bg(&mut self, status: &crate::bg::Status) -> Result<bool, String> {
+        let started = self.events.iter().any(|event| {
+            matches!(&event.body, EventBody::BgStarted { bg_id, .. } if bg_id == &status.id)
+        });
+        if !started {
+            self.record(crate::bg::started_body(status))?;
+        }
+        if !status.settled() {
+            self.sync();
+            return Ok(false);
+        }
+        let settled = self.events.iter().any(|event| {
+            matches!(&event.body, EventBody::BgSettled { bg_id, .. } if bg_id == &status.id)
+        });
+        if settled {
+            return Ok(false);
+        }
+        self.record(crate::bg::settled_body(status))?;
+        let text = crate::bg::wake_text(status);
+        self.record(EventBody::User {
+            text: Payload::text(text.clone()),
+            from: "job".into(),
+            delivery: "next".into(),
+            attachments: Vec::new(),
+        })?;
+        self.emit(UiEvent::Info(format!("» {}", one_line(&text))));
+        self.sync();
+        Ok(true)
     }
 
     fn record_messages(&mut self, messages: Vec<Message>) -> Result<(), String> {
@@ -2052,6 +2163,7 @@ impl Session {
             };
             let gate = gates[index].clone();
             let tx = done_tx.clone();
+            let call_id = call.id.clone();
             handles.push(tokio::spawn(async move {
                 let started = Instant::now();
                 let outcome = if gate.load(Ordering::SeqCst) {
@@ -2059,7 +2171,7 @@ impl Session {
                 } else if let Some(preset) = preset {
                     preset
                 } else {
-                    tools::dispatch(&name, &args, &ctx, &dir).await
+                    tools::dispatch(&name, &args, &ctx, &dir, &call_id).await
                 };
                 let _ = tx.send((index, outcome, started.elapsed())).await;
             }));
@@ -2206,6 +2318,17 @@ impl Session {
                 spilled: outcome.spilled,
                 result: outcome.result.clone().into(),
             })?;
+            // A promoted call became a background job at this instant: a reader
+            // of the log should see the job, not have to infer it from the
+            // `promoted` outcome. The status file the shim already wrote is
+            // the truth (`bg_started`, and the wake message if it settled
+            // while the model was still reading this result).
+            if outcome.outcome == "promoted"
+                && let Some(status) =
+                    crate::bg::Status::read(&crate::bg::status_path(&self.dir.join("bg"), dir))
+            {
+                let _ = self.note_bg(&status);
+            }
             // The TUI renders its own line from `UiEvent::ToolSettled`; only the
             // headless path prints here, so the painter is the only writer.
             if !self.json && !self.tui {

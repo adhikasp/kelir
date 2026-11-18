@@ -148,6 +148,13 @@ impl Capture {
         self.inline.len() + self.tail.len()
     }
 
+    /// The last [`TAIL_BYTES`] of output, lossily decoded: what a promoted call
+    /// shows the model so it can see where the job had got to.
+    pub fn tail_text(&self) -> String {
+        let tail: Vec<u8> = self.tail.iter().copied().collect();
+        String::from_utf8_lossy(&tail).into_owned()
+    }
+
     /// What the model sees, and whether the output spilled.
     pub fn render(&self, exit_code: Option<i32>, out_path: &Path) -> (String, bool) {
         if !self.spilled() {
