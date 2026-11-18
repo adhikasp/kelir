@@ -740,6 +740,13 @@ enum Step {
     Key(Event),
 }
 
+/// How long the input thread waits for a key before checking again. A short
+/// poll, never a blocking `read`: on Unix the cursor-position query ratatui
+/// makes when the window is resized needs the same event-reader lock, and a
+/// thread parked in `read()` makes that query time out (and the UI die) the
+/// first time the terminal changes size.
+const KEY_POLL: Duration = Duration::from_millis(30);
+
 /// Take the terminal (raw mode, panic hook, inline viewport), the keyboard, and
 /// the session's event stream. The caller has already checked that stdout is a
 /// terminal.
@@ -764,20 +771,22 @@ pub fn start(
     }
     let (key_tx, keys) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
-        // Blocks until the process exits or the terminal goes away: this read
-        // is the only terminal input, and it never runs on the async loop.
         loop {
-            match ratatui::crossterm::event::read() {
-                Ok(event) => {
-                    let keep = match &event {
-                        Event::Key(key) => key.kind != KeyEventKind::Release,
-                        Event::Paste(_) | Event::Resize(_, _) => true,
-                        _ => false,
-                    };
-                    if keep && key_tx.send(event).is_err() {
-                        return;
+            match ratatui::crossterm::event::poll(KEY_POLL) {
+                Ok(true) => match ratatui::crossterm::event::read() {
+                    Ok(event) => {
+                        let keep = match &event {
+                            Event::Key(key) => key.kind != KeyEventKind::Release,
+                            Event::Paste(_) | Event::Resize(_, _) => true,
+                            _ => false,
+                        };
+                        if keep && key_tx.send(event).is_err() {
+                            return;
+                        }
                     }
-                }
+                    Err(_) => return,
+                },
+                Ok(false) => {}
                 Err(_) => return,
             }
         }
