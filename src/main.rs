@@ -9,6 +9,7 @@ async fn main() -> ExitCode {
     let code = match cli.command {
         Command::Run(args) => kelir::session::run(args).await,
         Command::Ask(args) => kelir::session::ask(args).await,
+        Command::Ctl(args) => kelir::ctl::ctl(args).await,
     };
     ExitCode::from(code)
 }

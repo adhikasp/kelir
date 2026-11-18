@@ -50,25 +50,41 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str) -> ToolOutcome {
         .args(&ctx.shell[1..])
         .arg(command)
         .current_dir(&ctx.cwd)
+        .env("KELIR_SOCK", &ctx.sock)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     let group = ProcessGroup::new();
     group.configure(&mut process);
+    // Registered *before* the process exists, so a `stop` that arrives while
+    // the child is being created still finds (and kills) it.
+    ctx.running.insert(dir, group.clone());
 
     let mut child = match process.spawn() {
         Ok(child) => child,
         Err(error) => {
+            ctx.running.remove(dir);
             return ToolOutcome::error(format!("cannot start {}: {error}", ctx.shell[0]));
         }
     };
-    if let Some(pid) = child.id() {
-        group.assign(pid);
+    match child.id() {
+        Some(pid) => {
+            if let Err(error) = group.spawned(pid) {
+                let _ = child.kill().await;
+                ctx.running.remove(dir);
+                return ToolOutcome::error(error);
+            }
+        }
+        None => {
+            let _ = child.kill().await;
+            ctx.running.remove(dir);
+            return ToolOutcome::error("the shell started without a pid");
+        }
     }
     // The group outlives the call: closing it here would kill a child the
     // command deliberately left running, and the session owns it anyway.
-    ctx.keep_group(group);
+    ctx.keep_group(group.clone());
 
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
     let mut pumps = Vec::new();
@@ -127,6 +143,10 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str) -> ToolOutcome {
 
     let _ = out_file.flush().await;
     let _ = out_file.sync_all().await;
+
+    // The call is no longer running: `stop --call` must not target it, and the
+    // batch counts it as settled (not stopped/aborted).
+    ctx.running.remove(dir);
 
     if let Some(error) = write_error {
         return ToolOutcome::error(format!("cannot write {}: {error}", out_path.display()));

@@ -341,6 +341,19 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             outcome,
             final_text: spill_payload(blobs, seq, "final_text", final_text)?,
         },
+        EventBody::Verb {
+            name,
+            args,
+            from,
+            boundary,
+            error,
+        } => EventBody::Verb {
+            name,
+            args: spill_payload(blobs, seq, "verb.args", args)?,
+            from,
+            boundary,
+            error,
+        },
         other => other,
     })
 }
@@ -443,6 +456,20 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allowance: Option<Value>,
     },
+    /// Every verb received, applied or not.
+    Verb {
+        name: String,
+        #[serde(default)]
+        args: Payload,
+        #[serde(rename = "from")]
+        from: String,
+        /// Where it applies (`now`, `next_step`, `queued`, `turn_end`) or
+        /// `rejected` when it was refused.
+        boundary: String,
+        /// Why it was refused, when it was.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     ToolStarted {
         call_id: String,
         name: String,
@@ -502,6 +529,7 @@ impl LogEvent {
             EventBody::StepStarted { .. } => "step_started",
             EventBody::Assistant { .. } => "assistant",
             EventBody::Usage { .. } => "usage",
+            EventBody::Verb { .. } => "verb",
             EventBody::ToolStarted { .. } => "tool_started",
             EventBody::ToolSettled { .. } => "tool_settled",
             EventBody::TurnEnded { .. } => "turn_ended",
@@ -724,6 +752,13 @@ mod tests {
                 name: "note".into(),
                 text: Some("try this".into()),
                 path: None,
+            },
+            EventBody::Verb {
+                name: "say".into(),
+                args: json!({"text": "hi", "now": true}).into(),
+                from: "ctl".into(),
+                boundary: "now".into(),
+                error: None,
             },
         ]
     }

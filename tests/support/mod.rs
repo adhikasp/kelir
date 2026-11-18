@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,6 +16,10 @@ use tokio::net::{TcpListener, TcpStream};
 pub enum Reply {
     /// A complete SSE body, sent with a Content-Length.
     Sse(String),
+    /// The same, after a delay: lets a verb arrive while a step is in flight.
+    SseAfter(Duration, String),
+    /// The same, but held until the test opens the gate.
+    Gated(Arc<tokio::sync::Notify>, String),
     /// An SSE head plus a partial body, then the connection closes.
     Disconnect(String),
     /// A plain HTTP error.
@@ -160,14 +164,15 @@ async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
 
     match reply {
         Some(Reply::Sse(body)) => {
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(head.as_bytes()).await;
-            let _ = stream.write_all(body.as_bytes()).await;
-            let _ = stream.flush().await;
-            let _ = stream.shutdown().await;
+            write_sse(&mut stream, &body).await;
+        }
+        Some(Reply::SseAfter(delay, body)) => {
+            tokio::time::sleep(delay).await;
+            write_sse(&mut stream, &body).await;
+        }
+        Some(Reply::Gated(gate, body)) => {
+            gate.notified().await;
+            write_sse(&mut stream, &body).await;
         }
         Some(Reply::Disconnect(partial)) => {
             let head =
@@ -203,6 +208,17 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+async fn write_sse(stream: &mut TcpStream, body: &str) {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(head.as_bytes()).await;
+    let _ = stream.write_all(body.as_bytes()).await;
+    let _ = stream.flush().await;
+    let _ = stream.shutdown().await;
 }
 
 // ---------------------------------------------------------------- SSE script
@@ -429,4 +445,233 @@ pub async fn run_task(
         cwd,
         _temp: temp,
     }
+}
+
+// --------------------------------------------------- a running session + ctl
+
+/// A `kelir run` (usually `--keep`) that stays up while the test drives it, and
+/// the `kelir ctl` surface that talks to it.
+pub struct LiveSession {
+    child: tokio::process::Child,
+    stdout: tokio::io::BufReader<tokio::process::ChildStdout>,
+    stderr: Arc<Mutex<String>>,
+    stderr_task: tokio::task::JoinHandle<()>,
+    _temp: tempfile::TempDir,
+    pub cwd: PathBuf,
+    pub config: PathBuf,
+    pub state: PathBuf,
+    pub id: String,
+    pub session_dir: PathBuf,
+    /// Every NDJSON line read from the session so far.
+    pub events: Vec<Value>,
+}
+
+pub struct Ctl {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl Ctl {
+    /// The one JSON response line the session wrote back.
+    pub fn response(&self) -> Value {
+        self.stdout
+            .lines()
+            .rfind(|line| line.trim_start().starts_with('{'))
+            .unwrap_or_else(|| panic!("no JSON answer; stderr: {}", self.stderr))
+            .parse()
+            .unwrap_or_else(|error| panic!("answer is not JSON ({error}); stderr: {}", self.stderr))
+    }
+}
+
+impl LiveSession {
+    pub async fn start(mock: &Mock, args: &[&str], extra_config: &str) -> LiveSession {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config = temp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!("provider = \"openrouter\"\nmodel = \"test/model\"\n{extra_config}"),
+        )
+        .unwrap();
+        let state = temp.path().join("state");
+
+        let mut command = live_command(&cwd, &config, &state, &mock.base_url());
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().expect("spawn kelir");
+        let stdout = child.stdout.take().expect("stdout");
+        let stderr = child.stderr.take().expect("stderr");
+        let buffer = Arc::new(Mutex::new(String::new()));
+        let task = tokio::spawn(drain(stderr, buffer.clone()));
+
+        let mut session = LiveSession {
+            child,
+            stdout: tokio::io::BufReader::new(stdout),
+            stderr: buffer,
+            stderr_task: task,
+            _temp: temp,
+            cwd,
+            config,
+            state,
+            id: String::new(),
+            session_dir: PathBuf::new(),
+            events: Vec::new(),
+        };
+        let first = session.next_event().await;
+        assert_eq!(first["type"], "session_started", "{first}");
+        session.id = first["id"].as_str().expect("session id").to_string();
+        session.session_dir = session.state.join("sessions").join(&session.id);
+        session
+    }
+
+    /// The next NDJSON event the session wrote.
+    pub async fn next_event(&mut self) -> Value {
+        let mut line = String::new();
+        let read = tokio::time::timeout(Duration::from_secs(30), async {
+            use tokio::io::AsyncBufReadExt as _;
+            self.stdout.read_line(&mut line).await
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no event within 30 s; stderr: {}", self.stderr()))
+        .expect("read the session output");
+        assert!(
+            read > 0,
+            "the session closed its output; stderr: {}",
+            self.stderr()
+        );
+        let value: Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|error| panic!("bad event line ({error}): {line}"));
+        self.events.push(value.clone());
+        value
+    }
+
+    /// Read until an event of this type arrives (never looks backwards).
+    pub async fn wait_for(&mut self, event_type: &str) -> Value {
+        loop {
+            let event = self.next_event().await;
+            assert_ne!(
+                event["type"], "result",
+                "the session ended before a {event_type} event"
+            );
+            if event["type"] == event_type {
+                return event;
+            }
+        }
+    }
+
+    /// `kelir ctl <this session> …`.
+    pub async fn ctl(&self, args: &[&str]) -> Ctl {
+        let mut full = vec![self.id.as_str()];
+        full.extend_from_slice(args);
+        ctl_in(&self.state, &self.cwd, &self.config, &full).await
+    }
+
+    /// `kelir ctl latest …`: exercises session resolution.
+    pub async fn ctl_latest(&self, args: &[&str]) -> Ctl {
+        let mut full = vec!["latest"];
+        full.extend_from_slice(args);
+        ctl_in(&self.state, &self.cwd, &self.config, &full).await
+    }
+
+    pub fn stderr(&self) -> String {
+        self.stderr.lock().unwrap().clone()
+    }
+
+    /// The session log as it is on disk right now.
+    pub fn log(&self) -> Vec<Value> {
+        std::fs::read_to_string(self.session_dir.join("events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    /// Ask the session to end and wait for it to exit.
+    pub async fn end(self) -> (i32, String) {
+        let answer = self.ctl(&["end"]).await;
+        assert_eq!(answer.code, 0, "end was refused: {}", answer.stdout);
+        self.finish().await
+    }
+
+    /// Kill the session the way a crash or a `taskkill` would: the socket dies
+    /// and the state dir stays behind, so a later `ctl` can be tried against it.
+    pub async fn kill(&mut self) {
+        let _ = self.child.kill().await;
+        let _ = self.child.wait().await;
+    }
+
+    /// Wait for the process to exit on its own.
+    pub async fn finish(mut self) -> (i32, String) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        match tokio::time::timeout_at(deadline, self.child.wait()).await {
+            Ok(Ok(status)) => {
+                let code = status.code().unwrap_or(-1);
+                let buffer = self.stderr.clone();
+                let _ = self.stderr_task.await;
+                (code, buffer.lock().unwrap().clone())
+            }
+            Ok(Err(error)) => panic!("wait for kelir: {error}"),
+            Err(_) => {
+                let _ = self.child.kill().await;
+                panic!("kelir did not exit within 30 s; stderr: {}", self.stderr());
+            }
+        }
+    }
+}
+
+fn live_command(
+    cwd: &PathBuf,
+    config: &PathBuf,
+    state: &PathBuf,
+    base_url: &str,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_kelir"));
+    command
+        .current_dir(cwd)
+        .env("KELIR_CONFIG", config)
+        .env("KELIR_CONFIG_DIR", state.join("no-config"))
+        .env("KELIR_STATE_DIR", state)
+        .env("KELIR_BASE_URL", base_url)
+        .env("OPENROUTER_API_KEY", "test-openrouter-key")
+        .env("KELIR_GO_API_KEY", "test-go-key");
+    command
+}
+
+/// `kelir ctl` against a state dir, with no live session in the test harness.
+pub async fn ctl_in(state: &Path, cwd: &Path, config: &Path, args: &[&str]) -> Ctl {
+    let mut command = live_command(
+        &cwd.to_path_buf(),
+        &config.to_path_buf(),
+        &state.to_path_buf(),
+        "http://127.0.0.1:9/v1",
+    );
+    command.arg("ctl");
+    for arg in args {
+        command.arg(arg);
+    }
+    let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+        .await
+        .expect("ctl did not finish within 30 s")
+        .expect("run ctl");
+    Ctl {
+        code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+async fn drain(mut stderr: tokio::process::ChildStderr, buffer: Arc<Mutex<String>>) {
+    use tokio::io::AsyncReadExt as _;
+    let mut text = Vec::new();
+    let _ = stderr.read_to_end(&mut text).await;
+    buffer
+        .lock()
+        .unwrap()
+        .push_str(&String::from_utf8_lossy(&text));
 }

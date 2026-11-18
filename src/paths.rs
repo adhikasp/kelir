@@ -5,7 +5,7 @@
 //! Config: `%APPDATA%\kelir` (Windows), the same Application Support dir
 //! (macOS), `$XDG_CONFIG_HOME/kelir` or `~/.config/kelir` (Linux).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn env_path(var: &str) -> Option<PathBuf> {
     std::env::var_os(var)
@@ -74,9 +74,72 @@ pub fn session_dir(id: &str) -> PathBuf {
     sessions_dir().join(id)
 }
 
+/// Session ids on disk, newest first. ULIDs sort by time, so the directory
+/// names sort into creation order.
+pub fn sessions_newest_first() -> Vec<String> {
+    sessions_newest_first_in(&sessions_dir())
+}
+
+pub fn sessions_newest_first_in(base: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = std::fs::read_dir(base)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("ses_"))
+        .collect();
+    ids.sort();
+    ids.reverse();
+    ids
+}
+
+/// Resolve `kelir ctl <session>`: an exact id, a unique prefix, or `latest`.
+///
+/// Returns the candidates in the order to try them: one for an exact id, the
+/// matches for a prefix, every session (newest first) for `latest`.
+pub fn session_candidates(spec: &str) -> Result<Vec<String>, String> {
+    session_candidates_in(&sessions_dir(), spec)
+}
+
+pub fn session_candidates_in(base: &Path, spec: &str) -> Result<Vec<String>, String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err("no session given (an id, a unique prefix, or `latest`)".into());
+    }
+    let all = sessions_newest_first_in(base);
+    if spec == "latest" {
+        if all.is_empty() {
+            return Err(format!("no sessions yet in {}", base.display()));
+        }
+        return Ok(all);
+    }
+    if all.iter().any(|id| id == spec) {
+        return Ok(vec![spec.to_string()]);
+    }
+    let matches: Vec<String> = all
+        .iter()
+        .filter(|id| id.starts_with(spec))
+        .cloned()
+        .collect();
+    match matches.len() {
+        0 => Err(format!("no session matches `{spec}`")),
+        _ => Ok(matches),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_sessions(name: &str, ids: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kelir-paths-{}-{name}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for id in ids {
+            std::fs::create_dir_all(dir.join(id)).unwrap();
+        }
+        dir
+    }
 
     #[test]
     fn state_dir_ends_with_kelir_or_override() {
@@ -93,5 +156,55 @@ mod tests {
     fn session_dir_is_under_sessions() {
         let dir = session_dir("ses_test");
         assert!(dir.ends_with("sessions/ses_test") || dir.ends_with("sessions\\ses_test"));
+    }
+
+    #[test]
+    fn sessions_are_listed_newest_first() {
+        let base = temp_sessions("order", &["ses_01a", "ses_03c", "ses_02b"]);
+        assert_eq!(
+            sessions_newest_first_in(&base),
+            vec![
+                "ses_03c".to_string(),
+                "ses_02b".to_string(),
+                "ses_01a".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn an_exact_id_wins_over_a_prefix() {
+        let base = temp_sessions("exact", &["ses_01a", "ses_02b"]);
+        assert_eq!(
+            session_candidates_in(&base, "ses_01a").unwrap(),
+            vec!["ses_01a".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_prefix_resolves_to_its_matches_newest_first() {
+        let base = temp_sessions("prefix", &["ses_aaa1", "ses_aaa2", "ses_bbb"]);
+        assert_eq!(
+            session_candidates_in(&base, "ses_aaa").unwrap(),
+            vec!["ses_aaa2".to_string(), "ses_aaa1".to_string()]
+        );
+    }
+
+    #[test]
+    fn latest_lists_every_session_newest_first() {
+        let base = temp_sessions("latest", &["ses_01a", "ses_02b"]);
+        assert_eq!(
+            session_candidates_in(&base, "latest").unwrap(),
+            vec!["ses_02b".to_string(), "ses_01a".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_unknown_session_is_an_error() {
+        let base = temp_sessions("missing", &["ses_01a"]);
+        let error = session_candidates_in(&base, "ses_zzz").unwrap_err();
+        assert!(error.contains("no session matches"), "{error}");
+        let empty = temp_sessions("empty", &[]);
+        assert!(session_candidates_in(&empty, "latest").is_err());
+        assert!(session_candidates_in(&base, "  ").is_err());
     }
 }

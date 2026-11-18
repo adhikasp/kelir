@@ -5,11 +5,10 @@ pub mod bash;
 pub mod edit;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use crate::proc::ProcessGroup;
+use crate::proc::{Running, SessionGroups};
 
 #[derive(Debug, Clone)]
 pub struct Ctx {
@@ -17,20 +16,33 @@ pub struct Ctx {
     pub cwd: PathBuf,
     pub shell: Vec<String>,
     pub spill_limit: usize,
+    /// The address of the session socket, exported to every child as
+    /// `KELIR_SOCK` (`kelir mcp` and `kelir bg` use it; tests assert it).
+    pub sock: String,
     /// Process groups of every call this session started. Holding them keeps
     /// the Windows Job Objects open past the call (a leftover background child
     /// is not killed by returning) and closes them when the session ends.
-    pub groups: Arc<Mutex<Vec<ProcessGroup>>>,
+    pub groups: SessionGroups,
+    /// The calls running right now, so a verb can kill one or all of them.
+    pub running: Running,
 }
 
 impl Ctx {
-    pub fn new(session_dir: PathBuf, cwd: PathBuf, shell: Vec<String>, spill_limit: usize) -> Self {
+    pub fn new(
+        session_dir: PathBuf,
+        cwd: PathBuf,
+        shell: Vec<String>,
+        spill_limit: usize,
+        sock: String,
+    ) -> Self {
         Self {
             session_dir,
             cwd,
             shell,
             spill_limit,
-            groups: Arc::new(Mutex::new(Vec::new())),
+            sock,
+            groups: SessionGroups::new(),
+            running: Running::new(),
         }
     }
 
@@ -41,8 +53,8 @@ impl Ctx {
         self.session_dir.join("commands").join(dir)
     }
 
-    pub fn keep_group(&self, group: ProcessGroup) {
-        self.groups.lock().unwrap().push(group);
+    pub fn keep_group(&self, group: crate::proc::ProcessGroup) {
+        self.groups.keep(group);
     }
 }
 
@@ -59,12 +71,49 @@ pub struct ToolOutcome {
 
 impl ToolOutcome {
     pub fn error(message: impl Into<String>) -> Self {
-        let result = message.into();
+        Self::new("error", message.into(), None)
+    }
+
+    /// The turn was stopped (or this call was) while it ran.
+    pub fn stopped(reason: &str) -> Self {
+        let result = if reason.is_empty() {
+            "stopped by user".to_string()
+        } else {
+            format!("stopped by user: {reason}")
+        };
+        Self::new("stopped", result, None)
+    }
+
+    /// The turn was stopped before this call started.
+    pub fn skipped(reason: &str) -> Self {
+        let result = if reason.is_empty() {
+            "[Skipped] the turn was stopped before this call ran".to_string()
+        } else {
+            format!("[Skipped] the turn was stopped before this call ran: {reason}")
+        };
+        Self::new("skipped", result, None)
+    }
+
+    /// The tool is turned off for this session; the list sent to the provider
+    /// never changed.
+    pub fn disabled(name: &str) -> Self {
+        Self::new(
+            "disabled",
+            format!(
+                "disabled by user: the `{name}` tool is off for this session (`kelir ctl <session> tools --enable {name}` turns it back on)"
+            ),
+            None,
+        )
+    }
+
+    fn new(outcome: &str, result: String, exit_code: Option<i32>) -> Self {
+        let bytes = result.len() as u64;
+        let lines = crate::spill::count_lines(result.as_bytes());
         Self {
-            outcome: "error".into(),
-            exit_code: None,
-            bytes: result.len() as u64,
-            lines: crate::spill::count_lines(result.as_bytes()),
+            outcome: outcome.into(),
+            exit_code,
+            bytes,
+            lines,
             out_path: String::new(),
             spilled: false,
             result,
@@ -72,8 +121,8 @@ impl ToolOutcome {
     }
 }
 
-/// The tool schemas sent to the provider. The same four names will exist for
-/// the whole session; later milestones add `spawn` and `compact`.
+/// The tool schemas sent to the provider. The same names exist for the whole
+/// session; later milestones add `spawn` and `compact`.
 pub fn specs() -> Vec<Value> {
     vec![
         json!({
@@ -142,6 +191,7 @@ mod tests {
             PathBuf::from("."),
             vec!["bash".into(), "-c".into()],
             10_240,
+            "s/ses_1/sock".into(),
         )
     }
 
@@ -168,5 +218,28 @@ mod tests {
         let dir = ctx().call_dir("12-3-2");
         assert!(dir.ends_with(PathBuf::from("commands").join("12-3-2")));
         assert!(!dir.to_string_lossy().contains("call_"));
+    }
+
+    #[test]
+    fn stopped_skipped_and_disabled_outcomes_carry_readable_results() {
+        let stopped = ToolOutcome::stopped("we changed plan");
+        assert_eq!(stopped.outcome, "stopped");
+        assert_eq!(stopped.result, "stopped by user: we changed plan");
+        assert_eq!(ToolOutcome::stopped("").result, "stopped by user");
+
+        let skipped = ToolOutcome::skipped("stopped");
+        assert_eq!(skipped.outcome, "skipped");
+        assert!(
+            skipped.result.starts_with("[Skipped]"),
+            "{}",
+            skipped.result
+        );
+        assert!(!ToolOutcome::skipped("").result.contains('('));
+
+        let disabled = ToolOutcome::disabled("bash");
+        assert_eq!(disabled.outcome, "disabled");
+        assert!(disabled.result.contains("disabled by user"));
+        assert!(disabled.result.contains("--enable bash"));
+        assert_eq!(disabled.exit_code, None);
     }
 }

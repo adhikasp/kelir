@@ -13,7 +13,10 @@ The spec names `tokio`, `serde`, one HTTP client (`reqwest` + rustls), `clap`, `
 - **`ulid`** — `ses_<ulid>` session ids, the id shape the spec fixes.
 - **`windows-sys`** (Windows only) — `CreateJobObjectW`, `SetInformationJobObject` and
   `AssignProcessToJobObject` for the per-call Job Object with kill-on-close; `std` exposes only
-  `creation_flags`, not job objects.
+  `creation_flags`, not job objects. M1 also uses it for `CREATE_SUSPENDED`, `OpenThread`/`ResumeThread`
+  and a `Toolhelp32` thread walk (N2).
+- **`libc`** (Unix only) — `killpg(2)` is the only way to signal a whole process group; `std` has no
+  process-group signalling. The spec's *Shell and platforms* table names `killpg` for `stop`.
 
 ## Dev only (not linked into the binary)
 

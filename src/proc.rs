@@ -84,6 +84,11 @@ impl ProcessGroup {
         }
         #[cfg(not(any(unix, windows)))]
         let _ = pid;
+        // A verb may have killed this call while the process was being created:
+        // the kill could not reach a process that did not exist yet.
+        if self.is_killed() {
+            self.terminate();
+        }
         Ok(())
     }
 
@@ -92,6 +97,12 @@ impl ProcessGroup {
         if self.state.killed.swap(true, Ordering::SeqCst) {
             return false;
         }
+        self.terminate();
+        true
+    }
+
+    /// Signal the tree now, whatever `killed` says.
+    fn terminate(&self) {
         #[cfg(unix)]
         {
             let pgid = self.state.pgid.load(Ordering::SeqCst);
@@ -106,7 +117,6 @@ impl ProcessGroup {
         if let Some(job) = &self.state.job {
             job.terminate();
         }
-        true
     }
 
     pub fn is_killed(&self) -> bool {
@@ -131,7 +141,11 @@ struct GroupsInner(Mutex<Vec<ProcessGroup>>);
 
 impl Drop for GroupsInner {
     fn drop(&mut self) {
-        let groups = self.0.lock().map(|groups| groups.clone()).unwrap_or_default();
+        let groups = self
+            .0
+            .lock()
+            .map(|groups| groups.clone())
+            .unwrap_or_default();
         for group in groups {
             group.kill();
         }
@@ -217,7 +231,7 @@ mod win {
 
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, THREADENTRY32, TH32CS_SNAPTHREAD, Thread32First, Thread32Next,
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
     };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,

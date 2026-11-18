@@ -227,6 +227,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 vec!["bash".into(), "-c".into()],
                 10_240,
+                String::new(),
             ),
             _dir: dir,
         }

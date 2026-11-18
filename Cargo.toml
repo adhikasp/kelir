@@ -32,10 +32,14 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 interprocess = { version = "2.4.8", features = ["tokio"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }

@@ -41,7 +41,42 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   for output already in the pipe. A leftover background child keeps running and
   is not tracked (that is `bg`, M4). Its process group is held by the session so
   it is not killed by the call returning; closing the session closes the group.
-- **TODO (N2): the child is assigned to its Windows Job Object after spawn**, so
-  a child that forks in the first microseconds could escape. M1 (which needs a
-  reliable `stop`) switches to `CREATE_SUSPENDED` + `AssignProcessToJobObject` +
-  resume, or `PROC_THREAD_ATTRIBUTE_JOB_LIST`.
+- **N2 (fixed in M1): the child is created suspended** (`CREATE_SUSPENDED`),
+  assigned to its Job Object and only then resumed, so it cannot run user code
+  before it is inside the job. `std` does not expose the thread handle, so the
+  thread is found through a `CreateToolhelp32Snapshot` walk of the (still
+  suspended) process. Unix needs nothing extra: `process_group(0)` is applied
+  before `exec`.
+
+## M1
+
+- **The `verb` event carries two fields the spec's table does not name:**
+  `boundary` (`now`, `next_step`, `queued`, `turn_end`, or `rejected`) and, when
+  a verb was refused, `error`. They are what tells a reader of the log where the
+  verb applied or why it did not; `name`, `args` and `from` are as specified.
+- **`kelir ctl` validates a verb locally.** A malformed invocation (unknown verb,
+  `say` with no text, an unknown tool name) exits 2 without a socket round trip,
+  so nothing is logged: the request never reached the session. A verb the
+  *session* refuses (`stop --call <id>` for an id that is not running) is logged
+  with `"boundary": "rejected"` and answered `{"ok": false, "error": …}`.
+- **`model <target>` splits only on a configured provider name.** `model
+  openrouter/deepseek/deepseek-chat` switches the provider *and* the model;
+  `model deepseek/deepseek-chat` (whose first segment is not a provider) keeps
+  the current provider and replaces the model id, which is the common case on
+  OpenRouter, where model ids contain `/`.
+- **`step` is a session counter, not a turn counter.** In a `--keep` session the
+  second turn starts at the step after the first turn's last one, so `step` stays
+  unique in one log. `max_steps` still counts the steps of one turn.
+- **`later` while the session is idle starts a turn at once.** There is no turn
+  to end; the message is recorded with `delivery: "later"` and the process runs a
+  turn for it. Likewise a `say` still pending when a turn ends opens the next
+  turn instead of being dropped.
+- **`end` is a session verb, not a spec-table verb.** `kelir ctl <s> end` logs
+  `session_ended` and exits 0 (after a `turn_ended outcome=stopped` if a turn was
+  running). It exists for `--keep` sessions, which would otherwise have no way to
+  stop.
+- **A disabled call's outcome is `disabled`,** with the result text `disabled by
+  user: …`. The `tools` array in the request is untouched, as the cache requires.
+  A `stop` while calls run settles them as `stopped` (a process was running) or
+  `skipped` (the task never started) — both readable by the model.
+

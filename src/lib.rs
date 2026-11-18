@@ -7,8 +7,10 @@
 pub mod chat;
 pub mod cli;
 pub mod config;
+pub mod ctl;
 pub mod event;
 pub mod fold;
+pub mod ipc;
 pub mod paths;
 pub mod proc;
 pub mod provider;
@@ -18,6 +20,7 @@ pub mod sse;
 pub mod stream;
 pub mod tools;
 pub mod util;
+pub mod verbs;
 
 /// The crate version, as reported to providers and in the event log.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
