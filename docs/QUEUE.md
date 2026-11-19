@@ -54,3 +54,16 @@ STEER-3 implement, M5-M11. The repo is still local only: no remote, nothing push
 - Not started: STEER-1 review, STEER-2, STEER-3, M5-M11. The repo is local only (no remote, nothing pushed).
 - Panes: implementer t77 in the kelir-build Herdr tab; delete its opencode session after it finishes
   (`opencode session list` / `delete`). Keep `C:/Users/the maintainer/kelir-scratch/live.env` (OpenRouter key, outside repo).
+
+## State (2026-11-19 12:00) — Claude orchestrator resumed (pane t1x)
+
+- Verified committed HEAD gates: Linux 400 tests green; Windows 381/382 (one load-only flake:
+  `review_m4::r12_a_graceful_exit_leaves_a_promoted_job_running` "end was refused", passes alone and
+  3/3 in its own suite) — harden that test later.
+- STEER-1 review (opencode session) = PASS WITH FIXES: S1-S3 + N1-N5, brief docs/tasks/STEER-1-fixes.md.
+- First dogfood job running: **kelir (OpenCode Go, default model) implements STEER-1-fixes** in pane
+  t10w (tab kelir-build). Pinned binary C:/Users/the maintainer/kelir-scratch/bin/kelir-stable.exe (built at
+  94719d2). Next: fresh Claude reviewer, then fresh Claude transcript/retro pass over kelir's events.jsonl
+  (docs/retros/STEER-1-fixes.md), then STEER-2, STEER-3, M5-A...
+- herdr-app tab.new needs `--space <local space id>` (the focused space may be a Linux machine) and
+  `env -u SHELL`.
