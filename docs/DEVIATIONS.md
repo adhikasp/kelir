@@ -381,7 +381,8 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   whose job holds the tree on Windows), `cmd`, `out`, `kind` (`job`|`call`),
   `promoted`, `call` (the provider call id that started it), `job` (the Windows
   job object's name) and `error` (why the command could not start). States are
-  `running`, `exited`, `cancelled`.
+  `running`, `exited`, `cancelled` — and `lost`, which a *reader* reports for a
+  `running` status whose shim is gone (it is never written to the file).
 - **The status file is replaced atomically and read defensively.** A write goes
   to `<id>.status.<pid>.tmp` and then `rename`s over the real name (which
   replaces it on Windows too), so a reader sees the old file or the new one.
@@ -417,7 +418,14 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   boundary it can get and never between a tool call and its result; a malformed
   report is refused (`bg: not a job status: …`), not half-applied. A report from
   anyone but `job` is refused as well (`bg: an internal verb; jobs report
-  themselves`), so a `ctl` client cannot fabricate a job in the log.
+  themselves`), so a `ctl` client cannot fabricate a job in the log. The one
+  exception is `bg-spawn` (a `kelir bg run` asking its session to start the shim
+  outside the call's Job Object, see below): it is answered and not logged, and
+  the status file the shim writes is the record, exactly as for any job. A
+  routed job still reports itself to the session like any other (`bg run`
+  notifies after it reads the status), because the watcher's 250 ms poll would
+  otherwise put `bg_started` in the log after `turn_ended` of the call that
+  asked for it.
 - **The wake is `bg_settled` plus a `user` event with `from: "job"`**, written at
   the next boundary (or immediately when the session is idle, which starts a
   turn). The message is the spec's intent: `[bg job <id> exited 0 after 3.0s]`,
@@ -425,8 +433,10 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   to read the rest. **The fold renders the `user` message and not the `bg_`
   events**, so a job is reported exactly once and the live and resumed paths
   build the same request. `bg_settled` carries one field the spec's table does
-  not list, `state` (`exited`|`cancelled`), so a reader need not infer it from
-  `exit_code`.
+  not list, `state` (`exited`|`cancelled`|`lost`), so a reader need not infer it
+  from `exit_code`. A wake that follows a promoted `tool_settled` is written
+  after the whole batch's results, never between them: a call's results must stay
+  contiguous for the next request (M4 review N5).
 - **`resume` folds `bg/*.status` into the log** after the unknown-result block:
   for every job or promoted call, `bg_started` if the log lacks it, and
   `bg_settled` + the wake message if it settled while nothing was running. A
@@ -441,21 +451,63 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   job), waits up to 2 s for the shim to be gone and only then writes
   `state: "cancelled"`. The shim is the only writer while it lives, so the two
   can never interleave; if the job finished on its own first, that is reported
-  and nothing is overwritten.
-- **Windows: the call's Job Object is not `KILL_ON_JOB_CLOSE`, and the shim
-  watches its owner instead.** The spec asks that a detached job not be in a
-  kill-on-close job; a promoted call's tree is still the call's job object, kept
-  alive by the shim's own handle (the shim opens it by name, assigns the
-  suspended command to it and holds it until it exits), so closing the session's
-  handle does not take it down. What protects the other direction — a session
-  that dies **without** promoting — is the shim: it waits on the session's
-  process handle (Windows) or compares `getppid()` (Unix) and, within one 25 ms
-  poll, writes `cancelled` and takes the tree down. That also closes M3's
-  documented gap on Unix, where a `SIGKILL`ed session left a running call behind:
-  `tests/e2e_m4.rs` proves on both platforms that nothing keeps writing after the
-  session is killed. `CREATE_BREAKAWAY_FROM_JOB` is tried for a `kelir bg run`
-  shim and dropped only if an enclosing job forbids breakaway (the job then runs
-  inside whatever job the caller had).
+  and nothing is overwritten. **Nothing is signalled on the strength of a pid in
+  a status file**: `cancel` first checks that the process is the shim that wrote
+  the file (`proc::start_time` against the status's `started`, within 120 s) and
+  declines when it is not, because a status outlives its shim (a reboot, a
+  `taskkill /F`) and its pid can belong to somebody else by then (M4 review F5).
+- **Windows: the call's Job Object forbids breakaway and is `KILL_ON_JOB_CLOSE`
+  until promotion.** M4's first cut allowed breakaway so a `kelir bg run` inside
+  a call would not be trapped; an msys `spawn` asks for
+  `CREATE_BREAKAWAY_FROM_JOB` whenever the job allows it, so exec'd
+  grandchildren (`sleep.exe`, a nested `bash.exe`) left the call's tree and
+  neither `cancel` nor a killed session took them down (M4 review F1). The flag
+  is gone: the whole tree stays in the job, which is what makes "cancel kills
+  the job's process tree" true on Windows. A `kelir bg run` made inside a call
+  now asks the session to start its shim (the internal `bg-spawn` request, the
+  same `from: "job"` trust as `bg`): the session is outside the call's job, so
+  an explicit job still outlives the session. `KILL_ON_JOB_CLOSE` is back for an
+  unpromoted call's job (M4 review F6): a session that is killed outright still
+  has its job handles closed by the kernel, and a child a finished call left
+  behind (`cmd &`) goes with them; a promotion clears the flag before the
+  session closes its handle (`ProcessGroup::detach`), and the shim's own handle
+  plus its owner watch keep a promoted tree alive. What protects the other
+  direction — a session that dies **without** promoting — is the shim: it waits
+  on the session's process handle (Windows) or compares `getppid()` (Unix) and,
+  within one 25 ms poll, writes `cancelled` and takes the tree down. That also
+  closes M3's documented gap on Unix, where a `SIGKILL`ed session left a running
+  call behind: `tests/e2e_m4.rs` proves on both platforms that nothing keeps
+  writing after the session is killed.
+- **Unix: a finished call's shim stays as its tree's owner while the group is
+  not empty** (`proc::group_others`, a `/proc` scan on Linux). Without it a
+  `cmd &` child of a *finished* call outlived a `SIGKILL`ed session, because the
+  session's `killpg` only runs on a graceful exit (M4 review F6). The shim exits
+  the instant the group is empty — the common case is unchanged, and a call
+  settles on its *status file*, not on the shim process. The one platform gap:
+  where `/proc` cannot be read (macOS) `group_others` answers `None` and the
+  shim does not linger, so that half of the guarantee holds only on a graceful
+  exit there; macOS is compile-only today.
+- **`kelir bg out --follow` reads only what is new** (seek to the offset, read to
+  EOF), so following a job that writes a lot is not quadratic (M4 review N1).
+- **A job whose shim is gone is reported `lost`, and the status file is left
+  alone** (M4 review F4). `running` is what the shim wrote; a reader
+  (`bg ls`, `bg wait`, the session's watcher, `resume`) turns it into `lost` when
+  the shim is provably gone, with `error` saying so, so a `taskkill /F /IM
+  kelir.exe`, an OOM kill or a reboot can never leave a job that runs for ever.
+  Readers never write another process's status; `cancel` on a lost job reports
+  it and, on Windows, still takes the tree down by its job-object name (a name
+  is kelir's own namespace; a pid is not). A *call* whose shim dies before its
+  status settles now returns `outcome: "unknown"` with its partial output
+  instead of hanging, and its remaining tree is stopped.
+- **`kelir bg run` keeps the argument boundaries the caller wrote** (M4 review
+  F3): one word is a command line as written (shell syntax allowed), several
+  words are literal arguments, each quoted (`printf '[%s]' 'a b' c`). Shell
+  syntax belongs in one quoted word, which is how `bash -c` and every other
+  command line already work.
+- **`--cwd` (and a resumed session's recorded cwd) is the directory a call and a
+  job run in** (M4 review F2): the shim is spawned in it and the command inherits
+  it, on every path (`bash`, and `kelir bg run` both where the caller was and
+  through `bg-spawn`).
 - **Windows: the process clears the inherit flag on its own stdin/stdout/stderr**
   (`close_handle_inheritance`). A background job was holding the caller's pipe
   open — `kelir run --json | jq` stayed open for as long as a promoted job ran,
@@ -472,11 +524,15 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   it needs on its command line (`--dir --id --out --cmd --shell --shell-arg
   --kind --owner --call --job --sock`), so a shim is self-contained and
   detachable: `setsid` on Unix (the spec's word, via `pre_exec`),
-  `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB` on
-  Windows. A call's shim is instead grouped by the session (`process_group(0)` /
-  `CREATE_SUSPENDED` + Job Object) so that `stop` can reach it.
+  `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, plus
+  `CREATE_BREAKAWAY_FROM_JOB` when the caller's job allows it, on Windows. A
+  caller whose job forbids breakaway — a call's job, by design, or a harness's —
+  gets the shim without the breakaway flag, which is still outside the *call's*
+  job when the session starts it on request (`bg-spawn`). A call's shim is
+  instead grouped by the session (`process_group(0)` / `CREATE_SUSPENDED` + Job
+  Object) so that `stop` can reach it.
 - **A call's kill is now "kill the shim's group/job"** (Unix `killpg` on the
   shim's group, Windows `TerminateJobObject`), and a task cancelled mid-call
   still kills its tree (a `Drop` guard in the tool). A leftover `cmd &` child
-  keeps running, as documented for M0: the group/job is still held by the
-  session, so it dies when the session does.
+  keeps running, as documented for M0: the group/job is held by the session and
+  by a lingering shim, so it dies when the session does.
