@@ -12,7 +12,9 @@ Maintainer decision (2026-11-19). Small job; run right after M5-A is reviewed an
   turn with a fresh count. Resume (M3) treats a paused turn like a stopped one.
 - The TUI banner shows steps used/limit only when a limit is set.
 - Docs: SPEC.md (already updated), DEVIATIONS.md, README/usage.
-- After it lands the orchestrator removes `max_steps = 400` from the user config.
+- After it lands the orchestrator **deletes the `max_steps` line** from the user config (currently a stopgap
+  `max_steps = 4294967295`, because `0` is still fatal on the pre-STEER-4 binary: `turn_steps > 0` fails at step 1).
+  Delete the line; do not set `0`.
 
 ## Tests
 Unit: config parsing (unset, 0, N, invalid). E2E (mock): 150-step scripted turn completes with no limit;

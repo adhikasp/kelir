@@ -99,3 +99,6 @@ docs/tasks/STEER-4.md carry it. Code change touches src/config.rs + src/session.
 now (one writer rule), so STEER-4 runs **right after M5-A is reviewed**, before STEER-1-fixes. The 400 in
 %APPDATA%kelirconfig.toml stays until STEER-4 lands (else M5-A would hit the old 100 cap again).
 Order now: M5-A -> review -> retro -> STEER-4 -> STEER-1-fixes -> STEER-2 -> STEER-3 -> M5-B -> M6 ... M11.
+
+- User config stopgap (maintainer, 2026-11-19): `%APPDATA%kelirconfig.toml` has `max_steps = 4294967295` (not 400,
+  and not 0: `0` is fatal on the current binary). When STEER-4 lands: **delete that line**, do not set 0.
