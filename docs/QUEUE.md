@@ -144,3 +144,12 @@ retries). Decisions (maintainer: "fix that, retry with backoff"):
   parked** (stopped, resumes after STEER-5); steer1fix and steer2 parked (errored on 429, resume later with
   `ctl <session> say continue`, state dirs under kelir-wt/state/<job>).
 - Merge order: M5-A, steer4, steer5, steer1fix, steer2, steer3.
+
+## Update (2026-11-19 14:25) — M5-A gated, in review; first retro landed; STEER-6
+
+- M5-A (sources + skills): gates on main green (Windows 419, Linux 424); fresh reviewer pane t116 running.
+- Introspective pass on M5-A's transcript (Claude, pane t115) done: docs/retros/m5a.md (commit 8e9c74b): 99.4% cache
+  hit, 113 min, 320 steps; top findings: silent 8191-char bash command cut (Windows), design thrash (49% of completion
+  tokens), python-heredoc patches over `edit`. -> brief **STEER-6** (docs/tasks/STEER-6.md), runs after STEER-5 (a slot
+  and provider capacity), as a kelir-implemented job in its own worktree.
+- Order: steer4, steer5 (running) -> M5-A review fixes -> steer6 -> steer1fix -> steer2 -> steer3 -> M5-B -> M6...
