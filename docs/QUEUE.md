@@ -231,3 +231,11 @@ and the final config surface), before M5-B.
   heredocs to the 8 KB cut.
 - Running: buildinfra (t13n), tui2fix (t13t). Next to launch when a slot frees: steer11 (self-docs; after tui2 merges because it
   extends docs/reference created by tui2), steer7, steer8, steer9, steer1fix, steer2, then M5-B, M6.
+
+## Update (2026-11-20 06:40) — buildinfra merged (gate green), under review; workers
+
+- **buildinfra merged to main** (566379c) pending review; the new `bash scripts/gate.sh --linux` passed on the merged main:
+  fmt, clippy, nextest 641/641 (2 skipped), doctests, Linux. Use it instead of my gates.sh from now on. Reviewer pane running
+  (safety of the remote `prune`, lock under concurrency, nextest retries, lld/profile, doc numbers).
+- Known issue to fix before M12: `scripts/gate.sh` defaults the Linux machine name to a private host (repo must stay public-clean).
+- Running: steer2 (t144), steer7 (t145), tui2m (t146: merging main into tui2, conflicts).

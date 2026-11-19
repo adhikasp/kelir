@@ -1,0 +1,42 @@
+# Gate settings for cargo-nextest (docs/BUILD.md). `cargo test --lib` stays the
+# fast loop for one module; the gates use nextest because it runs every test in
+# its own process (a leaked child or a stray thread cannot take another test
+# down) and prints which tests needed a retry.
+[profile.default]
+# A retry is a flake to fix (STEER-9), never a pass: nextest prints `TRY n` and
+# the gate script lists every retried test. Two retries ride out a loaded box.
+retries = 2
+fail-fast = false
+# Four concurrent tests per worker; three workers build and test at once on a
+# 12-core desktop, and the suites are green serially (BUILD-INFRA rule 1).
+test-threads = 4
+# Bounds a hang only: a test still running after 4 x 90 s is killed with its
+# process tree and reported as timed out. STEER-9 replaced fixed sleeps with
+# event-driven waits whose ceilings are >= 60 s, so this is slack.
+slow-timeout = { period = "90s", terminate-after = 4 }
+
+# The TUI suite drives a real PTY, one process per test. Four of those at once
+# alongside the other suites is more load than the assertions expect: under it
+# e2e_tui::a_ctrl_c_before_the_first_message_does_not_stop_the_turn retried
+# (and that test also fails 1-in-6 on its own at -j1, so it is STEER-9's to fix;
+# this only keeps the gate from turning an existing flake into a red gate).
+# PTY tests get a group of their own, at most 2 at a time.
+[test-groups.pty]
+max-threads = 2
+
+[[profile.default.overrides]]
+filter = 'binary(e2e_tui)'
+test-group = 'pty'
+
+# The three process-heavy suites whose *existing* flakes (STEER-9) are the ones
+# that turn a loaded run red: each kills sessions, waits for trees to die and
+# scans for surviving pids. `cargo test` ran one test *binary* at a time, so
+# they never shared the box; nextest -j 4 runs four. Two at a time is enough to
+# keep the total under the worst case and costs about a second on a full run
+# (measured), because these are seconds each, not minutes.
+[test-groups.process-heavy]
+max-threads = 2
+
+[[profile.default.overrides]]
+filter = 'binary(e2e_m4) | binary(review_m4b) | binary(review_m4)'
+test-group = 'process-heavy'
