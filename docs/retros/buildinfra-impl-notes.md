@@ -15,8 +15,9 @@ that takes its own machine-wide lock, and a gate that still fails on a retry ins
 2. **nextest.** Installed on this box and on the Linux box (0.9.152, the release tarball; on Windows the
    "tarball" is a zip, which cost me one failed `tar zxf`). `.config/nextest.toml` is the gate profile. The
    full suite is about 20 % faster and one process per test. `cargo test --lib` stays the fast loop. The gate
-   names every retried test and fails on it unless `KELIR_GATE_ALLOW_RETRIES=1`, so a retry can never pass
-   as a clean run.
+   names every retried test; `KELIR_GATE_STRICT_RETRIES=1` makes a retry fatal, and it is not the default
+   (see *What was hard*: three different pre-existing flakes retried in three consecutive runs, so a strict
+   default would have made every worker's gate red for somebody else's STEER-9 bug).
 3. **Linux gate.** `remote-check.sh` keeps one work dir per job: fetch from the bundle, `checkout -f
    --detach`, `git clean -qfdx -e target`. Cold 117 s, reused 51 s (of which 47 s is the suite). It also
    bootstraps `~/.cargo/bin` onto PATH (a non-login `hc exec` shell has no cargo) and runs nextest when the

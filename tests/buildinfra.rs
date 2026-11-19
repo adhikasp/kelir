@@ -371,6 +371,40 @@ fn waiting_gives_up_with_exit_75_when_the_holder_never_returns() {
     }
 }
 
+// ------------------------------------------------------------------- scripts
+
+#[test]
+fn the_gate_script_keeps_the_measured_wins() {
+    let gate = read("scripts/gate.sh");
+    for (needle, why) in [
+        ("nextest run", "the gate runs nextest, not cargo test"),
+        ("--no-fail-fast", "one failing suite must not hide the rest"),
+        ("--retries 2", "the measured retry count"),
+        ("cargo test --doc", "nextest does not run doctests"),
+        (
+            "gate-lock.sh",
+            "the gate takes the machine-wide lock itself",
+        ),
+        ("CARGO_BUILD_JOBS", "a capped number of build jobs"),
+        ("cargo fmt --check", "fmt is a stage"),
+        (
+            "cargo clippy --all-targets",
+            "clippy -D warnings is a stage",
+        ),
+        ("RETRIED", "a retried test is named in the summary"),
+        (
+            "KELIR_GATE_STRICT_RETRIES",
+            "a retry can be made fatal for a job that fixed its flakes",
+        ),
+    ] {
+        assert!(gate.contains(needle), "{why}: {needle} is missing");
+    }
+    assert!(
+        gate.contains("--no-lock"),
+        "the inner run must not try to lock twice"
+    );
+}
+
 /// The gate reports nextest's own summary line, and the pattern it greps with
 /// matches the line nextest actually prints. The first version searched for
 /// `Summary:`; nextest prints `Summary [  82.4s] ...` with no colon, so the

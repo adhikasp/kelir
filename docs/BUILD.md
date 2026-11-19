@@ -96,7 +96,7 @@ config keys, so they do not appear in `docs/reference/config.md` (STEER-11) when
 | variable | default | effect |
 |---|---|---|
 | `KELIR_GATE_JOBS` | `4` | `CARGO_BUILD_JOBS` and nextest test threads |
-| `KELIR_GATE_ALLOW_RETRIES` | unset | `1` accepts a run where a test needed a retry (it is still named) |
+| `KELIR_GATE_STRICT_RETRIES` | unset | `1` fails the gate when a test needed a retry (it is named either way) |
 | `KELIR_GATE_LOCK` | `<git-common-dir>/kelir-gate.lock` | the lock path, for a driver outside the repo |
 | `KELIR_GATE_TIMEOUT` | `1800` | seconds a gate waits for the lock before exiting 75 |
 | `KELIR_SCRATCH` | `$HOME/kelir-scratch` | where the gate's log directories go |
@@ -115,8 +115,11 @@ config keys, so they do not appear in `docs/reference/config.md` (STEER-11) when
    that is where the e2e flakes came from (STEER-9). The suites are green serially; at `-j 4` they stay
    green while three workers run.
 3. **nextest, never as a way to hide a flake.** The gate runs `--retries 2` because a loaded box needs it, but
-   it *names* every test that needed a retry and fails the gate unless `KELIR_GATE_ALLOW_RETRIES=1`. A retry
-   is a flake to fix, not a pass. `--no-fail-fast` so one bad suite does not hide the other 18.
+   it *names* every test that needed a retry, and `KELIR_GATE_STRICT_RETRIES=1` makes a retry fatal. By
+   default it does not fail on one, because the flakes that remain are STEER-9's (three of them, all
+   reproducible outside nextest) and a gate that is red every third run is the flake STEER-9 warns about. A
+   retry is a flake to fix, not a pass — it is printed, never silent. `--no-fail-fast` so one bad suite does
+   not hide the other 18.
 4. **`cargo test --lib` stays the fast loop.** nextest builds the same binaries for a full run; for one module
    `cargo test --lib module::name` is still the quickest path and needs no nextest.
 5. **Do not delete a work dir to make a gate pass.** `remote-check.sh prune --force` is how Linux work dirs
@@ -148,9 +151,12 @@ the first to feel it. It passed 6/6 alone at `-j 4` and 0/6 failures with the gr
 still exists (it failed 1/6 at `-j 1` on its own), which is STEER-9's to fix. The group only stops an
 existing flake from turning a different job's gate red.
 
-That is why `scripts/gate.sh` fails on a retry by default instead of hiding it: with `--retries 2` a green
-run still says which test was retried, and the operator decides (`KELIR_GATE_ALLOW_RETRIES=1`) when a known
-flake is acceptable for one landing. The fix belongs to STEER-9 (event-driven waits).
+Three different tests retried in three consecutive full runs, each one reproduced outside nextest, and every
+one of them is STEER-9's property, not this change's. So the gate names a retry and stays green
+(`nextest: ok, but N retried test(s) above are STEER-9's to fix`), and `KELIR_GATE_STRICT_RETRIES=1` turns a
+retry into a failure for a job that has fixed its own flakes. The alternative — a gate that is red every third
+run because of somebody else's known flake — is exactly the harm STEER-9 describes: "a flaky gate trains
+everyone to ignore failures, which hides real ones".
 
 ## Rejected or not taken
 

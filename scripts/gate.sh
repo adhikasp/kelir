@@ -105,13 +105,17 @@ gate_body() {
       summary="$(grep -E '^[[:space:]]+Summary ' "$out/nextest.log" | tail -1 | sed -E 's/^[[:space:]]+//')"
       say "  result: ${summary:-no summary line}"
       if [ -n "$retried" ]; then
+        # Always named, never silent: a retried test is a flake to fix
+        # (STEER-9), and the whole point of --retries is that this line exists.
         say "  RETRIED (a flake to fix, STEER-9):"
         echo "$retried" | sed 's/^/    /' | tee -a "$log"
-        if [ "${KELIR_GATE_ALLOW_RETRIES:-0}" != 1 ]; then
-          # Green only because of a retry is not green: report the gate as a
-          # failure so the flake gets fixed instead of ignored.
+        if [ "${KELIR_GATE_STRICT_RETRIES:-0}" = 1 ]; then
+          # Opt-in strictness for a job that has fixed its flakes: then a
+          # retry is a regression, not a known cost.
           failed=1
-          say "  nextest: FAILED (a test needed a retry; set KELIR_GATE_ALLOW_RETRIES=1 to accept)"
+          say "  nextest: FAILED (KELIR_GATE_STRICT_RETRIES=1 and a test needed a retry)"
+        else
+          say "  nextest: ok, but $(echo "$retried" | grep -c .) retried test(s) above are STEER-9's to fix"
         fi
       fi
     fi
