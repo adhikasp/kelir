@@ -63,8 +63,6 @@ pub const TAIL_BYTES: usize = 2048;
 pub const SPINNER_TICK: Duration = Duration::from_millis(100);
 /// Frames are coalesced to at most one per this interval.
 pub const FRAME_MIN: Duration = Duration::from_millis(33);
-/// The retry countdown updates once a second.
-pub const SECOND: Duration = Duration::from_secs(1);
 
 // ------------------------------------------------------------------ events
 
@@ -1396,6 +1394,8 @@ pub struct Tui {
     keys: mpsc::UnboundedReceiver<Event>,
     /// When the next working-state tick is due (only armed while working).
     tick: Option<Instant>,
+    /// When the last frame went out, for the frame cap.
+    last_paint: Option<Instant>,
 }
 
 enum Step {
@@ -1477,6 +1477,7 @@ pub fn start(
         events,
         keys,
         tick: None,
+        last_paint: None,
     })
 }
 
@@ -1563,20 +1564,26 @@ impl Tui {
     /// more often than [`FRAME_MIN`].
     fn drain(&mut self, first: UiEvent) {
         self.app.apply(first);
+        let mut applied = 1usize;
         while let Ok(event) = self.events.try_recv() {
             self.app.apply(event);
+            applied += 1;
         }
         while let Ok(event) = self.keys.try_recv() {
             self.on_terminal(event);
         }
-        self.synced_pause(FRAME_MIN);
-    }
-
-    fn synced_pause(&self, _min: Duration) {
-        // The loop already repaints once per iteration; a burst is coalesced by
-        // the drain above. A timed pause here would make the tests sleep for no
-        // gain, so the cap is applied where it matters: a repaint happens only
-        // when something changed, which is what the loop guarantees.
+        // Frame cap: a burst of provider deltas is coalesced into one frame, and
+        // two bursts closer together than `FRAME_MIN` are held to it, so a fast
+        // provider cannot make the TUI repaint more than ~30 times a second.
+        // A single key press is never delayed here.
+        if applied > 1
+            && let Some(last) = self.last_paint
+        {
+            let elapsed = last.elapsed();
+            if elapsed < FRAME_MIN {
+                std::thread::sleep(FRAME_MIN - elapsed);
+            }
+        }
     }
 
     fn on_terminal(&mut self, event: Event) {
@@ -1665,6 +1672,7 @@ impl Tui {
             stdout,
             ratatui::crossterm::terminal::EndSynchronizedUpdate
         );
+        self.last_paint = Some(Instant::now());
         result.map(|_| ())
     }
 
