@@ -54,9 +54,14 @@ covers the pty spawns and the two commands `e2e_m4`/`review_m4` build by hand.
 ## Gates
 
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`
-single-threaded (all suites green) at `19e922a`+; Linux via
-`bash scripts/remote-check.sh the maintainer kelir-verify-m5afix` (fmt, clippy, 291 unit + all
-integration suites green).
+(all suites green) at `904168a`; Linux via
+`bash scripts/remote-check.sh the maintainer kelir-verify-m5afix` — fmt clean, clippy clean,
+**292 unit + every integration suite green**. Test counts (Windows single-threaded / Linux):
+unit 287 / 292, `e2e` 16 / 16, `e2e_m3` 11 / 13, `e2e_m4` 10 / 8, `e2e_m5` 10 / 10,
+`e2e_tui` 15 / 15, `e2e_verbs` 23 / 23, `review_m0..m4` 8/5/2/11/19, `review_m4b` 7,
+`review_m5a` 20 / 20 (was 10 of 20), `review_steer1` 6 (+2 ignored from before this job).
+The Windows/Linux differences in `e2e_m3`/`e2e_m4` are pre-existing `cfg` sets, not skips I
+added.
 
 Under a *fully parallel* `cargo test` on this box (several other kelir workers building at
 the same time) I saw occasional one-test failures in `e2e_verbs` (`model_swap_*`,
