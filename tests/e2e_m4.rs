@@ -600,19 +600,18 @@ async fn a_bg_run_inside_a_call_outlives_a_killed_session() {
     let alive = pid_alive(pid);
 
     // Clean up whatever happened before asserting.
-    let _ = std::process::Command::new(env!("CARGO_BIN_EXE_kelir"))
+    let mut cancel = std::process::Command::new(env!("CARGO_BIN_EXE_kelir"));
+    // Never the session that runs the suite: its `KELIR_SESSION_DIR` would
+    // point `bg` at that session's jobs and its `KELIR_SOCK` would report a
+    // test's job into it (kelir dogfoods itself). The helper removes every
+    // `KELIR_*`, before this test's own environment goes on.
+    support::scrub_std(&mut cancel);
+    cancel
         .args(["bg", "cancel", &id])
         .env("KELIR_STATE_DIR", &live.state)
         .env("KELIR_CONFIG", &live.config)
-        .env("KELIR_CONFIG_DIR", live.state.join("no-config"))
-        // Never the session that runs the suite: `KELIR_SESSION_DIR` would
-        // point `bg` at that session's jobs and `KELIR_SOCK` would report a
-        // test's job into it (kelir dogfoods itself).
-        .env_remove("KELIR_SESSION_DIR")
-        .env_remove("KELIR_SOCK")
-        .env_remove("KELIR_CALL_ID")
-        .env_remove("KELIR_BIN")
-        .output();
+        .env("KELIR_CONFIG_DIR", live.state.join("no-config"));
+    let _ = cancel.output();
     for _ in 0..20 {
         if !pid_alive(pid) {
             break;

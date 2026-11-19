@@ -345,6 +345,10 @@ fn drive_in_a_pty(
         })
         .expect("open a pty");
     let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_kelir"));
+    // The pty inherits this process's environment: a kelir session's own
+    // `KELIR_SOCK`, a `TERM_PROGRAM=herdr-*` or a stray test hook would change
+    // what the run under test is. Before the env below, never after.
+    support::scrub_pty(&mut command);
     command.cwd(&cwd);
     command.env("KELIR_CONFIG", &config);
     command.env("KELIR_CONFIG_DIR", state.join("no-config"));
@@ -709,6 +713,10 @@ fn panic_in_a_pty(
         })
         .expect("open a pty");
     let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_kelir"));
+    // The pty inherits this process's environment: a kelir session's own
+    // `KELIR_SOCK`, a `TERM_PROGRAM=herdr-*` or a stray test hook would change
+    // what the run under test is. Before the env below, never after.
+    support::scrub_pty(&mut command);
     command.cwd(&cwd);
     command.env("KELIR_CONFIG", &config);
     command.env("KELIR_CONFIG_DIR", state.join("no-config"));

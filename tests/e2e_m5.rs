@@ -79,7 +79,10 @@ async fn session_started_carries_the_real_sources_and_the_system_has_them() {
         .map(|source| source["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["prompt.md", "AGENTS.md", "sift"], "{sources:?}");
-    assert_eq!(sources[0]["path"], "embedded");
+    // The embedded default has no path at all: never the sentinel `embedded`,
+    // which a reader could take for a file (M5-A fixes F2b).
+    assert_eq!(sources[0]["path"], "");
+    assert_eq!(sources[0]["kind"], "prompt");
     for source in &sources[1..] {
         let path = Path::new(source["path"].as_str().unwrap());
         assert!(path.is_file(), "{} is not a file", path.display());
@@ -174,14 +177,28 @@ async fn an_edited_instruction_file_is_a_tail_message_and_the_prefix_is_unchange
         "{last}"
     );
 
-    // Editing it back to text the context already carries is not a duplicate.
+    // Editing it back is announced again, and it must be: the model's latest
+    // word on the file before this was EDITED INSTRUCTIONS, so the file on
+    // disk (ORIGINAL) has to be said (M5-A fixes F1). What must never happen is
+    // an *echo*: a second identical message for one edit, or a system rewrite.
     std::fs::write(project.agents(), "ORIGINAL INSTRUCTIONS").unwrap();
     let answer = live.ctl(&["say", "and now?"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     live.wait_for("turn_ended").await;
-    let source_events = of_type(&live.log(), "source").len();
-    assert_eq!(source_events, 1, "an edit back duplicated the source");
+    let log = live.log();
+    let sources: Vec<&Value> = of_type(&log, "source");
+    assert_eq!(sources.len(), 2, "{sources:?}");
+    assert_eq!(sources[1]["text"], "ORIGINAL INSTRUCTIONS");
     assert_eq!(mock.requests().len(), 3);
+    let requests = mock.requests();
+    assert_eq!(
+        system_of(&requests[2]),
+        system_of(&requests[0]),
+        "the edit back rewrote the system prompt"
+    );
+    let first = requests[0].messages().to_vec();
+    let third = requests[2].messages().to_vec();
+    assert_eq!(&third[..first.len()], &first[..], "the prefix changed");
 
     let (code, stderr) = live.end().await;
     assert_eq!(code, 0, "{stderr}");
@@ -443,4 +460,187 @@ async fn a_resumed_session_keeps_watching_the_sources_it_recorded() {
     );
     let (code, stderr) = live.end().await;
     assert_eq!(code, 0, "{stderr}");
+}
+
+#[tokio::test]
+async fn a_compaction_that_folds_a_source_away_says_the_file_again() {
+    // F1's compaction case: after the `source` message is summarised away, the
+    // context no longer carries the file's text, so the next boundary says what
+    // it holds — even though the bytes on disk did not change.
+    let project = Project::new("ORIGINAL INSTRUCTIONS", SKILL);
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_wait",
+            "bash",
+            &json!({"command": "sleep 1"}),
+        ))),
+        Reply::Sse(sse(&text_turn("carrying on", 0))),
+        Reply::Sse(sse(&text_turn("SUMMARY: instructions were edited", 0))),
+        Reply::Sse(sse(&text_turn("after", 0))),
+    ])
+    .await;
+    let mut live = LiveSession::start(
+        &mock,
+        &["run", "--keep", "--json", "--cwd", &project.path(), "go"],
+        "compact_keep = 0\n",
+    )
+    .await;
+    live.wait_for("tool_started").await;
+    std::fs::write(project.agents(), "EDITED INSTRUCTIONS").unwrap();
+    live.wait_for("source").await;
+    live.wait_for("turn_ended").await;
+
+    // The compaction folds the first turn (and its `source` message) away.
+    let answer = live.ctl(&["compact", "instructions"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let answer = live.ctl(&["say", "next"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    live.wait_for("turn_ended").await;
+
+    let log = live.log();
+    let sources: Vec<&Value> = of_type(&log, "source");
+    assert_eq!(sources.len(), 2, "{sources:?}");
+    assert_eq!(sources[1]["text"], "EDITED INSTRUCTIONS");
+    let compacted = of_type(&log, "compacted");
+    assert_eq!(compacted.len(), 1, "{compacted:?}");
+    // It is said at the tail of the next request, after the summary.
+    let requests = mock.requests();
+    let last = requests.last().unwrap();
+    let tail = last.messages().last().unwrap();
+    assert!(
+        tail["content"]
+            .as_str()
+            .unwrap()
+            .contains("EDITED INSTRUCTIONS"),
+        "{tail}"
+    );
+    let (code, stderr) = live.end().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+#[tokio::test]
+async fn the_skills_verb_sends_the_whole_file_front_matter_included() {
+    // F3/N5: the verb hashes and sends exactly the file the watcher hashes, so
+    // a skill's `description` reaches the model too and nothing is announced
+    // twice.
+    let project = Project::new("INSTRUCTIONS", SKILL);
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&text_turn("noted", 0))),
+        Reply::Sse(sse(&text_turn("applied", 0))),
+    ])
+    .await;
+    let mut live = LiveSession::start(
+        &mock,
+        &["run", "--keep", "--json", "--cwd", &project.path(), "go"],
+        "",
+    )
+    .await;
+    live.wait_for("turn_ended").await;
+    let answer = live
+        .ctl(&[
+            "skills",
+            "--name",
+            "sift",
+            "--path",
+            &project
+                .cwd
+                .join(".claude")
+                .join("skills")
+                .join("sift")
+                .to_string_lossy(),
+        ])
+        .await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let answer = live.ctl(&["say", "use it"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    live.wait_for("turn_ended").await;
+
+    let log = live.log();
+    let sources: Vec<&Value> = of_type(&log, "source");
+    assert_eq!(sources.len(), 1, "{sources:?}");
+    let text = sources[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("description: use when a log is too long to read"),
+        "the front matter (and so the description) was stripped: {text:?}"
+    );
+    assert!(text.contains("Read the tail first."), "{text:?}");
+    // And the model received it.
+    let requests = mock.requests();
+    let last = requests.last().unwrap();
+    assert!(
+        last.messages().iter().any(|message| message["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("Read the tail first."))),
+        "the skill never reached the request"
+    );
+    let (code, stderr) = live.end().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+#[tokio::test]
+async fn a_resume_keeps_watching_a_skill_the_verb_added() {
+    // F8's second half: a verb-added source's path is only in its `source`
+    // event, so a resumed watcher rebuilt from `sources[]` alone would stop
+    // watching it.
+    let project = Project::new("INSTRUCTIONS", SKILL);
+    let extra = project.cwd.join("extra-skill");
+    std::fs::create_dir_all(&extra).unwrap();
+    let skill = extra.join("SKILL.md");
+    std::fs::write(
+        &skill,
+        "---\nname: extra\ndescription: d\n---\n\nFIRST BODY\n",
+    )
+    .unwrap();
+
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&text_turn("noted", 0))),
+        Reply::Sse(sse(&text_turn("applied", 0))),
+    ])
+    .await;
+    let mut first = LiveSession::start(
+        &mock,
+        &["run", "--keep", "--json", "--cwd", &project.path(), "go"],
+        "",
+    )
+    .await;
+    first.wait_for("turn_ended").await;
+    let answer = first
+        .ctl(&[
+            "skills",
+            "--name",
+            "extra",
+            "--path",
+            &extra.to_string_lossy(),
+        ])
+        .await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    // A verb applies at a boundary: the next turn is what records the
+    // `source` event (and so the path the resume has to watch).
+    let answer = first.ctl(&["say", "noted"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    first.wait_for("turn_ended").await;
+    assert_eq!(of_type(&first.log(), "source").len(), 1);
+    first.kill().await;
+
+    std::fs::write(
+        &skill,
+        "---\nname: extra\ndescription: d\n---\n\nSECOND BODY\n",
+    )
+    .unwrap();
+    let resumed_mock = Mock::start(vec![Reply::Sse(sse(&text_turn("continuing", 0)))]).await;
+    let id = first.id.clone();
+    let mut second = LiveSession::start_reusing(
+        first.state.clone(),
+        &resumed_mock,
+        &["resume", "--keep", "--json", "--cwd", &project.path(), &id],
+        "",
+    )
+    .await;
+    let source = second.wait_for("source").await;
+    assert_eq!(source["name"], "extra", "{source}");
+    assert!(
+        source["text"].as_str().unwrap().contains("SECOND BODY"),
+        "{source}"
+    );
+    let _ = second.end().await;
 }
