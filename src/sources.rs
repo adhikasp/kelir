@@ -923,6 +923,20 @@ impl Watch {
             };
             watch.add(kind, name, &path, &hash_of(&text));
         }
+        // A `source` event a standing compaction folds into its summary is not
+        // in the context any more: the resume says what the file holds at its
+        // first boundary, exactly as a live session would after the same
+        // compaction.
+        for event in events {
+            if let crate::event::EventBody::Compacted {
+                through_seq,
+                pinned_seqs,
+                ..
+            } = &event.body
+            {
+                watch.forget_folded(events, *through_seq, pinned_seqs);
+            }
+        }
         watch
     }
 

@@ -644,3 +644,57 @@ async fn a_resume_keeps_watching_a_skill_the_verb_added() {
     );
     let _ = second.end().await;
 }
+
+#[tokio::test]
+async fn a_resume_after_a_compaction_says_the_source_the_summary_folded_away() {
+    // The resume case of F1's compaction half: the log's `source` message was
+    // folded into a summary before the session stopped, so the context the
+    // resume rebuilds does not carry the file's text. The first boundary says
+    // what the file holds, exactly as a live session would.
+    let project = Project::new("ORIGINAL", SKILL);
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_wait",
+            "bash",
+            &json!({"command": "sleep 1"}),
+        ))),
+        Reply::Sse(sse(&text_turn("carrying on", 0))),
+        Reply::Sse(sse(&text_turn("SUMMARY: the instructions changed", 0))),
+        Reply::Sse(sse(&text_turn("after", 0))),
+    ])
+    .await;
+    let mut live = LiveSession::start(
+        &mock,
+        &["run", "--keep", "--json", "--cwd", &project.path(), "go"],
+        "compact_keep = 0\n",
+    )
+    .await;
+    live.wait_for("tool_started").await;
+    std::fs::write(project.agents(), "EDITED").unwrap();
+    live.wait_for("source").await;
+    live.wait_for("turn_ended").await;
+    let answer = live.ctl(&["compact", "instructions"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let answer = live.ctl(&["say", "next"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    live.wait_for("turn_ended").await;
+    // The compaction stands; its summary is what carries the edit now.
+    let log = live.log();
+    assert_eq!(of_type(&log, "compacted").len(), 1, "{log:?}");
+    live.kill().await;
+
+    let id = live.id.clone();
+    let resumed_mock = Mock::start(vec![Reply::Sse(sse(&text_turn("resumed", 0)))]).await;
+    let mut second = LiveSession::start_reusing(
+        live.state.clone(),
+        &resumed_mock,
+        &["resume", "--keep", "--json", "--cwd", &project.path(), &id],
+        "compact_keep = 0\n",
+    )
+    .await;
+    // The summary is in the context, the message is not: the file is said once.
+    let source = second.wait_for("source").await;
+    assert_eq!(source["name"], "AGENTS.md", "{source}");
+    assert_eq!(source["text"], "EDITED", "{source}");
+    let _ = second.end().await;
+}

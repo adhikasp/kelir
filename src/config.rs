@@ -391,21 +391,17 @@ fn load_prompt(configured: Option<&str>) -> Result<(String, Option<PathBuf>), Co
             path.display()
         )));
     }
-    // The machine `prompt.md`, then the *session* cwd's `.kelir/prompt.md`.
-    // The cwd is the one the config is loaded for (the process runs there), so
-    // this is the same directory the render looks in.
-    let candidates = [
-        paths::config_dir().join("prompt.md"),
-        std::env::current_dir()
-            .map(|dir| dir.join(".kelir").join("prompt.md"))
-            .unwrap_or_default(),
-    ];
-    for candidate in candidates {
-        if candidate.is_file()
-            && let Ok(text) = std::fs::read_to_string(&candidate)
-        {
-            return Ok((text, Some(candidate)));
-        }
+    // Only the machine `prompt.md` here. The project's `.kelir/prompt.md` is
+    // *not* looked up from the process cwd: a session's cwd is `--cwd`, which
+    // the config does not know, and the render already reads
+    // `<cwd>/.kelir/prompt.md` first (M5-A fixes F2, second half). Reading it
+    // here would both miss `--cwd` and record a path the text did not come
+    // from.
+    let machine = paths::config_dir().join("prompt.md");
+    if machine.is_file()
+        && let Ok(text) = std::fs::read_to_string(&machine)
+    {
+        return Ok((text, Some(machine)));
     }
     Ok((DEFAULT_PROMPT.to_string(), None))
 }
@@ -613,6 +609,25 @@ compact_keep = 0
         assert!(error.to_string().contains("auto_compact_at"), "{error}");
         let path = temp_config("auto_compact_at = 0\n");
         assert!(load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn a_prompt_file_records_the_path_it_came_from() {
+        let dir = std::env::temp_dir().join(format!("kelir-prompt-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prompt = dir.join("my-prompt.txt");
+        std::fs::write(&prompt, "EXPLICIT BASE").unwrap();
+        // A TOML literal string: no escaping, so a Windows path goes in as is.
+        let text = format!("prompt = '{}'\n", prompt.display());
+        let path = temp_config(&text);
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.system_prompt, "EXPLICIT BASE");
+        assert_eq!(cfg.prompt_path.as_deref(), Some(prompt.as_path()));
+        // The embedded default has no path, and no sentinel either (F2, F2b).
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.system_prompt, DEFAULT_PROMPT);
+        assert!(cfg.prompt_path.is_none(), "{:?}", cfg.prompt_path);
     }
 
     #[test]
