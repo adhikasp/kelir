@@ -849,11 +849,11 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
             command.args(&rest);
             // A reader of the status file (and the model, in a `bg` report)
             // gets a reference, never a 40 KB command; `cmd.sh` has the bytes.
+            // Set here and written after the spawn like every other field: an
+            // early write would be the status `bg run` reads first, and it has
+            // no pid yet (a test caught that as "the shim never started").
             status.cmd = crate::util::truncate_chars(args.cmd.trim(), 300);
             status.cmd_path = Some(path_string(path));
-            if let Err(error) = status.write(&status_path(&dir, &args.id)) {
-                eprintln!("kelir bg-shim: cannot write the status file: {error}");
-            }
         }
     }
     command

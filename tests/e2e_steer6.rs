@@ -377,3 +377,158 @@ async fn a_long_bg_job_command_runs_from_a_file() {
     assert!(script.is_file(), "{}", script.display());
     assert_eq!(std::fs::read_to_string(script).unwrap(), heredoc);
 }
+
+/// S2: `parallel_tool_calls` must not silently depend on a warm model list. A
+/// first session whose list is slow (past the fetch bound) and one whose list
+/// endpoint is down both still ask a model whose family takes batching, and
+/// still refuse a model nobody knows.
+#[tokio::test]
+async fn parallel_tool_calls_does_not_wait_for_a_slow_or_missing_list() {
+    for (label, models) in [
+        (
+            "a slow list",
+            ModelsAnswer::ok(MODELS_JSON).slow(std::time::Duration::from_secs(8)),
+        ),
+        ("a list that never loads", ModelsAnswer::http(503, "later")),
+    ] {
+        let mock =
+            Mock::start_with_models(vec![Reply::Sse(sse(&text_turn("ok", 0)))], models).await;
+        // The harness's model is `test/model`, which the family table does not
+        // know; the point is that the list is not needed for a known family, so
+        // this runs `deepseek/deepseek-v4.1-flash-1017`.
+        let run = run_task(
+            &mock,
+            &[
+                "run",
+                "--json",
+                "--model",
+                "deepseek/deepseek-v4.1-flash-1017",
+                "t",
+            ],
+            &[],
+            None,
+            "",
+        )
+        .await;
+        assert_eq!(run.code, 0, "{label}: {}", run.stderr);
+        let requests = mock.requests();
+        assert_eq!(
+            requests[0].body["parallel_tool_calls"], true,
+            "{label}: a known family must be asked even with a cold list: {}",
+            requests[0].body
+        );
+    }
+
+    // An unknown model is still not asked, with no list at all.
+    let mock = Mock::start_with_models(
+        vec![Reply::Sse(sse(&text_turn("ok", 0)))],
+        ModelsAnswer::http(503, "later"),
+    )
+    .await;
+    let sandbox = Sandbox::new("");
+    let run = sandbox
+        .kelir(&mock.base_url(), &["run", "--json", "t"], &[])
+        .await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(
+        mock.requests()[0].body.get("parallel_tool_calls").is_none(),
+        "an unknown model was asked: {}",
+        mock.requests()[0].body
+    );
+}
+
+/// S3: a provider that answers 400 naming `reasoning_effort` costs one retry,
+/// not the session: the field is dropped, an `error` note is logged, and no
+/// later request carries it. The retry is not a provider-attempt retry (a 400
+/// is not transient), so the turn still finishes in one step.
+#[tokio::test]
+async fn a_400_naming_the_effort_is_retried_once_without_it() {
+    let mock = Mock::start(vec![
+        Reply::Http(
+            400,
+            r#"{"error":{"message":"reasoning_effort is not supported for this model","param":"reasoning_effort"}}"#
+                .to_string(),
+        ),
+        // The retried request: one step, then the answer.
+        Reply::Sse(sse(&tool_turn(
+            "call_1",
+            "bash",
+            &json!({"command": "printf 'ran\n'"}),
+        ))),
+        Reply::Sse(sse(&text_turn("done", 0))),
+    ])
+    .await;
+    let run = run_task(
+        &mock,
+        &["run", "--json", "the task"],
+        &[],
+        None,
+        "[providers.openrouter]\nreasoning_effort = \"high\"\n",
+    )
+    .await;
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    let requests = mock.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "the 400 was not retried once: {requests:?}"
+    );
+    assert_eq!(requests[0].body["reasoning_effort"], "high");
+    assert!(
+        requests[1].body.get("reasoning_effort").is_none(),
+        "the retry still carries the refused field: {}",
+        requests[1].body
+    );
+    assert_eq!(
+        requests[2].body.get("reasoning_effort"),
+        None,
+        "a later step re-sent the field the provider refused: {}",
+        requests[2].body
+    );
+    // The log says what happened, at `error`, so a person reading it sees the
+    // field was dropped rather than silently ignored.
+    let notes: Vec<&Value> = run
+        .events_of("error")
+        .into_iter()
+        .filter(|event| {
+            event["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("reasoning_effort")
+        })
+        .collect();
+    assert_eq!(notes.len(), 1, "{:?}", run.events);
+    assert!(
+        notes[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("retrying without")
+    );
+    // The session finished its work: the tool call ran.
+    assert_eq!(run.events_of("tool_settled").len(), 1);
+}
+
+/// S3: the default `medium` does not go to a model the provider's list says
+/// does not take the parameter; an explicit config still does (the person
+/// asked, and a gateway that refuses it is caught by the 400 retry above).
+#[tokio::test]
+async fn the_default_effort_is_gated_on_the_advertised_parameter() {
+    let models = ModelsAnswer::ok(
+        r#"{"data":[{"id":"test/model","context_length":262144,
+            "supported_parameters":["tools","parallel_tool_calls"]}]}"#,
+    );
+    let mock = Mock::start_with_models(vec![Reply::Sse(sse(&text_turn("ok", 0)))], models).await;
+    let run = run_task(&mock, &["run", "--json", "t"], &[], None, "").await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(
+        mock.requests()[0].body.get("reasoning_effort").is_none(),
+        "the default went to a model that does not advertise it: {}",
+        mock.requests()[0].body
+    );
+    assert!(
+        run.one_event("session_started")
+            .get("reasoning_effort")
+            .is_none(),
+        "the log must agree with the request"
+    );
+}

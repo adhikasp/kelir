@@ -22,6 +22,12 @@ pub const CACHE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 /// pays the fetch timeout once an hour instead of on every start.
 pub const RETRY_AFTER_MS: u64 = 60 * 60 * 1000;
 
+/// How long the first step waits for `GET /models`. The list is metadata, not
+/// the work, so a slow answer must not hold a turn; it was 1.5 s, which a
+/// 480-model list through a proxy can miss (STEER-6 review S2), so the wait is
+/// longer and a timeout is no longer remembered as a failure.
+pub const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(4_000);
+
 /// One model, with only the fields kelir acts on: a provider adding a field
 /// cannot break a session, and a field kelir does not need is not stored.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +45,12 @@ pub struct ModelInfo {
     /// [`crate::provider::build_request`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_calls: Option<bool>,
+    /// Whether the model accepts the `reasoning_effort` field, when the
+    /// provider lists `supported_parameters`: OpenRouter advertises it for the
+    /// families that take it. `None` means "the provider says nothing", which
+    /// is not the same as "no": see the effort gate in `session.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<bool>,
 }
 
 /// The cached answer for one provider.
@@ -160,6 +172,15 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
                 .supported_parameters
                 .as_ref()
                 .map(|names| names.iter().any(|name| name == "parallel_tool_calls"));
+            // OpenRouter names the flat field `reasoning_effort` for the models
+            // that take it; some list `reasoning` (the object form it is a
+            // shorthand for). Either name means the model takes reasoning
+            // controls, which is what the gate needs to know.
+            let reasoning_effort = model.supported_parameters.as_ref().map(|names| {
+                names
+                    .iter()
+                    .any(|name| name == "reasoning_effort" || name == "reasoning")
+            });
             ModelInfo {
                 id: model.id,
                 context: model
@@ -168,6 +189,7 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
                     .filter(|context| *context > 0),
                 tools,
                 parallel_calls,
+                reasoning_effort,
             }
         })
         .collect())
@@ -209,6 +231,81 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Families whose models accept `parallel_tool_calls`, from what the providers
+/// document and what has been measured. This is the *fallback* for a model the
+/// provider's list does not know (a first session, a slow list, a proxy that
+/// answers nothing): without it, whether the loop asks for batching would
+/// depend on a cache that may be an hour stale or empty (STEER-6 review S2 —
+/// live: a 480-model list took > 1.5 s through a forwarding proxy, the cache
+/// was written empty, and the request had no `parallel_tool_calls` although the
+/// model advertises it).
+///
+/// It is a *prefix/substring* test on the model id, deliberately conservative:
+/// a family named here supports it for every model the providers serve, and a
+/// model the provider's own list is authoritative for wins over this table.
+pub const PARALLEL_CALL_FAMILIES: [&str; 12] = [
+    "deepseek/",
+    "deepseek-v",
+    "anthropic/",
+    "claude-",
+    "openai/",
+    "gpt-4",
+    "gpt-5",
+    "gpt-oss",
+    "google/",
+    "gemini-",
+    "qwen/",
+    "kimi",
+];
+
+/// Does a model id name a family known to take several tool calls in one
+/// message? Only the fallback: see [`parallel_calls`].
+pub fn family_takes_parallel(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    PARALLEL_CALL_FAMILIES
+        .iter()
+        .any(|family| model.starts_with(family) || model.contains(family))
+}
+
+/// Whether the loop may ask this model for several tool calls in one message.
+///
+/// Precedence: the provider's own list (`supported_parameters`), then the
+/// built-in family table, then `false` — a model nobody says anything about is
+/// not asked, because not every gateway accepts the field. `listed` is the
+/// list as this process has it (cache or a fetch); `None`/no entry means the
+/// provider said nothing about this model, not that it said "no".
+pub fn parallel_calls(list: Option<&[ModelInfo]>, model: &str) -> bool {
+    if let Some(info) = list.and_then(|models| lookup(models, model))
+        && let Some(capable) = info.parallel_calls
+    {
+        return capable;
+    }
+    family_takes_parallel(model)
+}
+
+/// Whether `reasoning_effort` may be sent to this model.
+///
+/// `listed` is the provider's list (see [`parallel_calls`]); `explicit` says the
+/// person configured an effort for this provider, which is the one case where an
+/// unknown model is sent the field anyway (they asked for it).
+///
+/// * the list has the model with a `supported_parameters` list -> only when it
+///   names `reasoning_effort` (or the `reasoning` object form it is shorthand
+///   for): a provider that says a model does not take it is believed, and a
+///   400 on every step is the thing this avoids;
+/// * the list has the model but no capability list at all (OpenCode Go) ->
+///   nothing is known, so kelir's default still goes; a gateway that refuses it
+///   is caught by the one-shot 400 retry in `session.rs`;
+/// * the list does not have the model (a first session, a proxy, a new model)
+///   -> only when the person configured an effort, because an unknown gateway
+///   is the case most likely to refuse an unknown field.
+pub fn reasoning_effort_allowed(list: Option<&[ModelInfo]>, model: &str, explicit: bool) -> bool {
+    match list.and_then(|models| lookup(models, model)) {
+        Some(info) => info.reasoning_effort.unwrap_or(true),
+        None => explicit,
+    }
 }
 
 /// The window to compact against, and where it came from, for the session log.
@@ -253,6 +350,97 @@ mod tests {
         assert_eq!(models[0].context, Some(1_048_576));
         assert_eq!(models[0].tools, Some(true));
         assert_eq!(models[1].tools, Some(false));
+        // `supported_parameters` is read for both capabilities kelir acts on.
+        assert_eq!(models[0].parallel_calls, Some(true));
+        assert_eq!(models[0].reasoning_effort, Some(true));
+        assert_eq!(models[1].parallel_calls, Some(false));
+        assert_eq!(models[1].reasoning_effort, Some(false));
+    }
+
+    /// S2: the batching decision does not depend on a warm list. What the list
+    /// says wins; a model it does not know falls back to its family; a model
+    /// nobody knows is not asked.
+    #[test]
+    fn parallel_calls_falls_back_to_the_model_family() {
+        let models = parse(OPENROUTER).unwrap();
+        // The list is authoritative, both ways.
+        assert!(parallel_calls(
+            Some(&models),
+            "deepseek/deepseek-v4.1-flash-1017"
+        ));
+        assert!(!parallel_calls(Some(&models), "some/no-tools"));
+        // No list at all (a first session, a slow fetch): the family answers.
+        assert!(parallel_calls(None, "deepseek/deepseek-v4.1-flash-1017"));
+        assert!(parallel_calls(None, "anthropic/claude-sonnet-4.5"));
+        assert!(parallel_calls(None, "deepseek-v4.1-flash"));
+        assert!(!parallel_calls(None, "acme/mystery-1"));
+        assert!(!parallel_calls(None, "test/model"));
+        // An empty cache (a failed fetch) is the same as no list.
+        let empty = parse(r#"{"data":[]}"#).unwrap();
+        assert!(parallel_calls(
+            Some(&empty),
+            "deepseek/deepseek-v4.1-flash-1017"
+        ));
+        // A model outside the list but inside a known family.
+        assert!(parallel_calls(Some(&models), "openai/gpt-5-mini"));
+        assert!(!parallel_calls(Some(&models), "unknown/thing"));
+    }
+
+    /// S3: the effort gate, in the three cases the provider's list can be in.
+    #[test]
+    fn reasoning_effort_is_gated_on_what_the_provider_advertises() {
+        let models = parse(OPENROUTER).unwrap();
+        // Advertised -> allowed, default or explicit.
+        assert!(reasoning_effort_allowed(
+            Some(&models),
+            "deepseek/deepseek-v4.1-flash-1017",
+            false
+        ));
+        // Listed without it -> not allowed, even when configured: the provider
+        // said no, and a 400 on every step is the thing to avoid.
+        assert!(!reasoning_effort_allowed(
+            Some(&models),
+            "some/no-tools",
+            true
+        ));
+        // Unknown model -> only when the person asked for it.
+        assert!(!reasoning_effort_allowed(Some(&models), "acme/new", false));
+        assert!(reasoning_effort_allowed(Some(&models), "acme/new", true));
+        // No list at all -> only when explicitly configured.
+        assert!(!reasoning_effort_allowed(None, "deepseek/x", false));
+        assert!(reasoning_effort_allowed(None, "deepseek/x", true));
+        // A provider that lists no capabilities at all (Go) says nothing: the
+        // default stays, and a gateway that refuses it is caught by the retry.
+        let go = parse(GO).unwrap();
+        assert!(reasoning_effort_allowed(
+            Some(&go),
+            "deepseek-v4.1-flash",
+            false
+        ));
+        assert!(reasoning_effort_allowed(
+            Some(&go),
+            "deepseek-v4.1-flash",
+            true
+        ));
+    }
+
+    /// The family table is a fallback, so it has to stay narrow: an id nobody
+    /// recognises must not become "yes".
+    #[test]
+    fn the_family_table_is_conservative() {
+        for model in [
+            "deepseek/deepseek-v4.1-flash-1017",
+            "anthropic/claude-sonnet-4.5",
+            "openai/gpt-4o-mini",
+            "google/gemini-2.5-flash",
+            "qwen/qwen3-coder",
+            "moonshotai/kimi-k2",
+        ] {
+            assert!(family_takes_parallel(model), "{model}");
+        }
+        for model in ["acme/mystery", "test/model", "some/no-tools", ""] {
+            assert!(!family_takes_parallel(model), "{model}");
+        }
     }
 
     #[test]

@@ -35,6 +35,12 @@ pub struct ProviderConfig {
     /// requests (`low`, `medium`, `high`), sent as `reasoning_effort`. `None`
     /// sends no field at all, which is the provider's own default.
     pub reasoning_effort: Option<String>,
+    /// Whether [`ProviderConfig::reasoning_effort`] came from the config file
+    /// rather than from kelir's own default (`medium`). An explicit choice is
+    /// what lets the field reach a model the provider's list says nothing
+    /// about; the default only goes where the list says it is supported
+    /// (STEER-6 review S3).
+    pub reasoning_effort_explicit: bool,
     /// Header carrying the session id for providers that require one.
     pub session_header: Option<String>,
 }
@@ -213,7 +219,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             .filter(|url| !url.is_empty())
             .ok_or_else(|| ConfigError(format!("provider `{name}`: base_url is required")))?;
         let key = entry.key_env.as_deref().and_then(secret_from_env);
-        let effort = reasoning_effort(entry.reasoning_effort, &name)?;
+        let (effort, effort_explicit) = reasoning_effort(entry.reasoning_effort, &name)?;
         providers.insert(
             name,
             ProviderConfig {
@@ -224,6 +230,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
                 extra_headers: entry.extra_headers,
                 reasoning_field: entry.reasoning_field,
                 reasoning_effort: effort,
+                reasoning_effort_explicit: effort_explicit,
                 session_header: entry.session_header,
             },
         );
@@ -286,16 +293,16 @@ pub const REASONING_EFFORTS: [&str; 3] = ["low", "medium", "high"];
 fn reasoning_effort(
     configured: Option<String>,
     provider: &str,
-) -> Result<Option<String>, ConfigError> {
+) -> Result<(Option<String>, bool), ConfigError> {
     let Some(value) = configured else {
-        return Ok(Some(DEFAULT_REASONING_EFFORT.to_string()));
+        return Ok((Some(DEFAULT_REASONING_EFFORT.to_string()), false));
     };
     let value = value.trim().to_ascii_lowercase();
     if value.is_empty() {
-        return Ok(Some(DEFAULT_REASONING_EFFORT.to_string()));
+        return Ok((Some(DEFAULT_REASONING_EFFORT.to_string()), false));
     }
     if value == "none" {
-        return Ok(None);
+        return Ok((None, true));
     }
     if !REASONING_EFFORTS.contains(&value.as_str()) {
         return Err(ConfigError(format!(
@@ -303,7 +310,7 @@ fn reasoning_effort(
             REASONING_EFFORTS.join(", ")
         )));
     }
-    Ok(Some(value))
+    Ok((Some(value), true))
 }
 
 /// `max_steps`: unset or `0` means no cap at all (the default: a fully
@@ -729,6 +736,37 @@ compact_keep = 0
         let path = temp_config("[providers.openrouter]\nreasoning_effort = \" HIGH \"\n");
         let cfg = load(Some(&path)).unwrap();
         assert_eq!(cfg.reasoning_effort("openrouter").as_deref(), Some("high"));
+    }
+
+    /// The default `medium` and an explicit choice are not the same fact: only
+    /// the explicit one may reach a model the provider's list says nothing
+    /// about (STEER-6 review S3).
+    #[test]
+    fn an_explicit_effort_is_told_apart_from_the_default() {
+        let cfg = load(Some(&temp_config(""))).unwrap();
+        for name in [PROVIDER_OPENROUTER, PROVIDER_GO] {
+            let provider = cfg.provider(name).unwrap();
+            assert_eq!(
+                provider.reasoning_effort.as_deref(),
+                Some(crate::config::DEFAULT_REASONING_EFFORT)
+            );
+            assert!(!provider.reasoning_effort_explicit, "{name}: a default");
+        }
+        let path = temp_config(
+            "[providers.openrouter]
+reasoning_effort = \"low\"
+             [providers.opencode-go]
+reasoning_effort = \"none\"
+",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        let provider = cfg.provider("openrouter").unwrap();
+        assert_eq!(provider.reasoning_effort.as_deref(), Some("low"));
+        assert!(provider.reasoning_effort_explicit);
+        // `none` is an explicit choice too: it is never "the default applies".
+        let provider = cfg.provider(PROVIDER_GO).unwrap();
+        assert_eq!(provider.reasoning_effort, None);
+        assert!(provider.reasoning_effort_explicit);
     }
 
     #[test]

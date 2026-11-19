@@ -23,6 +23,36 @@ pub struct BuiltRequest {
     pub body: Value,
 }
 
+impl BuiltRequest {
+    /// The same request without one body field: what a retry sends when the
+    /// provider answered 400 *because* of that field (STEER-6 review S3). The
+    /// headers and everything else stay byte-identical, so the cache prefix
+    /// does not move.
+    pub fn without_field(&self, field: &str) -> BuiltRequest {
+        let mut body = self.body.clone();
+        if let Some(object) = body.as_object_mut() {
+            object.remove(field);
+        }
+        BuiltRequest {
+            url: self.url.clone(),
+            headers: self.headers.clone(),
+            body,
+        }
+    }
+
+    pub fn has_field(&self, field: &str) -> bool {
+        self.body.get(field).is_some()
+    }
+}
+
+/// Does an error message name `field` as the thing it refused? Providers answer
+/// an unknown or unsupported body field with a 400 whose `param`/`message` names
+/// it (`"param": "reasoning_effort"` on OpenRouter, "unsupported parameter" in
+/// the text elsewhere), so the name has to appear somewhere in the body.
+pub fn names_field(message: &str, field: &str) -> bool {
+    message.to_ascii_lowercase().contains(field)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderError {
     pub message: String,
@@ -336,6 +366,7 @@ mod tests {
             extra_headers: BTreeMap::new(),
             reasoning_field: None,
             reasoning_effort: None,
+            reasoning_effort_explicit: false,
             session_header: None,
         }
     }
@@ -349,6 +380,7 @@ mod tests {
             extra_headers: BTreeMap::new(),
             reasoning_field: None,
             reasoning_effort: None,
+            reasoning_effort_explicit: false,
             session_header: Some("x-opencode-session".into()),
         }
     }

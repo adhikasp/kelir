@@ -642,6 +642,7 @@ mod tests {
             extra_headers: BTreeMap::new(),
             reasoning_field: None,
             reasoning_effort: None,
+            reasoning_effort_explicit: false,
             session_header: None,
         };
         Client::new(cfg, "ses_1", None).unwrap()
