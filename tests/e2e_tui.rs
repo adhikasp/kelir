@@ -280,9 +280,13 @@ fn snapshot_the_output_tail_view() {
     app.press(tui::Press::ToggleTail);
     let screen = snapshot(&mut app);
     let rows: Vec<&str> = screen.lines().collect();
-    assert_eq!(rows[0], "line one", "{screen}");
-    assert_eq!(rows[1], "line two", "{screen}");
-    assert_eq!(rows[2], "line three", "{screen}");
+    // The header names the call (design note §4), then the tail itself.
+    assert!(rows[0].contains("$ cargo test"), "{screen}");
+    assert_eq!(rows[1], "line one", "{screen}");
+    assert_eq!(rows[2], "line two", "{screen}");
+    assert_eq!(rows[3], "line three", "{screen}");
+    // The state row is still there (the overlay only takes the area above it).
+    assert!(rows[7].starts_with("tail (Ctrl-O closes)"), "{screen}");
     assert!(
         rows[7].starts_with("tail (Ctrl-O closes) · kelir idle"),
         "{}",

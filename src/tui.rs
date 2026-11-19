@@ -31,7 +31,6 @@ use ratatui::crossterm::cursor::{MoveTo, Show};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::terminal::{Clear, ClearType};
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget as _};
 use serde_json::Value;
@@ -1075,6 +1074,11 @@ impl App {
         self.show_tail = true;
     }
 
+    /// The most recent settled call, which the Ctrl-O overlay's header names.
+    pub fn last_call(&self) -> Option<&CallLine> {
+        self.calls.values().max_by_key(|call| call.ordinal)
+    }
+
     /// `/expand [n|last]`: append one call's output to the scrollback.
     pub fn expand(&mut self, which: Option<u64>) {
         let ordinal = match which {
@@ -1249,8 +1253,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     } else {
         render_live(app, frame, areas.live);
         render_editor(app, frame, area, areas.editor);
+        render_state(app, frame, areas.state);
     }
-    render_state(app, frame, areas.state);
     render_facts(app, frame, areas.facts);
 }
 
@@ -1332,28 +1336,34 @@ fn chip_spans(app: &App, line: &str, theme: Theme) -> Vec<Span<'static>> {
 
 /// The output tail (Ctrl-O): the whole area above the state row, dim.
 fn render_tail(app: &App, frame: &mut Frame, screen: Rect, facts: Rect) {
-    let height = if facts.height > 0 {
-        screen.height.saturating_sub(1)
-    } else {
-        screen.height
-    };
+    // Everything above the facts row: the overlay replaces the live area, the
+    // state row and the editor while it is open, and the facts row says how to
+    // close it.
+    let height = facts.y.saturating_sub(screen.y);
     let area = Rect {
         x: screen.x,
         y: screen.y,
         width: screen.width,
         height,
     };
-    let tail: Vec<Line> = app.tail.iter().map(|row| Line::from(row.clone())).collect();
+    // The overlay's header is the call line (design note §4), so the reader
+    // knows which call the output belongs to; the rest is the dim tail.
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(call) = app.last_call() {
+        lines.push(call.line(app.theme, area.width as usize));
+    }
+    lines.extend(app.tail.iter().map(|row| Line::from(row.clone())));
     frame.render_widget(
-        Paragraph::new(tail)
-            .style(Style::default().add_modifier(Modifier::DIM))
+        Paragraph::new(lines)
+            .style(app.theme.dim())
             .scroll((tail_scroll(app, area.height as usize), 0)),
         area,
     );
 }
 
 fn tail_scroll(app: &App, height: usize) -> u16 {
-    let rows = app.tail.len();
+    // The header takes one row, so the tail starts one lower.
+    let rows = app.tail.len() + usize::from(app.last_call().is_some());
     rows.saturating_sub(height.max(1)).min(u16::MAX as usize) as u16
 }
 
@@ -1741,6 +1751,7 @@ fn tail_rows(rows: Vec<Line<'static>>) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Modifier;
     use serde_json::json;
 
     fn response(ok: bool, verb: &str) -> Response {
