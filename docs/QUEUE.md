@@ -211,3 +211,14 @@ and the final config surface), before M5-B.
   kelir-wt/steer6 (docs/tasks/STEER-6-fixes.md, pane t12q).
 - **tui2** (TUI v2 + markdown) running (pane t11z). Design note docs/design/TUI-v2.md (ea9fc54). **steer11** (self-docs) and
   steer7/8/9, steer1fix, steer2, M5-B, M6.. queued; slots limited to three kelir workers (rate limit until STEER-5 lands).
+
+## Update (2026-11-19 22:55) — build-infra order, steer6 round 2, tui2 in QA
+
+- **BUILD-INFRA** (docs/tasks/BUILD-INFRA.md; work order from the maintainer via the admin session): one worktree
+  (kelir-wt/buildinfra, pane t13n), lands before M5-B. The orchestrator's gate script already holds a single-gate lock and caps
+  `CARGO_BUILD_JOBS=4`/`RUST_TEST_THREADS=4`; nextest, Linux-dir reuse, lld/profile changes are the worker's job, measured.
+- **steer6**: round-2 review PASS WITH FIXES (N5/N6 small): worker **steer6c** (kelir-wt/steer6, pane t13m); merge after it.
+- **steer5fix** still running (t12r); **tui2** gates green (Windows 534/0; Linux 513 with one load flake that passes 4/4 alone),
+  fresh QA reviewer t13k doing the emulator-render visual review; retro docs/retros/tui2.md landed (8 KB cut again, double
+  `cargo test` runs = 37% of wall, no compaction, a git stash/reset incident lost work).
+- Queue after: merge steer6c, steer5fix, tui2; then steer11 (self-docs), steer7, steer8, steer9, steer1fix, steer2, M5-B, M6.
