@@ -2,6 +2,49 @@
 
 Small, deliberate differences, with the reason. Everything else tracks the spec.
 
+## STEER-6: the retro's loop changes (2026-11-19)
+
+- **A command over 6000 bytes runs from a file, on every OS.** The spec's shell row is
+  `bash -c` (or `cmd.exe /C`), i.e. the command as the last argument. On Windows, Git for
+  Windows' `bash.exe` silently cuts a command line past ~8,191 characters, and a cut heredoc
+  usually exits 0 (three M5-A calls, one STEER-4 call, each with a half-written file). A long
+  command is therefore written to `<call dir>/cmd.sh` (`cmd.bat` for `cmd.exe`) and the shell
+  is run on the file with no `-c`. The threshold applies on Linux and macOS too, so the code
+  path is exercised by the whole suite on every platform instead of only by the one where the
+  cut happens. The file lives in the call's own directory, not a temp dir: the exact bytes that
+  ran stay readable, which is what makes a cut diagnosable.
+- **A long command also stays off the shim's own command line.** `kelir bg-shim` used to take
+  the command as `--cmd <text>`, and Windows refuses to *start* a process whose command line is
+  past ~32 KB (`os error 206`) — so a 40 KB heredoc failed before the shim existed. It travels
+  as `--cmd-file <path>` instead. `kelir bg run <cmd>` still takes the command as an argument,
+  so a job command past ~32 KB cannot be started through the CLI at all; the model writes the
+  script with `edit` and runs that. This is a process-argv ceiling, not a kelir choice.
+- **`edit` takes `edits: [{old, new, replace_all?}, …]` as well as `old`/`new`.** The spec's
+  tool row names `{path, old, new, replace_all?}`. `edits` is the same operation repeated: it is
+  atomic (all hunks checked before anything is written, one write at the end) and applied in
+  order against the evolving text, because the dogfood model used `python -` patch scripts for
+  multi-hunk changes and those fail with exit 0. `old`/`new` are unchanged and the tool list is
+  the same, so the frozen request prefix only moves at a release.
+- **`session_started.reasoning_effort` is a field the spec's table does not list.** The spec's
+  provider section leaves the effort field unverified and has no way to record it. The value
+  kelir sends is recorded (and absent when the config says `none`) so the log and the request
+  agree and a cache-key question can be answered from the log alone. Measured on the OpenCode Go
+  gateway: the flat `reasoning_effort` field is honoured (the reasoning tokens move with it, ×2
+  between `low` and `high` on a reasoning-heavy prompt); the OpenRouter-style
+  `{"reasoning": {"effort": …}}` object is accepted but added latency with no reason-token
+  effect, so kelir sends the flat field on both providers. A model with a long thinking phase
+  may still spend its budget before the answer (one probe returned an empty `content` with
+  `finish_reason: length`); the knob is a request, not a guarantee.
+- **`compact_at_tokens` is a third auto-compaction input.** The spec says 80 % of the window
+  (configurable). A 1M-token window at 80 % is 800K, and a real session passes 150K with 76 % of
+  the context being old file reads. Compaction now fires at
+  `min(window * auto_compact_at, compact_at_tokens)`; the default target is 150,000 and `0`
+  disables the cap, so the window fraction alone decides, exactly as before.
+- **`parallel_tool_calls` is set only on OpenRouter, and only for a model that advertises
+  it.** The spec says parallel calls are allowed; the request said nothing. OpenRouter's
+  `supported_parameters` is where the capability is stated. Go's model list states no such
+  capability, so the field is not guessed at there.
+
 ## Sources and skills (M5-A, 2026-11-19)
 
 - **A source edited mid-session is found by a per-boundary content hash, not a watcher.**
