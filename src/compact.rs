@@ -590,6 +590,7 @@ mod tests {
             extra_headers: BTreeMap::new(),
             reasoning_field: None,
             session_header: None,
+            max_concurrent_requests: None,
         };
         Client::new(cfg, "ses_1", None).unwrap()
     }
