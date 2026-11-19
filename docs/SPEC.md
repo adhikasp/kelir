@@ -236,6 +236,15 @@ from the start because inbound messages arrive on that connection. Servers are c
 - **Attachments** (images, voice, video) enter as `source` events: voice transcribed at ingress,
   images to the prompt, video as frames.
 
+## Self-documentation
+
+Everything user-configurable is documented in `docs/reference/` (config keys with defaults, env overrides, flags, verbs,
+files, events, providers, troubleshooting) with pointers into the source, kept honest by a **drift test** (code and docs
+must agree both ways) and partly generated from code (`kelir docs --generate`). The same text is embedded in the binary
+and readable by the agent: `kelir docs [topic]`, `kelir docs --find <words>`. A builtin skill `kelir` ("operate or configure
+kelir itself") points at it, so the pushed hint and steering rules can inject it. The base prompt carries one line that
+names `kelir docs`. Every milestone's definition of done includes updating `docs/reference/`.
+
 ## Compaction
 
 Three triggers, one mechanism: the model calls the `compact` tool, a human sends `/compact

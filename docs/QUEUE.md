@@ -192,3 +192,11 @@ in the session state dir with a pointer in the prompt (model reads it on demand 
 - Step 1 (running): fresh Claude design analyst compares opencode and Claude Code runs (screenshots) and writes
   docs/design/TUI-v2.md. Step 2: kelir implements tui2 in kelir-wt/tui2 from that note. Step 3: reviewer with screenshots,
   introspective retro, merge. Parks STEER-3 as a separate job (superseded by tui2).
+
+## Update (2026-11-19 17:00) — self-documentation (maintainer)
+
+**STEER-11** (docs/tasks/STEER-11.md): organised `docs/reference/` of everything configurable (config/CLI/env/verbs/files/
+events/providers/troubleshooting + source map), generated where possible and guarded by a drift test, embedded and readable
+via `kelir docs`, shipped as a builtin skill `kelir` that the hint (M5-B) and steering rules (M8) can inject. SPEC.md has a
+Self-documentation section; AGENTS.md says docs are part of done. Run it right after STEER-5/6 (it needs the env-var registry
+and the final config surface), before M5-B.
