@@ -1262,8 +1262,23 @@ impl App {
         if let Some(dir) = &self.session_dir {
             let path = dir.join(&chip.rel);
             let _ = std::fs::remove_file(path);
-            // The file is gone: a later paste of the same bytes must save again.
+            // The file is gone: a later paste of the same bytes must save again,
+            // and a path that was taken into a chip can be taken again (its
+            // file no longer exists, so it is not "the same paste twice").
             self.seen_images.retain(|_, rel| rel != &chip.rel);
+            // The text forms the same file was absorbed in (`C:/x/shot.png`,
+            // `"C:/x/shot.png"`) name a file that no longer exists, so they must
+            // be takeable again.
+            let stem = chip
+                .rel
+                .rsplit('/')
+                .next()
+                .and_then(|name| name.split_once('-'))
+                .map(|(_, rest)| rest.to_string())
+                .unwrap_or_default();
+            self.absorbed.retain(|text| {
+                !text.contains(&chip.rel) && (stem.is_empty() || !text.contains(&stem))
+            });
         }
     }
 
@@ -2813,6 +2828,36 @@ mod tests {
 
     /// A typed path that is only half a file stays text until it is a file: a
     /// prefix of a real path is not an image, and nothing is saved for it.
+    /// A chip removed before it was sent takes its file with it, so the same
+    /// path must be able to become a chip again: the "already absorbed" memory
+    /// is dropped with the file (the live drive typed the path a second time
+    /// and it stayed text).
+    #[test]
+    fn a_path_whose_chip_was_removed_becomes_a_chip_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_of_width(100);
+        app.set_session_dir(dir.path().to_path_buf());
+        let image = dir.path().join("shot.png");
+        std::fs::write(&image, png_720()).unwrap();
+        let typed = image.display().to_string();
+        for _ in 0..2 {
+            for c in typed.chars() {
+                app.press(Press::Edit(Key::Char(c)));
+            }
+            assert_eq!(app.editor.chips().len(), 1, "{:?}", app.editor.text());
+            app.press(Press::Backspace);
+            assert!(app.editor.chips().is_empty());
+            assert_eq!(app.editor.text().trim_end(), "");
+            assert_eq!(
+                std::fs::read_dir(dir.path().join("attachments"))
+                    .map(|entries| entries.count())
+                    .unwrap_or(0),
+                0,
+                "each chip took its own file"
+            );
+        }
+    }
+
     #[test]
     fn a_partial_typed_path_is_still_text_and_a_quote_comes_with_its_path() {
         let dir = tempfile::tempdir().unwrap();
