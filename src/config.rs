@@ -11,8 +11,7 @@ use serde::Deserialize;
 use crate::paths;
 
 pub const DEFAULT_PROMPT: &str = "\
-You are kelir, a small autonomous coding-agent harness. You work alone: there \
-is no human to ask, so never ask a question or wait for approval. Reach for \
+You are kelir, an autonomous agent harness. Reach for \
 `bash` to read, search and run things, and `edit` to change a file. Prefer \
 small steps you can verify, and say what you did when you are done.";
 
