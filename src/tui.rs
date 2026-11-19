@@ -452,6 +452,9 @@ pub struct App {
     /// The session dir, for `attachments/`; `None` in a unit test with no
     /// session (pastes then stay text).
     session_dir: Option<std::path::PathBuf>,
+    /// The image paths already turned into pointers at submit, so a line
+    /// submitted twice (history) does not save the same file twice.
+    pub(crate) absorbed: std::collections::HashSet<String>,
     /// A note the state row shows (`saving image…`), cleared by the next event.
     pub note: String,
     /// When the current retry wait ends, so the countdown is read from the
@@ -498,6 +501,7 @@ impl App {
             frame: 0,
             seen_images: HashMap::new(),
             session_dir: None,
+            absorbed: std::collections::HashSet::new(),
             note: String::new(),
             retry_deadline: None,
             last_out: None,
@@ -995,12 +999,19 @@ impl App {
 
     /// Parse one submitted line and send what it asks for. Chips become pointer
     /// text here: the editor showed `[image 1]`, the model sees the pointer.
+    ///
+    /// A line that contains an image *path* (a drag and drop, or a paste on a
+    /// terminal whose bracketed paste arrives as keystrokes — crossterm 0.29
+    /// only decodes `ESC[200~` on Unix) gets the same treatment: the file is
+    /// saved and the path is replaced with the pointer. So a dropped path is a
+    /// pointer on every platform, never a raw path and never bytes.
     pub fn submit(&mut self, line: &str) {
         let chips = self.editor.take_chips();
         let mut text = line.to_string();
         for chip in &chips {
             text = text.replace(&chip.label, &chip.pointer);
         }
+        text = self.absorb_image_paths(&text);
         match commands::parse(&text) {
             Ok(Parsed::Action(action)) => {
                 self.close_group();
@@ -1019,6 +1030,38 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Replace every existing image path in `text` with a pointer, saving the
+    /// file into the session first. Words that are not images are left alone.
+    /// Replace every existing image path in `text` with a pointer, saving the
+    /// file into the session first. A path may be quoted (`"C:\… b.png"`, what
+    /// Explorer's drag and drop and a clipboard paste produce) or bare; words
+    /// that are not images are left exactly as they were.
+    pub fn absorb_image_paths(&mut self, text: &str) -> String {
+        if self.session_dir.is_none() {
+            return text.to_string();
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.to_string();
+        while let Some(candidate) = next_path(&rest) {
+            let (start, matched) = candidate;
+            out.push_str(&rest[..start]);
+            let reusable = self.absorbed.contains(&matched);
+            match attachments::pasted_image(&matched) {
+                Some(paste) if !reusable => match self.save_image(&paste.path) {
+                    Some(saved) => {
+                        self.absorbed.insert(matched.clone());
+                        out.push_str(&saved.pointer);
+                    }
+                    None => out.push_str(&matched),
+                },
+                _ => out.push_str(&matched),
+            }
+            rest = rest[start + matched.len()..].to_string();
+        }
+        out.push_str(&rest);
+        out
     }
 
     /// Send one action through the session's verb channel — the same channel
@@ -1127,6 +1170,43 @@ impl App {
 }
 
 // ------------------------------------------------------------------- input
+
+/// The next quoted or bare path-shaped token in `text`, as `(start, token)`.
+///
+/// Quoted first (a Windows path with spaces arrives quoted), then bare: a token
+/// of non-space characters whose extension is one kelir knows. The caller
+/// decides whether it is a real file; this only finds the candidates.
+fn next_path(text: &str) -> Option<(usize, String)> {
+    let bytes = text.as_bytes();
+    let mut best: Option<(usize, String)> = None;
+    for quote in ['"', '\''] {
+        if let Some(open) = text.find(quote) {
+            let rest = &text[open + quote.len_utf8()..];
+            if let Some(close) = rest.find(quote) {
+                let inner = &rest[..close];
+                if attachments::extension_ok_str(inner) {
+                    best = Some((open, format!("{quote}{inner}{quote}")));
+                    break;
+                }
+            }
+        }
+    }
+    // Bare tokens: split on whitespace and keep the first with an image
+    // extension. A quoted match wins because it can contain spaces.
+    if best.is_none() {
+        let mut offset = 0usize;
+        for token in text.split_inclusive(char::is_whitespace) {
+            let word = token.trim_end();
+            if attachments::extension_ok_str(word) {
+                best = Some((offset, word.to_string()));
+                break;
+            }
+            offset += token.len();
+        }
+    }
+    let _ = bytes;
+    best
+}
 
 /// A key press the TUI acts on (already translated from a terminal event).
 #[derive(Debug, Clone, PartialEq, Eq)]

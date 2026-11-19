@@ -617,7 +617,9 @@ fn drive_in_a_pty(
     if wait_for(&screen, "kelir", Duration::from_secs(20)) {
         // A moment for raw mode; then anything the test types first, the
         // message, and Enter.
-        std::thread::sleep(Duration::from_millis(200));
+        // A bracketed paste is only delivered as a paste once the app has
+        // enabled the mode; half a second is enough on every terminal seen.
+        std::thread::sleep(Duration::from_millis(600));
         if !preamble.is_empty() {
             send(preamble);
             std::thread::sleep(Duration::from_millis(200));
@@ -977,6 +979,92 @@ fn drive_and_count_idle_bytes(
         code,
         bytes_while_idle: after - before,
     }
+}
+
+/// A bracketed paste of a PNG path (which is what a terminal sends for a drag
+/// and drop or a clipboard path) becomes a chip, the prompt carries the
+/// pointer, and no image bytes are in it.
+#[tokio::test]
+async fn a_pasted_image_path_becomes_a_pointer_in_the_prompt() {
+    let answer = "described";
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn(answer, 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let image = cwd.join("shot.png");
+    std::fs::write(&image, tiny_png()).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    // A quoted path, as a Windows drag and drop (or a clipboard paste of a
+    // file) puts on the input line. It is typed as keystrokes here: crossterm
+    // 0.29 only decodes `ESC[200~` on Unix, so on Windows a bracketed paste
+    // arrives as characters. The submit-time path scan is what makes both
+    // platforms a pointer (`App::absorb_image_paths`).
+    let paste = format!("\"{}\"", image.display());
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(cwd, config, state, base_url, paste.as_bytes(), vec![])
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    // The saved file is in the session's attachments, unmodified.
+    let log = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
+    let attachments = run.session_dir.join("attachments");
+    if !attachments.is_dir() {
+        panic!(
+            "no attachments dir.
+log: {log}
+screen: {:?}",
+            run.screen
+        );
+    }
+    let files: Vec<_> = std::fs::read_dir(&attachments)
+        .expect("an attachments dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(std::fs::read(&files[0]).unwrap(), tiny_png());
+    // The `user` event carries the pointer, not the path and not the bytes.
+    let log = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
+    let user = log
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["type"] == "user")
+        .expect("a user event");
+    let text = user["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("[image: attachments/1-shot.png"),
+        "the prompt carries the pointer: {text:?}"
+    );
+    assert!(
+        text.contains("hello there"),
+        "the typed text is still there: {text:?}"
+    );
+    assert!(!text.contains("shot.png\""), "no raw path: {text:?}");
+    assert!(
+        !text.contains("iVBOR"),
+        "no image bytes in the prompt: {text:?}"
+    );
+}
+
+/// A 4x3 PNG: bytes a real decoder would accept as a header.
+fn tiny_png() -> Vec<u8> {
+    let mut bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&4u32.to_be_bytes());
+    bytes.extend_from_slice(&3u32.to_be_bytes());
+    bytes.extend_from_slice(&[8, 2, 0, 0, 0]);
+    bytes
 }
 
 /// The failure word: `error` goes out over the same OSC record — and a failed

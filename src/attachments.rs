@@ -117,6 +117,12 @@ pub fn pasted_image(text: &str) -> Option<PastedImage> {
     })
 }
 
+/// Does this text end in an image extension? Cheap enough to run on every
+/// candidate token before the file system is touched.
+pub fn extension_ok_str(text: &str) -> bool {
+    extension_ok(Path::new(text.trim_matches(['"', '\'', '&', ' '])))
+}
+
 fn extension_ok(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
