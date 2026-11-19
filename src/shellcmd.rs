@@ -28,6 +28,18 @@
 //! cheaper `-c`; the file route there is the same code, exercised by the same
 //! tests, and it is what a long command has always used.
 //!
+//! Which shells can take a file is decided by the switch their argv ends in:
+//! `-c`, a short-flag cluster ending in `c` (`bash -lc`, `-ic`, `-ec`, …),
+//! `/C`, or `-Command`. The flags before the `c` stay (`bash -l cmd.sh`), so a
+//! login shell keeps its flags and the file route (STEER-6 review N5). Any
+//! other shape is left exactly as configured where the argument route is safe
+//! (Unix) and is an **error** on Windows, where the alternative is the halving
+//! route this module exists to remove.
+//!
+//! A `.bat` starts with `@echo off`: without it `cmd.exe` echoes the prompt and
+//! every line of the command into the result, which turns a 20 KB command into
+//! 20 KB of echo (STEER-6 review N6).
+//!
 //! The file is not a temporary. It lives in the call's own directory, and the
 //! last one written for a call is the one that ran.
 
@@ -83,28 +95,76 @@ enum Family {
     PowerShell,
 }
 
-/// The switch a shell takes its command with, when kelir knows the shell well
-/// enough to rewrite the call; `None` leaves the configured argv exactly as it
-/// is (a shell whose argv is something else is not kelir's to reinterpret).
-fn command_switch(shell_args: &[String]) -> Option<&str> {
-    let last = shell_args.last()?.as_str();
-    match last {
-        "-c" => Some("-c"),
-        "/C" => Some("/C"),
-        "/c" => Some("/c"),
-        "-Command" => Some("-Command"),
-        "-command" => Some("-command"),
-        _ => None,
+/// How the last word of a `shell` argv takes a command, when kelir knows the
+/// shell well enough to rewrite the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Switch {
+    /// `-c`, or a short-flag cluster ending in `c` (`-lc`, `-ec`, `-xc`, …).
+    /// The word is replaced by the remaining flags (nothing for plain `-c`) and
+    /// the file follows as the shell's last argument: `bash -l cmd.sh`,
+    /// `bash -e cmd.sh`.
+    Posix { flags: String },
+    /// `/C` or `/c`: kept verbatim, `cmd.exe /C <script>` (STEER-6 review B1).
+    Cmd(String),
+    /// `-Command`/`-command`: replaced by `-File`, because `-Command <path>`
+    /// would run the path as PowerShell source (STEER-6 review N2).
+    PowerShell(String),
+}
+
+impl Switch {
+    fn family(&self) -> Family {
+        match self {
+            Switch::Posix { .. } => Family::Posix,
+            Switch::Cmd(_) => Family::CmdExe,
+            Switch::PowerShell(_) => Family::PowerShell,
+        }
+    }
+
+    /// What has to stay on the shell's argv when the command is a file, after
+    /// the switch word is dropped: an empty string means nothing.
+    fn keep(&self) -> &str {
+        match self {
+            Switch::Posix { flags } => flags,
+            Switch::Cmd(word) | Switch::PowerShell(word) => word,
+        }
     }
 }
 
-fn family(shell_args: &[String]) -> Option<Family> {
-    match command_switch(shell_args) {
-        Some("-c") => Some(Family::Posix),
-        Some("/C") | Some("/c") => Some(Family::CmdExe),
-        Some("-Command") | Some("-command") => Some(Family::PowerShell),
-        _ => None,
+/// The switch a shell takes its command with, when kelir knows the shell well
+/// enough to rewrite the call; `None` means the argv is not kelir's to
+/// reinterpret (see [`decide`] for what that costs on Windows).
+///
+/// A login-shell spelling (`bash -lc`, `bash -ic`, `bash -ec`) is a short-flag
+/// cluster whose `c` *is* the command switch: leaving it on the argument route
+/// kept the Windows backslash halving for a common config (STEER-6 review N5).
+fn command_switch(shell_args: &[String]) -> Option<Switch> {
+    let last = shell_args.last()?.as_str();
+    match last {
+        "/C" | "/c" => return Some(Switch::Cmd(last.to_string())),
+        "-Command" | "-command" => return Some(Switch::PowerShell(last.to_string())),
+        "-c" => {
+            return Some(Switch::Posix {
+                flags: String::new(),
+            });
+        }
+        _ => {}
     }
+    // `-lc`, `-ec`, `-xc`, …: one dash, short flags, the last of them `c`.
+    let cluster = last.strip_prefix('-')?;
+    if cluster.len() < 2 || !cluster.ends_with('c') {
+        return None;
+    }
+    let flags = &cluster[..cluster.len() - 1];
+    if !flags.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(Switch::Posix {
+        flags: format!("-{flags}"),
+    })
+}
+
+fn family(shell_args: &[String]) -> Option<Family> {
+    command_switch(shell_args).map(|switch| switch.family())
 }
 
 /// The name of the script a command is written to, by shell, for a call (whose
@@ -147,19 +207,30 @@ pub fn write_script(
 ) -> Result<ShellInput, String> {
     let name = script_name(shell_args, stem);
     let path = dir.join(&name);
-    let body = script_body(cmd, family(shell_args) == Some(Family::Posix), raw_cr());
+    let switch = command_switch(shell_args);
+    let body = script_body(cmd, switch.as_ref().map(Switch::family), raw_cr());
     std::fs::create_dir_all(dir)
         .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
     std::fs::write(&path, body.as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     Ok(ShellInput::Script {
         path,
-        keep_switch: match family(shell_args) {
-            Some(Family::CmdExe) => command_switch(shell_args).map(str::to_string),
-            Some(Family::PowerShell) => Some("-File".to_string()),
-            Some(Family::Posix) | None => None,
-        },
+        keep_switch: keep_switch(switch.as_ref()),
     })
+}
+
+/// The argv fragment that replaces the switch word once the command is a file:
+/// `cmd.exe` keeps `/C`, PowerShell gets `-File`, a POSIX shell gets whatever
+/// flags came before its `c` (`bash -lc` -> `bash -l <path>`) and nothing for a
+/// plain `-c`.
+fn keep_switch(switch: Option<&Switch>) -> Option<String> {
+    match switch {
+        // `-Command <path>` would run the path as PowerShell source.
+        Some(Switch::PowerShell(_)) => Some("-File".to_string()),
+        Some(Switch::Posix { flags, .. }) if flags.is_empty() => None,
+        Some(switch) => Some(switch.keep().to_string()),
+        None => None,
+    }
 }
 
 /// `KELIR_SHELL_RAW=cr`: send a POSIX script raw, keeping CRLF terminators.
@@ -167,10 +238,17 @@ fn raw_cr() -> bool {
     std::env::var_os("KELIR_SHELL_RAW").is_some_and(|value| value == "cr")
 }
 
+/// The first line of every `.bat`: without it `cmd.exe` echoes the prompt and
+/// the command line into the result, so a 20 KB command comes back as 20 KB of
+/// echo (STEER-6 review N6).
+pub const ECHO_OFF: &str = "@echo off";
+
 /// The bytes a script file gets from a command (see [`write_script`]): LF for a
-/// POSIX shell unless `raw_cr`, CRLF for `cmd.exe`/PowerShell, and always one
-/// trailing terminator.
-pub fn script_body(cmd: &str, posix: bool, raw_cr: bool) -> String {
+/// POSIX shell unless `raw_cr`, CRLF for `cmd.exe`/PowerShell, one trailing
+/// terminator, and `@echo off` ahead of a `.bat` so the result is the command's
+/// output and not cmd.exe's echo of it.
+fn script_body(cmd: &str, family: Option<Family>, raw_cr: bool) -> String {
+    let posix = matches!(family, Some(Family::Posix) | None);
     let body = if posix && !raw_cr {
         cmd.replace("\r\n", "\n")
     } else {
@@ -182,6 +260,9 @@ pub fn script_body(cmd: &str, posix: bool, raw_cr: bool) -> String {
     }
     if !posix {
         body = body.replace("\r\n", "\n").replace('\n', "\r\n");
+    }
+    if family == Some(Family::CmdExe) {
+        body = format!("{ECHO_OFF}\r\n{body}");
     }
     body
 }
@@ -202,6 +283,24 @@ pub fn input(
     decide(cmd, shell_args, dir, stem, always_script())
 }
 
+/// A `shell` argv kelir cannot hand a file to, in the words the person who
+/// configured it needs: which word was not understood, and the spellings that
+/// are. On Windows the alternative is not "leave it alone" but the halving
+/// argument route (STEER-6 review N5), so this is an error, not a fallback.
+fn unknown_shell(shell_args: &[String]) -> String {
+    format!(
+        "the configured shell ({}) does not end in a command switch kelir can \
+         replace with a script path: use `-c`, a short-flag cluster ending in \
+         `c` (`-lc`, `-ec`, `-xc`), `/C`, or `-Command` — on Windows a command \
+         handed to another shape has its backslash runs halved",
+        shell_args
+            .iter()
+            .map(|arg| format!("{arg:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 /// [`input`] with the route made explicit, so both branches are testable on
 /// every platform (the Windows-only one is otherwise never exercised on Linux
 /// and vice versa).
@@ -212,9 +311,27 @@ pub fn decide(
     stem: &str,
     always_file: bool,
 ) -> Result<ShellInput, String> {
-    if command_switch(shell_args).is_none() {
-        return Ok(ShellInput::Argument(cmd.to_string()));
+    let switch = command_switch(shell_args);
+    if switch.is_none() {
+        // Not kelir's argv to reinterpret. Where the argument route is safe
+        // (Unix: no msys layer, no 8 KB cut) it stays exactly as configured.
+        // Where it is not — `always_file`, i.e. Windows — that route is the
+        // one that halves backslashes, so a command must not silently take it
+        // (STEER-6 review N5).
+        if !always_file || cmd.trim().is_empty() {
+            return Ok(ShellInput::Argument(cmd.to_string()));
+        }
+        return Err(unknown_shell(shell_args));
     }
+    // A POSIX script's terminators are LF (see [`script_body`]), and the
+    // argument route must mean the same thing as the file route, or a
+    // command's meaning would change at the length boundary: `echo a > f<CR>`
+    // names a file with a CR on one route and not on the other (STEER-6 review
+    // N10). So the normalisation belongs to the shell family, not to the route.
+    let cmd = &match &switch {
+        Some(Switch::Posix { .. }) if !raw_cr() => cmd.replace("\r\n", "\n"),
+        _ => cmd.to_string(),
+    };
     if !always_file && cmd.len() <= SHELL_CMD_MAX {
         return Ok(ShellInput::Argument(cmd.to_string()));
     }
@@ -231,20 +348,17 @@ pub fn decide(
 /// `bg run` write it before the shim exists, to keep the command off the shim's
 /// own argv). The switch follows from the shell, not from the file.
 pub fn script_input(path: &Path, shell_args: &[String]) -> Result<ShellInput, String> {
-    if command_switch(shell_args).is_none() {
+    let switch = command_switch(shell_args);
+    if switch.is_none() {
         return Err(format!(
-            "a script was written for a shell that takes no command switch: {}",
+            "a script was written for {}: {}",
+            unknown_shell(shell_args),
             path.display()
         ));
     }
-    let keep_switch = match family(shell_args) {
-        Some(Family::CmdExe) => command_switch(shell_args).map(str::to_string),
-        Some(Family::PowerShell) => Some("-File".to_string()),
-        Some(Family::Posix) | None => None,
-    };
     Ok(ShellInput::Script {
         path: path.to_path_buf(),
-        keep_switch,
+        keep_switch: keep_switch(switch.as_ref()),
     })
 }
 
@@ -375,7 +489,7 @@ mod tests {
                 cmd.push('y');
             }
             assert_eq!(cmd.len(), length, "the fixture is exact");
-            let body = script_body(&cmd, true, false);
+            let body = script_body(&cmd, Some(Family::Posix), false);
             let expected = if cmd.ends_with('\n') {
                 cmd.clone()
             } else {
@@ -387,9 +501,13 @@ mod tests {
             if cmd.contains("\\r\\n") {
                 assert!(!body.contains("\\r\\n"), "length {length}: CRLF kept");
             }
-            // `cmd.exe` gets the same command with CRLF terminators, and the
-            // payload's own bytes otherwise.
-            let bat = script_body(&cmd, false, false);
+            // `cmd.exe` gets the same command with CRLF terminators, the
+            // payload's own bytes otherwise, and `@echo off` first (N6).
+            let bat = script_body(&cmd, Some(Family::CmdExe), false);
+            let bat = bat
+                .strip_prefix("@echo off\r\n")
+                .expect("a .bat starts with @echo off (N6)");
+            assert!(!script_body(&cmd, Some(Family::Posix), false).contains("@echo off"));
             assert_eq!(
                 bat.replace("\r\n", "\n"),
                 expected,
@@ -400,15 +518,64 @@ mod tests {
         }
     }
 
+    /// N5: a shell kelir cannot hand a file to is left alone where the argument
+    /// route is safe (Unix), and is an **error** where it is not (Windows,
+    /// `always_file`), because the argument route there halves backslashes. No
+    /// silent fallback to the route this whole module exists to remove.
     #[test]
-    fn a_shell_that_takes_no_command_switch_is_never_rewritten() {
+    fn a_shell_that_takes_no_command_switch_is_never_rewritten_and_never_halved() {
         let dir = temp("other");
         let args = vec!["--eval".to_string()];
         let cmd = "x".repeat(SHELL_CMD_MAX + 100);
         assert_eq!(
-            decide(&cmd, &args, &dir, "", true).unwrap(),
+            decide(&cmd, &args, &dir, "", false).unwrap(),
             ShellInput::Argument(cmd.clone())
         );
+        let error = decide(&cmd, &args, &dir, "", true).unwrap_err();
+        assert!(
+            error.contains("--eval") && error.contains("-lc"),
+            "the error names the argv and the spellings: {error}"
+        );
+        assert!(script_input(Path::new("C:/x/a.sh"), &args).is_err());
+    }
+
+    /// N5: the login-shell spellings take the file route, and the flags before
+    /// the `c` stay on the argv (`bash -l cmd.sh`, not `bash cmd.sh`).
+    #[test]
+    fn a_short_flag_cluster_ending_in_c_takes_the_file_route() {
+        let dir = temp("lc");
+        for (args, flags) in [
+            (vec!["-lc".to_string()], Some("-l")),
+            (vec!["-ec".to_string()], Some("-e")),
+            (vec!["-xc".to_string()], Some("-x")),
+            (vec!["--login".to_string(), "-ic".to_string()], Some("-i")),
+        ] {
+            let cmd = "cat > r.txt <<'E'\n\\\\\\\\\nE\n".to_string();
+            match decide(&cmd, &args, &dir, "", true).unwrap() {
+                ShellInput::Script { path, keep_switch } => {
+                    assert_eq!(path, dir.join(SCRIPT_NAME_UNIX), "{args:?}");
+                    assert_eq!(keep_switch.as_deref(), flags, "{args:?}");
+                    let argv = script_args(&args, keep_switch.as_deref(), &path);
+                    let mut want: Vec<String> = args[..args.len() - 1].to_vec();
+                    if let Some(flags) = flags {
+                        want.push(flags.to_string());
+                    }
+                    want.push(crate::util::path_string(&path));
+                    assert_eq!(argv, want, "{args:?}: the file route's argv");
+                }
+                other => panic!("{args:?} must take the file route, got {other:?}"),
+            }
+        }
+        // A plain `-c` still means no flag: `bash cmd.sh`.
+        assert_eq!(
+            keep_switch(command_switch(&["-c".to_string()]).as_ref()),
+            None
+        );
+        // A cluster that does not end in `c` is not a command switch.
+        assert!(command_switch(&["-li".to_string()]).is_none());
+        assert!(command_switch(&["-c1".to_string()]).is_none());
+        assert!(command_switch(&["-".to_string()]).is_none());
+        assert!(command_switch(&[]).is_none());
     }
 
     /// B1: `cmd.exe` without `/C` starts an interactive shell that runs nothing
@@ -422,9 +589,14 @@ mod tests {
                 assert_eq!(path, dir.join(SCRIPT_NAME_CMD));
                 assert_eq!(keep_switch.as_deref(), Some("/C"));
                 let body = std::fs::read(&path).unwrap();
+                // N6: `@echo off` first, so the result is the output only.
                 assert_eq!(
                     body,
-                    format!("echo {}\r\necho done\r\n", "y".repeat(SHELL_CMD_MAX)).as_bytes()
+                    format!(
+                        "@echo off\r\necho {}\r\necho done\r\n",
+                        "y".repeat(SHELL_CMD_MAX)
+                    )
+                    .as_bytes()
                 );
                 assert!(!String::from_utf8_lossy(&body).contains("\n\n"));
             }
@@ -491,6 +663,42 @@ mod tests {
                     !body.windows(2).any(|pair| pair == b"\r\n"),
                     "a cmd.sh with CRLF breaks a heredoc terminator"
                 );
+            }
+            other => panic!("expected a script, got {other:?}"),
+        }
+    }
+
+    /// N10: a short command takes the argument route and a long one the file
+    /// route, and the two must mean the same thing — so a CRLF terminator is
+    /// normalised for a POSIX shell on **both**, not only in the file it
+    /// writes. Before this, `echo a > f<CR>` created `f<CR>` under 6000 bytes
+    /// and `f` above it (the reviewer's CRLF test passed on Windows and failed
+    /// on Linux).
+    #[test]
+    fn both_routes_normalise_a_posix_crlf_the_same_way() {
+        let dir = temp("n10");
+        let cmd = "echo one\r\necho two > f\r\n";
+        assert_eq!(
+            decide(cmd, &bash(), &dir, "", false).unwrap(),
+            ShellInput::Argument("echo one\necho two > f\n".to_string()),
+            "the argument route kept the CRs"
+        );
+        let long_cmd = format!("# {}\r\necho two > f\r\n", "z".repeat(SHELL_CMD_MAX));
+        match decide(&long_cmd, &bash(), &dir, "", false).unwrap() {
+            ShellInput::Script { path, .. } => {
+                let body = std::fs::read_to_string(&path).unwrap();
+                assert!(!body.contains('\r'), "the file route kept the CRs");
+            }
+            other => panic!("expected a script, got {other:?}"),
+        }
+        // A cmd.exe script keeps CRLF — only the POSIX family is normalised —
+        // and starts with `@echo off` (N6).
+        let bat_dir = temp("n10-bat");
+        match decide(cmd, &cmd_exe(), &bat_dir, "", true).unwrap() {
+            ShellInput::Script { path, .. } => {
+                let body = std::fs::read_to_string(&path).unwrap();
+                assert!(body.starts_with("@echo off\r\n"), "{body:?}");
+                assert!(body.contains("echo one\r\n"), "{body:?}");
             }
             other => panic!("expected a script, got {other:?}"),
         }

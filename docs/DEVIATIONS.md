@@ -28,8 +28,13 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   PowerShell `-File <path>`, because `cmd.exe <path>` starts an interactive shell on a null stdin
   that runs nothing and exits 0 (STEER-6 review B1: a long command reported success and never
   ran), and `-Command <path>` would run the path as PowerShell source. A POSIX shell reads the
-  script from its own argv, so its `-c` goes. Any argument before the switch (`cmd.exe /D /C`) is
-  kept. A shell kelir does not know (`--eval`) is left exactly as configured.
+  script from its own argv, so its `-c` goes — and a login-shell spelling (`bash -lc`, `-ic`,
+  `-ec`) keeps the flags before the `c` and drops the `c` (`bash -l cmd.sh`), so that common config
+  takes the file route instead of silently keeping the halving argument route (STEER-6 review N5).
+  Any argument before the switch (`cmd.exe /D /C`) is kept. A shell kelir does not know (`--eval`)
+  is left exactly as configured on Unix; on Windows a command for such a shell is an **error**
+  naming the argv and the spellings that work, because the only route left there is the one that
+  halves backslashes.
   Verified with the inbox `powershell.exe` in an e2e test (`-File cmd.ps1`, output written by the
   script). A Store-installed `pwsh` cannot be used as a call shell at all on Windows: it is an
   AppX execution alias, and Windows refuses to put the process an alias starts into a Job Object
@@ -38,9 +43,14 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   `powershell.exe`, or `bash`, as `shell`.
 - **A script's line endings are normalised, and only those.** A POSIX shell gets LF: a CRLF
   `cmd.sh` puts a `\r` at the end of every line and breaks a heredoc terminator outright.
-  `cmd.exe` and PowerShell get CRLF. A lone `\r` inside a payload (how a heredoc writes a literal
-  CR to a file) is untouched. `KELIR_SHELL_RAW=cr` sends a POSIX script byte-for-byte instead, for
-  a caller that needs the raw bytes.
+  `cmd.exe` and PowerShell get CRLF. The normalisation follows the **shell family, not the route**:
+  a short POSIX command on the argument route is normalised the same way, because otherwise the
+  same text would mean two things at the 6,000-byte boundary (`echo a > f<CR>` created `f<CR>`
+  below it and `f` above it — STEER-6 review N10). A lone `\r` inside a payload (how a heredoc
+  writes a literal CR to a file) is untouched. `KELIR_SHELL_RAW=cr` sends the bytes exactly as
+  written on both POSIX routes, for a caller that needs the raw bytes. A `.bat` also starts with
+  `@echo off`: without it `cmd.exe` echoes the prompt and the command line into the result, so a
+  20 KB command came back as 20 KB of echo (STEER-6 review N6).
 - **A long command also stays off the shim's own command line.** `kelir bg-shim` used to take
   the command as `--cmd <text>`, and Windows refuses to *start* a process whose command line is
   past ~32 KB (`os error 206`) — so a 40 KB heredoc failed before the shim existed. It travels

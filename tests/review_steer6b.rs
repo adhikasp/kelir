@@ -149,19 +149,25 @@ async fn s1_short_command_regressions() {
         std::fs::read_to_string(run.cwd.join("uni.txt")).unwrap(),
         "é日本語🎉"
     );
-    // N10: on Unix a short CRLF command takes `-c` and keeps its CRs (the file
-    // is named `crlf.txt<CR>`); on Windows it always goes through the LF file.
-    #[cfg(windows)]
+    // N10 (fixed): a CRLF command means the same on both routes and both
+    // platforms — the file is `crlf.txt`, not `crlf.txt<CR>`, and it holds
+    // `two`. Before the fix this passed on Windows and failed on Linux.
     assert_eq!(
         std::fs::read_to_string(run.cwd.join("crlf.txt"))
             .unwrap()
             .trim(),
-        "two"
+        "two",
+        "a CRLF command must reach the shell as LF on every route"
     );
-    #[cfg(not(windows))]
-    eprintln!(
-        "unix short CRLF: crlf.txt exists = {}",
-        run.cwd.join("crlf.txt").exists()
+    // The CR really is gone rather than being part of the name: no entry in the
+    // work dir has a CR in it.
+    let cr_named = std::fs::read_dir(&run.cwd)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .any(|entry| entry.file_name().to_string_lossy().contains('\r'));
+    assert!(
+        !cr_named,
+        "a file named crlf.txt<CR>: the route kept the CR"
     );
     assert!(
         result_of(&run, "crlf").contains("one"),
@@ -206,6 +212,23 @@ async fn b1_cmd_exe_short_long_exit_cwd() {
     assert!(s.contains("hello-cmd"), "{s}");
     assert_eq!(settled(&run, "s")["outcome"], "ok");
     eprintln!("cmd short result: {s:?}");
+    // N6: `@echo off` first, so the result is the output, not the prompt, the
+    // command line echoed back (20 KB of it for the long call), or the blank
+    // line cmd.exe prints before running a batch file.
+    assert_eq!(s.trim(), "hello-cmd", "the .bat echoed itself: {s:?}");
+    assert!(
+        !s.starts_with(
+            "
+"
+        ),
+        "cmd.exe's pre-batch blank line: {s:?}"
+    );
+    // The long call: no prompt echo either. (cmd.exe itself breaks a line
+    // past its own ~8 KB limit and echoes the fragments, which is its parser
+    // and not kelir's echo; the prompt and the blank first line are gone.)
+    let l = result_of(&run, "l");
+    assert!(!l.contains("work>"), "cmd.exe echoed its prompt: {l:.200}");
+    assert!(l.len() < 6_000, "{} bytes of echo back", l.len());
     assert!(
         std::fs::read_to_string(run.cwd.join("long.txt"))
             .unwrap()
@@ -245,22 +268,25 @@ async fn n2_powershell_backslashes_quotes_and_exit_code() {
     assert!(run.cwd.join("long.txt").exists());
 }
 
-/// A shell argv whose last word is not `-c`/`/C`/`-Command` (`bash -lc`) keeps the
-/// argument route, so backslash runs are still halved on Windows (round-2 N5).
-/// Ignored: it fails today and proves the gap.
+/// N5 (fixed): a login-shell argv (`bash -lc`) is a short-flag cluster ending
+/// in `c`, so it takes the file route and 4 backslashes stay 4. Before the fix
+/// it kept the argument route and came back halved; this test was ignored as
+/// the failing proof.
 #[cfg(windows)]
-#[ignore = "proves round-2 finding N5"]
 #[tokio::test]
-async fn s1_unrecognised_switch_keeps_the_old_route_and_its_halving() {
+async fn n5_a_login_shell_cluster_takes_the_file_route() {
+    // The shell kelir resolves, with `-c` spelled as the login cluster `-lc`: a
+    // bare `bash` is whatever PATH finds first, which on this box is a WSL
+    // launcher and not the shell kelir picked.
+    let mut shell = kelir::config::default_shell();
+    assert_eq!(shell.last().map(String::as_str), Some("-c"), "{shell:?}");
+    *shell.last_mut().unwrap() = "-lc".into();
+    let config = format!("shell = {}\n", serde_json::to_string(&shell).unwrap());
     let cmd = "cat > r.txt <<'E'\n\\\\\\\\\nE\n";
-    let run = drive(
-        vec![("c".into(), json!({"command": cmd}))],
-        "shell = [\"bash\", \"-lc\"]\n",
-        &[],
-    )
-    .await;
+    let run = drive(vec![("c".into(), json!({"command": cmd}))], &config, &[]).await;
     let got = std::fs::read_to_string(run.cwd.join("r.txt")).unwrap_or_default();
     eprintln!("bash -lc: 4 backslashes -> {got:?}");
+    eprintln!("settled: {}", settled(&run, "c"));
     assert_eq!(
         got.trim_end(),
         "\\\\\\\\",
@@ -268,10 +294,10 @@ async fn s1_unrecognised_switch_keeps_the_old_route_and_its_halving() {
     );
 }
 
-/// Round-2 N6: the `.bat` has no `@echo off`, so every cmd.exe call result starts
-/// with the prompt and the echoed command line. Ignored: fails today.
+/// Round-2 N6 (fixed): the `.bat` starts with `@echo off`, so a cmd.exe call
+/// result is the command's output and not the prompt plus the echoed command.
+/// Before the fix this test was ignored as the failing proof.
 #[cfg(windows)]
-#[ignore = "proves round-2 finding N6"]
 #[tokio::test]
 async fn n6_cmd_exe_result_has_no_prompt_echo() {
     let run = drive(
