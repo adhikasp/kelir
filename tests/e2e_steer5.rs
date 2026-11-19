@@ -409,42 +409,52 @@ async fn the_wait_line_says_what_and_how_long() {
 /// process takes it. (That is the property a pid file does not have; the
 /// governor's own unit test proves the lock itself, and this one proves the
 /// session honours it across processes.)
+///
+/// The first request is held open by the test's gate, so this is about the
+/// governor and not about how long a process takes to start.
 #[tokio::test]
 async fn two_processes_never_overlap_a_provider_request() {
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
     let mock = Mock::start(vec![
-        // A slow first answer: without the governor the second session's
-        // request would be in flight for most of it, which is what the peak
-        // concurrency would show.
-        Reply::SseAfter(Duration::from_millis(1_200), sse(&text_turn("first", 0))),
-        Reply::SseAfter(Duration::from_millis(200), sse(&text_turn("second", 0))),
+        Reply::Gated(gate.clone(), sse(&text_turn("first", 0))),
+        Reply::Sse(sse(&text_turn("second", 0))),
     ])
     .await;
     // One state dir shared by both: that is where the slots are, and that is
     // what "across local kelir processes" means. The knob is per provider —
     // one account has one limit.
-    let config = "[providers.openrouter]\nmax_concurrent_requests = 1\n";
+    let config = "[providers.openrouter]
+max_concurrent_requests = 1
+";
     let mut first = LiveSession::start(&mock, &["run", "--keep", "--json", "one"], config).await;
-    // The first session is inside its slow request now: it holds the slot.
     first.wait_for("step_started").await;
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    let second_state = first.state.clone();
+    // The first request is in the mock's hands now (the gate holds it), so the
+    // first session certainly holds the slot.
+    wait_until(Duration::from_secs(10), || mock.request_count() >= 1).await;
+
     let mut second = LiveSession::start_reusing(
-        second_state,
+        first.state.clone(),
         &mock,
         &["run", "--keep", "--json", "two"],
         config,
     )
     .await;
     second.wait_for("step_started").await;
-    // The second session's step is logged, but its request waits for the slot
-    // the first holds while its 1.2 s answer is written.
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_eq!(
-        mock.request_count(),
-        1,
-        "the second request was sent before the slot came free"
-    );
+    // The second session has built its request and is waiting for the slot, so
+    // nothing reaches the mock while the first held it. Give it far longer than
+    // the slot poll needs: a request it *could* send would arrive in ~100 ms.
+    let deadline = Instant::now() + Duration::from_millis(1_200);
+    while Instant::now() < deadline {
+        assert_eq!(
+            mock.request_count(),
+            1,
+            "the second request was sent before the slot came free"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
+    // Release the first; the second may go in now.
+    gate.notify_one();
     let ended = first.wait_for("turn_ended").await;
     assert_eq!(ended["outcome"], "done", "{ended}");
     let ended = second.wait_for("turn_ended").await;
@@ -459,15 +469,28 @@ async fn two_processes_never_overlap_a_provider_request() {
     let _ = second.finish().await;
 }
 
+/// Poll `check` until it holds or `limit` passes. The calls are condition-based
+/// rather than sleep-based on purpose: a busy dev box can make any fixed sleep
+/// a coin flip.
+async fn wait_until(limit: Duration, mut check: impl FnMut() -> bool) {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if check() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the condition did not hold within {limit:?}");
+}
+
 /// Without the knob, nothing is serialised: two sessions on one account are
 /// free to be in flight together (the default must not surprise anyone).
 #[tokio::test]
 async fn without_the_knob_requests_are_not_serialised() {
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
     let mock = Mock::start(vec![
-        // The same slow answers: with no governor the two requests are in
-        // flight together, which is the default.
-        Reply::SseAfter(Duration::from_millis(1_200), sse(&text_turn("first", 0))),
-        Reply::SseAfter(Duration::from_millis(1_200), sse(&text_turn("second", 0))),
+        Reply::Gated(gate.clone(), sse(&text_turn("first", 0))),
+        Reply::Sse(sse(&text_turn("second", 0))),
     ])
     .await;
     let mut first = LiveSession::start(&mock, &["run", "--keep", "--json", "one"], "").await;
@@ -480,12 +503,15 @@ async fn without_the_knob_requests_are_not_serialised() {
     )
     .await;
     second.wait_for("step_started").await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // With no governor the second request goes out while the first is still
+    // held: two in flight, which is the default.
+    wait_until(Duration::from_secs(10), || mock.request_count() >= 2).await;
     assert_eq!(
         mock.max_concurrent(),
         2,
         "the governor was on without being asked for"
     );
+    gate.notify_one();
     let _ = first.wait_for("turn_ended").await;
     let _ = second.wait_for("turn_ended").await;
     assert_eq!(first.ctl(&["end"]).await.code, 0, "first end");
