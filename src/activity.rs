@@ -509,7 +509,10 @@ mod tests {
             Duration::from_secs(49),
         ));
         assert!(done.starts_with('✓'), "{done}");
-        assert!(done.contains("3 steps · 4.8k tok · $0.0010 · 49s"), "{done}");
+        assert!(
+            done.contains("3 steps · 4.8k tok · $0.0010 · 49s"),
+            "{done}"
+        );
         let stopped = text(summary_line(
             theme,
             "stopped",

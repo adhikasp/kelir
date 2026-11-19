@@ -176,7 +176,9 @@ impl Theme {
             None => true,
         };
         let ascii = std::env::var_os("KELIR_ASCII").is_some_and(|value| !value.is_empty())
-            || std::env::var("TERM").map(|term| term == "dumb").unwrap_or(false);
+            || std::env::var("TERM")
+                .map(|term| term == "dumb")
+                .unwrap_or(false);
         Self {
             color,
             glyphs: if ascii {
@@ -298,8 +300,7 @@ impl Theme {
     /// Reversed video, the only "background" kelir uses (it inverts correctly
     /// on a light terminal too).
     pub fn chip(self) -> Style {
-        Style::default()
-            .add_modifier(Modifier::REVERSED | Modifier::DIM)
+        Style::default().add_modifier(Modifier::REVERSED | Modifier::DIM)
     }
 }
 
