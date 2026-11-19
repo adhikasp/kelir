@@ -5,6 +5,7 @@
 //! against a lock path in a temp dir; the only processes they start are that
 //! script and the `bash` children it is handed, and each is killed by exact pid
 //! when the test ends (AGENTS.md hard rules).
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
