@@ -821,7 +821,7 @@ async fn the_tui_renders_a_markdown_answer_and_commits_it() {
     assert!(text.contains("Some bold words"), "{text:?}");
     assert!(text.contains("cargo test"), "{text:?}");
     // The committed turn ends with the one-line summary.
-    assert!(text.contains("1 steps"), "{text:?}");
+    assert!(text.contains("1 step"), "{text:?}");
     // (the state row's idle text is checked by the snapshot tests; the pty's
     // repaint diff only rewrites what changed, so it need not appear here)
 }
@@ -1058,6 +1058,54 @@ screen: {:?}",
         !text.contains("iVBOR"),
         "no image bytes in the prompt: {text:?}"
     );
+}
+
+/// The Windows paste path end to end, in a pty: the kernel delivers the pasted
+/// path as a stream of key events there too, so the chip has to appear before
+/// Enter — the review's finding was that on Windows it appeared only at submit,
+/// as raw path text (`S8`).
+#[tokio::test]
+async fn a_typed_image_path_is_a_chip_in_the_editor_before_it_is_sent() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("PARROT", 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let image = cwd.join("shot.png");
+    std::fs::write(&image, tiny_png()).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let typed = image.display().to_string();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(cwd, config, state, base_url, typed.as_bytes(), vec![])
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    // The screen showed the chip (the path itself was replaced), which is what
+    // a Backspace then removes whole; the submit-time scan is no longer the only
+    // thing that makes the pointer.
+    let plain = plain(&run.screen);
+    assert!(plain.contains("[image 1]"), "the chip was drawn: {plain:?}");
+    let user = std::fs::read_to_string(run.session_dir.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["type"] == "user")
+        .expect("a user event");
+    let text = user["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("[image: attachments/1-shot.png"),
+        "the prompt carries the pointer once: {text:?}"
+    );
+    assert!(!text.contains("iVBOR"), "no bytes: {text:?}");
 }
 
 /// A 4x3 PNG: bytes a real decoder would accept as a header.

@@ -194,6 +194,65 @@ impl Editor {
         self.col += added;
     }
 
+    /// Take the word that ends at the cursor (a keystroke burst's path, before
+    /// it is typed), leaving the buffer and the cursor as they were minus that
+    /// word. `None` when no word ends at the cursor.
+    ///
+    /// The word is the run of non-space characters ending at the cursor, with a
+    /// closing quote and its matching opening quote taken along: the shapes a
+    /// dropped path arrives in (`C:\x\a.png`, `"C:\x\a b.png"`,
+    /// `& 'C:\x\a.png'`). A path with spaces is only a word when it is quoted,
+    /// which is exactly what Explorer and the shell hand over.
+    pub fn take_word_before_cursor(&mut self) -> Option<String> {
+        let row = self.row;
+        let col = self.char_to_byte(row, self.col);
+        let line = self.lines[row].clone();
+        let chars: Vec<char> = line[..col].chars().collect();
+        let mut end = chars.len();
+        while end > 0 && chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+        if end == 0 {
+            return None;
+        }
+        // A closing quote belongs to the word: find its opener.
+        let closer = chars[end - 1];
+        let (start, drop_to) = if closer == '"' || closer == '\'' {
+            match chars[..end - 1].iter().rposition(|c| *c == closer) {
+                Some(open) => (open, end),
+                None => (end - 1, end),
+            }
+        } else {
+            let open = chars[..end]
+                .iter()
+                .rposition(|c| c.is_whitespace())
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            (open, end)
+        };
+        let word: String = chars[start..drop_to].iter().collect();
+        if word.trim_matches(['"', '\'', '&', ' ']).is_empty() {
+            return None;
+        }
+        // Take the word and the single space before it: the chip inserts its own
+        // spacing, and the burst's space is part of what the path brought.
+        let from = if start > 0 && chars[start - 1] == ' ' {
+            start - 1
+        } else {
+            start
+        };
+        let to_byte = |index: usize| -> usize {
+            line[..col]
+                .char_indices()
+                .nth(index)
+                .map(|(offset, _)| offset)
+                .unwrap_or(col)
+        };
+        self.lines[row].replace_range(to_byte(from)..to_byte(drop_to), "");
+        self.col = chars[..from].len();
+        Some(word)
+    }
+
     /// Remove the chip the cursor belongs to (just before it, or starting at
     /// it). Returns it so the caller can delete the file.
     pub fn remove_chip_at_cursor(&mut self) -> Option<Chip> {

@@ -1455,11 +1455,18 @@ impl Session {
                     if pending.from != "tui" {
                         self.emit(UiEvent::Info(format!("› {}", one_line(&text))));
                     }
+                    // The text carries the pointers; the list carries the paths
+                    // they name, so a reader (and a later tool) can see which
+                    // images a message was about without parsing prose (N5).
+                    let attachments = crate::attachments::paths_in(&text)
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect();
                     self.record(EventBody::User {
                         text: Payload::text(text),
                         from: pending.from,
                         delivery: if now { "now" } else { "next" }.to_string(),
-                        attachments: Vec::new(),
+                        attachments,
                     })?;
                     applied.messages += 1;
                 }
@@ -1875,8 +1882,13 @@ impl Session {
         if let Ok(rest) = path.strip_prefix(&self.dir) {
             return Ok(crate::util::path_string(rest));
         }
+        // The sequence number counts the session's copies, so two different
+        // files get two numbers (review N6: they all used to be `1-…`). Names
+        // stay unique either way, but a human reading the session's
+        // `attachments/` should be able to count them.
         let mut seen = std::collections::HashMap::new();
-        let saved = crate::attachments::save(&self.dir, 1, path, &mut seen)
+        let seq = crate::attachments::next_seq(&self.dir);
+        let saved = crate::attachments::save(&self.dir, seq, path, &mut seen)
             .map_err(|error| format!("view: {error}"))?;
         Ok(saved.rel)
     }

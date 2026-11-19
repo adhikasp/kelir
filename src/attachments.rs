@@ -117,6 +117,44 @@ pub fn pasted_image(text: &str) -> Option<PastedImage> {
     })
 }
 
+/// The path-shaped tail of `text`: the run of characters a dropped or typed
+/// path could be. A quoted run wins (`"C:\a b.png"`, `& 'C:\a.png'`) because it
+/// can hold spaces; otherwise the last non-space token is the candidate.
+///
+/// Returns `None` when the tail cannot be an image path at all (empty, no image
+/// extension in it, too long to be one). Nothing here touches the file system:
+/// the caller asks [`pasted_image`], which is the one rule both ingress paths
+/// (a bracketed paste and a keystroke burst) obey.
+pub fn path_tail(text: &str) -> Option<String> {
+    let text = text.trim_end();
+    if text.is_empty() || text.chars().count() > MAX_PATH_CHARS {
+        return None;
+    }
+    let last = text.chars().next_back()?;
+    if last == '"' || last == '\'' {
+        // A closed quote: the run starts at its opener.
+        if let Some(open) = text[..text.len() - last.len_utf8()].rfind(last) {
+            let quoted = &text[open..];
+            return extension_ok_str(quoted).then(|| quoted.to_string());
+        }
+        return None;
+    }
+    let start = text
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(index, c)| index + c.len_utf8())
+        .unwrap_or(0);
+    let word = &text[start..];
+    // `& 'C:\a.png'` is PowerShell's drag form: the word is the quoted part.
+    let word = word.strip_prefix("& ").unwrap_or(word);
+    extension_ok_str(word).then(|| word.to_string())
+}
+
+/// The longest text [`path_tail`] considers: a path, not the paragraph someone
+/// happened to be typing.
+pub const MAX_PATH_CHARS: usize = 512;
+
 /// Does this text end in an image extension? Cheap enough to run on every
 /// candidate token before the file system is touched.
 pub fn extension_ok_str(text: &str) -> bool {
@@ -169,6 +207,52 @@ pub fn file_name(seq: u32, source: &Path) -> String {
     format!("{seq}-{stem}.{extension}")
 }
 
+/// Every image path a message names, in the order they appear: what the `user`
+/// event's `attachments[]` carries (the design note: the list holds the path
+/// while the text holds the pointer).
+///
+/// A pointer is `[image: <path>, …]`, written only by [`pointer`], so the scan
+/// is the inverse of that one function and cannot drift from it.
+pub fn paths_in(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("[image: ") {
+        let after = &rest[start + "[image: ".len()..];
+        let Some(end) = after.find(']') else {
+            break;
+        };
+        let inner = &after[..end];
+        // The path is the first comma-separated field; older pointers carry it
+        // alone.
+        let path = inner.split(',').next().unwrap_or_default().trim();
+        if !path.is_empty() && !out.iter().any(|seen| seen == path) {
+            out.push(path.to_string());
+        }
+        rest = &after[end..];
+    }
+    out
+}
+
+/// The sequence number the session's next copy gets: one more than the highest
+/// `<n>-…` already in `<session>/attachments/` (`1` for the first). A number is
+/// a count and a label, not an identity: the file name only has to be unique,
+/// which it is by suffix as well.
+pub fn next_seq(session_dir: &Path) -> u32 {
+    let dir = dir(session_dir);
+    let highest = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            name.split('-').next()?.parse::<u32>().ok()
+        })
+        .max()
+        .unwrap_or(0);
+    highest.saturating_add(1)
+}
+
 fn sanitise(text: &str) -> String {
     text.chars()
         .map(|c| {
@@ -216,15 +300,19 @@ pub fn bytes_label(bytes: u64) -> String {
     }
 }
 
-/// What a file's first bytes say it is: `Ok(Some((format, dimensions)))` for a
-/// format kelir reads, `Ok(None)` when the bytes are not one (an empty file, a
-/// text file with a `.png` name), `Err` when it cannot even be read.
+/// A file's own claim about itself: the format its signature names and the size
+/// its header states.
+pub type Identity = (&'static str, (u32, u32));
+
+/// What a file's first bytes say it is: `Ok(Some(identity))` for a format
+/// kelir reads, `Ok(None)` when the bytes are not one (an empty file, a text
+/// file with a `.png` name), `Err` when it cannot even be read.
 ///
 /// The extension is a claim the file makes; this is the file's own signature.
 /// An image is refused before it reaches the log because a bad one stays in the
 /// conversation: every later request repeats it, and the provider's refusal
 /// repeats with it (`S3`).
-pub fn sniff(path: &Path) -> Result<Option<(&'static str, (u32, u32))>, String> {
+pub fn sniff(path: &Path) -> Result<Option<Identity>, String> {
     use std::io::Read as _;
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
@@ -590,6 +678,93 @@ mod tests {
             pasted_image("this sentence ends in .png but is not a path"),
             None
         );
+    }
+
+    /// Review N5: the `user` event's `attachments[]` names the images the text
+    /// points at, so a reader does not have to parse prose.
+    #[test]
+    fn a_pointer_is_the_inverse_of_the_path_list() {
+        let one = pointer("attachments/1-shot.png", Some((4, 3)), 726);
+        assert_eq!(
+            paths_in(&format!("what is this? {one}")),
+            vec!["attachments/1-shot.png".to_string()]
+        );
+        // Two images, one repeated: the list is ordered and de-duplicated.
+        let two = format!(
+            "{a} and {b} and again {a}",
+            a = pointer("attachments/1-a.png", None, 10),
+            b = pointer("attachments/2-b.jpg", None, 20)
+        );
+        assert_eq!(
+            paths_in(&two),
+            vec![
+                "attachments/1-a.png".to_string(),
+                "attachments/2-b.jpg".to_string()
+            ]
+        );
+        // Text with no pointer, and a broken one, name nothing.
+        assert!(paths_in("no images here").is_empty());
+        assert!(paths_in("[image: attachments/1-a.png").is_empty());
+    }
+
+    /// Review N6: copies are numbered in the order they arrive, not all `1-…`.
+    #[test]
+    fn a_sessions_copies_are_numbered_in_sequence() {
+        let session = tempfile::tempdir().unwrap();
+        assert_eq!(next_seq(session.path()), 1, "a fresh session starts at 1");
+        let attachments = dir(session.path());
+        std::fs::create_dir_all(&attachments).unwrap();
+        std::fs::write(attachments.join("1-a.png"), png_bytes(4, 3)).unwrap();
+        std::fs::write(attachments.join("2-b.png"), png_bytes(4, 3)).unwrap();
+        assert_eq!(next_seq(session.path()), 3);
+        // A name that is not numbered does not confuse the count.
+        std::fs::write(attachments.join("notes.png"), png_bytes(4, 3)).unwrap();
+        assert_eq!(next_seq(session.path()), 3);
+    }
+
+    /// Review S3: the signature decides, not the extension.
+    #[test]
+    fn sniff_reads_the_signature_and_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("ok.png");
+        std::fs::write(&good, png_bytes(4, 3)).unwrap();
+        assert_eq!(sniff(&good).unwrap(), Some(("png", (4, 3))));
+        let fake = dir.path().join("fake.png");
+        std::fs::write(&fake, b"not a png").unwrap();
+        assert_eq!(sniff(&fake).unwrap(), None);
+        let empty = dir.path().join("empty.png");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(sniff(&empty).unwrap(), None);
+        let jpeg = dir.path().join("x.jpg");
+        std::fs::write(&jpeg, jpeg_bytes(800, 600)).unwrap();
+        assert_eq!(sniff(&jpeg).unwrap(), Some(("jpg", (800, 600))));
+        let gif = dir.path().join("x.gif");
+        std::fs::write(&gif, gif_bytes(64, 32)).unwrap();
+        assert_eq!(sniff(&gif).unwrap(), Some(("gif", (64, 32))));
+        // A file that cannot be read is an error, not a verdict.
+        assert!(sniff(&dir.path().join("missing.png")).is_err());
+    }
+
+    /// Review S4: the path tail a keystroke burst is matched against.
+    #[test]
+    fn a_path_tail_is_the_word_or_the_quoted_run_that_ends_the_text() {
+        assert_eq!(
+            path_tail("look at C:/tmp/a.png").as_deref(),
+            Some("C:/tmp/a.png")
+        );
+        assert_eq!(
+            path_tail("look at \"C:/tmp/a b.png\"").as_deref(),
+            Some("\"C:/tmp/a b.png\"")
+        );
+        assert_eq!(
+            path_tail("& 'C:/tmp/a.png'").as_deref(),
+            Some("'C:/tmp/a.png'")
+        );
+        // Not a path: no image extension, or an open quote with nothing after it.
+        assert_eq!(path_tail("look at C:/tmp/a.txt"), None);
+        assert_eq!(path_tail("look at \""), None);
+        assert_eq!(path_tail(""), None);
+        assert!(path_tail(&"x".repeat(MAX_PATH_CHARS + 1)).is_none());
     }
 
     #[test]

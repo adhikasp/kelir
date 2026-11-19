@@ -236,7 +236,15 @@ pub fn tokens(count: u64) -> String {
 
 /// The facts row, as one string (the renderer clips it to the width).
 pub fn status_text(status: &Status) -> String {
-    let mut parts = vec![format!("kelir {}", status.phase.word())];
+    // One state, one word: `done` reads as `idle` here (the state row's kind for
+    // it is idle too, so the two rows cannot disagree), while `paused` and
+    // `error` keep their own word because they are not idle (S5). The summary
+    // line above the row already carries the outcome.
+    let word = match status.phase {
+        Phase::Done => Phase::Idle.word(),
+        other => other.word(),
+    };
+    let mut parts = vec![format!("kelir {word}")];
     if !status.model.is_empty() {
         parts.push(status.model.clone());
     }
@@ -1051,11 +1059,25 @@ impl App {
     /// One key press.
     pub fn press(&mut self, press: Press) {
         match press {
-            Press::Edit(key) => match self.editor.handle(key) {
-                Outcome::Submitted(text) => self.submit(&text),
-                Outcome::ChipRemoved(chip) => self.discard_chip(&chip),
-                Outcome::Edited | Outcome::Ignored => {}
-            },
+            Press::Edit(key) => {
+                let typed = matches!(key, Key::Char(c) if !c.is_control());
+                match self.editor.handle(key) {
+                    Outcome::Submitted(text) => self.submit(&text),
+                    Outcome::ChipRemoved(chip) => self.discard_chip(&chip),
+                    Outcome::Edited | Outcome::Ignored => {
+                        // A terminal whose bracketed paste arrives as keystrokes
+                        // (Windows: crossterm decodes `ESC[200~` only on Unix)
+                        // has just typed a path character by character. The
+                        // moment a complete image path ends at the cursor it
+                        // becomes the same chip the paste would have made (S8),
+                        // so the chip is what the user sees and edits on every
+                        // platform, not only on Unix.
+                        if typed {
+                            self.adopt_typed_image();
+                        }
+                    }
+                }
+            }
             Press::Backspace => match self.editor.handle(Key::RemoveChip) {
                 Outcome::ChipRemoved(chip) => self.discard_chip(&chip),
                 _ => match self.editor.handle(Key::Backspace) {
@@ -1075,6 +1097,46 @@ impl App {
             }
             Press::Redraw => {}
         }
+    }
+
+    /// Take the image path that was just typed (or pasted as keystrokes) at the
+    /// cursor and turn it into a chip: the file is saved into the session, the
+    /// path text is removed from the buffer and `[image N]` takes its place.
+    ///
+    /// The whole run of text ending at the cursor is considered, not just the
+    /// last character: a path can arrive in pieces (a drag and drop types it in
+    /// one burst, a slow paste in several), and a partial path is simply not a
+    /// file yet, so nothing happens until it is.
+    fn adopt_typed_image(&mut self) {
+        if self.session_dir.is_none() {
+            return;
+        }
+        let Some(line) = self.editor.lines().get(self.editor.cursor().0) else {
+            return;
+        };
+        let col = self.editor.cursor().1;
+        let typed: String = line.chars().take(col).collect();
+        let typed = typed.trim_end();
+        let Some(candidate) = attachments::path_tail(typed) else {
+            return;
+        };
+        // Only a complete, existing image: `attachments::pasted_image` is the
+        // same rule the paste takes, so both ingress paths agree.
+        let Some(paste) = attachments::pasted_image(&candidate) else {
+            return;
+        };
+        if self.absorbed.contains(&candidate) {
+            return;
+        }
+        let Some(saved) = self.save_image(&paste.path) else {
+            return;
+        };
+        if self.editor.take_word_before_cursor().is_none() {
+            return;
+        }
+        self.absorbed.insert(candidate);
+        let chip = Chip::new(saved.seq, &saved.rel, &saved.pointer);
+        self.press(Press::Edit(Key::Chip(chip)));
     }
 
     /// A bracket paste: an image *path* becomes a chip, anything else is text.
@@ -1984,6 +2046,17 @@ mod tests {
         }
     }
 
+    /// A 1280x720 PNG header: enough for the pointer and the sniff.
+    fn png_720() -> Vec<u8> {
+        let mut png = vec![0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1280u32.to_be_bytes());
+        png.extend_from_slice(&720u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0]);
+        png
+    }
+
     fn app() -> App {
         app_of_width(60)
     }
@@ -2375,7 +2448,8 @@ mod tests {
             .find(|row| row.contains("tok") && row.contains("$0.0010"))
             .expect("the summary line");
         assert!(summary.contains("✓"), "{summary:?}");
-        assert!(summary.contains("1 steps"), "{summary:?}");
+        assert!(summary.contains("1 step"), "{summary:?}");
+        assert!(!summary.contains("1 steps"), "{summary:?}");
     }
 
     #[test]
@@ -2415,6 +2489,77 @@ mod tests {
             "{echoed:?}"
         );
         assert!(!echoed.contains("what the"), "{echoed:?}");
+    }
+
+    /// The maintainer's platform: on Windows a terminal's paste arrives as
+    /// keystrokes (crossterm decodes `ESC[200~` only on Unix). The chip must
+    /// appear when the path has been typed, as it does after a bracketed paste —
+    /// not only at submit, and not as raw path text (`S8`).
+    #[test]
+    fn a_typed_image_path_burst_becomes_a_chip_at_paste_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_of_width(100);
+        app.set_session_dir(dir.path().to_path_buf());
+        let image = dir.path().join("shot.png");
+        std::fs::write(&image, png_720()).unwrap();
+        for c in "look ".chars() {
+            app.press(Press::Edit(Key::Char(c)));
+        }
+        // Every keystroke of the path, exactly as a terminal sends it.
+        for c in image.display().to_string().chars() {
+            app.press(Press::Edit(Key::Char(c)));
+        }
+        assert_eq!(app.editor.chips().len(), 1, "{:?}", app.editor.text());
+        assert_eq!(app.editor.text(), "look [image 1] ");
+        assert!(dir.path().join("attachments/1-shot.png").is_file());
+        // Backspace removes the chip whole, and its file with it.
+        app.press(translate(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)).unwrap());
+        assert!(app.editor.chips().is_empty());
+        assert_eq!(app.editor.text(), "look ");
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("attachments"))
+                .map(|entries| entries.count())
+                .unwrap_or(0),
+            0,
+            "the chip's file went too"
+        );
+    }
+
+    /// A typed path that is only half a file stays text until it is a file: a
+    /// prefix of a real path is not an image, and nothing is saved for it.
+    #[test]
+    fn a_partial_typed_path_is_still_text_and_a_quote_comes_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_of_width(100);
+        app.set_session_dir(dir.path().to_path_buf());
+        let image = dir.path().join("my shot.png");
+        std::fs::write(&image, png_720()).unwrap();
+        let full = image.display().to_string();
+        for c in full[..full.len() - 2].chars() {
+            app.press(Press::Edit(Key::Char(c)));
+        }
+        assert!(app.editor.chips().is_empty(), "{:?}", app.editor.text());
+        assert!(
+            app.editor.text().trim_end().ends_with(".p"),
+            "{:?}",
+            app.editor.text()
+        );
+        app.press(Press::Edit(Key::Clear));
+        // A quoted path with a space: the quote pair goes with the chip.
+        for c in format!("\"{}\"", full).chars() {
+            app.press(Press::Edit(Key::Char(c)));
+        }
+        assert_eq!(app.editor.chips().len(), 1, "{:?}", app.editor.text());
+        assert!(
+            app.editor.text().trim_end().ends_with("[image 1]"),
+            "{:?}",
+            app.editor.text()
+        );
+        assert!(
+            !app.editor.text().contains("my shot"),
+            "{:?}",
+            app.editor.text()
+        );
     }
 
     #[test]

@@ -343,7 +343,12 @@ pub fn summary_line(
         "paused" => (theme.glyphs.paused(), theme.waiting()),
         _ => (theme.glyphs.error(), theme.error()),
     };
-    let mut parts = vec![format!("{steps} steps")];
+    // One step is one step (review N4: `1 steps` read like a bug).
+    let mut parts = vec![if steps == 1 {
+        "1 step".to_string()
+    } else {
+        format!("{steps} steps")
+    }];
     parts.push(format!("{} tok", crate::tui::tokens(tokens)));
     if cost > 0.0 {
         parts.push(format!("${cost:.4}"));
