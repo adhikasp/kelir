@@ -316,6 +316,10 @@ pub fn promote_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.promote"))
 }
 
+/// How long a `cancel` marker is believed. A cancel takes at most
+/// [`CANCEL_WAIT`]; the rest is slack for a slow box, not for a stale file.
+pub const CANCEL_MARKER_TTL: Duration = Duration::from_secs(30);
+
 /// The marker a `cancel` writes before it kills anything (STEER-7). Between the
 /// kill and the final `cancelled` status (up to [`CANCEL_WAIT`]) the status file
 /// still says `running` and its shim is already dead, which readers would report
@@ -327,8 +331,22 @@ pub fn cancel_path(dir: &Path, id: &str) -> PathBuf {
 }
 
 /// Is a `cancel` in flight for this job?
+///
+/// A marker only counts while it is young: a `cancel` that was itself killed
+/// between the kill and the status write leaves the file behind, and a marker
+/// that never expired would keep a dead job `running` for ever — the exact
+/// failure [`Status::observed`] exists to prevent. Past [`CANCEL_MARKER_TTL`]
+/// the marker is ignored and the job is judged by its shim, as before.
 pub fn cancelling(dir: &Path, id: &str) -> bool {
-    cancel_path(dir, id).is_file()
+    let path = cancel_path(dir, id);
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return false;
+    };
+    match metadata.modified().ok().and_then(|at| at.elapsed().ok()) {
+        Some(age) => age <= CANCEL_MARKER_TTL,
+        // A clock that will not say is no proof a cancel is happening.
+        None => false,
+    }
 }
 
 /// A status as a reader should understand it, given the `bg/` directory it was
@@ -2124,6 +2142,27 @@ mod tests {
         settled.state = STATE_CANCELLED.into();
         let marker = CancelMarker::write(&dir, &settled.id);
         assert_eq!(observed_in(&dir, &settled).state, STATE_CANCELLED);
+        drop(marker);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A marker left behind by a `cancel` that was itself killed must not keep a
+    /// dead job `running` for ever: past its time to live it is ignored.
+    #[test]
+    fn a_stale_cancel_marker_is_ignored() {
+        let dir = temp_dir("stale-cancel");
+        let status = sample();
+        let marker = CancelMarker::write(&dir, &status.id);
+        assert!(cancelling(&dir, &status.id));
+        // Backdate the marker past its life, the way a killed cancel would.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(cancel_path(&dir, &status.id))
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() - CANCEL_MARKER_TTL * 2)
+            .unwrap();
+        assert!(!cancelling(&dir, &status.id));
+        assert_ne!(observed_in(&dir, &status).state, STATE_RUNNING);
         drop(marker);
         std::fs::remove_dir_all(&dir).ok();
     }
