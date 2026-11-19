@@ -55,6 +55,44 @@ wait itself in `session::stream`. Where this differs from the brief:
   its own sibling, not a provider failure, so it is a visible line and a status
   line only. It is interruptible like a retry wait (`stop`, `say --now`, `end`).
 
+## Sources and skills (M5-A, 2026-11-19)
+
+- **A source edited mid-session is found by a per-boundary content hash, not a watcher.**
+  The brief allows either ("a watcher or a per-turn mtime/hash check", "say why in
+  `DEVIATIONS.md` if you deviate"). kelir re-reads the recorded sources at each
+  `before_step` and compares a hash of the body. A watcher would be a thread, an OS
+  notification subscription or an open handle on a process that is already hosting
+  someone's desktop, and the recorded set is a handful of small files — one base prompt,
+  a few instruction files, one file per skill. The hash is also *exact*: an `mtime` that
+  changed while the body did not is not news, and a file edited back to a body the
+  context already carries (the system prompt's own, or an earlier `source` message's) is
+  not a duplicate. `src/sources.rs::Watch` holds that state; a resumed session rebuilds
+  it from the list `session_started` recorded, so it reports the edits a live session
+  would have.
+- **Skills are recorded in `session_started.sources[]`.** The spec says `sources[]`
+  carries `{name, path, hash}` "for everything that went in", and a skill does go in — as
+  a *pull* target. Recording it is what lets a skill edited mid-session arrive as a
+  `source` message, and its hash is of the `SKILL.md` as read from disk (front matter
+  included). No skill body is rendered into the system prompt: the prompt names the
+  directories and nothing else, exactly as the pull rule requires.
+- **The base prompt's own edit arrives as `kind: "instruction"`.** The spec's `source`
+  kinds (`hint`, `skill`, `instruction`, `memory`, `attachment`, `channel`) have no
+  `prompt`, so the base prompt uses `instruction` and is told apart by its name,
+  `prompt.md`. The embedded default records its `path` as `embedded`, so a reader can
+  never mistake it for a project file that no longer exists.
+- **`KELIR_HOME` overrides the home directory** (`paths::home`, after which `HOME` and
+  `%USERPROFILE%` follow as before). Sources are discovered in `~/.claude/skills`, so a
+  test run on a developer's machine would otherwise depend on that machine's skills; the
+  test harness points `KELIR_HOME` at its own temp dir. It is the same kind of environment
+  override as `KELIR_STATE_DIR`/`KELIR_CONFIG_DIR`, and nothing else reads it.
+- **The test harness scrubs `KELIR_SESSION_DIR`, `KELIR_SOCK`, `KELIR_CALL_ID` and
+  `KELIR_BIN` before every spawn.** kelir dogfoods itself, so a suite run from inside a
+  kelir session inherited that session's own job directory and socket: `bg out` read the
+  *session's* jobs, and a test could report (or cancel) a job in the session running it.
+  `e2e_m4`'s three process tests and `review_m4`'s R7 failed for exactly that reason at
+  clean HEAD. This is test infrastructure, not shipped behaviour, but it is recorded here
+  because it changes what the suite proves about process isolation.
+
 ## Models metadata comes from the provider (2026-11-19)
 
 The built-in window table is gone. It assumed 128k for every `deepseek` model, so the 1M-token
@@ -137,6 +175,31 @@ consuming a scripted reply) so a session can start in a test.
 - **`step` is a session counter, not a turn counter.** In a `--keep` session the
   second turn starts at the step after the first turn's last one, so `step` stays
   unique in one log. `max_steps` still counts the steps of one turn.
+- **A `max_steps` cap pauses the turn; it never fails it (STEER-4).** Unset or
+  `0` in `config.toml` (or `--max-steps 0`) means no cap at all, which is the
+  default: the old `100` default is gone, and `0` is accepted as "unlimited"
+  rather than refused, so a stopgap config cannot break a session. Reaching an
+  explicit cap ends the turn with `turn_ended outcome=paused` (not `error`), the
+  NDJSON `result` says `paused` with exit code 0 (a pause is not a failure), and
+  stderr/TUI print "turn paused after N steps; say continue to resume". A
+  `--keep` session stays up and its next `say` opens a new turn with a fresh
+  count; `resume` of a paused log continues it like a stopped one (see
+  `resume::interrupted`). The TUI status line shows `step used/limit` only when a
+  cap is set, and the TUI banner names the cap; the phase word is `paused`. A
+  verb's answer already carries a `state` object; it now also reports
+  `turn_steps` (the turn's own count) and `max_steps` (the cap, `null` when
+  there is none), so a steering human sees a pause coming. Two details the
+  STEER-4 review asked for (S1, N1, N2): the cap is checked *before* a step is
+  counted, so after a pause `state.turn_steps` is the number of steps that ran
+  (never `cap + 1`), and the count is right the moment the pause is reported;
+  with a cap set the TUI's status line says `step 0/N` while idle too, not a
+  bare `step 0` that would hide the limit until a turn started; and a paused
+  turn reports Herdr `blocked`, not `idle`, because a paused turn *is* waiting
+  for a human (saying `continue`) and a pane supervisor cannot otherwise tell
+  it from one that never started. `paused` would be the clearer word but this
+  Herdr does not know it (measured with `scripts/live/m2_osc_probe.py` on `hc`
+  0.1.21: `state=paused` and `state=waiting` leave the pane's status `null`,
+  `state=blocked` shows as `blocked`), so the record keeps a word Herdr shows.
 - **`later` while the session is idle starts a turn at once.** There is no turn
   to end; the message is recorded with `delivery: "later"` and the process runs a
   turn for it. Likewise a `say` still pending when a turn ends opens the next
@@ -291,7 +354,9 @@ consuming a scripted reply) so a session can start in a test.
 - **A resume takes its id, cwd, provider, model and counters from the log, not  from flags.** `--cwd`, `--model` and `--provider` are ignored with `--resume`;
   the config (windows, prompts, keys) is today's machine's. The model/provider
   are the last `step_started`'s, so a `model` verb swap survives the resume.
-  `step` and `turn` continue from the log instead of restarting.
+  `step` and `turn` continue from the log instead of restarting. The turn's own
+  step count restarts at 0 (it is per turn), and today's `max_steps`/`--max-steps`
+  applies to the resumed turn like every other config knob.
 - **`kelir resume <id>` on a finished session with no task does nothing.** It
   appends the `resumed` event and one `session_ended {reason: "resumed"}`, exits
   0 and makes no provider request. With a task (`kelir resume <id> <task>`,

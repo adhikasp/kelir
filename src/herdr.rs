@@ -17,8 +17,12 @@
 //! one of those, so kelir's panes never showed a status at all (the M2 review's
 //! B1). DEVIATIONS records what is lost with them.
 //!
-//! States: `idle`, `working`, `done`, `error`. kelir never reports `blocked`:
-//! it never waits on a human.
+//! States: `idle`, `working`, `done`, `error`, and `blocked` for a turn paused
+//! on an explicit step cap — that is a turn waiting for a human to say
+//! `continue`, the one case where kelir does wait on one. A `paused` word would
+//! be clearer, but this Herdr does not know it: it accepts `blocked` and
+//! silently drops any other word (`scripts/live/m2_osc_probe.py`, measured
+//! 2026-11-19, status stayed `null` for `state=paused`, `state=waiting`).
 
 use std::io::{IsTerminal as _, Write};
 
@@ -32,6 +36,9 @@ pub enum State {
     Working,
     Done,
     Idle,
+    /// The turn paused on an explicit cap: the session waits for a human to
+    /// say `continue` (the only state in which kelir waits on one).
+    Blocked,
     Error,
 }
 
@@ -41,6 +48,7 @@ impl State {
             State::Working => "working",
             State::Done => "done",
             State::Idle => "idle",
+            State::Blocked => "blocked",
             State::Error => "error",
         }
     }
@@ -163,6 +171,7 @@ mod tests {
             (State::Working, "working"),
             (State::Done, "done"),
             (State::Idle, "idle"),
+            (State::Blocked, "blocked"),
             (State::Error, "error"),
         ] {
             assert_eq!(
@@ -175,7 +184,13 @@ mod tests {
 
     #[test]
     fn a_record_carries_no_key_but_state() {
-        for state in [State::Working, State::Done, State::Idle, State::Error] {
+        for state in [
+            State::Working,
+            State::Done,
+            State::Idle,
+            State::Blocked,
+            State::Error,
+        ] {
             let text = record(state);
             let payload = text.trim_start_matches(OSC_7501).trim_end_matches(ST);
             assert_eq!(payload, format!("state={}", state.word()));
@@ -186,12 +201,21 @@ mod tests {
         }
     }
 
+    /// `blocked` is the pause word: this Herdr accepts it and drops `paused`,
+    /// so a paused turn's pane is visibly waiting instead of looking like one
+    /// that never started (review N2).
     #[test]
-    fn a_blocked_message_is_never_sent() {
-        // kelir has no `blocked` word; only the four states exist.
-        for state in [State::Working, State::Done, State::Idle, State::Error] {
-            assert!(!record(state).contains("blocked"));
-        }
+    fn a_paused_turn_reports_blocked_because_herdr_drops_paused() {
+        let sink = Sink::default();
+        let mut herdr = Herdr::with_writer(false, sink.clone());
+        herdr.report(State::Blocked);
+        assert_eq!(
+            sink_text(&sink),
+            "\u{1b}]7501;state=blocked\u{1b}\\",
+            "the pause word this Herdr accepts"
+        );
+        // A telegram bridge keeps `blocked` for a pause; it only remaps `done`.
+        assert_eq!(state_for(State::Blocked, true), State::Blocked);
     }
 
     #[test]

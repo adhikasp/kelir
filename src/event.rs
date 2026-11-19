@@ -366,9 +366,11 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
         },
         EventBody::TurnEnded {
             outcome,
+            reason,
             final_text,
         } => EventBody::TurnEnded {
             outcome,
+            reason,
             final_text: spill_payload(blobs, seq, "final_text", final_text)?,
         },
         EventBody::Compacted {
@@ -542,6 +544,11 @@ pub enum EventBody {
     },
     TurnEnded {
         outcome: String,
+        /// Why the turn paused (`steps`: an explicit `max_steps` cap,
+        /// `provider`: the retry budget ran out). Absent for every other
+        /// outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
         final_text: Payload,
     },
     /// A background job exists: an explicit `kelir bg run` (which reports
@@ -910,6 +917,7 @@ mod tests {
             },
             EventBody::TurnEnded {
                 outcome: "done".into(),
+                reason: None,
                 final_text: "done".into(),
             },
             EventBody::BgStarted {

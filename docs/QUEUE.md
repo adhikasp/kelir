@@ -132,3 +132,71 @@ agent on the transcript (docs/retros/<job>.md) -> orchestrator merges to main ->
 order by smallest first, so conflicts stay small: steer4, steer1fix, steer2, steer3. M5-A merges first (it is
 already on main). Next wave when slots free: M5-B (Herdr line, hint, memory, attachments, observe), M6 (MCP).
 CPU is 6C/12T: at most ~4 concurrent cargo-building workers.
+
+## Update (2026-11-19 13:50) — rate limit (429) wave and STEER-5
+
+Five concurrent kelir sessions exceeded the OpenCode Go rate limit (HTTP 429, kelir gave up after short
+retries). Decisions (maintainer: "fix that, retry with backoff"):
+- **STEER-5** (docs/tasks/STEER-5.md): retry with Retry-After / exponential full-jitter backoff, interruptible,
+  visible, pause-not-fail on exhaustion, optional client-side concurrency governor. Worktree kelir-wt/steer5, pane
+  next to steer4.
+- Concurrency capped at **three** kelir workers until STEER-5 lands: M5-A (t10z), steer4 (t113), steer5. **steer3
+  parked** (stopped, resumes after STEER-5); steer1fix and steer2 parked (errored on 429, resume later with
+  `ctl <session> say continue`, state dirs under kelir-wt/state/<job>).
+- Merge order: M5-A, steer4, steer5, steer1fix, steer2, steer3.
+
+## Update (2026-11-19 14:25) — M5-A gated, in review; first retro landed; STEER-6
+
+- M5-A (sources + skills): gates on main green (Windows 419, Linux 424); fresh reviewer pane t116 running.
+- Introspective pass on M5-A's transcript (Claude, pane t115) done: docs/retros/m5a.md (commit 8e9c74b): 99.4% cache
+  hit, 113 min, 320 steps; top findings: silent 8191-char bash command cut (Windows), design thrash (49% of completion
+  tokens), python-heredoc patches over `edit`. -> brief **STEER-6** (docs/tasks/STEER-6.md), runs after STEER-5 (a slot
+  and provider capacity), as a kelir-implemented job in its own worktree.
+- Order: steer4, steer5 (running) -> M5-A review fixes -> steer6 -> steer1fix -> steer2 -> steer3 -> M5-B -> M6...
+
+- 14:00 M5-A review = PASS WITH FIXES (0 blockers, 11 should-fix, docs/reviews/m5a-review.md); fixes job **m5afix**
+  (docs/tasks/M5-A-fixes.md) in kelir-wt/m5afix; running now with steer4 and steer5 (three kelir workers).
+
+## Update (2026-11-19 15:05) — three gaps recorded (from the admin session on the maintainer; I agree with all three)
+
+1. **STEER-7** (docs/tasks/STEER-7.md): socket hardening — refuse foreign job ids/paths, per-session token (retro F8).
+2. **STEER-8** (docs/tasks/STEER-8.md): cost from a price table when the provider reports 0, `ctl status` with steps,
+   last prompt size, window %, cache ratio, retry state; threshold warnings (retro F9).
+3. **M12** (docs/tasks/M12.md): publish preparation (history scrub, first CI run, README/LICENSE/SECURITY,
+   dry-run publish). **The push itself is gated on the maintainer's explicit yes** (a decision only he can make):
+   asked once at the end of M12, not before.
+Order after the current wave: steer4, steer5, m5afix -> steer6 -> steer7 -> steer8 -> steer1fix -> steer2 -> steer3 ->
+M5-B -> M6 ... M11 -> M12. STEER-5/6 already cover rate-limit, compaction trigger, design thrash, lying-tool exit codes.
+
+## Update (2026-11-19 16:10) — steer4 merged, M5-A review fixes + steer5 running
+
+- **steer4 merged to main** (9dd351f): PASS WITH FIXES, fixed (steer4fix), gates green on Linux (446) and Windows (439
+  with 2 load flakes that also hit main). The user config line `max_steps = 4294967295` can go once the pinned/installed
+  binary is the new one (the installed `.cargo/bin/kelir.exe` is still old: it would fall back to 100).
+- Introspective retros landed: docs/retros/m5a.md, docs/retros/steer4.md (same top findings: design thrash, 8 KB command cut,
+  429 giving up) -> STEER-5 (running), STEER-6 (queued).
+- Flaky e2e under load recorded as **STEER-9** (docs/tasks/STEER-9.md); gates now use `cargo test --no-fail-fast`.
+- Running: steer5 (t114), m5afix (t119). Merge order next: m5afix, steer5, then steer6, steer7, steer8, steer9, steer1fix, steer2, steer3, M5-B ...
+
+- 16:25 Parked workers closed (they had only read files: no commits, clean worktrees): steer1fix (t110), steer2 (t111),
+  steer3 (t112). Their Herdr "needs attention" flags cleared by closing the panes. Worktrees kelir-wt/steer1fix,
+  steer2, steer3 kept (clean, branches at the old base): **relaunch fresh** from a rebased/new worktree off current main
+  when a slot frees (do not resume; their transcripts are in kelir-wt/state/<job>/ if the retro wants them).
+  Running now: steer5 (t114), m5afix (t119), steer6 (t11s).
+
+## Update (2026-11-19 16:40) — TUI polish (maintainer)
+
+New requirement: polish the TUI: clear idle-vs-working, collapsed/de-emphasised tool calls, image paste stored as a file
+in the session state dir with a pointer in the prompt (model reads it on demand via `kelir view`), full markdown.
+- **STEER-10** (docs/tasks/STEER-10.md) + STEER-3 = one job **tui2**.
+- Step 1 (running): fresh Claude design analyst compares opencode and Claude Code runs (screenshots) and writes
+  docs/design/TUI-v2.md. Step 2: kelir implements tui2 in kelir-wt/tui2 from that note. Step 3: reviewer with screenshots,
+  introspective retro, merge. Parks STEER-3 as a separate job (superseded by tui2).
+
+## Update (2026-11-19 17:00) — self-documentation (maintainer)
+
+**STEER-11** (docs/tasks/STEER-11.md): organised `docs/reference/` of everything configurable (config/CLI/env/verbs/files/
+events/providers/troubleshooting + source map), generated where possible and guarded by a drift test, embedded and readable
+via `kelir docs`, shipped as a builtin skill `kelir` that the hint (M5-B) and steering rules (M8) can inject. SPEC.md has a
+Self-documentation section; AGENTS.md says docs are part of done. Run it right after STEER-5/6 (it needs the env-var registry
+and the final config surface), before M5-B.

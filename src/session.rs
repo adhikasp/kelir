@@ -241,6 +241,9 @@ struct Session {
     step: u32,
     /// The turn being run (0 before the first one).
     turn: u32,
+    /// Steps taken in the turn now running, reset at every turn start: an
+    /// explicit `max_steps` cap counts these, not the session-wide `step`.
+    turn_steps: u32,
     /// Tools turned off for the rest of the session. The list sent to the
     /// provider never changes.
     disabled: BTreeSet<String>,
@@ -357,12 +360,14 @@ fn crash_at(point: &str) {
 enum TurnEnd {
     Done,
     Stopped(String),
+    /// The turn paused and waits for a human. Not a failure: the session
+    /// stays alive (`--keep`) and the next message opens a new turn. The log
+    /// says `turn_ended` outcome `paused` with the report's `reason`
+    /// (`steps`: the explicit `max_steps` cap; `provider`: the provider stayed
+    /// unavailable past the waiting budget, so the message says how to go on).
+    Paused(PauseReport),
     /// The `end` verb arrived.
     End,
-    /// The provider stayed unavailable past the waiting budget. The log says
-    /// `turn_ended` outcome `paused` (never `error`: nothing is broken and the
-    /// fold is intact) and the message says how to go on.
-    Paused(PauseReport),
 }
 
 /// What the next turn should be.
@@ -405,27 +410,64 @@ enum StreamEnd {
     Paused(PauseReport),
 }
 
-/// What a pause says happened, for `turn_ended.final_text`.
+/// What a pause says happened, for `turn_ended.final_text` (and its `reason`).
 struct PauseReport {
-    /// Provider requests made inside the budget.
+    /// `paused` because of this: an explicit `max_steps` cap (`steps`) or an
+    /// unavailable provider (`provider`).
+    reason: PauseReason,
+    /// Provider requests made inside the budget (`provider` only).
     attempts: u32,
-    /// How long the waits inside the budget took.
+    /// How long the waits inside the budget took (`provider` only).
     waited: Duration,
-    /// The last failure's short reason ("rate limited (429)").
-    reason: String,
+    /// The last failure's short reason ("rate limited (429)"), `provider` only.
+    detail: String,
+}
+
+/// The two ways a turn pauses; both log `outcome: "paused"`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PauseReason {
+    /// An explicit `max_steps` cap was reached.
+    Steps,
+    /// The provider stayed unavailable past the waiting budget.
+    Provider,
+}
+
+impl PauseReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            PauseReason::Steps => "steps",
+            PauseReason::Provider => "provider",
+        }
+    }
 }
 
 impl PauseReport {
+    /// The step cap: "turn paused after 40 steps; say continue to resume".
+    fn steps(steps: u32) -> PauseReport {
+        PauseReport {
+            reason: PauseReason::Steps,
+            attempts: steps,
+            waited: Duration::ZERO,
+            detail: String::new(),
+        }
+    }
+
     /// "provider unavailable after 7 attempts / 30 min: rate limited (429);
     /// say continue to retry".
     fn message(&self) -> String {
+        if self.reason == PauseReason::Steps {
+            return format!(
+                "turn paused after {} steps; say continue to resume",
+                self.attempts
+            );
+        }
         let mut text = format!(
             "provider unavailable after {} attempt{}, {}: ",
             self.attempts,
             if self.attempts == 1 { "" } else { "s" },
             crate::retry::seconds_text(self.waited)
         );
-        text.push_str(&self.reason);
+        text.push_str(&self.detail);
         text.push_str("; say continue to retry");
         text
     }
@@ -568,6 +610,13 @@ async fn drive(opts: Options) -> u8 {
             ),
             "Enter sends · Alt-Enter adds a line · /help shows the commands".to_string(),
         ];
+        // The cap is worth a banner line only when one is set: the status line
+        // carries the count ("step 3/5") while a turn runs.
+        if let Some(cap) = session.cfg.max_steps {
+            banner.push(format!(
+                "step cap {cap} per turn · reaching it pauses the turn (say continue)"
+            ));
+        }
         if session.resumed {
             banner.push(format!(
                 "resumed from the event log · {} turn(s) recorded{}",
@@ -580,7 +629,13 @@ async fn drive(opts: Options) -> u8 {
             ));
         }
         banner.push(String::new());
-        match tui::start(from_session, to_tui.clone(), tx.clone(), &banner) {
+        match tui::start(
+            from_session,
+            to_tui.clone(),
+            tx.clone(),
+            &banner,
+            session.cfg.max_steps,
+        ) {
             Ok(handle) => {
                 session.ui = Some(to_tui.clone());
                 let task = tokio::spawn(handle.run());
@@ -682,8 +737,14 @@ async fn load_models(client: &Client, provider: &str) -> (Option<crate::models::
 
 async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let common = &opts.common;
-    let cfg = config::load(common.config.as_deref())
+    let mut cfg = config::load(common.config.as_deref())
         .map_err(|error| Failure::Usage(error.to_string()))?;
+    // `--max-steps N` overrides the file, and `0` there means "no cap" as it
+    // does in `config.toml`: a stopgap config must never be able to cap a turn
+    // at zero steps.
+    if let Some(steps) = common.max_steps {
+        cfg.max_steps = (steps > 0).then_some(steps);
+    }
 
     // A resume takes its id, cwd, model and tool list from the log; only the
     // config (windows, prompts, provider keys) comes from today's machine.
@@ -1012,6 +1073,7 @@ impl Session {
             final_text: String::new(),
             step: prepared.resume.as_ref().map(|read| read.step).unwrap_or(0),
             turn: prepared.resume.as_ref().map(|read| read.turns).unwrap_or(0),
+            turn_steps: 0,
             disabled: BTreeSet::new(),
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
@@ -1212,7 +1274,7 @@ impl Session {
         let continuing = !closed
             || matches!(
                 resume::last_turn_outcome(&self.events).as_deref(),
-                Some("stopped") | Some("error")
+                Some("stopped") | Some("paused") | Some("error")
             );
         if !continuing {
             return Ok(());
@@ -1327,6 +1389,9 @@ impl Session {
         let state = match outcome {
             "done" => HerdrState::Done,
             "error" => HerdrState::Error,
+            // A paused turn waits for a human to say `continue`; that is the
+            // one Herdr word a supervisor can see as waiting (review N2).
+            "paused" => HerdrState::Blocked,
             _ => HerdrState::Idle,
         };
         self.report(state);
@@ -1372,6 +1437,11 @@ impl Session {
         json!({
             "turn": self.turn,
             "step": self.step,
+            // The turn's own count and its cap, so a steering human sees a
+            // pause coming (FINDINGS: "a status line with steps used/limit
+            // would have shown it coming"). `max_steps` is null with no cap.
+            "turn_steps": self.turn_steps,
+            "max_steps": self.cfg.max_steps,
             "running": self.live_calls,
             "provider": self.provider_name,
             "model": self.model,
@@ -2121,6 +2191,7 @@ impl Session {
                 Ok(TurnEnd::Done) => {
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "done".into(),
+                        reason: None,
                         final_text: self.final_text.clone().into(),
                     });
                     self.finish_turn("done");
@@ -2134,6 +2205,7 @@ impl Session {
                     }
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "stopped".into(),
+                        reason: None,
                         final_text: self.final_text.clone().into(),
                     });
                     self.finish_turn("stopped");
@@ -2143,26 +2215,40 @@ impl Session {
                 Ok(TurnEnd::End) => {
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "stopped".into(),
+                        reason: None,
                         final_text: self.final_text.clone().into(),
                     });
                     self.finish_turn("stopped");
                     reason = "end".into();
                     false
                 }
-                // The provider stayed unavailable past the waiting budget. The
-                // turn is *paused*, never failed: nothing is broken, the fold is
-                // intact, and a later `say` retries from it with a fresh budget.
-                // A one-shot run exits 0, like every other pause.
+                // A pause is never a failure: nothing is broken and the fold is
+                // intact. The hint is the whole point of `paused` over `error`:
+                // it goes to stderr even under `--json` (stdout stays NDJSON)
+                // and into the TUI's scrollback, never only into the log. A
+                // one-shot run exits 0. `reason` tells a step cap from an
+                // unavailable provider.
                 Ok(TurnEnd::Paused(report)) => {
                     let message = report.message();
-                    if !self.tui {
-                        eprintln!("kelir: {message}");
+                    if report.reason == PauseReason::Steps {
+                        if !self.tui {
+                            eprintln!("→ {message}");
+                        }
+                    } else {
+                        if !self.tui {
+                            eprintln!("kelir: {message}");
+                        }
+                        self.emit(UiEvent::Info(format!("» {message}")));
+                        self.final_text = message.clone();
                     }
-                    self.emit(UiEvent::Info(format!("» {message}")));
-                    self.final_text = message.clone();
+                    let text = match report.reason {
+                        PauseReason::Steps => self.final_text.clone(),
+                        PauseReason::Provider => message.clone(),
+                    };
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "paused".into(),
-                        final_text: message.into(),
+                        reason: Some(report.reason.as_str().into()),
+                        final_text: text.into(),
                     });
                     self.finish_turn("paused");
                     code = 0;
@@ -2176,6 +2262,7 @@ impl Session {
                     self.emit(UiEvent::Error(message.clone()));
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "error".into(),
+                        reason: None,
                         final_text: String::new().into(),
                     });
                     self.finish_turn("error");
@@ -2285,14 +2372,25 @@ impl Session {
             turn: self.turn,
             provider: self.provider_name.clone(),
             model: self.model.clone(),
+            limit: self.cfg.max_steps,
         });
         self.report(HerdrState::Working);
-        let mut turn_steps = 0u32;
+        self.turn_steps = 0;
         loop {
-            turn_steps += 1;
-            if turn_steps > self.cfg.max_steps {
-                return Err(format!("step limit {} reached", self.cfg.max_steps));
+            // An explicit cap counts the steps of *this* turn: reaching it
+            // pauses the turn (the work so far is kept, and the next message
+            // opens a new turn with a fresh count). No cap at all, the
+            // default, never stops a turn. The test comes *before* the
+            // increment, so a paused turn's count is the number of steps that
+            // ran, not one more: `state` says `2` of `2`, never `3` of `2`
+            // (review S1).
+            if let Some(cap) = self.cfg.max_steps
+                && self.turn_steps >= cap
+            {
+                self.emit(UiEvent::Paused { steps: cap });
+                return Ok(TurnEnd::Paused(PauseReport::steps(cap)));
             }
+            self.turn_steps += 1;
 
             // ---------------------------------------------------- before_step
             let applied = self.apply(Boundary::BeforeStep)?;
@@ -2331,6 +2429,8 @@ impl Session {
                 step,
                 provider: self.provider_name.clone(),
                 model: self.model.clone(),
+                turn_steps: self.turn_steps,
+                limit: self.cfg.max_steps,
             });
 
             let assembler = match self.stream(rx, RequestFor::Step, false).await? {
@@ -2530,9 +2630,10 @@ impl Session {
                 if error.retryable && !summary {
                     self.sync();
                     return Ok(StreamEnd::Paused(PauseReport {
+                        reason: PauseReason::Provider,
                         attempts: budget.attempts(),
                         waited: budget.spent(),
-                        reason: error.reason(),
+                        detail: error.reason(),
                     }));
                 }
                 return Err(error.message);
@@ -2544,9 +2645,10 @@ impl Session {
             let Some(wait) = wait else {
                 self.sync();
                 return Ok(StreamEnd::Paused(PauseReport {
+                    reason: PauseReason::Provider,
                     attempts: budget.attempts(),
                     waited: budget.spent(),
-                    reason: error.reason(),
+                    detail: error.reason(),
                 }));
             };
             budget.charge(wait);
@@ -3200,18 +3302,20 @@ mod tests {
     #[test]
     fn a_pause_says_what_happened_and_how_to_go_on() {
         let report = PauseReport {
+            reason: PauseReason::Provider,
             attempts: 7,
             waited: Duration::from_secs(30 * 60),
-            reason: "rate limited (429)".into(),
+            detail: "rate limited (429)".into(),
         };
         assert_eq!(
             report.message(),
             "provider unavailable after 7 attempts, 30 min: rate limited (429); say continue to retry"
         );
         let one = PauseReport {
+            reason: PauseReason::Provider,
             attempts: 1,
             waited: Duration::from_millis(400),
-            reason: "provider error (500)".into(),
+            detail: "provider error (500)".into(),
         };
         assert_eq!(
             one.message(),
@@ -3266,7 +3370,7 @@ mod tests {
                 model: String::new(),
                 shell: vec![],
                 spill_limit: 0,
-                max_steps: 0,
+                max_steps: None,
                 cache_ttl: None,
                 system_prompt: crate::config::DEFAULT_PROMPT.to_string(),
                 providers: Default::default(),
@@ -3293,6 +3397,7 @@ mod tests {
             final_text: String::new(),
             step: 0,
             turn: 0,
+            turn_steps: 0,
             disabled: BTreeSet::new(),
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
@@ -3337,7 +3442,7 @@ mod tests {
             model: String::new(),
             shell: vec![],
             spill_limit: 0,
-            max_steps: 0,
+            max_steps: None,
             cache_ttl: None,
             system_prompt: crate::config::DEFAULT_PROMPT.to_string(),
             providers: Default::default(),
