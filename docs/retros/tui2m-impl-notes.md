@@ -75,3 +75,19 @@ No real provider was called; every scenario used the in-repo mock.
 - A merge conflict in a *test* body can hide a semantic conflict: both sides
   asserted the same `OPENROUTER` fixture for different fields, and keeping one
   side's assertion would have silently dropped the other's coverage.
+
+## Second merge: main at 997a833 (buildinfra, 566379c)
+
+`git merge main` after the first one conflicted only in `docs/PROGRESS.md` (both sides appended a row).
+Resolved by keeping both, main's newest last, and putting the buildinfra row (`BUILD-INFRA`) above mine;
+no other file conflicted (`AGENTS.md`, `Cargo.toml`, `.cargo/config.toml`, `.config/nextest.toml`,
+`scripts/gate*.sh`, `scripts/remote-check.sh`, `tests/buildinfra.rs` all auto-merged).
+
+Nothing in tui2's code collides with the build infra: the new gate wants fmt, clippy, nextest -j 4 and
+doctests, and the TUI suite already sits in a `pty` nextest group (max 2) via `.config/nextest.toml`,
+so the PTY tests do not oversubscribe the box next to the process-heavy suites.
+
+Gate at the merge commit 93930ac, `bash scripts/gate.sh --linux`:
+fmt ok (1.2 s), clippy ok (50.5 s), nextest 757 passed / 2 skipped in 151 s with **zero retried tests**,
+doctest ok, Linux via `scripts/remote-check.sh the maintainer`: rc=0, 757 passed, FMT-OK, CLIPPY-OK, gate: PASS.
+The 2 skipped are the pre-existing Unix-only/Opt-In tests, not tui2's.
