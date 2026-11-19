@@ -484,6 +484,31 @@ impl Ctl {
     }
 }
 
+/// Is `pid` still a running process? (The support module's own answer: the e2e
+/// tests carry their own copy; this one is for a diagnostic message.)
+fn pid_alive_here(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let tasklist = std::path::Path::new(&system_root)
+            .join("System32")
+            .join("tasklist.exe");
+        std::process::Command::new(tasklist)
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")))
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string()])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+}
+
 impl LiveSession {
     pub async fn start(mock: &Mock, args: &[&str], extra_config: &str) -> LiveSession {
         let temp = tempfile::tempdir().unwrap();
@@ -531,13 +556,26 @@ impl LiveSession {
 
     /// The next NDJSON event the session wrote.
     pub async fn next_event(&mut self) -> Value {
+        let pid = self.pid();
+        let started = std::time::Instant::now();
         let mut line = String::new();
         let read = tokio::time::timeout(Duration::from_secs(30), async {
             use tokio::io::AsyncBufReadExt as _;
             self.stdout.read_line(&mut line).await
         })
         .await
-        .unwrap_or_else(|_| panic!("no event within 30 s; stderr: {}", self.stderr()))
+        .unwrap_or_else(|_| {
+            panic!(
+                "no event within 30 s (session pid {pid} alive={} after {:?}, seen so far: {:?}, stderr: {})",
+                pid_alive_here(pid),
+                started.elapsed(),
+                self.events
+                    .iter()
+                    .map(|event| event["type"].clone())
+                    .collect::<Vec<_>>(),
+                self.stderr()
+            )
+        })
         .expect("read the session output");
         assert!(
             read > 0,
@@ -580,6 +618,12 @@ impl LiveSession {
 
     pub fn stderr(&self) -> String {
         self.stderr.lock().unwrap().clone()
+    }
+
+    /// The session process's pid, for a test that has to say whether it is
+    /// still alive when an event is late.
+    pub fn pid(&self) -> u32 {
+        self.child.id().unwrap_or(0)
     }
 
     /// The session log as it is on disk right now.

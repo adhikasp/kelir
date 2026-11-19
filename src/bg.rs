@@ -472,9 +472,8 @@ impl SpawnRequest {
     }
 }
 
-/// Start a detached shim for `launch`. Returns whether the session had to do it
-/// (the Windows case above), which means the job is already reported to it.
-pub async fn start_shim(launch: &Launch<'_>) -> Result<bool, String> {
+/// Start the shim for `kelir bg run`.
+pub async fn start_shim(launch: &Launch<'_>) -> Result<(), String> {
     #[cfg(windows)]
     {
         if let Err(denied) = spawn_shim(launch, true) {
@@ -488,7 +487,7 @@ pub async fn start_shim(launch: &Launch<'_>) -> Result<bool, String> {
                 if let Ok(answer) = crate::ipc::request_value(sock.trim(), &request).await
                     && answer.ok
                 {
-                    return Ok(true);
+                    return Ok(());
                 }
             }
             // No session to help (a bare shell inside some other job): the job
@@ -496,12 +495,11 @@ pub async fn start_shim(launch: &Launch<'_>) -> Result<bool, String> {
             // can be done — and the caller's job is not a call's.
             spawn_shim(launch, false).map_err(|error| format!("{error} ({denied})"))?;
         }
-        Ok(false)
+        Ok(())
     }
     #[cfg(not(windows))]
     {
-        spawn_shim(launch, true)?;
-        Ok(false)
+        spawn_shim(launch, true)
     }
 }
 
@@ -990,13 +988,10 @@ async fn run(args: BgRunArgs) -> u8 {
         // its own directory.
         cwd: std::env::current_dir().ok(),
     };
-    let via_session = match start_shim(&launch).await {
-        Ok(via_session) => via_session,
-        Err(error) => {
-            eprintln!("kelir: bg run: {error}");
-            return 1;
-        }
-    };
+    if let Err(error) = start_shim(&launch).await {
+        eprintln!("kelir: bg run: {error}");
+        return 1;
+    }
 
     // Wait for the shim to say the command is running (or already failed), so
     // the id and the pid are real when the model reads them.
@@ -1024,10 +1019,11 @@ async fn run(args: BgRunArgs) -> u8 {
                 "read: kelir bg out {} | wait: kelir bg wait {} | cancel: kelir bg cancel {}",
                 status.id, status.id, status.id
             );
-            // The session already knows: it started the shim itself.
-            if !via_session {
-                notify(&status).await;
-            }
+            // Tell the session at once (even when it started the shim itself):
+            // the watcher would find the job on its next 250 ms poll, but the
+            // report is what puts `bg_started` in the log before the call that
+            // asked for the job has even settled.
+            notify(&status).await;
             if status.error.is_some() { 1 } else { 0 }
         }
         None => {
