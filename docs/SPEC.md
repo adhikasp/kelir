@@ -42,8 +42,8 @@ that appends an event; the loop applies verbs at named boundaries.
 - **A bg job that finishes while its session is not running** is only recorded: its shim writes
   `bg/<id>.status`, and the next `resume` folds it into the log as `bg_settled`. Nothing wakes a
   stopped session.
-- **Children (`spawn`) are separate OS processes** (`kelir run --child`), each owning its own
-  session dir. They live inside the parent's process group (Unix) or Job Object (Windows), so
+- **Children are separate OS processes** the model starts from `bash` (`kelir run --child`,
+  `kelir brief`; there is no spawn tool), each owning its own session dir. They live inside the parent's process group (Unix) or Job Object (Windows), so
   killing the parent leaves no orphans.
 
 ## What the model gets
@@ -54,7 +54,6 @@ that appends an event; the loop applies verbs at named boundaries.
 |---|---|
 | `bash` | runs a command in the configured shell (see *Shell and platforms*); output tee'd to `commands/<id>/out` |
 | `edit` | string replace in one file: `{path, old, new, replace_all?}`; `old` must match exactly once unless `replace_all`; `old: ""` on a missing file creates it. Preserves the file's line endings (CRLF stays CRLF). Returns the changed line numbers. Reading files is `bash` (`cat`, `sed -n`, `rg`). |
-| `spawn` | starts a child session with a task; returns its result, or a handle for a background child |
 | `compact` | compacts this session's context (see *Compaction*); takes an optional `focus` |
 
 Everything else is a CLI the model reaches through `bash`, so it costs no tool schema:
@@ -130,8 +129,8 @@ The request is built so its prefix only ever grows:
 1. **System** = base `prompt.md` + machine and project sources, rendered once at
    `session_started` and frozen (the date goes in, never the time). A source file edited on disk
    mid-session arrives as a `source` message, not as a system rewrite.
-2. **Tools** = the four native tools, the same list for the whole session (and for `brief`,
-   which refuses `edit`/`spawn`/`compact` by result rather than by a different list).
+2. **Tools** = the three native tools (`bash`, `edit`, `compact`), the same list for the whole
+   session (and for `brief`, which refuses `edit`/`compact` by result rather than by a different list).
 3. **Messages** = append-only. Hints, `skills` changes, memory, attachments, bg and child
    completions, channel envelopes and gate notes are new messages at the tail, never edits to
    earlier ones. Parallel results go in call order.
@@ -259,14 +258,20 @@ answers ("do 1,4") resolved at `prompt_submit` against the last numbered list in
 
 ## Subagents
 
-`spawn` starts a child session (own process, own dir, `parent`/`depth` in `session_started`);
-the parent gets the result as the tool result, or for a background child as a `child_settled`
-at the next boundary. Because a child is a session, `stop`, `resume`, `observe`, `attach` and
-`kelir ls`/kill work on it unchanged. **Limits** (`config.toml`): depth 3 (root is 0), 10
-children per agent, 16 live descendants per root; a spawn past a cap is refused with a message
-the model can read. **No spend cap** : cost per session and per child is shown in
-`kelir ls`, not enforced. Only the root reports Herdr status. `brief` is a child preset: a
-by-value snapshot of the parent's context, `edit`/`spawn`/`compact` refused, history untouched.
+A child is a kelir process the model starts from `bash`: `kelir run --child "<task>" [--background]`
+or `kelir brief "<question>"`. There is **no `spawn` tool**; the native tool list is `bash`, `edit`,
+`compact`. `KELIR_ROOT`, `KELIR_PARENT` and `KELIR_DEPTH` ride along with `KELIR_SOCK` (exported to
+every bash child), so the CLI registers `child_started`/`child_settled` with the **root session's
+socket** (the root stays the only writer of the registry and of its own log; each child still owns
+its own session dir with `parent`/`depth` in `session_started`). A foreground child's result is the
+bash call's stdout; a background child's `child_settled` arrives at the next boundary and wakes the
+parent. Because a child is a session, `stop`, `resume`, `observe`, `attach` and `kelir ls`/kill work
+on it unchanged. **Limits** (`config.toml`), enforced by the CLI against the root's registry: depth 3
+(root is 0), 10 children per agent, 16 live descendants per root; a start past a cap exits non-zero
+with a message the model can read. **No spend cap**: cost per session and per child is shown in
+`kelir ls`, not enforced. Only the root reports Herdr status. `brief` is a child preset: a by-value
+snapshot of the parent's context, `edit`/`compact` refused, history untouched. Delegation guidance
+(when and how to start children) is a builtin skill injected at M8, not a tool.
 
 ## Background
 
@@ -322,7 +327,7 @@ fold). Deps: tokio, serde, one HTTP client (reqwest + rustls), ratatui/crossterm
 | M5 | sources (machine + project), skills, the pushed hint, memory, attachments, `observe` | `observe` matches what the provider received byte for byte; the hint names the right skill for 10 held-out prompts; the cache hit ratio holds across a hint |
 | — | **dogfood 1:** kelir is the default for the maintainer's own terminal side tasks | a week of real use; the scorecard reads kelir's logs |
 | M6 | `kelir mcp` (`rmcp` client, socket broker, `mcp_started`/`mcp_settled`) | `kelir mcp <server> <tool> … \| jq` works in a bash call; the call shows in `observe`; a >10 KB result spills |
-| M7 | `spawn` and `brief`: child sessions, caps, `kelir ls` and kill | a child of a child finishes; killing the parent leaves no orphan (Linux and Windows); the 17th live descendant is refused; `brief` hits the parent's cache |
+| M7 | children as CLI (`kelir run --child`, `kelir brief`, root-registered via `KELIR_ROOT`/`KELIR_PARENT`/`KELIR_DEPTH`), caps, `kelir ls` and kill | a child of a child finishes; killing the parent leaves no orphan (Linux and Windows); the 17th live descendant is refused; `brief` hits the parent's cache |
 | M8 | gates (six events) and the maintainer's gates: verify, note-check, pull/commit, "do 1,4" | a hedged final answer is blocked once; a crashing gate fails open; `observe` lists what fired |
 | M9 | jobs, named sessions, `STATUS` | a job resumes its session the next day; single-flight holds |
 | M10 | Telegram: `tg-bridge` through `kelir mcp`, `notifications/claude/channel` inbound, `turn_done`, `kelir` as a third `/harness` in `tg-router` | a DM topic gets an answer and a fallback reply; the spool survives a restart |

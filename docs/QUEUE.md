@@ -14,7 +14,7 @@ Order of work, one writer on `src/` at a time. Update as items move.
    (in flight when the orchestrator changed hands).
 4. STEER-2 (two providers, opencode credential read directly).
 5. STEER-3 (markdown in the TUI).
-6. M5-B (hint, memory, attachments, `observe`), M6 MCP, M7 spawn/brief, M8 gates, M9 jobs/sessions,
+6. M5-B (hint, memory, attachments, `observe`), M6 MCP, M7 children-as-CLI/brief (no spawn tool, see below), M8 gates, M9 jobs/sessions,
    M10 Telegram, M11 attach: each with implementer -> tester -> retro (3 passes).
 
 Per-job loop (the maintainera, 2026-11-19, revised): **kelir implements** and **kelir tests/reviews** (two
@@ -67,3 +67,19 @@ STEER-3 implement, M5-M11. The repo is still local only: no remote, nothing push
   (docs/retros/STEER-1-fixes.md), then STEER-2, STEER-3, M5-A...
 - herdr-app tab.new needs `--space <local space id>` (the focused space may be a Linux machine) and
   `env -u SHELL`.
+
+## State (2026-11-19 12:20) — handover recorded, writers sorted, M7 design change
+
+- **Handover**: the opencode orchestrator t9m started the M5-A implementer (kelir, pane t10s) before the
+  role came back to Claude (t1x). I had also launched STEER-1-fixes (kelir, pane t10w). One writer on
+  `src/` at a time: **t10s (M5-A) continues; t10w was stopped before it wrote anything and STEER-1-fixes is
+  requeued behind M5-A** (brief unchanged: docs/tasks/STEER-1-fixes.md). t9m stood down.
+- **M7 design change (maintainer, via Telegram)**: no spawn tool. A child is a kelir process the model starts
+  from bash (`kelir run --child`, `kelir brief`); `KELIR_ROOT`/`KELIR_PARENT`/`KELIR_DEPTH` ride along with
+  `KELIR_SOCK`; the CLI registers `child_started`/`child_settled` with the root's socket (root stays the only
+  writer); caps (depth 3, 10 per agent, 16 live per root) are enforced by the CLI. Native tools: bash, edit,
+  compact. Delegation is a builtin skill injected at M8. SPEC.md and docs/tasks/M7.md updated.
+- Drive mode: continuous through M11, no stops to report; stop only for the usage limit (hand to t9m), a
+  missing key, or a decision only the maintainer can make. A watchdog on the Linux box nudges this pane when idle.
+- Next after M5-A lands: gates -> fresh reviewer (kelir) -> retro (fresh opencode) -> STEER-1-fixes -> STEER-2 ->
+  STEER-3 -> M5-B -> M6 ... M11, recording each landed milestone in docs/PROGRESS.md.
