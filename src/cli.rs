@@ -34,6 +34,8 @@ pub enum Command {
     Ctl(CtlArgs),
     /// Background jobs: run, ls, out, wait, cancel.
     Bg(BgArgs),
+    /// Show which key each provider would use (never the key itself).
+    Doctor(DoctorArgs),
     /// Internal: the background-job shim. Not for humans.
     #[command(hide = true, name = "bg-shim")]
     BgShim(BgShimArgs),
@@ -44,7 +46,7 @@ pub struct CommonArgs {
     /// Model id for this run (overrides the config).
     #[arg(long)]
     pub model: Option<String>,
-    /// Provider name from the config (`openrouter`, `opencode-go`, or a custom one).
+    /// Provider name: `openrouter` or `opencode-go` (there are exactly two).
     #[arg(long)]
     pub provider: Option<String>,
     /// Working directory for the session (defaults to the current directory).
@@ -171,6 +173,18 @@ pub struct CtlArgs {
     /// `skills --kind <skill|instruction>` (default `skill`).
     #[arg(long, value_name = "KIND")]
     pub kind: Option<String>,
+}
+
+/// `kelir doctor`: what the two providers are wired to, and where each key
+/// comes from — the source, never the secret.
+#[derive(Debug, Args, Clone, Default)]
+#[command(after_help = "Exit 0 when every provider checked has a usable key, 1 otherwise.")]
+pub struct DoctorArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// One JSON object instead of the text report.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// `kelir bg …` inside a bash call (or standalone): jobs live in the session's
