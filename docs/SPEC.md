@@ -22,6 +22,8 @@ that appends an event; the loop applies verbs at named boundaries.
   bg/<bg-id>.status       # written by the bg shim; survives kelir exiting
   sock                    # the session socket (a named pipe on Windows)
   token                   # this session's secret, owner-only (0600); `kelir ctl` reads it
+  bg/<bg-id>.cancel       # exists only while a `cancel` is in flight (so a reader says
+                          # "running", not "lost", between the kill and the status write)
 ```
 
 - **Session id:** `ses_<ulid>`. It is also the provider cache/session key (see *Prompt caching*).

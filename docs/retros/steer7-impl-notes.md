@@ -1,7 +1,8 @@
 # STEER-7 implementer notes (session-socket hardening)
 
 Branch `job/steer7`, based on `main` at `e13662a`. Commits: `ca99415` (the feature), `c6a87e5`
-(the Linux-gate fix in a `cfg(windows)` test), plus a docs commit.
+(the Linux-gate fix in a `cfg(windows)` test), `5f7d88a` (a cancel in flight is not a lost job),
+`5accaef` (the cancel marker's time to live), plus docs commits.
 
 ## What I did
 
@@ -86,6 +87,19 @@ Branch `job/steer7`, based on `main` at `e13662a`. Commits: `ca99415` (the featu
    from a child) and wrong for a stranger, for whom it would be a log-write primitive. So the
    listener answers and drops unauthenticated requests before the session sees them, and the
    `rejected` events exist for the authenticated-but-wrong cases. Written up in DEVIATIONS.
+7. **The last real bug came from a test that was flaky only sometimes** — the `ctl cancel`
+   e2e failed about half the time with `bg_settled state:"lost"` for a job it had just
+   cancelled, and the first instinct ("load flake, rerun") was wrong. Two things were wrong and
+   neither was the test: (a) `cancel_at` kills the shim before it writes `cancelled`, so for up
+   to `CANCEL_WAIT` the file says `running` with a dead shim, and `Status::observed` — by design,
+   since M4 — calls that `lost`; (b) `note_bg` recorded the watcher's *snapshot*, so a report
+   taken while the shim lived was recorded after it died, and the (correct) `lost` reading of a
+   stale snapshot overwrote everything. Fixed with the `bg/<id>.cancel` marker (readers say
+   "running" while a cancel is in flight, and the marker expires so a killed cancel cannot pin a
+   dead job), the re-read in `note_bg`, and `observed_in` used by `list`/`wait`/`out --follow`
+   too. I found it by writing the raw status and marker state to a file from the session when
+   the debug variable was set — printf-debugging through a child process' log, which is what the
+   harness gives you for a process you do not control.
 
 ## Where the prompt, the tools or the harness slowed me down
 
@@ -107,7 +121,8 @@ Branch `job/steer7`, based on `main` at `e13662a`. Commits: `ca99415` (the featu
 ## Gates
 
 - Windows: `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings` clean,
-  `cargo test` 649 passing over 25 suites, 0 failed (`e2e_steer7` 10/10); no `kelir` process left
+  `cargo test --no-fail-fast` 651 passing over 25 suites, 0 failed (`e2e_steer7` 10/10, and the
+  cancel test 8/8 in a row after the fix; it was ~50 % red before); no `kelir` process left
   behind (`Get-Process kelir` → 0).
-- Linux (`bash scripts/remote-check.sh the maintainer kelir-verify-steer7`, HEAD `c6a87e5`): fmt clean,
-  clippy clean, 651 passing, 0 failed, exit 0.
+- Linux (`bash scripts/remote-check.sh the maintainer kelir-verify-steer7`, HEAD `5accaef`): fmt clean,
+  clippy clean, 653 passing, 0 failed, exit 0.

@@ -44,6 +44,16 @@ permissions in `src/perm.rs`, and the two are wired in `src/ipc.rs` (the socket)
   against (see `docs/SPEC.md`, *Who may drive a session*): a process that can read this session's
   environment or token file runs as the user, in the session, and is trusted. The token stops a
   different session's child, a stray script and a pipe found by name.
+- **`cancel` writes `bg/<id>.cancel` while it works, and readers honour it for 30 s.** A cancel
+  kills the shim first and writes the `cancelled` status last (up to `CANCEL_WAIT`, 2 s), so in
+  between the status file says `running` and the shim behind it is dead — which every reader is
+  built to report as `lost`, and which the session's own watcher did: the e2e test that cancels a
+  job got a `bg_settled` of `lost` roughly half the time, and so would a real session. Two
+  changes close it: the marker file (`bg::observed_in`) tells readers a cancel is in flight, and
+  `Session::note_bg` re-reads the status file when it records a report instead of trusting the
+  watcher's snapshot, which may predate the cancel. The marker expires
+  (`CANCEL_MARKER_TTL`), because a cancel killed mid-flight would otherwise leave a dead job
+  `running` for ever, and is removed on every way out of `cancel_at`, including refusals.
 
 ## Retrying provider errors (STEER-5, 2026-11-19)
 
