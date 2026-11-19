@@ -59,6 +59,7 @@ fn drive(
         })
         .expect("open a pty");
     let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_kelir"));
+    support::scrub_pty(&mut command);
     command.cwd(&cwd);
     command.env("KELIR_STATE_DIR", &state);
     command.env("KELIR_HOME", state.join("home"));

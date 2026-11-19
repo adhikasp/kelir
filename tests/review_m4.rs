@@ -359,18 +359,16 @@ async fn r7_a_job_writing_a_lot_of_output() {
     let out_file = sandbox.state.join("bg").join(format!("{id}.out"));
     assert_eq!(bytes_len(&out_file), 120_000_000);
     let began = Instant::now();
-    let followed = tokio::process::Command::new(env!("CARGO_BIN_EXE_kelir"))
+    let mut follow = tokio::process::Command::new(env!("CARGO_BIN_EXE_kelir"));
+    // Never the session that runs the suite: the helper removes every
+    // `KELIR_*` (M5-A fixes N2), before this test's own environment goes on.
+    support::scrub_tokio(&mut follow);
+    follow
         .args(["bg", "out", &id, "--follow"])
         .env("KELIR_STATE_DIR", &sandbox.state)
         .env("KELIR_CONFIG", &sandbox.config)
-        .env_remove("KELIR_SESSION_DIR")
-        .env_remove("KELIR_SOCK")
-        .env_remove("KELIR_CALL_ID")
-        .env_remove("KELIR_BIN")
-        .stdout(std::process::Stdio::null())
-        .status()
-        .await
-        .unwrap();
+        .stdout(std::process::Stdio::null());
+    let followed = follow.status().await.unwrap();
     assert!(followed.success());
     assert!(
         began.elapsed() < Duration::from_secs(10),

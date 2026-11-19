@@ -437,7 +437,14 @@ pub struct SystemInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceInfo {
     pub name: String,
+    /// The file the text came from; empty for the embedded base prompt (never
+    /// a sentinel such as `embedded`, which a reader could mistake for a file).
     pub path: String,
+    /// `prompt`, `instruction` or `skill`: what the source *is*, recorded where
+    /// it was found rather than guessed from its name. Absent in a log written
+    /// before M5-A's fixes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub hash: String,
 }
 
