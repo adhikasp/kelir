@@ -102,3 +102,13 @@ Order now: M5-A -> review -> retro -> STEER-4 -> STEER-1-fixes -> STEER-2 -> STE
 
 - User config stopgap (maintainer, 2026-11-19): `%APPDATA%kelirconfig.toml` has `max_steps = 4294967295` (not 400,
   and not 0: `0` is fatal on the current binary). When STEER-4 lands: **delete that line**, do not set 0.
+
+## Update (2026-11-19 13:05) — Herdr self-awareness (maintainer)
+
+No new tool. **M5 source**: when `HC_TERMINAL_ID` is set (herdr-core also sets `HC_TERMINAL_SOCKET`, `HC_SCOPE`;
+`TERM_PROGRAM` is ghostty and unusable) render one frozen line at session_start with pane, space, tab, `where`
+from `hc get $HC_TERMINAL_ID --json` (`herdr.space`/`herdr.tab`/`where` labels); fail open if `hc` is missing or
+slow; never freeze a live count. **M8 builtin skill `herdr`**: `hc ls --json` (all machines; group `where` by space
+prefix to count agents in my space), `hc get/read/send/wait`, `hc machine ls`, rule: never kill another agent's
+pane; outside Herdr the line is absent and the skill says so. In SPEC.md (Sources bullet, M5 and M8 rows). Goes into
+the M5-B brief (M5-A is already in flight and only covers file sources + skills) and the M8 brief.

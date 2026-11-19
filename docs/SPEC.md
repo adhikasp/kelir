@@ -221,6 +221,13 @@ from the start because inbound messages arrive on that connection. Servers are c
   Decisions API call per user prompt scores skills and MCP
   servers; kelir appends "might be relevant: name — description" (never a body) as a `source`
   message. It fails open on a missing key or a timeout.
+- **Herdr awareness (source, M5)**: herdr-core sets `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET` and `HC_SCOPE` in every
+  pane it creates (`TERM_PROGRAM` is `ghostty` there and unusable). If `HC_TERMINAL_ID` is set, kelir renders
+  **one line** at `session_start` into the frozen system sources: the pane's address, space, tab and `where` label,
+  read once from `hc get $HC_TERMINAL_ID --json` (labels `herdr.space`/`herdr.tab`/`where`). It **fails open**:
+  `hc` missing, slow (short timeout) or erroring just omits the line. **No live count is ever frozen into the
+  prompt** (how many agents share the space is asked live, see the M8 `herdr` skill). Outside Herdr the line is
+  absent. No new tool.
 - **Memory** is a source: the project's memory directory is loaded at session start; the model
   writes it with `edit`; changes made mid-session arrive as `source` messages.
 - **Attachments** (images, voice, video) enter as `source` events: voice transcribed at ingress,
@@ -330,11 +337,11 @@ fold). Deps: tokio, serde, one HTTP client (reqwest + rustls), ratatui/crossterm
 | M2 | inline ratatui TUI in the session process, plus the OSC 7501 writer | every TUI action is also a `ctl` verb; a kelir pane in the Herdr app shows working / idle / done |
 | M3 | durability (fsync, unsettled detection, `resume`) and compaction (tool, `/compact`, auto at 80 %) | `kill -9` at five random points, resume never re-runs a completed command; after a compaction the task and every human message are verbatim in the next request |
 | M4 | `bg` + shim + status files + 10-minute promotion + wake | a 15-minute command is promoted, kelir exits, `kelir bg out` still reads it, `resume` shows it settled |
-| M5 | sources (machine + project), skills, the pushed hint, memory, attachments, `observe` | `observe` matches what the provider received byte for byte; the hint names the right skill for 10 held-out prompts; the cache hit ratio holds across a hint |
+| M5 | sources (machine + project, incl. the Herdr line), skills, the pushed hint, memory, attachments, `observe` | with `HC_TERMINAL_ID` set the frozen system holds one Herdr line (pane, space, tab, where) and without it none, `hc` missing fails open; `observe` matches what the provider received byte for byte; the hint names the right skill for 10 held-out prompts; the cache hit ratio holds across a hint |
 | — | **dogfood 1:** kelir is the default for the maintainer's own terminal side tasks | a week of real use; the scorecard reads kelir's logs |
 | M6 | `kelir mcp` (`rmcp` client, socket broker, `mcp_started`/`mcp_settled`) | `kelir mcp <server> <tool> … \| jq` works in a bash call; the call shows in `observe`; a >10 KB result spills |
 | M7 | children as CLI (`kelir run --child`, `kelir brief`, root-registered via `KELIR_ROOT`/`KELIR_PARENT`/`KELIR_DEPTH`), caps, `kelir ls` and kill | a child of a child finishes; killing the parent leaves no orphan (Linux and Windows); the 17th live descendant is refused; `brief` hits the parent's cache |
-| M8 | gates (six events) and the maintainer's gates: verify, note-check, pull/commit, "do 1,4" | a hedged final answer is blocked once; a crashing gate fails open; `observe` lists what fired |
+| M8 | gates (six events), the maintainer's gates: verify, note-check, pull/commit, "do 1,4"; and the builtin skills `delegation` and `herdr` (`herdr`: `hc ls --json` with state/status/agent/name/where/cwd across machines, group `where` by space prefix to answer how many agents share my space, `hc get/read/send/wait`, `hc machine ls`, and the rule **never kill another agent's pane**; outside Herdr the skill says so) | a hedged final answer is blocked once; a crashing gate fails open; `observe` lists what fired; asked "how many agents share my space?" inside a pane the model answers from `hc ls --json`, outside one it says it is not in Herdr |
 | M9 | jobs, named sessions, `STATUS` | a job resumes its session the next day; single-flight holds |
 | M10 | Telegram: `tg-bridge` through `kelir mcp`, `notifications/claude/channel` inbound, `turn_done`, `kelir` as a third `/harness` in `tg-router` | a DM topic gets an answer and a fallback reply; the spool survives a restart |
 | — | **dogfood 2:** one Telegram topic routed to kelir for a week | |
