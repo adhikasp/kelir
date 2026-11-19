@@ -273,6 +273,12 @@ struct Session {
     window_source: &'static str,
     /// The provider's model list as this process learned it.
     models: Option<crate::models::Cache>,
+    /// Body fields a provider refused with a 400 during this session, by the
+    /// field name: the retry leaves them out and the session remembers, so the
+    /// same 400 is not paid twice (STEER-6 review S3). A provider that rejects
+    /// the field used to make every step a hard error until the person found
+    /// the config key.
+    refused_fields: BTreeSet<String>,
     /// The sources in this context, re-checked at every boundary: an edit on
     /// disk becomes a `source` message, never a system rewrite.
     watch: crate::sources::Watch,
@@ -586,6 +592,15 @@ fn watch_bg(dir: PathBuf, tx: mpsc::UnboundedSender<Incoming>) {
 /// The provider's model list: the cache when it is fresh, a fetch when it is
 /// not, and the old list when the fetch fails. The fetch is bounded so an
 /// offline box pays it once an hour, not on every start.
+///
+/// A first session on a machine used to leave the list empty for up to an hour
+/// after one slow fetch (STEER-6 review S2: a 480-model list through a
+/// forwarding proxy took more than the 1.5 s bound). So a fetch that times out
+/// is not remembered as a failure unless it *failed*: a slow list is retried at
+/// the next start, and the start after a real failure waits
+/// [`crate::models::RETRY_AFTER_MS`]. The batching and effort decisions no
+/// longer need the list at all (they fall back to the model's family and to
+/// the configured effort), so this is only about the window and the metadata.
 async fn load_models(client: &Client, provider: &str) -> (Option<crate::models::Cache>, bool) {
     let now = crate::models::now_ms();
     let cached = crate::models::load(provider);
@@ -594,18 +609,26 @@ async fn load_models(client: &Client, provider: &str) -> (Option<crate::models::
     {
         return (cached, false);
     }
-    match tokio::time::timeout(Duration::from_millis(1500), client.models()).await {
+    match tokio::time::timeout(crate::models::FETCH_TIMEOUT, client.models()).await {
         Ok(Ok(models)) => {
             let cache = crate::models::Cache::new(provider, models, now);
             let _ = crate::models::store(&cache);
             (Some(cache), true)
         }
-        _ => {
+        Ok(Err(error)) => {
+            // A real answer (`500`, no route, a broken body): back off, so an
+            // offline box or a dead endpoint is not asked on every start.
             let mut cache =
                 cached.unwrap_or_else(|| crate::models::Cache::new(provider, Vec::new(), 0));
             cache.failed_at_ms = Some(now);
             let _ = crate::models::store(&cache);
+            eprintln!("kelir: models: {provider}: {error} (using what is cached)");
             (Some(cache), false)
+        }
+        Err(_) => {
+            // Slow, not wrong: keep whatever was cached (its own age decides
+            // when it is stale) and try again next start.
+            (cached, false)
         }
     }
 }
@@ -947,6 +970,7 @@ impl Session {
             window: prepared.window,
             window_source: prepared.window_source,
             models: prepared.models,
+            refused_fields: BTreeSet::new(),
             watch: crate::sources::Watch::default(),
         };
         // The watcher re-checks the sources the frozen system was rendered
@@ -977,6 +1001,14 @@ impl Session {
             },
             sources: prepared.system.sources.clone(),
             tools: session.tool_names.clone(),
+            // What the loop will ask this model for: the configured effort,
+            // unless the provider's list says the model does not take the
+            // parameter (STEER-6 review S3). `None` means no field is sent at
+            // all — config `none`, or a model the list rules out — and the log
+            // then agrees with the request instead of naming a field the
+            // provider would reject. A `model` verb later swaps the client and
+            // the request follows the new provider.
+            reasoning_effort: session.first_effort(),
         })?;
         // What the render had to say about its sources (a non-UTF-8 file read
         // lossily, a truncation, a malformed skill skipped): recorded once, so
@@ -1803,6 +1835,70 @@ impl Session {
 
     // ---------------------------------------------------------- compaction
 
+    /// The effort the first request will carry: the configured value, unless the
+    /// provider's list says the model does not take the parameter. Recorded in
+    /// `session_started`, so the log and the request agree from the first step.
+    fn first_effort(&self) -> Option<String> {
+        if !self.effort_allowed() {
+            return None;
+        }
+        self.cfg
+            .provider(&self.provider_name)
+            .ok()
+            .and_then(|provider| provider.reasoning_effort)
+    }
+
+    /// Whether the loop may ask this model for several tool calls in one
+    /// message: the provider's list when it has an entry, else the built-in
+    /// family table, so a first session (cold or slow list) still asks a model
+    /// that can do it (STEER-6 review S2).
+    fn parallel_calls(&self) -> bool {
+        crate::models::parallel_calls(
+            self.models.as_ref().map(|cache| cache.models.as_slice()),
+            &self.model,
+        )
+    }
+
+    /// Whether `reasoning_effort` may go in the body: only where the provider
+    /// advertises the parameter, or for a model the list says nothing about
+    /// when the person configured an effort explicitly (STEER-6 review S3).
+    fn effort_allowed(&self) -> bool {
+        let explicit = self
+            .cfg
+            .provider(&self.provider_name)
+            .map(|provider| provider.reasoning_effort_explicit)
+            .unwrap_or(false);
+        crate::models::reasoning_effort_allowed(
+            self.models.as_ref().map(|cache| cache.models.as_slice()),
+            &self.model,
+            explicit,
+        )
+    }
+
+    /// The request for one step, with the two capability decisions applied.
+    fn step_request(&self, messages: &[crate::chat::ChatMessage]) -> provider::BuiltRequest {
+        self.capabilities(self.client.build_with(
+            &self.model,
+            messages,
+            &self.tool_specs(),
+            self.parallel_calls(),
+        ))
+    }
+
+    /// Apply what this provider/model actually takes: `reasoning_effort` only
+    /// where the provider advertises it or the config asked for it on an
+    /// unknown model, and nothing this session already saw a 400 for.
+    fn capabilities(&self, request: provider::BuiltRequest) -> provider::BuiltRequest {
+        let mut request = request;
+        if !self.effort_allowed() {
+            request = request.without_field("reasoning_effort");
+        }
+        for field in &self.refused_fields {
+            request = request.without_field(field);
+        }
+        request
+    }
+
     /// The tool list sent to the provider: the specs for the names frozen at
     /// `session_started`, in that order. A session started before a tool existed
     /// keeps its old list, so the request prefix (and its cache) is unchanged.
@@ -1847,7 +1943,14 @@ impl Session {
                     .compact_floor
                     .map(|floor| tokens > floor)
                     .unwrap_or(true);
-                if above_floor && compact::should_auto(window, self.cfg.auto_compact_at, tokens) {
+                if above_floor
+                    && compact::should_auto(
+                        window,
+                        self.cfg.auto_compact_at,
+                        self.cfg.compact_at_tokens,
+                        tokens,
+                    )
+                {
                     self.compact_request = Some(CompactRequest {
                         by: "auto",
                         focus: None,
@@ -1975,13 +2078,13 @@ impl Session {
             plan.through_seq,
             tokens_before
         )));
-        let summarising = compact::summarise_request(
+        let summarising = self.capabilities(compact::summarise_request(
             &self.client,
             &self.model,
             &self.cfg.compact_prompt,
             &transcript,
             request.focus.as_deref(),
-        );
+        ));
         let assembler = match self.stream(rx, &summarising, true).await? {
             StreamEnd::Assembled(assembler) => assembler,
             StreamEnd::Stopped(reason) => return Ok(CompactRun::Stopped(reason)),
@@ -2293,9 +2396,14 @@ impl Session {
             self.check_sources()?;
 
             let folded = crate::fold::fold(&self.events, &self.dir)?;
-            let request =
-                self.client
-                    .build(&self.model, &folded.request_messages(), &self.tool_specs());
+            // Ask for several calls in one message when the provider says the
+            // model takes them, or (cold or slow list) when the model's family
+            // is known to; the loop already runs a batch concurrently and
+            // appends results in call order. `reasoning_effort` goes only where
+            // the provider advertises it (or where the config asked for it on
+            // an unknown model). Both do not depend on the cache being warm
+            // (STEER-6 review S2/S3).
+            let request = self.step_request(&folded.request_messages());
             let request_text = serde_json::to_string(&request.body).unwrap_or_default();
             self.step += 1;
             let step = self.step;
@@ -2409,6 +2517,37 @@ impl Session {
         }
     }
 
+    /// A 400 that names one of the capability fields kelir added: remove it
+    /// from the request being retried and remember it, so no later request in
+    /// this session pays the same 400 (STEER-6 review S3). Answers `true` when
+    /// the request should be retried, once, without the field.
+    fn drop_refused_field(
+        &mut self,
+        request: &mut provider::BuiltRequest,
+        error: &provider::ProviderError,
+        dropped: &mut Option<String>,
+    ) -> bool {
+        // One drop per request: a second 400 means the field was not the
+        // (only) reason, and looping through the body would hide it.
+        if dropped.is_some() || !error.message.starts_with("http 400") {
+            return false;
+        }
+        let field = ["reasoning_effort", "parallel_tool_calls"]
+            .into_iter()
+            .find(|field| {
+                request.has_field(field)
+                    && !self.refused_fields.contains(*field)
+                    && provider::names_field(&error.message, field)
+            });
+        let Some(field) = field else {
+            return false;
+        };
+        *request = request.without_field(field);
+        self.refused_fields.insert(field.to_string());
+        *dropped = Some(field.to_string());
+        true
+    }
+
     /// Stream one response, taking verbs while it is in flight. A `stop` ends
     /// the turn without committing the half-response; anything else waits for
     /// the next boundary.
@@ -2428,6 +2567,11 @@ impl Session {
         // (the provider is down or the prompt is too large) and it is spend the
         // turn does not need. A step keeps the provider attempt budget.
         let max_attempts = if summary { 1 } else { provider::MAX_ATTEMPTS };
+        // The request as sent: a provider that answers 400 naming a body field
+        // gets one retry without it, and the session remembers for every later
+        // request (STEER-6 review S3).
+        let mut request = request.clone();
+        let mut dropped: Option<String> = None;
         loop {
             let client = self.client.clone();
             // Live text goes to the UI as it arrives; the callback is a send to
@@ -2446,28 +2590,52 @@ impl Session {
                     }
                 }
             };
-            let future = client.stream_with(request, &mut on_delta);
-            tokio::pin!(future);
-            let mut outcome: Option<Result<crate::stream::Assembler, provider::ProviderError>> =
-                None;
+            // The stream borrows the request immutably for its whole life, so
+            // the attempt lives in its own block: what comes out is the result
+            // or the verb that interrupted it, and the request is mutable again
+            // for the field drop below.
             let mut interrupt: Option<StreamEnd> = None;
-            while outcome.is_none() && interrupt.is_none() {
-                tokio::select! {
-                    result = &mut future => outcome = Some(result),
-                    incoming = rx.recv(), if inbox_open => {
-                        match incoming {
-                            Some(incoming) => self.take_interrupt(incoming, &mut interrupt),
-                            None => inbox_open = false,
+            let outcome = {
+                let future = client.stream_with(&request, &mut on_delta);
+                tokio::pin!(future);
+                let mut outcome: Option<Result<crate::stream::Assembler, provider::ProviderError>> =
+                    None;
+                while outcome.is_none() && interrupt.is_none() {
+                    tokio::select! {
+                        result = &mut future => outcome = Some(result),
+                        incoming = rx.recv(), if inbox_open => {
+                            match incoming {
+                                Some(incoming) => self.take_interrupt(incoming, &mut interrupt),
+                                None => inbox_open = false,
+                            }
                         }
                     }
                 }
-            }
+                outcome
+            };
             if let Some(end) = interrupt {
                 return Ok(end);
             }
             match outcome.expect("the stream ended without a result") {
                 Ok(assembler) => return Ok(StreamEnd::Assembled(assembler)),
                 Err(error) => {
+                    // A 400 that names a field kelir put in the body: drop it,
+                    // remember it for the session, and try once more. Not a
+                    // rate limit or a server error — the same request would
+                    // fail the same way — so it is not the retryable budget.
+                    if self.drop_refused_field(&mut request, &error, &mut dropped) {
+                        self.record(EventBody::Error {
+                            location: "provider".into(),
+                            message: format!(
+                                "{}: retrying without `{}` and leaving it out for the rest of                                  the session",
+                                error.message,
+                                dropped.as_deref().unwrap_or("?")
+                            ),
+                            retryable: false,
+                        })?;
+                        self.sync();
+                        continue;
+                    }
                     let will_retry = error.retryable && attempt + 1 < max_attempts;
                     self.record(EventBody::Error {
                         location: "provider".into(),
@@ -3025,6 +3193,7 @@ mod tests {
             window: None,
             model_windows: Default::default(),
             auto_compact_at: 0.8,
+            compact_at_tokens: crate::compact::DEFAULT_SOFT_TARGET,
             compact_prompt: String::new(),
             skills_dirs: vec![],
             compact_keep: 0,
@@ -3055,6 +3224,8 @@ mod tests {
                     key: None,
                     extra_headers: Default::default(),
                     reasoning_field: None,
+                    reasoning_effort: None,
+                    reasoning_effort_explicit: false,
                     session_header: None,
                 },
             );

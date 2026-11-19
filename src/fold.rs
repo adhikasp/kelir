@@ -267,6 +267,7 @@ mod tests {
                 },
                 sources: vec![],
                 tools: vec!["bash".into()],
+                reasoning_effort: None,
             },
         )
     }

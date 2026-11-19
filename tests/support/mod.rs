@@ -73,6 +73,9 @@ struct State {
 pub struct ModelsAnswer {
     pub status: u16,
     pub body: String,
+    /// Held this long before answering: a slow list is a real case (a big
+    /// catalogue through a proxy, STEER-6 review S2).
+    pub delay: Option<Duration>,
 }
 
 impl ModelsAnswer {
@@ -80,6 +83,7 @@ impl ModelsAnswer {
         ModelsAnswer {
             status: 200,
             body: body.into(),
+            delay: None,
         }
     }
 
@@ -87,7 +91,14 @@ impl ModelsAnswer {
         ModelsAnswer {
             status,
             body: body.into(),
+            delay: None,
         }
+    }
+
+    /// The same answer, held `delay` before it is written.
+    pub fn slow(mut self, delay: Duration) -> ModelsAnswer {
+        self.delay = Some(delay);
+        self
     }
 }
 
@@ -154,7 +165,8 @@ pub const MODELS_JSON: &str = r#"{"data":[
  {"id":"deepseek/deepseek-v4.1-flash-1017","context_length":1048576,
   "supported_parameters":["tools","parallel_tool_calls","reasoning"]},
  {"id":"anthropic/claude-sonnet-4.5","context_length":200000,"supported_parameters":["tools"]},
- {"id":"test/model","context_length":262144,"supported_parameters":["tools"]},
+ {"id":"test/model","context_length":262144,
+  "supported_parameters":["tools","parallel_tool_calls","reasoning"]},
  {"id":"go/model","limit":{"context":1000000},"capabilities":{"tools":{"supported":true}}}
 ]}"#;
 
@@ -218,6 +230,9 @@ async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
             state.models_requests += 1;
             state.models.clone()
         };
+        if let Some(delay) = answer.delay {
+            tokio::time::sleep(delay).await;
+        }
         let head = format!(
             "HTTP/1.1 {} Models\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             answer.status,

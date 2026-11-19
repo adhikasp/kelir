@@ -177,7 +177,7 @@ Per provider (OpenRouter's caching page read 2026-11-18):
 
 | | Linux / macOS | Windows |
 |---|---|---|
-| shell (`shell` in config) | `bash -c` (falls back to `$SHELL`) | Git for Windows `bash.exe`; `agshell` or `pwsh` by config |
+| shell (`shell` in config) | `bash -c` (falls back to `$SHELL`); a command over 6 KB runs from a file | Git for Windows `bash.exe`; `agshell` or `pwsh` by config. Every command runs from a file (switch kept: `/C`, `-File`) — see DEVIATIONS |
 | process tree | own process group (`setsid`), `killpg` on stop | Job Object per call (kill-on-close), `CREATE_NEW_PROCESS_GROUP` |
 | session socket | Unix socket | named pipe (both via the `interprocess` crate) |
 | detached bg job | `setsid`, outside the session's group | `DETACHED_PROCESS`, outside the session's Job Object |
