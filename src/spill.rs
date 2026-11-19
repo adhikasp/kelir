@@ -25,6 +25,33 @@ pub fn count_lines(bytes: &[u8]) -> u64 {
     }
 }
 
+/// Markers a shell prints when it ran a command that was cut short: Git bash's
+/// heredoc warning is the one seen in the wild (M5-A seq 344, STEER-4 seq 613:
+/// a 9 KB heredoc wrote an 8 KB file and **exited 0**). The other two are what
+/// a truncated one-liner usually dies with.
+const TRUNCATION_MARKERS: [&str; 3] = [
+    "delimited by end-of-file",
+    "unexpected EOF",
+    "unexpected end of file",
+];
+
+/// The notice the model gets when its output looks truncated. It is *appended*
+/// to the result (never in place of it), so the shell's own warning and the
+/// explanation are read together: the dogfood model spent 12 steps blaming its
+/// own heredoc body for a cut it could not see.
+pub fn truncation_notice(text: &str) -> Option<&'static str> {
+    if TRUNCATION_MARKERS
+        .iter()
+        .any(|marker| text.contains(marker))
+    {
+        return Some(
+            "[kelir: your command may have been cut short: write big files with `edit` \
+             (empty `old`) instead of a heredoc, and check the exit code of each command.]",
+        );
+    }
+    None
+}
+
 /// Line count from a streaming read: newlines, plus one for an unterminated
 /// final line.
 fn line_count(bytes: u64, newlines: u64, last: Option<u8>) -> u64 {
@@ -169,6 +196,13 @@ impl Capture {
             } else {
                 out.push_str(&String::from_utf8_lossy(&self.inline));
             }
+            if let Some(notice) = truncation_notice(&out) {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(notice);
+                out.push('\n');
+            }
             return (out, false);
         }
 
@@ -191,6 +225,10 @@ impl Capture {
         }
         out.push_str(&format!("--- first {HEAD_BYTES} bytes ---\n{head}\n"));
         out.push_str(&format!("--- last {TAIL_BYTES} bytes ---\n{tail}\n"));
+        if let Some(notice) = truncation_notice(&head).or_else(|| truncation_notice(&tail)) {
+            out.push_str(notice);
+            out.push('\n');
+        }
         // `sed -n` first: rg is not installed everywhere, sed always is.
         out.push_str(&format!(
             "---\nhint: sed -n '1,80p' \"{path}\"   or   rg -n '<pattern>' \"{path}\"\n"

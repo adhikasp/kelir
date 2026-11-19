@@ -91,6 +91,11 @@ pub struct Status {
     pub finished: Option<String>,
     #[serde(default)]
     pub cmd: String,
+    /// Where a long command was written instead of being passed as an
+    /// argument (`cmd.sh`/`cmd.bat` in the job's directory). `cmd` is then a
+    /// short reference, and this file holds the exact bytes that ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmd_path: Option<String>,
     /// The output file, absolute, forward slashes.
     #[serde(default)]
     pub out: String,
@@ -124,6 +129,7 @@ impl Status {
             started: crate::event::now_ts(),
             finished: None,
             cmd: cmd.to_string(),
+            cmd_path: None,
             out: path_string(out),
             kind: kind.to_string(),
             promoted: false,
@@ -383,6 +389,11 @@ pub struct Launch<'a> {
     pub out: PathBuf,
     /// The command, run by `shell` (`shell[0]` plus its args, then the command).
     pub cmd: String,
+    /// A file holding the command, when it is too long to pass on a command
+    /// line. The shim reads it and does not take `cmd` (a 40 KB argument past
+    /// the Windows limit does not even reach the shim: `spawn` fails with
+    /// `os error 206`).
+    pub cmd_file: Option<PathBuf>,
     pub shell: Vec<String>,
     pub kind: &'a str,
     /// The session's pid: if it dies before a promotion, the shim takes the
@@ -412,11 +423,18 @@ pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> 
         .arg("--id")
         .arg(&launch.id)
         .arg("--out")
-        .arg(&launch.out)
-        .arg("--cmd")
-        .arg(&launch.cmd)
-        .arg("--kind")
-        .arg(launch.kind);
+        .arg(&launch.out);
+    match &launch.cmd_file {
+        // The command is a file: nothing long on this arg list either, so the
+        // shim can be started whatever the command's size.
+        Some(path) => {
+            command.arg("--cmd-file").arg(path);
+        }
+        None => {
+            command.arg("--cmd").arg(&launch.cmd);
+        }
+    }
+    command.arg("--kind").arg(launch.kind);
     if let Some(shell) = launch.shell.first() {
         command.arg("--shell").arg(shell);
     }
@@ -527,6 +545,7 @@ impl SpawnRequest {
             id: self.id.clone(),
             out: PathBuf::from(&self.out),
             cmd: self.cmd.clone(),
+            cmd_file: None,
             shell: self.shell.clone(),
             kind: &self.kind,
             // A job belongs to nobody: it outlives whatever started it.
@@ -715,6 +734,19 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
         eprintln!("kelir bg-shim: cannot create {}: {error}", dir.display());
         return 1;
     }
+    // A command that came as a file (it is too long for an argument list) is
+    // read here, in the shim's own memory, and never put on a command line.
+    let script = args.cmd_file.clone();
+    let args = match script.as_ref() {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => BgShimArgs { cmd: text, ..args },
+            Err(error) => {
+                eprintln!("kelir bg-shim: cannot read {}: {error}", path.display());
+                return 1;
+            }
+        },
+        None => args,
+    };
     let mut status = Status::new(&args.id, &args.kind, &args.cmd, &args.out);
     status.call = args.call.clone();
     status.job = args.job.clone();
@@ -775,10 +807,48 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     let argv: Vec<String> = std::iter::once(args.shell.clone())
         .chain(args.shell_args.iter().cloned())
         .collect();
+    // A long command is written to a file and handed to the shell by name: a
+    // command line past ~8 KB is silently cut on Windows (`shellcmd`), and the
+    // cut looks like success. `cmd` is what the shell actually runs.
+    let script_dir = args
+        .out
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| dir.clone());
+    // A caller that already wrote the script (the bash call, which had to keep
+    // the shim's own argv short) decided it; otherwise the shim decides from
+    // the command's length.
+    let shell_input = match &script {
+        Some(path) => crate::shellcmd::ShellInput::Script(path.clone()),
+        None => match crate::shellcmd::input(&args.cmd, &args.shell_args, &script_dir) {
+            Ok(input) => input,
+            Err(error) => {
+                fail(&dir, &status, &error);
+                return 1;
+            }
+        },
+    };
     let mut command = tokio::process::Command::new(&argv[0]);
+    match &shell_input {
+        crate::shellcmd::ShellInput::Argument(cmd) => {
+            command.args(&argv[1..]).arg(cmd);
+        }
+        crate::shellcmd::ShellInput::Script(path) => {
+            // No `-c`: the shell reads the file as a script, which has no
+            // length limit and keeps cwd and env exactly as before.
+            command
+                .args(&argv[1..argv.len().saturating_sub(1)])
+                .arg(path);
+            // A reader of the status file (and the model, in a `bg` report)
+            // gets a reference, never a 40 KB command; `cmd.sh` has the bytes.
+            status.cmd = crate::util::truncate_chars(args.cmd.trim(), 300);
+            status.cmd_path = Some(path_string(path));
+            if let Err(error) = status.write(&status_path(&dir, &args.id)) {
+                eprintln!("kelir bg-shim: cannot write the status file: {error}");
+            }
+        }
+    }
     command
-        .args(&argv[1..])
-        .arg(&args.cmd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(out_file))
         .stderr(std::process::Stdio::from(out_for_err));
@@ -1096,6 +1166,7 @@ async fn run(args: BgRunArgs) -> u8 {
         id: id.clone(),
         out: out.clone(),
         cmd: command.clone(),
+        cmd_file: None,
         shell,
         kind: KIND_JOB,
         // A job belongs to nobody: it outlives whatever started it.
@@ -1642,6 +1713,7 @@ mod tests {
             started: "2026-11-19T10:00:00Z".into(),
             finished: None,
             cmd: "sleep 60".into(),
+            cmd_path: None,
             out: "bg/bg_1.out".into(),
             kind: KIND_JOB.into(),
             promoted: false,
