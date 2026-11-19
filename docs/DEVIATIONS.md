@@ -705,6 +705,15 @@ consuming a scripted reply) so a session can start in a test.
   STEER-5's `error` event with `retry_in_ms` is a one-line `emit` when it
   exists. The alternative (duplicating the retry loop here) would conflict with
   that job for no gain.
+- **Windows bracketed paste arrives as keystrokes, so the image path is caught
+  at submit as well as on `Event::Paste`.** crossterm 0.29 decodes
+  `ESC[200~…ESC[201~` only in its Unix parser; on Windows a terminal's paste
+  comes through as ordinary key events (measured on this box's ConPTY: the same
+  bytes produce `Event::Paste` on Linux and a stream of `Key` events on
+  Windows). `App::absorb_image_paths` therefore also scans the submitted line
+  for an existing image path and turns it into the same pointer, so a drag and
+  drop and a clipboard path work on both platforms; `Event::Paste` remains the
+  path on Unix, where it arrives before submit.
 - **The clipboard image on Ctrl-V is not implemented; pasted and dropped
   *paths* are.** Design note §10 asks whether `windows-sys`'s clipboard
   features add under 50 KB. They add the DataExchange and Memory features plus
