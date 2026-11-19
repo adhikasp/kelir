@@ -976,3 +976,41 @@ consuming a scripted reply) so a session can start in a test.
   still kills its tree (a `Drop` guard in the tool). A leftover `cmd &` child
   keeps running, as documented for M0: the group/job is held by the session and
   by a lingering shim, so it dies when the session does.
+
+## Two providers, and OpenCode Go's key from opencode itself (STEER-2, 2026-11-19)
+
+The brief is `docs/tasks/STEER-2.md`; the code is `src/credentials.rs` and `src/doctor.rs`. Where
+this differs from the spec text, or needed a call the brief left open:
+
+- **`kind` is gone from the provider tables.** The brief says a `[providers.<name>]` table only
+  overrides settings of the two providers, and the name decides the provider. A `kind = "…"` key in
+  one of those tables is therefore ignored rather than honoured: `[providers.opencode-go] kind =
+  "openrouter"` still configures `opencode-go`. It is the same rule as a literal `key` — a config
+  that names a provider a second way is a config that can disagree with itself.
+- **A literal `key` is warned about, not fatal.** A config file with `key = "…"` (top level or in a
+  provider table) loads, prints one warning to stderr naming the two supported sources, and never
+  uses the value. Failing the load would make an existing config unusable for the sake of a warning
+  it does not need, and a maintainer's old config must keep starting.
+- **The store read is synchronous.** `credentials::resolve` blocks for at most `AUTH_TIMEOUT` (5 s)
+  and is called from `prepare`/`reopen` and from a `model` verb that swaps provider. Startup is the
+  only place it costs anything, and it happens before the request is built rather than being woven
+  through the async turn (a background task holding the key would put the secret in another
+  place). The measured cost is ~0.33–0.39 s warm, ~1.7 s worst cold.
+- **`opencode auth export opencode` is run twice at most, and never in a loop.** When the store's
+  entry is inside the two-minute margin the read is repeated once, because the CLI refreshes a
+  token as a side effect of running; if the second read is no fresher the stale one is used and the
+  401 path (one more read, one retry) is what fixes it. There is no third read and no polling.
+- **The 401/403 re-read is one per request, not one per turn.** `reread` is reset when the request
+  is rebuilt for a new reason (a `model` swap, a `say --now`), so a turn cannot loop on it: the
+  second 401 in a row is the answer and ends the step as a refusal.
+- **An expired store credential is a usage error (exit 2) before any request.** The brief says to
+  fail with the expiry time and the fix; failing *before* the request, rather than after a 401, is
+  what keeps a token that cannot work off the wire at all.
+- **`key_cmd` is named by its file name in messages and in `key_origin`.** A `key_cmd =
+  ["C:/Users/someone/bin/getkey"]` would otherwise put a private path into `session_started` and
+  into `kelir doctor`'s output; the repo's public-log rule and the brief's "no private paths" both
+  apply. Only the program's own name is recorded.
+- **The Go provider's `key_env` stays `KELIR_GO_API_KEY` in the config entry.** It is what the
+  precedence list starts with *when set*; the store is the default that answers when it is not.
+  `config::load` therefore stays pure (no process read, so `kelir doctor` and a unit test can load a
+  config without starting a helper) and the resolution happens exactly once, at session start.
