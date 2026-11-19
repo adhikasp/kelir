@@ -230,6 +230,14 @@ impl Group {
         &self.calls
     }
 
+    /// The group as the live area shows it while it is still open: the last few
+    /// call lines, folded the same way they will be committed.
+    pub fn preview(&self, theme: Theme, width: usize, rows: usize) -> Vec<Line<'static>> {
+        let lines = group_rows(theme, width, &self.calls, self.elapsed);
+        let start = lines.len().saturating_sub(rows);
+        lines[start..].to_vec()
+    }
+
     /// Close the group: the rows to commit, in order. One or two calls keep one
     /// line each; three or more fold into `ran N commands`, with every failure
     /// and every edit still getting its own line.

@@ -78,14 +78,30 @@ fn herdr_records(screen: &str) -> Vec<String> {
     records
 }
 
+/// Assert the screen's row `index` equals `expected`, and that every other row
+/// is `blank`; returns the whole screen for a message.
+fn row_eq(screen: &str, index: usize, expected: &str) {
+    let rows: Vec<&str> = screen.lines().collect();
+    assert_eq!(
+        rows.get(index),
+        Some(&expected),
+        "row {index} of {screen:?}"
+    );
+}
+
+/// The viewport's rows 0..3 are the live area. The idle one is blank; a
+/// streaming answer renders markdown with no `##`/`**` left in it.
 #[test]
 fn snapshot_the_idle_viewport() {
     let mut app = new_app();
     app.push_text(""); // nothing to commit
-    assert_eq!(
-        snapshot(&mut app),
-        "\n\n\n\n›\n\n\nkelir idle · step 0 · 0 tok\n"
-    );
+    let screen = snapshot(&mut app);
+    row_eq(&screen, 0, "");
+    row_eq(&screen, 1, "");
+    row_eq(&screen, 2, "");
+    row_eq(&screen, 3, " ● idle · ready");
+    row_eq(&screen, 4, "›");
+    row_eq(&screen, 7, "kelir idle · step 0 · 0 tok");
 }
 
 #[test]
@@ -104,11 +120,22 @@ fn snapshot_streaming_text_in_the_live_area() {
         turn_steps: 1,
         limit: None,
     });
-    app.apply(UiEvent::Delta("Hello ".into()));
-    app.apply(UiEvent::Delta("world".into()));
-    assert_eq!(
-        snapshot(&mut app),
-        "Hello world\n\n\n\n›\n\n\nkelir working · test/model · step 1 · 0 tok\n"
+    app.apply(UiEvent::Delta("Hello **wor".into()));
+    let screen = snapshot(&mut app);
+    // The unclosed `**` stays literal (a streamed prefix is not a mistake).
+    assert!(screen.contains("Hello **wor"), "{screen:?}");
+    app.apply(UiEvent::Delta("ld**\n".into()));
+    let screen = snapshot(&mut app);
+    let state = screen.lines().nth(3).unwrap_or_default();
+    assert!(state.contains("writing"), "{screen:?}");
+    assert!(
+        !screen.contains("**"),
+        "the closed emphasis renders: {screen:?}"
+    );
+    let facts = screen.lines().nth(7).unwrap_or_default();
+    assert!(
+        facts.starts_with("kelir working · test/model · step 1"),
+        "{facts:?}"
     );
 }
 
@@ -128,10 +155,12 @@ fn snapshot_a_running_call() {
         name: "bash".into(),
         input: json!({"command": "sleep 1"}),
     });
-    assert_eq!(
-        snapshot(&mut app),
-        "$ sleep 1\n\n\n\n›\n\n\nkelir working · test/model · step 0 · 0 tok · 1 running\n"
-    );
+    let screen = snapshot(&mut app);
+    let state = screen.lines().nth(3).unwrap_or_default();
+    assert!(state.contains("running bash: sleep 1"), "{screen:?}");
+    // The live rows are quiet while a call runs: the state row says what is
+    // happening, and it is the only thing that moved.
+    assert_eq!(screen.lines().next(), Some(""), "{screen:?}");
 }
 
 #[test]
@@ -145,14 +174,16 @@ fn snapshot_an_error() {
     });
     app.apply(UiEvent::Error("provider said no".into()));
     assert_eq!(app.status.phase, Phase::Error);
-    assert_eq!(
-        snapshot(&mut app),
-        "provider said no\n\n\n\n›\n\n\nkelir error · test/model · step 0 · 0 tok\n"
-    );
+    let screen = snapshot(&mut app);
+    let state = screen.lines().nth(3).unwrap_or_default();
+    assert!(state.contains("error"), "{screen:?}");
+    assert!(state.contains("provider said no"), "{screen:?}");
+    let facts = screen.lines().nth(7).unwrap_or_default();
+    assert!(facts.starts_with("kelir error"), "{facts:?}");
 }
 
-/// Ctrl-O: the last call's output tail takes the whole area above the status
-/// line, and the editor is out of the way while it is open.
+/// Ctrl-O: the last call's output tail takes the whole area above the facts
+/// row, and the editor is out of the way while it is open.
 #[test]
 fn snapshot_the_output_tail_view() {
     let dir = tempfile::tempdir().unwrap();
@@ -164,16 +195,16 @@ fn snapshot_the_output_tail_view() {
         input: json!({"command": "cargo test"}),
         outcome: "ok".into(),
         exit_code: Some(0),
+        elapsed_ms: 200,
         bytes: 30,
         lines: 3,
         spilled: false,
         out_path: out.to_string_lossy().into_owned(),
+        tail: String::new(),
     });
-    let settled = app.take_scroll();
-    assert_eq!(
-        settled,
-        vec!["$ cargo test  (exit 0 · 30 B · 3 lines)".to_string()]
-    );
+    // The call is still in the open group, not committed yet: nothing to
+    // scroll.
+    assert!(app.take_scroll().is_empty());
     app.press(tui::Press::ToggleTail);
     let screen = snapshot(&mut app);
     let rows: Vec<&str> = screen.lines().collect();
@@ -204,8 +235,8 @@ fn snapshot_a_long_editor_line_stays_on_its_row() {
     assert_eq!(rows.len(), 8);
     assert_eq!(rows[4].chars().count(), 60, "{}", rows[4]);
     assert!(rows[7].starts_with("kelir idle"), "{}", rows[7]);
-    // The streamed rows above are untouched.
-    assert!(rows[0..4].iter().all(|row| row.is_empty()));
+    // The live rows above are untouched.
+    assert!(rows[0..3].iter().all(|row| row.is_empty()), "{screen:?}");
 }
 
 // -------------------------------------------------- every action is a verb

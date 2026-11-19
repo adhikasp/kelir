@@ -510,8 +510,12 @@ async fn drive(opts: Options) -> u8 {
             tx.clone(),
             &banner,
             session.cfg.max_steps,
+            crate::theme::Theme::from_env(),
         ) {
-            Ok(handle) => {
+            Ok(mut handle) => {
+                // The session dir is where a pasted image is saved, and where
+                // `attachments/…` in a prompt resolves.
+                handle.app.set_session_dir(session.dir.clone());
                 session.ui = Some(to_tui.clone());
                 let task = tokio::spawn(handle.run());
                 // If the UI dies (a panic, a terminal error) the session ends
@@ -2696,15 +2700,26 @@ impl Session {
                     elapsed.as_secs_f64()
                 );
             }
+            // A failed call's tail row: the last line it printed, so the
+            // transcript says *why* without unfolding anything.
+            let tail = if outcome.outcome == "ok" && outcome.exit_code.unwrap_or(0) == 0 {
+                String::new()
+            } else {
+                call_tail(&outcome)
+                    .or_else(|| last_result_line(&outcome.result))
+                    .unwrap_or_default()
+            };
             self.emit(UiEvent::ToolSettled {
                 name: call.name.clone(),
                 input: call.args.clone(),
                 outcome: outcome.outcome.clone(),
                 exit_code: outcome.exit_code,
+                elapsed_ms: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
                 bytes: outcome.bytes,
                 lines: outcome.lines,
                 spilled: outcome.spilled,
                 out_path: outcome.out_path.clone(),
+                tail,
             });
         }
         self.sync();
@@ -2859,6 +2874,24 @@ fn compact_input(args: &Value) -> String {
         .map(str::to_string)
         .unwrap_or_else(|| args.to_string());
     crate::util::truncate_chars(&text.replace('\n', " ↵ "), 60)
+}
+
+/// The last non-empty line of a call's output file: a failed call's tail row.
+/// Reads only the end of the file, so a 200 MB log stays cheap.
+fn call_tail(outcome: &ToolOutcome) -> Option<String> {
+    if outcome.out_path.is_empty() {
+        return None;
+    }
+    let text = crate::tui::read_tail(std::path::Path::new(&outcome.out_path), 4096).ok()?;
+    let line = crate::tui::last_line(&text);
+    (!line.is_empty()).then_some(line)
+}
+
+/// The last non-empty line of a result that never reached a file (a stopped or
+/// disabled call's message).
+fn last_result_line(result: &str) -> Option<String> {
+    let line = crate::tui::last_line(result);
+    (!line.is_empty()).then_some(line)
 }
 
 /// One line for the UI: newlines folded, length bounded.

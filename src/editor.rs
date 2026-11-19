@@ -138,6 +138,24 @@ impl Editor {
         (self.row, self.col)
     }
 
+    /// The cursor as the renderer needs it: `(row, display column)`, the prompt
+    /// included and every character measured by its terminal width (a chip's
+    /// label is ordinary text, so it counts its own width).
+    pub fn cursor_display(&self) -> (usize, usize) {
+        use unicode_width::UnicodeWidthChar as _;
+        let before: usize = self
+            .lines
+            .get(self.row)
+            .map(|line| {
+                line.chars()
+                    .take(self.col)
+                    .map(|c| c.width().unwrap_or(0))
+                    .sum()
+            })
+            .unwrap_or(0);
+        (self.row, crate::tui::PROMPT_WIDTH + before)
+    }
+
     pub fn history(&self) -> &[String] {
         &self.history
     }

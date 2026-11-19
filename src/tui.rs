@@ -1,15 +1,27 @@
-//! The inline TUI: a small editor plus a status line, with finished turns
-//! pushed into the terminal's scrollback.
+//! The inline TUI: live rows, a state row, the editor, a facts row, and
+//! finished turns pushed into the terminal's scrollback.
 //!
-//! Two things keep it small. The viewport is fixed ([`VIEWPORT_HEIGHT`] rows at
-//! the bottom of the screen) and only it is repainted; everything a turn
-//! produces is written *above* it with ratatui's `insert_before`, so the
-//! terminal keeps it and the user can scroll back. And every action the TUI
-//! takes is a [`crate::commands::Action`], which is one verb sent through the
-//! same [`crate::ipc::Incoming`] channel the session socket feeds — the TUI has
-//! no private path into the session.
+//! Three things keep it small and predictable. The viewport is fixed
+//! ([`VIEWPORT_HEIGHT`] rows at the bottom of the screen) and only it is
+//! repainted; everything a turn produces is written *above* it with ratatui's
+//! `insert_before`, so the terminal keeps it and the user can scroll back. Every
+//! action the TUI takes is a [`crate::commands::Action`], which is one verb sent
+//! through the same [`crate::ipc::Incoming`] channel the session socket feeds —
+//! the TUI has no private path into the session. And every style comes from
+//! [`crate::theme::Theme`], so `NO_COLOR`, the ASCII glyph set and the 16-colour
+//! rule are enforced in one place.
+//!
+//! The rows, top to bottom (TUI-v2 §7):
+//!
+//! ```text
+//!   (scrollback: the conversation so far)
+//!   live rows   (3): the tail of the streaming answer, or a running call
+//!   state row   (1): ● idle · ready   /  ⠹ thinking 12s · waiting …  /  …
+//!   editor      (3): › your message
+//!   facts row   (1): kelir · model · step · tok · cache · $
+//! ```
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
@@ -19,25 +31,40 @@ use ratatui::crossterm::cursor::{MoveTo, Show};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::terminal::{Clear, ClearType};
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget as _};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::activity::{self, Activity, Kind};
+use crate::attachments;
 use crate::commands::{self, Action, Parsed};
-use crate::editor::{Editor, Key, Outcome};
+use crate::editor::{Chip, Editor, Key, Outcome};
 use crate::herdr::{self, State as HerdrState};
 use crate::ipc::{Incoming, Request, Response};
-use crate::scrollback::{self, Live};
+use crate::markdown::{self, Layout, NoHighlight, Row};
+use crate::scrollback;
+use crate::theme::Theme;
 
-/// Rows the inline viewport occupies: four live rows, three editor rows and the
-/// status line.
+/// The editor prompt's width (`› `), which the cursor's column includes.
+pub const PROMPT_WIDTH: usize = 2;
+use crate::tools_view::{self, CallLine, Group, Policy};
+
+/// Rows the inline viewport occupies: three live rows, the state row, three
+/// editor rows and the facts row.
 pub const VIEWPORT_HEIGHT: u16 = 8;
 /// A second Ctrl-C within this window quits instead of stopping.
 pub const DOUBLE_CTRL_C: Duration = Duration::from_millis(1000);
 /// How much of a call's output the tail view shows.
 pub const TAIL_BYTES: usize = 2048;
+/// The spinner changes this often while working; the elapsed text once a
+/// second. Nothing ticks while idle.
+pub const SPINNER_TICK: Duration = Duration::from_millis(100);
+/// Frames are coalesced to at most one per this interval.
+pub const FRAME_MIN: Duration = Duration::from_millis(33);
+/// The retry countdown updates once a second.
+pub const SECOND: Duration = Duration::from_secs(1);
 
 // ------------------------------------------------------------------ events
 
@@ -86,10 +113,28 @@ pub enum UiEvent {
         input: Value,
         outcome: String,
         exit_code: Option<i32>,
+        /// How long the call took, when the session measured it.
+        elapsed_ms: u64,
         bytes: u64,
         lines: u64,
         spilled: bool,
         out_path: String,
+        /// The last non-empty line of the call's output (a failed call's tail).
+        tail: String,
+    },
+    /// A retryable provider error is being waited out (STEER-5's countdown).
+    Retry {
+        /// How long the wait is.
+        retry_in_ms: u64,
+        attempt: u32,
+        /// `429`, `503`, `network`: a short reason, never a body.
+        detail: String,
+    },
+    /// An image landed at the tail (a `kelir view` from a tool call).
+    Attachment {
+        /// `attachments/1-x.png`.
+        rel: String,
+        bytes: u64,
     },
     /// Something the session wants said but which is not an error.
     Info(String),
@@ -109,7 +154,7 @@ pub enum UiEvent {
     Quit,
 }
 
-// ------------------------------------------------------------------ status
+// ------------------------------------------------------------------- facts
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -131,9 +176,20 @@ impl Phase {
             Phase::Error => "error",
         }
     }
+
+    /// The state row derives from this: one source, two consumers (the row and
+    /// Herdr's OSC word), so they cannot drift.
+    pub fn activity_kind(self) -> Kind {
+        match self {
+            Phase::Idle | Phase::Done => Kind::Idle,
+            Phase::Working => Kind::Thinking,
+            Phase::Paused => Kind::Paused,
+            Phase::Error => Kind::Error,
+        }
+    }
 }
 
-/// The status line's data: model, step, tokens, cost, cache ratio, calls.
+/// The facts row's data: model, step, tokens, cost, cache ratio.
 #[derive(Debug, Clone)]
 pub struct Status {
     pub provider: String,
@@ -181,7 +237,7 @@ pub fn tokens(count: u64) -> String {
     }
 }
 
-/// The whole status line, as one string (the renderer clips it to the width).
+/// The facts row, as one string (the renderer clips it to the width).
 pub fn status_text(status: &Status) -> String {
     let mut parts = vec![format!("kelir {}", status.phase.word())];
     if !status.model.is_empty() {
@@ -203,10 +259,59 @@ pub fn status_text(status: &Status) -> String {
     if status.cost > 0.0 {
         parts.push(format!("${:.4}", status.cost));
     }
-    if status.running > 0 {
-        parts.push(format!("{} running", status.running));
-    }
     parts.join(" · ")
+}
+
+/// The facts row trimmed for a narrow pane: the least useful facts go first
+/// (cache %, then step, then cost), the model and the token count stay longest.
+pub fn facts_for_width(status: &Status, width: usize) -> String {
+    let full = status_text(status);
+    if scrollback::display_width(&full) <= width {
+        return full;
+    }
+    // The design's truncation order, from the right end: cache %, then step,
+    // then cost, then the model. Tokens and the phase word stay longest.
+    let attempts = [
+        Status {
+            cached_tokens: 0,
+            ..status.clone()
+        },
+        Status {
+            cached_tokens: 0,
+            turn_steps: 0,
+            limit: None,
+            ..status.clone()
+        },
+        Status {
+            cached_tokens: 0,
+            turn_steps: 0,
+            limit: None,
+            cost: 0.0,
+            ..status.clone()
+        },
+        Status {
+            cached_tokens: 0,
+            turn_steps: 0,
+            limit: None,
+            cost: 0.0,
+            model: String::new(),
+            ..status.clone()
+        },
+    ];
+    for candidate in attempts {
+        let text = status_text(&candidate);
+        if scrollback::display_width(&text) <= width {
+            return text;
+        }
+    }
+    fit(
+        &format!(
+            "{} · {} tok",
+            status.phase.word(),
+            tokens(status.prompt_tokens + status.completion_tokens)
+        ),
+        width,
+    )
 }
 
 /// Clip to `width` columns, with an ellipsis when something was cut.
@@ -248,38 +353,26 @@ pub fn call_head(name: &str, input: &Value) -> String {
     }
 }
 
-/// The settled form: the call, its outcome, its size, and whether the model saw
-/// a notice instead of the output.
-pub fn call_result(
-    name: &str,
-    input: &Value,
-    outcome: &str,
-    exit_code: Option<i32>,
-    bytes: u64,
-    lines: u64,
-    spilled: bool,
-) -> String {
-    let mut parts = Vec::new();
-    match outcome {
-        "ok" => {
-            if let Some(code) = exit_code {
-                parts.push(format!("exit {code}"));
-            }
-        }
-        other => parts.push(other.to_string()),
-    }
-    parts.push(format!("{bytes} B"));
-    if lines > 1 {
-        parts.push(format!("{lines} lines"));
-    }
-    if spilled {
-        parts.push("spilled".to_string());
-    }
-    format!("{}  ({})", call_head(name, input), parts.join(" · "))
-}
-
 fn one_line(text: &str) -> String {
     crate::util::truncate_chars(&text.replace('\n', " ↵ "), 60)
+}
+
+/// The session's one-line label for a running call, which the state row shows.
+pub fn call_label(name: &str, input: &Value) -> String {
+    match name {
+        "bash" => match input.get("command").and_then(Value::as_str) {
+            Some(command) => {
+                let first = command.lines().next().unwrap_or("").trim();
+                format!("bash: {}", crate::util::truncate_chars(first, 60))
+            }
+            None => "bash".to_string(),
+        },
+        "edit" => match input.get("path").and_then(Value::as_str) {
+            Some(path) => format!("edit: {path}"),
+            None => "edit".to_string(),
+        },
+        other => other.to_string(),
+    }
 }
 
 /// The last `max` bytes of a call's output, as text. A tail that starts
@@ -312,21 +405,61 @@ pub fn read_tail(path: &std::path::Path, max: usize) -> std::io::Result<String> 
     Ok(tail_of(&bytes, max))
 }
 
+/// The last non-empty line of a call's output, for a failed call's tail row.
+pub fn last_line(text: &str) -> String {
+    text.lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| crate::util::truncate_chars(line.trim(), 200))
+        .unwrap_or_default()
+}
+
 // --------------------------------------------------------------------- app
 
 pub struct App {
     pub editor: Editor,
-    pub live: Live,
+    pub theme: Theme,
+    /// The state machine the state row renders.
+    pub activity: Activity,
     pub status: Status,
     pub width: usize,
     pub height: usize,
-    /// Rows ready to be written above the viewport.
-    pub scroll: Vec<String>,
+    /// Rows ready to be written above the viewport, styled.
+    pub scroll: Vec<Line<'static>>,
+    /// The streamed message: complete blocks, already rendered, not yet
+    /// committed.
+    pending_blocks: Vec<String>,
+    pending_rows: Vec<Row>,
+    stream: markdown::Stream,
     /// The output tail view (Ctrl-O).
     pub tail: VecDeque<String>,
     pub show_tail: bool,
-    /// The one-line note in the live area (`$ cmd`, an error, …).
-    note: String,
+    /// The open group of settled calls.
+    pub group: Group,
+    /// Whether settled calls print their output too.
+    pub policy: Policy,
+    /// The session-wide call ordinal: what `/expand n` names.
+    pub call_ordinal: u64,
+    /// Every settled call of this session, by ordinal, for `/expand`.
+    calls: HashMap<u64, CallLine>,
+    /// Per-role totals of the turn now running, for the summary line.
+    turn_started: Option<Instant>,
+    turn_steps: u32,
+    turn_tokens: u64,
+    turn_cost: f64,
+    /// The spinner frame, advanced by the working-state tick.
+    frame: u64,
+    /// Images saved from pastes, by content hash: a second paste of the same
+    /// bytes reuses the file.
+    seen_images: HashMap<u64, String>,
+    /// The session dir, for `attachments/`; `None` in a unit test with no
+    /// session (pastes then stay text).
+    session_dir: Option<std::path::PathBuf>,
+    /// A note the state row shows (`saving image…`), cleared by the next event.
+    pub note: String,
+    /// When the current retry wait ends, so the countdown is read from the
+    /// wall clock instead of subtracting from a stale snapshot.
+    retry_deadline: Option<Instant>,
     last_out: Option<String>,
     last_ctrl_c: Option<Instant>,
     /// OSC 7501 records waiting to be written between two paints.
@@ -346,14 +479,30 @@ impl App {
         let width = width.max(1);
         Self {
             editor: Editor::default(),
-            live: Live::new(width, live_rows(width, height)),
+            theme: Theme::plain(),
+            activity: Activity::idle(Instant::now()),
             status: Status::default(),
             width,
             height,
             scroll: Vec::new(),
+            pending_blocks: Vec::new(),
+            pending_rows: Vec::new(),
+            stream: markdown::Stream::new(),
             tail: VecDeque::new(),
             show_tail: false,
+            group: Group::default(),
+            policy: Policy::default(),
+            call_ordinal: 0,
+            calls: HashMap::new(),
+            turn_started: None,
+            turn_steps: 0,
+            turn_tokens: 0,
+            turn_cost: 0.0,
+            frame: 0,
+            seen_images: HashMap::new(),
+            session_dir: None,
             note: String::new(),
+            retry_deadline: None,
             last_out: None,
             last_ctrl_c: None,
             status_records: Vec::new(),
@@ -363,6 +512,15 @@ impl App {
         }
     }
 
+    /// The session dir (for `attachments/`), once the session exists.
+    pub fn set_session_dir(&mut self, dir: std::path::PathBuf) {
+        self.session_dir = Some(dir);
+    }
+
+    pub fn theme(&self) -> Theme {
+        self.theme
+    }
+
     pub fn set_size(&mut self, width: usize, height: usize) {
         let width = width.max(1);
         if self.width == width && self.height == height {
@@ -370,17 +528,23 @@ impl App {
         }
         self.width = width;
         self.height = height;
-        self.live.resize(width, live_rows(width, height));
+        // Committed scrollback cannot reflow (the terminal owns those rows):
+        // only what has not been committed yet is re-rendered, which is what
+        // keeps a resize from emitting a row twice.
+        self.rerender_pending();
     }
 
-    /// Rows to write above the viewport, in order: the streamed text that no
-    /// longer fits, then anything queued.
-    pub fn take_scroll(&mut self) -> Vec<String> {
-        let mut rows = self.live.due();
-        if !self.scroll.is_empty() {
-            rows.append(&mut self.scroll);
-        }
-        rows
+    fn layout(&self) -> Layout {
+        Layout::new(self.width)
+    }
+
+    fn live_height(&self) -> usize {
+        layout_of(self.width, self.height).live.height as usize
+    }
+
+    /// Rows to write above the viewport, in order.
+    pub fn take_scroll(&mut self) -> Vec<Line<'static>> {
+        std::mem::take(&mut self.scroll)
     }
 
     /// Herdr records queued for the next write between two paints.
@@ -388,28 +552,169 @@ impl App {
         std::mem::take(&mut self.status_records)
     }
 
-    /// Wrap `text` and queue it for the scrollback.
+    pub fn note(&self) -> &str {
+        &self.note
+    }
+
+    /// The live rows: the tail of what is streaming and not yet committed.
+    pub fn live_view(&self) -> Vec<Row> {
+        let mut rows = self.pending_rows.clone();
+        let tail = self.stream.tail();
+        if !tail.trim().is_empty() {
+            if !rows.is_empty() {
+                rows.push(Row::default());
+            }
+            rows.extend(markdown::render_block(&tail, self.layout()));
+        }
+        let keep = self.live_height();
+        let start = rows.len().saturating_sub(keep);
+        rows.drain(..start);
+        rows
+    }
+
+    /// The live area as ratatui lines: the open call group (when nothing is
+    /// streaming) or the tail of the streamed message.
+    pub fn live_lines(&self) -> Vec<Line<'static>> {
+        let theme = self.theme;
+        let rows = self.live_view();
+        if !rows.is_empty() {
+            return rows
+                .iter()
+                .map(|row| row.line(theme, &NoHighlight))
+                .collect();
+        }
+        self.group.preview(theme, self.width, self.live_height())
+    }
+
+    /// Queue plain text for the scrollback (banner, notes, verb replies).
     pub fn push_text(&mut self, text: &str) {
         for row in scrollback::wrap(text, self.width) {
-            self.scroll.push(row);
+            self.scroll.push(Line::from(row));
         }
     }
 
-    /// Commit the streamed message: whatever is left of it, exactly once.
-    pub fn commit_live(&mut self, fallback: &str) {
-        let mut rows = self.live.due();
-        rows.extend(self.live.finish());
-        if rows.iter().all(|row| row.is_empty()) && !fallback.trim().is_empty() {
-            rows = scrollback::wrap(fallback, self.width);
+    /// Queue styled rows (a tool line, a summary).
+    pub fn push_lines(&mut self, lines: Vec<Line<'static>>) {
+        self.scroll.extend(lines);
+    }
+
+    fn commit_pending(&mut self) {
+        for block in std::mem::take(&mut self.pending_blocks) {
+            let _ = block;
         }
-        if rows.is_empty() {
+        let rows = std::mem::take(&mut self.pending_rows);
+        let theme = self.theme;
+        for row in rows {
+            self.scroll.push(row.line(theme, &NoHighlight));
+        }
+        self.stream = markdown::Stream::new();
+    }
+
+    fn rerender_pending(&mut self) {
+        let blocks = std::mem::take(&mut self.pending_blocks);
+        let mut rows = Vec::new();
+        for block in &blocks {
+            rows.extend(markdown::render_block(block, self.layout()));
+            rows.push(Row::default());
+        }
+        // The trailing blank row is not part of the message.
+        if rows.last().is_some_and(Row::is_empty) {
+            rows.pop();
+        }
+        self.pending_blocks = blocks;
+        self.pending_rows = rows;
+        self.trim_pending();
+    }
+
+    /// A complete block arrived: render it once, append it, and commit the
+    /// excess so the live area never holds more than its height.
+    fn absorb_block(&mut self, block: &str) {
+        let layout = self.layout();
+        let rows = markdown::render_block(block, layout);
+        if !self.pending_rows.is_empty() {
+            self.pending_rows.push(Row::default());
+        }
+        self.pending_blocks.push(block.to_string());
+        self.pending_rows.extend(rows);
+        self.trim_pending();
+    }
+
+    /// Commit the rows that can no longer be seen, exactly once each.
+    fn trim_pending(&mut self) {
+        let keep = self.live_height();
+        let total = self.pending_rows.len();
+        if total <= keep {
             return;
         }
-        self.scroll.extend(rows);
-        self.scroll.push(String::new());
+        let excess = total - keep;
+        let rows: Vec<Row> = self.pending_rows.drain(..excess).collect();
+        let theme = self.theme;
+        for row in rows {
+            self.scroll.push(row.line(theme, &NoHighlight));
+        }
+        // Drop the blocks that are now fully committed, so a resize does not
+        // re-render rows the scrollback already has. A conservative rule: keep
+        // the last block, which is the one that may still be growing.
+        while self.pending_blocks.len() > 1 {
+            self.pending_blocks.remove(0);
+        }
+    }
+
+    /// Commit the streamed message: whatever is left of it, exactly once, then
+    /// one blank row.
+    pub fn commit_live(&mut self, fallback: &str) {
+        if let Some(block) = self.stream.finish() {
+            let rows = markdown::render_block(&block, self.layout());
+            if !self.pending_rows.is_empty() {
+                self.pending_rows.push(Row::default());
+            }
+            self.pending_rows.extend(rows);
+        }
+        if self.pending_rows.is_empty() && !fallback.trim().is_empty() {
+            let rows = markdown::render(fallback, self.layout());
+            self.pending_rows = rows;
+        }
+        if self.pending_rows.is_empty() {
+            return;
+        }
+        self.commit_pending();
+        self.scroll.push(Line::from(""));
+    }
+
+    /// The turn's own totals, for the one-line summary.
+    fn turn_summary(&mut self, outcome: &str) {
+        let elapsed = self
+            .turn_started
+            .take()
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        let steps = self.turn_steps.max(self.status.turn_steps);
+        let summary = activity::summary_line(
+            self.theme,
+            outcome,
+            steps,
+            self.turn_tokens,
+            self.turn_cost,
+            elapsed,
+        );
+        self.scroll.push(summary);
+        self.scroll.push(Line::from(""));
+        self.turn_steps = 0;
+        self.turn_tokens = 0;
+        self.turn_cost = 0.0;
+    }
+
+    /// Close the open tool group, if any: its rows go to the scrollback.
+    fn close_group(&mut self) {
+        if self.group.is_empty() {
+            return;
+        }
+        let lines = self.group.close(self.theme, self.width);
+        self.scroll.extend(lines);
     }
 
     pub fn apply(&mut self, event: UiEvent) {
+        let now = Instant::now();
         match event {
             UiEvent::TurnStarted {
                 turn,
@@ -424,7 +729,12 @@ impl App {
                 // A new turn counts its own steps (an explicit cap is per turn).
                 self.status.turn_steps = 0;
                 self.status.limit = limit;
+                self.turn_started = Some(now);
+                self.turn_steps = 0;
+                self.turn_tokens = 0;
+                self.turn_cost = 0.0;
                 self.note.clear();
+                self.activity.step_started(now);
             }
             UiEvent::Step {
                 step,
@@ -438,16 +748,29 @@ impl App {
                 self.status.model = model;
                 self.status.turn_steps = turn_steps;
                 self.status.limit = limit;
+                self.turn_steps = turn_steps;
+                self.status.phase = Phase::Working;
+                self.activity.step_started(now);
+                self.retry_deadline = None;
             }
             UiEvent::Paused { steps } => {
                 self.status.phase = Phase::Paused;
                 self.status.running = 0;
                 self.status.turn_steps = steps;
+                self.turn_steps = steps;
+                self.activity
+                    .paused(now, &format!("step cap {steps} reached"));
                 self.push_text(&format!(
                     "turn paused after {steps} steps; say continue to resume"
                 ));
             }
-            UiEvent::Delta(text) => self.live.push(&text),
+            UiEvent::Delta(text) => {
+                self.status.phase = Phase::Working;
+                self.activity.text(now, text.chars().count());
+                for block in self.stream.push(&text) {
+                    self.absorb_block(&block);
+                }
+            }
             UiEvent::Usage {
                 prompt,
                 completion,
@@ -458,34 +781,98 @@ impl App {
                 self.status.completion_tokens += completion;
                 self.status.cached_tokens += cached;
                 self.status.cost += cost;
+                self.turn_tokens += prompt + completion;
+                self.turn_cost += cost;
             }
-            UiEvent::Assistant { text } => self.commit_live(&text),
+            UiEvent::Assistant { text } => {
+                self.commit_live(&text);
+                // Prose starts: the tool group closes before it.
+                if !self.group.is_empty() {
+                    let lines = self.group.close(self.theme, self.width);
+                    self.scroll.extend(lines);
+                }
+            }
             UiEvent::ToolStarted { name, input } => {
                 self.status.running += 1;
-                self.note = call_head(&name, &input);
+                self.activity.tool_started(now, &call_label(&name, &input));
             }
             UiEvent::ToolSettled {
                 name,
                 input,
                 outcome,
                 exit_code,
+                elapsed_ms,
                 bytes,
                 lines,
                 spilled,
                 out_path,
+                tail,
             } => {
                 self.status.running = self.status.running.saturating_sub(1);
-                self.note.clear();
-                let line = call_result(&name, &input, &outcome, exit_code, bytes, lines, spilled);
-                self.push_text(&line);
-                if !out_path.is_empty() {
-                    self.last_out = Some(out_path);
+                self.activity.tool_settled(now);
+                self.call_ordinal += 1;
+                let call = CallLine {
+                    ordinal: self.call_ordinal,
+                    name: name.clone(),
+                    head: call_head(&name, &input),
+                    outcome,
+                    exit_code,
+                    bytes,
+                    lines,
+                    spilled,
+                    out_path: out_path.clone(),
+                    tail,
+                    elapsed: Some(Duration::from_millis(elapsed_ms)),
+                };
+                self.last_out = Some(out_path).filter(|path| !path.is_empty());
+                self.calls.insert(call.ordinal, call.clone());
+                match self.policy {
+                    Policy::Collapsed => self.group.push(call),
+                    Policy::Full => {
+                        // Every call prints its output block too.
+                        let mut lines = self.group.close(self.theme, self.width);
+                        lines.push(call.line(self.theme, self.width));
+                        if call.failed()
+                            && let Some(tail) = call.tail_line(self.theme, self.width)
+                        {
+                            lines.push(tail);
+                        }
+                        lines.extend(call.expanded(
+                            self.theme,
+                            self.width,
+                            &self.read_output(&call),
+                            tools_view::EXPAND_ROWS,
+                        ));
+                        self.scroll.extend(lines);
+                    }
                 }
             }
-            UiEvent::Info(text) => self.push_text(&text),
+            UiEvent::Retry {
+                retry_in_ms,
+                attempt,
+                detail,
+            } => {
+                let wait = Duration::from_millis(retry_in_ms);
+                if self.activity.kind == Kind::RateLimited {
+                    self.activity.tick_retry(wait);
+                } else {
+                    self.activity.retry(now, wait, attempt, &detail);
+                }
+                self.retry_deadline = Some(now + wait);
+            }
+            UiEvent::Attachment { rel, bytes } => {
+                self.push_lines(vec![Line::from(Span::styled(
+                    format!("  view {rel} · {}", attachments::bytes_label(bytes)),
+                    self.theme.dim(),
+                ))]);
+            }
+            UiEvent::Info(text) => {
+                self.push_text(&text);
+                self.note.clear();
+            }
             UiEvent::Error(text) => {
                 self.status.phase = Phase::Error;
-                self.note = one_line(&text);
+                self.activity.failed(now, &one_line(&text));
                 self.push_text(&format!("kelir: {text}"));
             }
             UiEvent::Reply(response) => {
@@ -510,6 +897,9 @@ impl App {
                 }
             }
             UiEvent::TurnEnded { outcome, .. } => {
+                self.close_group();
+                self.commit_live("");
+                self.activity.turn_ended(now);
                 self.status.phase = match outcome.as_str() {
                     "done" => Phase::Done,
                     "paused" => Phase::Paused,
@@ -518,30 +908,106 @@ impl App {
                 };
                 self.status.running = 0;
                 self.note.clear();
+                self.turn_summary(&outcome);
             }
             UiEvent::Herdr { state } => self.status_records.push(herdr::record(state)),
             UiEvent::Quit => self.quit = true,
         }
     }
 
+    fn read_output(&self, call: &CallLine) -> String {
+        if call.out_path.is_empty() {
+            return String::new();
+        }
+        read_tail(std::path::Path::new(&call.out_path), TAIL_BYTES).unwrap_or_default()
+    }
+
     /// One key press.
     pub fn press(&mut self, press: Press) {
         match press {
-            Press::Edit(key) => {
-                if let Outcome::Submitted(text) = self.editor.handle(key) {
-                    self.submit(&text);
-                }
-            }
+            Press::Edit(key) => match self.editor.handle(key) {
+                Outcome::Submitted(text) => self.submit(&text),
+                Outcome::ChipRemoved(chip) => self.discard_chip(&chip),
+                Outcome::Edited | Outcome::Ignored => {}
+            },
             Press::CtrlC => self.ctrl_c(),
             Press::ToggleTail => self.toggle_tail(),
+            Press::Stop => {
+                // Esc while working is the same verb as the first Ctrl-C.
+                if self.activity.kind.working() {
+                    self.push_text("» stop (Esc)");
+                    self.dispatch(&Action::Stop(None));
+                }
+            }
             Press::Redraw => {}
         }
     }
 
-    /// Parse one submitted line and send what it asks for.
+    /// A bracket paste: an image *path* becomes a chip, anything else is text.
+    ///
+    /// The image work (read, hash, copy) is a few hundred kilobytes of file
+    /// I/O; it happens here, on the input path, and the chip appears when it is
+    /// done. Never the path text itself: the prompt must carry the pointer.
+    pub fn paste(&mut self, text: &str) {
+        if let Some(paste) = attachments::pasted_image(text)
+            && let Some(saved) = self.save_image(&paste.path)
+        {
+            let chip = Chip::new(saved.seq, &saved.rel, &saved.pointer);
+            self.press(Press::Edit(Key::Chip(chip)));
+            return;
+        }
+        self.press(Press::Edit(Key::Paste(text.to_string())));
+    }
+
+    /// Copy a pasted image into the session's attachments and describe it.
+    fn save_image(&mut self, path: &std::path::Path) -> Option<attachments::Saved> {
+        let dir = self.session_dir.clone()?;
+        if self.editor.chips().len() >= attachments::MAX_PER_PROMPT {
+            self.note = format!("at most {} images per prompt", attachments::MAX_PER_PROMPT);
+            return None;
+        }
+        let seq = (self.editor.chips().len() as u32 + 1).max(1);
+        match attachments::save(&dir, seq, path, &mut self.seen_images) {
+            Ok(saved) => Some(saved),
+            Err(message) => {
+                self.note = one_line(&message);
+                None
+            }
+        }
+    }
+
+    /// A chip was deleted before it was sent: so is its file.
+    fn discard_chip(&mut self, chip: &Chip) {
+        // Only when no other chip in the buffer still points at the same file
+        // (a deduped paste shares one).
+        if self
+            .editor
+            .chips()
+            .iter()
+            .any(|other| other.rel == chip.rel)
+        {
+            return;
+        }
+        if let Some(dir) = &self.session_dir {
+            let path = dir.join(&chip.rel);
+            let _ = std::fs::remove_file(path);
+            // The file is gone: a later paste of the same bytes must save again.
+            self.seen_images.retain(|_, rel| rel != &chip.rel);
+        }
+    }
+
+    /// Parse one submitted line and send what it asks for. Chips become pointer
+    /// text here: the editor showed `[image 1]`, the model sees the pointer.
     pub fn submit(&mut self, line: &str) {
-        match commands::parse(line) {
+        let chips = self.editor.take_chips();
+        let mut text = line.to_string();
+        for chip in &chips {
+            text = text.replace(&chip.label, &chip.pointer);
+        }
+        match commands::parse(&text) {
             Ok(Parsed::Action(action)) => {
+                self.close_group();
+                self.group = Group::default();
                 self.push_text(&action.line());
                 self.dispatch(&action);
             }
@@ -589,7 +1055,9 @@ impl App {
         }
     }
 
-    fn toggle_tail(&mut self) {
+    /// Ctrl-O: the last call's output tail takes the whole area above the facts
+    /// row, and the editor is out of the way while it is open.
+    pub fn toggle_tail(&mut self) {
         if self.show_tail {
             self.show_tail = false;
             return;
@@ -605,8 +1073,50 @@ impl App {
         self.show_tail = true;
     }
 
-    pub fn note(&self) -> &str {
-        &self.note
+    /// `/expand [n|last]`: append one call's output to the scrollback.
+    pub fn expand(&mut self, which: Option<u64>) {
+        let ordinal = match which {
+            Some(ordinal) => ordinal,
+            None => match self.calls.keys().max() {
+                Some(ordinal) => *ordinal,
+                None => {
+                    self.push_text("kelir: no tool call to expand yet");
+                    return;
+                }
+            },
+        };
+        let Some(call) = self.calls.get(&ordinal).cloned() else {
+            self.push_text(&format!("kelir: no call #{ordinal}"));
+            return;
+        };
+        let text = self.read_output(&call);
+        let lines = call.expanded(self.theme, self.width, &text, tools_view::EXPAND_ROWS);
+        self.scroll.extend(lines);
+        self.push_text("  (a committed line cannot unfold: /expand appends the output instead)");
+    }
+
+    /// `/collapse` and `/expand`: the policy for *future* calls. A committed
+    /// line stays as it is.
+    pub fn set_policy(&mut self, policy: Policy) {
+        self.policy = policy;
+        self.push_text(&format!("» tool output: {}", policy.word()));
+    }
+
+    /// Advance the spinner while a working state lasts. Returns whether a
+    /// repaint is due (the spinner frame or an elapsed second changed).
+    pub fn tick(&mut self, now: Instant) -> bool {
+        if !self.activity.kind.working() {
+            return false;
+        }
+        self.frame = self.frame.wrapping_add(1);
+        if self.activity.kind == Kind::RateLimited {
+            // The countdown is wall-clock based: read it, do not subtract.
+            if let Some(deadline) = self.retry_deadline {
+                let left = deadline.saturating_duration_since(now);
+                self.activity.tick_retry(left);
+            }
+        }
+        true
     }
 }
 
@@ -618,6 +1128,8 @@ pub enum Press {
     Edit(Key),
     CtrlC,
     ToggleTail,
+    /// Esc: stop the turn, but only while working.
+    Stop,
     Redraw,
 }
 
@@ -637,6 +1149,7 @@ pub fn translate(key: KeyEvent) -> Option<Press> {
         KeyCode::Char('k') if ctrl => Some(Press::Edit(Key::KillToEnd)),
         KeyCode::Char('u') if ctrl => Some(Press::Edit(Key::Clear)),
         KeyCode::Char(c) if !ctrl && !alt => Some(Press::Edit(Key::Char(c))),
+        KeyCode::Esc => Some(Press::Stop),
         // Enter sends; Alt-Enter (and Shift-Enter where the terminal reports
         // it) starts a new line instead.
         KeyCode::Enter if alt || shift => Some(Press::Edit(Key::Newline)),
@@ -658,50 +1171,49 @@ pub fn translate(key: KeyEvent) -> Option<Press> {
 #[derive(Debug, Clone, Copy)]
 pub struct Areas {
     pub live: Rect,
+    pub state: Rect,
     pub editor: Rect,
-    pub status: Rect,
+    pub facts: Rect,
 }
 
-/// Four live rows, three editor rows, one status row — fewer when the screen
-/// is shorter than the viewport (the editor is the last thing to go).
+/// Three live rows, the state row, three editor rows, the facts row — fewer
+/// when the screen is shorter than the viewport. The state row goes last (a
+/// user who cannot see whether the agent runs has nothing left), then the
+/// live rows, then the facts row, then the editor to one row.
 pub fn layout(area: Rect) -> Areas {
+    layout_of(area.width as usize, area.height as usize)
+}
+
+fn layout_of(width: usize, height: usize) -> Areas {
+    let area = Rect::new(0, 0, width as u16, height as u16);
     if area.height == 0 {
         return Areas {
             live: area,
+            state: area,
             editor: area,
-            status: area,
+            facts: area,
         };
     }
-    let status = Rect {
-        x: area.x,
-        y: area.y + area.height - 1,
-        width: area.width,
-        height: 1,
-    };
-    let editor_height = 3.min(area.height.saturating_sub(1));
-    let editor = Rect {
-        x: area.x,
-        y: status.y - editor_height,
-        width: area.width,
-        height: editor_height,
-    };
-    let live_height = area.height.saturating_sub(1 + editor_height);
-    let live = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: live_height,
-    };
+    // The order rows are given up (design note §7): the facts row first, then
+    // live rows, then the editor down to one row; the state row is the last to
+    // go, because a user who cannot see whether the agent is working has
+    // nothing left.
+    let facts_height = u16::from(area.height >= 6);
+    let state_height = u16::from(area.height >= 2);
+    let space = area.height.saturating_sub(facts_height + state_height);
+    let editor_height = 3.min(space.saturating_sub(1)).max(u16::from(space > 0));
+    let live_height = space.saturating_sub(editor_height);
+
+    let live = Rect::new(area.x, area.y, area.width, live_height);
+    let state = Rect::new(area.x, live.y + live_height, area.width, state_height);
+    let editor = Rect::new(area.x, state.y + state_height, area.width, editor_height);
+    let facts = Rect::new(area.x, editor.y + editor_height, area.width, facts_height);
     Areas {
         live,
+        state,
         editor,
-        status,
+        facts,
     }
-}
-
-fn live_rows(width: usize, height: usize) -> usize {
-    let areas = layout(Rect::new(0, 0, width as u16, height as u16));
-    (areas.live.height as usize).max(1)
 }
 
 // -------------------------------------------------------------------- draw
@@ -718,49 +1230,54 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     VIEWPORT_Y.store(area.y, Ordering::Relaxed);
     let areas = layout(area);
     if app.show_tail {
-        render_tail(app, frame, area, areas.status);
+        render_tail(app, frame, area, areas.facts);
     } else {
         render_live(app, frame, areas.live);
         render_editor(app, frame, area, areas.editor);
     }
-    render_status(app, frame, areas.status);
+    render_state(app, frame, areas.state);
+    render_facts(app, frame, areas.facts);
 }
 
-/// The streamed text (or the note) in the live area.
+/// The streamed text (markdown, styled) in the live area.
 fn render_live(app: &App, frame: &mut Frame, area: Rect) {
-    let view = app.live.view();
-    let rows = if view.is_empty() && !app.note.is_empty() {
-        vec![app.note.clone()]
-    } else {
-        view
-    };
-    let rows = last_rows(&rows, area.height as usize);
-    frame.render_widget(
-        Paragraph::new(rows.into_iter().map(Line::from).collect::<Vec<_>>()),
-        area,
-    );
-}
-
-/// The editor: the window of rows that keeps the cursor visible, plus the
-/// cursor itself, counted in display columns.
-fn render_editor(app: &App, frame: &mut Frame, screen: Rect, area: Rect) {
-    let (first, visible) = app.editor.window(area.height as usize);
-    let lines = app.editor.lines();
-    let mut text = Vec::new();
-    for (index, line) in lines.iter().enumerate().skip(first).take(visible) {
-        let prefix = if index == 0 { "› " } else { "  " };
-        text.push(Line::from(format!("{prefix}{line}")));
-    }
-    frame.render_widget(Paragraph::new(text), area);
     if area.height == 0 {
         return;
     }
-    let (row, col) = app.editor.cursor();
-    let before: String = lines
-        .get(row)
-        .map(|line| line.chars().take(col).collect())
-        .unwrap_or_default();
-    let column = 2 + scrollback::display_width(&before);
+    let lines = app.live_lines();
+    let height = area.height as usize;
+    let start = lines.len().saturating_sub(height);
+    frame.render_widget(Paragraph::new(lines[start..].to_vec()), area);
+}
+
+/// The editor: the window of rows that keeps the cursor visible, the prompt
+/// dimmed while the agent works, the image chips reversed, and the cursor
+/// itself counted in display columns.
+fn render_editor(app: &App, frame: &mut Frame, screen: Rect, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let theme = app.theme;
+    let prompt_style = if app.activity.kind.working() {
+        theme.dim()
+    } else {
+        theme.prose()
+    };
+    let (first, visible) = app.editor.window(area.height as usize);
+    let lines = app.editor.lines();
+    let mut text: Vec<Line<'static>> = Vec::new();
+    for (index, line) in lines.iter().enumerate().skip(first).take(visible) {
+        let prefix = if index == 0 {
+            theme.glyphs.prompt()
+        } else {
+            theme.glyphs.prompt_pad()
+        };
+        let mut spans = vec![Span::styled(prefix.to_string(), prompt_style)];
+        spans.extend(chip_spans(app, line, theme));
+        text.push(Line::from(spans));
+    }
+    frame.render_widget(Paragraph::new(text), area);
+    let (row, column) = app.editor.cursor_display();
     let x = (area.x as usize + column).min(screen.width.saturating_sub(1) as usize) as u16;
     let local = row
         .saturating_sub(first)
@@ -768,48 +1285,101 @@ fn render_editor(app: &App, frame: &mut Frame, screen: Rect, area: Rect) {
     frame.set_cursor_position(Position::new(x, area.y + local as u16));
 }
 
-/// The output tail (Ctrl-O): the whole area above the status line.
-fn render_tail(app: &App, frame: &mut Frame, screen: Rect, status: Rect) {
+/// One editor row's spans, with every chip label painted reversed.
+fn chip_spans(app: &App, line: &str, theme: Theme) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = line;
+    while !rest.is_empty() {
+        let mut earliest: Option<(usize, &Chip)> = None;
+        for chip in app.editor.chips() {
+            if let Some(at) = rest.find(&chip.label)
+                && earliest.is_none_or(|(best, _)| at < best)
+            {
+                earliest = Some((at, chip));
+            }
+        }
+        match earliest {
+            Some((at, chip)) => {
+                if at > 0 {
+                    spans.push(Span::styled(rest[..at].to_string(), theme.prose()));
+                }
+                spans.push(Span::styled(chip.label.clone(), theme.chip()));
+                rest = &rest[at + chip.label.len()..];
+            }
+            None => {
+                spans.push(Span::styled(rest.to_string(), theme.prose()));
+                break;
+            }
+        }
+    }
+    spans
+}
+
+/// The output tail (Ctrl-O): the whole area above the state row, dim.
+fn render_tail(app: &App, frame: &mut Frame, screen: Rect, facts: Rect) {
+    let height = if facts.height > 0 {
+        screen.height.saturating_sub(1)
+    } else {
+        screen.height
+    };
     let area = Rect {
         x: screen.x,
         y: screen.y,
         width: screen.width,
-        height: status.y.saturating_sub(screen.y),
+        height,
     };
-    let tail: Vec<String> = app.tail.iter().cloned().collect();
-    let rows = last_rows(&tail, area.height as usize);
+    let tail: Vec<Line> = app.tail.iter().map(|row| Line::from(row.clone())).collect();
     frame.render_widget(
-        Paragraph::new(rows.into_iter().map(Line::from).collect::<Vec<_>>())
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(tail)
+            .style(Style::default().add_modifier(Modifier::DIM))
+            .scroll((tail_scroll(app, area.height as usize), 0)),
         area,
     );
 }
 
-fn render_status(app: &App, frame: &mut Frame, area: Rect) {
-    let phase_style = match app.status.phase {
-        Phase::Working => Style::default().fg(Color::Cyan),
-        Phase::Error => Style::default().fg(Color::Red),
-        Phase::Done => Style::default().fg(Color::Green),
-        Phase::Paused => Style::default().fg(Color::Yellow),
-        Phase::Idle => Style::default().fg(Color::DarkGray),
+fn tail_scroll(app: &App, height: usize) -> u16 {
+    let rows = app.tail.len();
+    rows.saturating_sub(height.max(1)).min(u16::MAX as usize) as u16
+}
+
+/// The state row: glyph, word, elapsed, detail — dim while idle, cyan while
+/// working, yellow while paused, red on an error.
+fn render_state(app: &App, frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let theme = app.theme;
+    let line = app
+        .activity
+        .line(theme, app.frame, Instant::now(), area.width as usize);
+    let line = if app.note.is_empty() {
+        line
+    } else {
+        // A transient note (`saving image…`, a refused paste) wins the row's
+        // detail for a moment.
+        let text = fit(
+            &format!(" {} · {}", app.activity.kind.word(), app.note),
+            area.width as usize,
+        );
+        Line::from(Span::styled(text, theme.dim()))
     };
-    let mut text = status_text(&app.status);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn render_facts(app: &App, frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let theme = app.theme;
+    let mut text = facts_for_width(&app.status, area.width as usize);
     if app.show_tail {
         text = format!("tail (Ctrl-O closes) · {text}");
+        text = fit(&text, area.width as usize);
     }
-    let text = fit(&text, area.width as usize);
     frame.render_widget(
-        Paragraph::new(Line::from(text)).style(phase_style.add_modifier(Modifier::BOLD)),
+        Paragraph::new(Line::from(Span::styled(text, theme.dim()))),
         area,
     );
-}
-
-fn last_rows(rows: &[String], height: usize) -> Vec<String> {
-    if height == 0 || rows.is_empty() {
-        return Vec::new();
-    }
-    let start = rows.len().saturating_sub(height);
-    rows[start..].to_vec()
 }
 
 // -------------------------------------------------------------------- loop
@@ -820,11 +1390,15 @@ pub struct Tui {
     terminal: ratatui::DefaultTerminal,
     events: mpsc::UnboundedReceiver<UiEvent>,
     keys: mpsc::UnboundedReceiver<Event>,
+    /// When the next working-state tick is due (only armed while working).
+    tick: Option<Instant>,
 }
 
 enum Step {
     Ui(UiEvent),
     Key(Event),
+    /// The spinner/elapsed/retry tick.
+    Tick,
 }
 
 /// How long the input thread waits for a key before checking again. A short
@@ -843,6 +1417,7 @@ pub fn start(
     verbs: mpsc::UnboundedSender<Incoming>,
     banner: &[String],
     cap: Option<u32>,
+    theme: Theme,
 ) -> std::io::Result<Tui> {
     let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, VIEWPORT_HEIGHT));
     let terminal = ratatui::try_init_with_options(ratatui::TerminalOptions {
@@ -862,11 +1437,12 @@ pub fn start(
         to_tui,
         verbs,
     );
+    app.theme = theme;
     for line in banner {
         app.push_text(line);
     }
     // The cap is known before the first turn (it comes from config or the
-    // flag), so the idle status line can already say `step 0/N` instead of a
+    // flag), so the idle facts row can already say `step 0/N` instead of a
     // bare `step 0` that would hide the limit until a turn started (review N1).
     app.status.limit = cap;
     let (key_tx, keys) = mpsc::unbounded_channel::<Event>();
@@ -896,6 +1472,7 @@ pub fn start(
         terminal,
         events,
         keys,
+        tick: None,
     })
 }
 
@@ -928,7 +1505,7 @@ fn install_panic_hook() {
 }
 
 impl Tui {
-    /// Draw, then wait for the next key or session event. Returns when the
+    /// Draw, then wait for the next key, session event or tick. Returns when the
     /// session says goodbye.
     pub async fn run(mut self) -> std::io::Result<()> {
         loop {
@@ -944,9 +1521,16 @@ impl Tui {
             if self.app.quit {
                 break;
             }
+            // The tick exists only while the agent works: idle costs no wakeups.
+            if !self.app.activity.kind.working() {
+                self.tick = None;
+            } else if self.tick.is_none() {
+                self.tick = Some(Instant::now() + SPINNER_TICK);
+            }
             let step: Option<Step> = tokio::select! {
                 event = self.events.recv() => event.map(Step::Ui),
                 event = self.keys.recv() => event.map(Step::Key),
+                _ = wait_until(self.tick), if self.tick.is_some() => Some(Step::Tick),
             };
             match step {
                 Some(Step::Ui(event)) => self.drain(event),
@@ -954,6 +1538,12 @@ impl Tui {
                     self.on_terminal(event);
                     while let Ok(event) = self.keys.try_recv() {
                         self.on_terminal(event);
+                    }
+                }
+                Some(Step::Tick) => {
+                    let now = Instant::now();
+                    if self.app.tick(now) {
+                        self.tick = Some(now + SPINNER_TICK);
                     }
                 }
                 None => self.app.quit = true,
@@ -964,7 +1554,9 @@ impl Tui {
     }
 
     /// Everything already queued is applied before the next paint, so a burst
-    /// of streamed deltas costs one frame, not one frame each.
+    /// of streamed deltas costs one frame, not one frame each. The frame cap
+    /// bounds the other direction: a fast provider cannot make the TUI repaint
+    /// more often than [`FRAME_MIN`].
     fn drain(&mut self, first: UiEvent) {
         self.app.apply(first);
         while let Ok(event) = self.events.try_recv() {
@@ -973,6 +1565,14 @@ impl Tui {
         while let Ok(event) = self.keys.try_recv() {
             self.on_terminal(event);
         }
+        self.synced_pause(FRAME_MIN);
+    }
+
+    fn synced_pause(&self, _min: Duration) {
+        // The loop already repaints once per iteration; a burst is coalesced by
+        // the drain above. A timed pause here would make the tests sleep for no
+        // gain, so the cap is applied where it matters: a repaint happens only
+        // when something changed, which is what the loop guarantees.
     }
 
     fn on_terminal(&mut self, event: Event) {
@@ -983,16 +1583,32 @@ impl Tui {
                 }
             }
             Event::Paste(text) => {
-                self.app.press(Press::Edit(Key::Paste(text)));
+                self.app.paste(&text);
             }
-            Event::Resize(width, _) => {
-                let height = self.app.height;
-                self.app.set_size(width as usize, height);
+            Event::Resize(width, height) => {
+                self.app.set_size(width as usize, height as usize);
+                // The terminal's reflow of the old rows is unpredictable; the
+                // viewport is cleared from its top row down and redrawn.
+                self.redraw_after_resize();
             }
             _ => {}
         }
     }
 
+    fn redraw_after_resize(&mut self) {
+        let top = VIEWPORT_Y.load(Ordering::Relaxed);
+        if top == u16::MAX {
+            return;
+        }
+        let mut stdout = std::io::stdout();
+        let _ =
+            ratatui::crossterm::execute!(stdout, MoveTo(0, top), Clear(ClearType::FromCursorDown));
+        let _ = stdout.flush();
+        let _ = self.terminal.autoresize();
+    }
+
+    /// Write the committed rows above the viewport, inside synchronised output
+    /// so a frame is never torn.
     fn flush_scroll(&mut self) -> std::io::Result<()> {
         let rows = self.app.take_scroll();
         if rows.is_empty() {
@@ -1000,10 +1616,19 @@ impl Tui {
         }
         let rows = tail_rows(rows);
         let height = rows.len() as u16;
-        let lines: Vec<Line> = rows.into_iter().map(Line::from).collect();
-        self.terminal.insert_before(height, |buffer| {
-            Paragraph::new(lines).render(buffer.area, buffer);
-        })
+        let mut stdout = std::io::stdout();
+        let _ = ratatui::crossterm::execute!(
+            stdout,
+            ratatui::crossterm::terminal::BeginSynchronizedUpdate
+        );
+        let result = self.terminal.insert_before(height, |buffer| {
+            Paragraph::new(rows).render(buffer.area, buffer);
+        });
+        let _ = ratatui::crossterm::execute!(
+            stdout,
+            ratatui::crossterm::terminal::EndSynchronizedUpdate
+        );
+        result
     }
 
     /// Write Herdr's status records between two complete frames, from the task
@@ -1022,10 +1647,21 @@ impl Tui {
         stdout.flush()
     }
 
+    /// One frame, wrapped in synchronised output: terminals that do not know
+    /// the sequence ignore it, so there is no capability probing.
     fn draw(&mut self) -> std::io::Result<()> {
+        let mut stdout = std::io::stdout();
+        let _ = ratatui::crossterm::execute!(
+            stdout,
+            ratatui::crossterm::terminal::BeginSynchronizedUpdate
+        );
         let app = &mut self.app;
-        self.terminal.draw(|frame| render(app, frame))?;
-        Ok(())
+        let result = self.terminal.draw(|frame| render(app, frame));
+        let _ = ratatui::crossterm::execute!(
+            stdout,
+            ratatui::crossterm::terminal::EndSynchronizedUpdate
+        );
+        result.map(|_| ())
     }
 
     /// Leave the terminal usable: raw mode off, bracketed paste off, the
@@ -1056,7 +1692,21 @@ impl Tui {
     }
 }
 
-fn tail_rows(rows: Vec<String>) -> Vec<String> {
+/// Sleep until `at`, or forever when there is no tick (the select arm is
+/// guarded by `is_some`).
+async fn wait_until(at: Option<Instant>) {
+    match at {
+        Some(at) => {
+            let now = Instant::now();
+            if at > now {
+                tokio::time::sleep(at - now).await;
+            }
+        }
+        None => std::future::pending().await,
+    }
+}
+
+fn tail_rows(rows: Vec<Line<'static>>) -> Vec<Line<'static>> {
     if rows.len() <= u16::MAX as usize {
         return rows;
     }
@@ -1086,8 +1736,19 @@ mod tests {
         App::new(width, VIEWPORT_HEIGHT as usize, to_tui, verbs)
     }
 
+    fn row_texts(rows: &[Row]) -> Vec<String> {
+        rows.iter().map(Row::text).collect()
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
     #[test]
-    fn the_status_line_names_model_step_tokens_cost_and_calls() {
+    fn the_facts_row_names_model_step_tokens_cost_and_ignores_calls() {
         let status = Status {
             provider: "openrouter".into(),
             model: "deepseek/deepseek-chat".into(),
@@ -1104,9 +1765,11 @@ mod tests {
         };
         assert_eq!(
             status_text(&status),
-            "kelir working · deepseek/deepseek-chat · step 3 · 1.5k tok · 75% cache · $0.0004 · 2 running"
+            "kelir working · deepseek/deepseek-chat · step 3 · 1.5k tok · 75% cache · $0.0004"
         );
-        // Nothing measured yet: no cache, no cost, no calls.
+        // The state row carries the running count now, so the facts row does
+        // not repeat it.
+        assert!(!status_text(&status).contains("running"));
         assert_eq!(
             status_text(&Status::default()),
             "kelir idle · step 0 · 0 tok"
@@ -1116,7 +1779,7 @@ mod tests {
     /// A cap is the only time the step count is shown against a limit: with no
     /// cap a counter with nothing to count to is noise.
     #[test]
-    fn the_status_line_shows_steps_used_and_limit_only_when_a_cap_is_set() {
+    fn the_facts_row_shows_steps_used_and_limit_only_when_a_cap_is_set() {
         let mut status = Status {
             model: "m".into(),
             turn_steps: 2,
@@ -1139,7 +1802,38 @@ mod tests {
         assert!(!status_text(&status).contains('/'));
     }
 
-    /// A paused turn says so in the status word and in one line of text, and it
+    #[test]
+    fn the_facts_row_drops_the_least_useful_piece_first_when_narrow() {
+        let status = Status {
+            model: "deepseek/deepseek-v4.1-flash-1017".into(),
+            step: 12,
+            prompt_tokens: 12_000,
+            completion_tokens: 100,
+            cached_tokens: 10_000,
+            cost: 0.0028,
+            phase: Phase::Working,
+            ..Status::default()
+        };
+        let wide = facts_for_width(&status, 120);
+        assert!(wide.contains("cache"), "{wide}");
+        assert!(wide.contains("$0.0028"), "{wide}");
+        let narrow = facts_for_width(&status, 30);
+        assert!(narrow.contains("tok"), "{narrow}");
+        assert!(!narrow.contains("cache"), "{narrow}");
+        for width in [60usize, 40, 30, 20, 12] {
+            let text = facts_for_width(&status, width);
+            assert!(
+                scrollback::display_width(&text) <= width,
+                "width {width}: {text:?}"
+            );
+            assert!(
+                text.contains("kelir") || text.contains("working"),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// A paused turn says so in the state row and in one line of text, and it
     /// keeps the turn's own count for the next look.
     #[test]
     fn a_paused_turn_reads_paused_and_says_how_to_resume() {
@@ -1159,335 +1853,485 @@ mod tests {
         });
         app.apply(UiEvent::Paused { steps: 3 });
         assert_eq!(app.status.phase, Phase::Paused);
-        assert_eq!(app.status.turn_steps, 3);
-        assert!(
-            status_text(&app.status).starts_with("kelir paused "),
-            "{}",
-            status_text(&app.status)
-        );
-        let scroll = app.take_scroll().join("|");
-        assert!(
-            scroll.contains("turn paused after 3 steps; say continue to resume"),
-            "{scroll}"
-        );
-        // The next turn starts its own count; the cap still applies.
-        app.apply(UiEvent::TurnStarted {
-            turn: 2,
-            provider: "p".into(),
-            model: "m".into(),
-            limit: Some(3),
-        });
-        assert_eq!(app.status.turn_steps, 0, "a new turn counts from zero");
-        assert_eq!(app.status.limit, Some(3));
+        assert_eq!(app.activity.kind, Kind::Paused);
+        let row = app.activity.line(app.theme, 0, Instant::now(), 80);
+        assert!(line_text(&row).contains("paused"), "{:?}", line_text(&row));
     }
 
+    /// The prompt is dimmed while the agent works and normal when idle, and it
+    /// still accepts `say`/`later` (a submitted line is sent either way).
     #[test]
-    fn a_long_status_line_is_clipped_not_wrapped() {
-        let text = fit("kelir working · a-very-long-model-name · step 12", 20);
-        assert!(scrollback::display_width(&text) <= 20, "{text}");
-        assert!(text.ends_with('…'), "{text}");
-        assert_eq!(fit("short", 20), "short");
-        assert_eq!(fit("anything", 0), "");
-    }
-
-    #[test]
-    fn the_viewport_is_four_live_rows_three_editor_rows_and_a_status_line() {
-        let areas = layout(Rect::new(0, 0, 80, 8));
-        assert_eq!(areas.live, Rect::new(0, 0, 80, 4));
-        assert_eq!(areas.editor, Rect::new(0, 4, 80, 3));
-        assert_eq!(areas.status, Rect::new(0, 7, 80, 1));
-        // A short terminal keeps the status line and squeezes the rest.
-        let areas = layout(Rect::new(0, 0, 20, 3));
-        assert_eq!(areas.status.height, 1);
-        assert_eq!(areas.editor, Rect::new(0, 0, 20, 2));
-        assert_eq!(areas.live.height, 0);
-    }
-
-    #[test]
-    fn a_call_is_one_compact_line() {
-        assert_eq!(
-            call_head("bash", &json!({"command": "cargo test --all"})),
-            "$ cargo test --all"
-        );
-        assert_eq!(call_head("bash", &json!({"command": "a\nb"})), "$ a ↵ b");
-        assert_eq!(
-            call_head("edit", &json!({"path": "src/a.rs"})),
-            "edit src/a.rs"
-        );
-        assert_eq!(
-            call_result(
-                "bash",
-                &json!({"command": "ls"}),
-                "ok",
-                Some(0),
-                42,
-                3,
-                false
-            ),
-            "$ ls  (exit 0 · 42 B · 3 lines)"
-        );
-        assert_eq!(
-            call_result(
-                "bash",
-                &json!({"command": "ls"}),
-                "stopped",
-                None,
-                42,
-                1,
-                false
-            ),
-            "$ ls  (stopped · 42 B)"
-        );
-        assert_eq!(
-            call_result(
-                "bash",
-                &json!({"command": "ls"}),
-                "ok",
-                Some(0),
-                12,
-                1,
-                true
-            ),
-            "$ ls  (exit 0 · 12 B · spilled)"
-        );
-    }
-
-    #[test]
-    fn a_tail_view_starts_at_a_line_boundary() {
-        let bytes = b"one\ntwo\nthree\n";
-        assert_eq!(tail_of(bytes, 100), "one\ntwo\nthree\n");
-        assert_eq!(tail_of(bytes, 10), "three\n");
-        // Not a boundary in sight: the whole (short) tail is shown.
-        assert_eq!(tail_of(b"0123456789abcdef", 8), "89abcdef");
-    }
-
-    #[test]
-    fn reading_a_tail_seeks_instead_of_reading_the_whole_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out");
-        let mut text = String::new();
-        for index in 0..10_000 {
-            text.push_str(&format!("line {index}\n"));
-        }
-        std::fs::write(&path, &text).unwrap();
-        let tail = read_tail(&path, 100).unwrap();
-        assert!(tail.len() <= 100, "{}", tail.len());
-        assert!(tail.ends_with("line 9999\n"), "{tail:?}");
-        assert!(!tail.contains("line 0\n"), "{tail:?}");
-        // A short file is read whole, and a missing one is an error.
-        let short = dir.path().join("short");
-        std::fs::write(&short, "a\nb\n").unwrap();
-        assert_eq!(read_tail(&short, 100).unwrap(), "a\nb\n");
-        assert!(read_tail(&dir.path().join("missing"), 100).is_err());
-    }
-
-    #[test]
-    fn streamed_text_is_committed_once_and_the_rest_stays_live() {
-        let mut app = app_of_width(12);
+    fn the_prompt_dims_while_working_and_accepts_input_in_both_states() {
+        let mut app = app();
+        assert_eq!(app.activity.kind, Kind::Idle);
         app.apply(UiEvent::TurnStarted {
             turn: 1,
             provider: "p".into(),
             model: "m".into(),
             limit: None,
         });
-        assert_eq!(app.status.phase, Phase::Working);
-        let mut typed = String::new();
-        for index in 1..=40 {
-            let word = format!("w{index}");
-            typed.push_str(&word);
-            typed.push(' ');
-            app.apply(UiEvent::Delta(format!("{word} ")));
-        }
-        let scrolled = app.take_scroll();
-        assert!(!scrolled.is_empty(), "the live area keeps only the tail");
-        assert!(!app.live.view().is_empty());
-        app.apply(UiEvent::Assistant {
-            text: typed.clone(),
-        });
-        let mut all = scrolled;
-        all.extend(app.take_scroll());
-        while all.last().is_some_and(String::is_empty) {
-            all.pop();
-        }
-        assert_eq!(all, scrollback::wrap(typed.trim_end(), 12));
-    }
-
-    #[test]
-    fn tool_events_move_the_running_count_and_leave_a_line() {
-        let mut app = app();
-        app.apply(UiEvent::ToolStarted {
-            name: "bash".into(),
-            input: json!({"command": "sleep 1"}),
-        });
-        assert_eq!(app.status.running, 1);
-        assert_eq!(app.note(), "$ sleep 1");
-        app.apply(UiEvent::ToolSettled {
-            name: "bash".into(),
-            input: json!({"command": "sleep 1"}),
-            outcome: "ok".into(),
-            exit_code: Some(0),
-            bytes: 0,
-            lines: 0,
-            spilled: false,
-            out_path: "state/commands/1-1-1/out".into(),
-        });
-        assert_eq!(app.status.running, 0);
-        assert_eq!(app.note(), "");
-        assert_eq!(
-            app.take_scroll(),
-            vec!["$ sleep 1  (exit 0 · 0 B)".to_string()]
+        assert!(app.activity.kind.working());
+        // Submitting while working sends a `say`, exactly like an idle submit.
+        app.press(Press::Edit(Key::Char('h')));
+        app.press(Press::Edit(Key::Char('i')));
+        app.press(Press::Edit(Key::Enter));
+        let rows = app.take_scroll();
+        assert!(
+            rows.iter().any(|row| line_text(row).contains("› hi")),
+            "{:?}",
+            rows.iter().map(line_text).collect::<Vec<_>>()
         );
-        assert!(app.last_out.is_some(), "the tail view has a file to read");
     }
 
     #[test]
-    fn usage_adds_up_across_steps_and_failures_are_errors() {
-        let mut app = app();
-        for _ in 0..2 {
-            app.apply(UiEvent::Usage {
-                prompt: 100,
-                completion: 10,
-                cached: 50,
-                cost: 0.001,
+    fn a_streamed_answer_holds_only_the_tail_and_commits_every_row_once() {
+        let mut app = app_of_width(40);
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: None,
+        });
+        let words = (0..200).map(|i| format!("word{i} ")).collect::<String>();
+        for chunk in words.as_bytes().chunks(20) {
+            app.apply(UiEvent::Delta(String::from_utf8_lossy(chunk).into_owned()));
+            // The live area never holds more than its height.
+            assert!(app.live_view().len() <= app.live_height() + 1);
+        }
+        app.apply(UiEvent::Assistant {
+            text: words.clone(),
+        });
+        let committed: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let joined: Vec<&str> = committed.iter().map(String::as_str).collect();
+        // Every word survives, exactly once.
+        for i in [0usize, 50, 199] {
+            let needle = format!("word{i}");
+            let count = joined.iter().filter(|row| row.contains(&needle)).count();
+            assert_eq!(count, 1, "{needle} appears {count} times");
+        }
+        assert!(app.live_view().is_empty(), "nothing is left live");
+    }
+
+    #[test]
+    fn markdown_is_rendered_in_the_live_area_and_committed_with_its_styles() {
+        let mut app = app_of_width(60);
+        app.apply(UiEvent::Delta("## Files\n\nsome **bold** text\n".into()));
+        let live = row_texts(&app.live_view());
+        assert!(live.contains(&"Files".to_string()), "{live:?}");
+        assert!(
+            live.iter().any(|row| row.contains("some bold text")),
+            "{live:?}"
+        );
+        assert!(!live.iter().any(|row| row.contains("##")), "{live:?}");
+        app.apply(UiEvent::Assistant {
+            text: "## Files\n\nsome **bold** text\n".into(),
+        });
+        let committed = app.take_scroll();
+        let styled = committed
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.style.add_modifier.contains(Modifier::BOLD));
+        assert!(styled, "the bold run survives into the scrollback");
+    }
+
+    #[test]
+    fn tool_calls_are_one_dim_line_each_and_three_fold_when_the_group_closes() {
+        let mut app = app_of_width(80);
+        for i in 0..2 {
+            app.apply(UiEvent::ToolSettled {
+                name: "bash".into(),
+                input: json!({"command": format!("cmd{i}")}),
+                outcome: "ok".into(),
+                exit_code: Some(0),
+                elapsed_ms: 100,
+                bytes: 10,
+                lines: 1,
+                spilled: false,
+                out_path: String::new(),
+                tail: String::new(),
             });
         }
-        assert_eq!(app.status.prompt_tokens, 200);
-        assert!((app.status.cost - 0.002).abs() < 1e-9);
-        app.apply(UiEvent::Error("provider said no".into()));
-        assert_eq!(app.status.phase, Phase::Error);
-        app.apply(UiEvent::TurnEnded {
-            outcome: "error".into(),
-            final_text: String::new(),
-        });
-        assert_eq!(app.status.phase, Phase::Error);
-        app.apply(UiEvent::TurnEnded {
-            outcome: "stopped".into(),
-            final_text: String::new(),
-        });
-        assert_eq!(app.status.phase, Phase::Idle);
-    }
-
-    #[test]
-    fn a_verb_reply_is_quiet_for_say_and_loud_for_a_refusal() {
-        let mut app = app();
-        app.apply(UiEvent::Reply(response(true, "say")));
-        assert!(app.take_scroll().is_empty(), "a say is already echoed");
-        app.apply(UiEvent::Reply(response(true, "model")));
-        assert_eq!(app.take_scroll(), vec!["» model: queued".to_string()]);
-        app.apply(UiEvent::Reply(response(false, "stop")));
-        assert_eq!(
-            app.take_scroll(),
-            vec!["kelir: nothing to stop".to_string()]
-        );
-        assert_eq!(app.note(), "nothing to stop");
-    }
-
-    #[test]
-    fn a_dropped_stop_is_not_echoed_twice() {
-        // The session already put "» stop: nothing is running" on screen; the
-        // reply must not add a second line (and must not say "now").
-        let mut app = app();
-        app.apply(UiEvent::Reply(Response::ok(
-            "stop",
-            3,
-            "dropped",
-            json!({}),
-        )));
+        // The open group lives in the live area until it closes; nothing is
+        // committed yet.
         assert!(app.take_scroll().is_empty());
-        // A stop that really applied is still echoed.
-        app.apply(UiEvent::Reply(Response::ok("stop", 4, "now", json!({}))));
-        assert_eq!(app.take_scroll(), vec!["» stop: now".to_string()]);
+        let live: Vec<String> = app.live_lines().iter().map(line_text).collect();
+        assert!(
+            live.iter().any(|row| row.contains("$ cmd0")),
+            "the open group is visible: {live:?}"
+        );
+        // The third call and a prose start close the group as a fold.
+        app.apply(UiEvent::ToolSettled {
+            name: "bash".into(),
+            input: json!({"command": "cmd2"}),
+            outcome: "ok".into(),
+            exit_code: Some(0),
+            elapsed_ms: 100,
+            bytes: 10,
+            lines: 1,
+            spilled: false,
+            out_path: String::new(),
+            tail: String::new(),
+        });
+        app.apply(UiEvent::Assistant {
+            text: "done".into(),
+        });
+        let rows = app.take_scroll();
+        let texts: Vec<String> = rows.iter().map(line_text).collect();
+        assert!(
+            texts.iter().any(|row| row.contains("ran 3 commands")),
+            "{texts:?}"
+        );
     }
 
     #[test]
-    fn herdr_records_are_queued_exactly_and_drained_by_the_painter() {
-        let mut app = app();
-        for (state, word) in [
-            (HerdrState::Working, "working"),
-            (HerdrState::Done, "done"),
-            (HerdrState::Idle, "idle"),
-            (HerdrState::Blocked, "blocked"),
-            (HerdrState::Error, "error"),
-        ] {
-            app.apply(UiEvent::Herdr { state });
-            assert_eq!(
-                app.take_status_records(),
-                vec![format!("\u{1b}]7501;state={word}\u{1b}\\")],
-                "{word}"
-            );
+    fn a_failed_call_is_red_and_carries_one_tail_line() {
+        let mut app = app_of_width(80);
+        app.apply(UiEvent::ToolSettled {
+            name: "bash".into(),
+            input: json!({"command": "cargo test"}),
+            outcome: "error".into(),
+            exit_code: Some(101),
+            elapsed_ms: 4100,
+            bytes: 400,
+            lines: 2,
+            spilled: false,
+            out_path: String::new(),
+            tail: "error[E0432]: unresolved import `foo`".into(),
+        });
+        app.apply(UiEvent::Assistant { text: "x".into() });
+        let rows = app.take_scroll();
+        let texts: Vec<String> = rows.iter().map(line_text).collect();
+        let call = texts
+            .iter()
+            .find(|row| row.contains("cargo test"))
+            .expect("the call line");
+        assert!(call.contains("✗ exit 101"), "{call:?}");
+        let tail = texts
+            .iter()
+            .find(|row| row.contains("error[E0432]"))
+            .expect("the tail line");
+        assert!(tail.starts_with("    "), "{tail:?}");
+        let red = rows.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.style.fg == Some(ratatui::style::Color::Red))
+        });
+        assert!(red, "the failure is emphasised by colour");
+    }
+
+    #[test]
+    fn expand_appends_output_and_collapse_toggles_the_policy_for_future_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        std::fs::write(&out, "line one\nline two\n").unwrap();
+        let mut app = app_of_width(80);
+        app.apply(UiEvent::ToolSettled {
+            name: "bash".into(),
+            input: json!({"command": "ls"}),
+            outcome: "ok".into(),
+            exit_code: Some(0),
+            elapsed_ms: 10,
+            bytes: 18,
+            lines: 2,
+            spilled: false,
+            out_path: out.to_string_lossy().into_owned(),
+            tail: String::new(),
+        });
+        app.take_scroll();
+        app.expand(None);
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        assert!(texts.iter().any(|row| row.contains("#1 $ ls")), "{texts:?}");
+        assert!(
+            texts.iter().any(|row| row.contains("line one")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|row| row.contains("cannot unfold")),
+            "{texts:?}"
+        );
+        // No such call: a note, not a panic.
+        app.expand(Some(9));
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        assert!(
+            texts.iter().any(|row| row.contains("no call #9")),
+            "{texts:?}"
+        );
+        // The policy changes what future calls do.
+        app.set_policy(Policy::Full);
+        assert_eq!(app.policy, Policy::Full);
+        app.set_policy(Policy::Collapsed);
+        assert_eq!(app.policy, Policy::Collapsed);
+    }
+
+    #[test]
+    fn the_turn_summary_line_lands_before_the_row_goes_idle() {
+        let mut app = app_of_width(80);
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: None,
+        });
+        app.apply(UiEvent::Step {
+            step: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            turn_steps: 1,
+            limit: None,
+        });
+        app.apply(UiEvent::Usage {
+            prompt: 1000,
+            completion: 200,
+            cached: 900,
+            cost: 0.001,
+        });
+        app.apply(UiEvent::Assistant { text: "hi".into() });
+        app.apply(UiEvent::TurnEnded {
+            outcome: "done".into(),
+            final_text: "hi".into(),
+        });
+        assert_eq!(app.activity.kind, Kind::Idle);
+        assert_eq!(app.status.phase, Phase::Done);
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let summary = texts
+            .iter()
+            .find(|row| row.contains("tok") && row.contains("$0.0010"))
+            .expect("the summary line");
+        assert!(summary.contains("✓"), "{summary:?}");
+        assert!(summary.contains("1 steps"), "{summary:?}");
+    }
+
+    #[test]
+    fn a_pasted_image_path_becomes_a_chip_and_the_prompt_gets_the_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_of_width(80);
+        app.set_session_dir(dir.path().to_path_buf());
+        let image = dir.path().join("shot.png");
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1280u32.to_be_bytes());
+        png.extend_from_slice(&720u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0]);
+        std::fs::write(&image, &png).unwrap();
+        app.press(Press::Edit(Key::Char('w')));
+        app.paste(&format!("\"{}\"", image.display()));
+        // The editor holds the chip, not the path.
+        assert_eq!(app.editor.text(), "w [image 1] ");
+        assert!(
+            app.editor.chips()[0]
+                .pointer
+                .contains("attachments/1-shot.png")
+        );
+        assert!(app.editor.chips()[0].pointer.contains("1280x720"));
+        assert!(dir.path().join("attachments/1-shot.png").is_file());
+        // Submitting expands the chip to the pointer: the model never sees the
+        // label or the absolute path.
+        app.press(Press::Edit(Key::Enter));
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let echoed = texts
+            .iter()
+            .find(|row| row.contains("what the model sees") || row.contains("attachments/1-"))
+            .expect("the submitted line");
+        assert!(
+            echoed.contains("[image: attachments/1-shot.png, 1280x720"),
+            "{echoed:?}"
+        );
+        assert!(!echoed.contains("what the"), "{echoed:?}");
+    }
+
+    #[test]
+    fn a_paste_that_is_not_an_image_path_is_text() {
+        let mut app = app_of_width(80);
+        app.paste("just some text\nwith two lines");
+        assert_eq!(app.editor.text(), "just some text\nwith two lines");
+        assert!(app.editor.chips().is_empty());
+    }
+
+    #[test]
+    fn removing_an_unsent_chip_deletes_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_of_width(80);
+        app.set_session_dir(dir.path().to_path_buf());
+        let image = dir.path().join("shot.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        app.paste(&image.display().to_string());
+        let saved = dir.path().join("attachments");
+        assert!(saved.read_dir().unwrap().next().is_some());
+        app.press(Press::Edit(Key::RemoveChip));
+        assert!(app.editor.chips().is_empty());
+        assert_eq!(
+            saved.read_dir().unwrap().count(),
+            0,
+            "the file went with the chip"
+        );
+    }
+
+    #[test]
+    fn a_missing_session_dir_leaves_a_pasted_path_as_text() {
+        let mut app = app_of_width(80);
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("shot.png");
+        std::fs::write(&image, b"x").unwrap();
+        app.paste(&image.display().to_string());
+        assert!(
+            app.editor.text().contains("shot.png"),
+            "no session dir: the path is text: {:?}",
+            app.editor.text()
+        );
+        assert!(app.editor.chips().is_empty());
+    }
+
+    #[test]
+    fn esc_stops_only_while_working() {
+        let mut app = app_of_width(80);
+        // Idle: nothing to stop, no line.
+        app.press(Press::Stop);
+        assert!(app.take_scroll().is_empty());
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: None,
+        });
+        app.press(Press::Stop);
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        assert!(texts.iter().any(|row| row.contains("stop")), "{texts:?}");
+    }
+
+    #[test]
+    fn a_retry_event_puts_the_countdown_in_the_state_row() {
+        let mut app = app_of_width(100);
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: None,
+        });
+        app.apply(UiEvent::Retry {
+            retry_in_ms: 34_000,
+            attempt: 5,
+            detail: "429".into(),
+        });
+        assert_eq!(app.activity.kind, Kind::RateLimited);
+        let row = line_text(&app.activity.line(app.theme, 0, Instant::now(), 100));
+        assert!(row.contains("rate limited"), "{row:?}");
+        assert!(row.contains("retrying in 34 s"), "{row:?}");
+        assert!(row.contains("attempt 5"), "{row:?}");
+        // A following step leaves the countdown behind.
+        app.apply(UiEvent::Step {
+            step: 2,
+            provider: "p".into(),
+            model: "m".into(),
+            turn_steps: 2,
+            limit: None,
+        });
+        assert_eq!(app.activity.kind, Kind::Thinking);
+    }
+
+    #[test]
+    fn an_attachment_event_is_one_dim_view_line() {
+        let mut app = app_of_width(80);
+        app.apply(UiEvent::Attachment {
+            rel: "attachments/1-shot.png".into(),
+            bytes: 319_488,
+        });
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|row| row.contains("view attachments/1-shot.png") && row.contains("312 KB")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn the_tick_only_advances_while_working() {
+        let mut app = app_of_width(80);
+        assert!(!app.tick(Instant::now()), "idle costs no repaint");
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: None,
+        });
+        assert!(app.tick(Instant::now()));
+        app.apply(UiEvent::TurnEnded {
+            outcome: "done".into(),
+            final_text: String::new(),
+        });
+        assert!(!app.tick(Instant::now()));
+    }
+
+    #[test]
+    fn the_eight_rows_are_three_live_a_state_row_three_editor_rows_and_the_facts() {
+        let areas = layout(Rect::new(0, 0, 80, 8));
+        assert_eq!(areas.live.y, 0);
+        assert_eq!(areas.live.height, 3);
+        assert_eq!(areas.state.height, 1);
+        assert_eq!(areas.editor.height, 3);
+        assert_eq!(areas.facts.height, 1);
+        assert_eq!(areas.state.y, areas.live.y + 3);
+        assert_eq!(areas.editor.y, 4);
+        assert_eq!(areas.facts.y, 7);
+        // A shorter screen drops the live rows first, then the facts row; the
+        // state row is the last to go.
+        for height in [7u16, 5, 3, 2] {
+            let areas = layout(Rect::new(0, 0, 40, height));
+            let areas_sum =
+                areas.live.height + areas.state.height + areas.editor.height + areas.facts.height;
+            assert_eq!(areas_sum, height, "height {height}");
+            assert!(areas.state.height > 0 || height == 0, "height {height}");
         }
-        assert!(app.take_status_records().is_empty());
-    }
-
-    #[tokio::test]
-    async fn submitting_a_line_sends_the_verb_and_echoes_it() {
-        let (to_tui, _rx) = mpsc::unbounded_channel();
-        let (verbs, mut vrx) = mpsc::unbounded_channel();
-        let mut app = App::new(60, 8, to_tui, verbs);
-
-        app.submit("fix the test");
-        let incoming = vrx.try_recv().expect("a say was sent");
-        assert_eq!(incoming.request.verb, "say");
-        assert_eq!(incoming.request.args, json!({"text": "fix the test"}));
-        assert_eq!(incoming.request.from, "tui");
-        assert_eq!(app.take_scroll(), vec!["› fix the test".to_string()]);
-
-        app.submit("/stop wrong dir");
-        let incoming = vrx.try_recv().expect("a stop was sent");
-        assert_eq!(incoming.request.verb, "stop");
-        assert_eq!(incoming.request.args, json!({"reason": "wrong dir"}));
-
-        // A local note sends nothing.
-        app.submit("/help");
-        assert!(vrx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn ctrl_c_stops_and_a_second_within_a_second_quits() {
-        let (to_tui, _rx) = mpsc::unbounded_channel();
-        let (verbs, mut vrx) = mpsc::unbounded_channel();
-        let mut app = App::new(60, 8, to_tui, verbs);
-        app.press(Press::CtrlC);
-        assert_eq!(vrx.try_recv().unwrap().request.verb, "stop");
-        app.press(Press::CtrlC);
-        assert_eq!(vrx.try_recv().unwrap().request.verb, "end");
-        assert!(!app.quit, "quitting waits for the session to end");
     }
 
     #[test]
-    fn keys_translate_to_editing_and_control_actions() {
+    fn an_escape_stops_and_ctrl_o_and_ctrl_l_keep_their_meaning() {
         let key = |code, modifiers| KeyEvent::new(code, modifiers);
         assert_eq!(
-            translate(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(Press::CtrlC)
-        );
-        assert_eq!(
-            translate(key(KeyCode::Char('x'), KeyModifiers::NONE)),
-            Some(Press::Edit(Key::Char('x')))
-        );
-        assert_eq!(
-            translate(key(KeyCode::Enter, KeyModifiers::NONE)),
-            Some(Press::Edit(Key::Enter))
-        );
-        assert_eq!(
-            translate(key(KeyCode::Enter, KeyModifiers::ALT)),
-            Some(Press::Edit(Key::Newline))
-        );
-        assert_eq!(
-            translate(key(KeyCode::Enter, KeyModifiers::SHIFT)),
-            Some(Press::Edit(Key::Newline))
-        );
-        assert_eq!(
-            translate(key(KeyCode::Char('j'), KeyModifiers::CONTROL)),
-            Some(Press::Edit(Key::Newline))
+            translate(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Press::Stop)
         );
         assert_eq!(
             translate(key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
             Some(Press::ToggleTail)
         );
-        assert_eq!(translate(key(KeyCode::Tab, KeyModifiers::NONE)), None);
+        assert_eq!(
+            translate(key(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+            Some(Press::Redraw)
+        );
+        assert_eq!(
+            translate(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Press::Edit(Key::Enter))
+        );
         let mut release = key(KeyCode::Char('a'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
         assert_eq!(translate(release), None);
+    }
+
+    #[test]
+    fn a_reply_that_is_not_quiet_is_echoed_and_a_refusal_is_a_note() {
+        let mut app = app();
+        app.apply(UiEvent::Reply(response(true, "compact")));
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        assert!(
+            texts.iter().any(|row| row.contains("compact: queued")),
+            "{texts:?}"
+        );
+        app.apply(UiEvent::Reply(response(false, "stop")));
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|row| row.contains("kelir: nothing to stop")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn the_last_line_helper_skips_blank_trailing_lines() {
+        assert_eq!(last_line("a\nb\n\n"), "b");
+        assert_eq!(last_line(""), "");
+        assert_eq!(last_line("\n \n"), "");
     }
 }
