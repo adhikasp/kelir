@@ -49,3 +49,13 @@ Everything that passes on the Windows dev box must also pass on Linux: run
 `scripts/remote-check.sh <machine>` (the orchestrator tells you the machine name; it builds HEAD there
 with fmt, clippy -D warnings and the full test suite). It is part of every milestone's gates. If you
 add Unix-only code, it is only verified by that script, so run it before reporting.
+
+## No leaked processes, no visible windows (hard rule)
+
+The dev box is someone's desktop. A test, script or benchmark that spawns processes must kill every
+process tree it started, even when it fails or is killed (Drop guard / Job Object / `taskkill /T`).
+Never launch unbounded numbers of jobs. No spawn path may create a visible console window on Windows:
+child processes of a console-less parent each get their own window unless started with
+`CREATE_NO_WINDOW`. Before reporting, check `tasklist` for leftover `kelir.exe`/`bash.exe` from your
+runs. Reproduce Windows process bugs from a console-less parent too (not only from a Herdr pane,
+which has a console). Incident: 2026-11-19, 160+ stalled `bg-shim` jobs and their consoles.
