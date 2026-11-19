@@ -97,7 +97,7 @@ behaviour, not kelir).
 | `cargo fmt --check` | clean |
 | `cargo clippy --all-targets -- -D warnings` | clean |
 | `cargo test --no-fail-fast` (Windows, one full run) | 22 suites, every one green: 334 unit + e2e 16 + e2e_m3 11 + e2e_m4 10 + e2e_m5 10 + e2e_steer4 6 + e2e_steer6 14 + e2e_tui 17 + e2e_verbs 23 + review_m0 8 + review_m1 5 + review_m2 2 + review_m3 11 + review_m4 19 + review_m4b 7 + review_m5a 20 + review_steer1 6 (2 ignored) + review_steer4 9 + review_steer6 15 + review_steer6b 16 |
-| `scripts/remote-check.sh the maintainer kelir-verify-steer6c` (Linux, HEAD b736fb2) | fmt clean, clippy clean, 339 unit, every suite green, exit 0 |
+| `scripts/remote-check.sh <machine> kelir-verify-steer6c` (Linux, HEAD b736fb2) | fmt clean, clippy clean, 339 unit, every suite green, exit 0 |
 
 Live drive (real release binary, no model; `scripts/live/steer6b_review_shell.sh`, env scrubbed of
 this session's `KELIR_*` so the jobs land in the scratch state dir):
