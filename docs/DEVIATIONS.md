@@ -2,6 +2,44 @@
 
 Small, deliberate differences, with the reason. Everything else tracks the spec.
 
+## Sources and skills (M5-A, 2026-11-19)
+
+- **A source edited mid-session is found by a per-boundary content hash, not a watcher.**
+  The brief allows either ("a watcher or a per-turn mtime/hash check", "say why in
+  `DEVIATIONS.md` if you deviate"). kelir re-reads the recorded sources at each
+  `before_step` and compares a hash of the body. A watcher would be a thread, an OS
+  notification subscription or an open handle on a process that is already hosting
+  someone's desktop, and the recorded set is a handful of small files — one base prompt,
+  a few instruction files, one file per skill. The hash is also *exact*: an `mtime` that
+  changed while the body did not is not news, and a file edited back to a body the
+  context already carries (the system prompt's own, or an earlier `source` message's) is
+  not a duplicate. `src/sources.rs::Watch` holds that state; a resumed session rebuilds
+  it from the list `session_started` recorded, so it reports the edits a live session
+  would have.
+- **Skills are recorded in `session_started.sources[]`.** The spec says `sources[]`
+  carries `{name, path, hash}` "for everything that went in", and a skill does go in — as
+  a *pull* target. Recording it is what lets a skill edited mid-session arrive as a
+  `source` message, and its hash is of the `SKILL.md` as read from disk (front matter
+  included). No skill body is rendered into the system prompt: the prompt names the
+  directories and nothing else, exactly as the pull rule requires.
+- **The base prompt's own edit arrives as `kind: "instruction"`.** The spec's `source`
+  kinds (`hint`, `skill`, `instruction`, `memory`, `attachment`, `channel`) have no
+  `prompt`, so the base prompt uses `instruction` and is told apart by its name,
+  `prompt.md`. The embedded default records its `path` as `embedded`, so a reader can
+  never mistake it for a project file that no longer exists.
+- **`KELIR_HOME` overrides the home directory** (`paths::home`, after which `HOME` and
+  `%USERPROFILE%` follow as before). Sources are discovered in `~/.claude/skills`, so a
+  test run on a developer's machine would otherwise depend on that machine's skills; the
+  test harness points `KELIR_HOME` at its own temp dir. It is the same kind of environment
+  override as `KELIR_STATE_DIR`/`KELIR_CONFIG_DIR`, and nothing else reads it.
+- **The test harness scrubs `KELIR_SESSION_DIR`, `KELIR_SOCK`, `KELIR_CALL_ID` and
+  `KELIR_BIN` before every spawn.** kelir dogfoods itself, so a suite run from inside a
+  kelir session inherited that session's own job directory and socket: `bg out` read the
+  *session's* jobs, and a test could report (or cancel) a job in the session running it.
+  `e2e_m4`'s three process tests and `review_m4`'s R7 failed for exactly that reason at
+  clean HEAD. This is test infrastructure, not shipped behaviour, but it is recorded here
+  because it changes what the suite proves about process isolation.
+
 ## Models metadata comes from the provider (2026-11-19)
 
 The built-in window table is gone. It assumed 128k for every `deepseek` model, so the 1M-token
