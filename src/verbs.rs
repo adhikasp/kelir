@@ -441,6 +441,8 @@ mod tests {
             state: "exited".into(),
             pid: Some(42),
             shim: Some(41),
+            shim_started: None,
+            pid_started: None,
             exit_code: Some(0),
             started: "2026-11-19T10:00:00Z".into(),
             finished: Some("2026-11-19T10:00:02Z".into()),

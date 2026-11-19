@@ -18,5 +18,5 @@ if it was settled but not applied. N3: make "already running" atomic on Unix (a 
 exclusive create/`flock`, or equivalent) and prove it with a repeated race test. N4: log the
 summarising request's usage/cost as a `usage` event with a marker so `kelir ls` sees it.
 
-Gates: fmt, clippy -D warnings, full `cargo test`, `bash scripts/remote-check.sh the maintainer`. Update the
+Gates: fmt, clippy -D warnings, full `cargo test`, `bash scripts/remote-check.sh <machine>`. Update the
 `docs/PROGRESS.md` M3 row. Commit `M3: fixes` (explicit paths), `hc send t1x "<result>"`.

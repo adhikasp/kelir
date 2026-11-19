@@ -27,6 +27,8 @@
 //! survives the call and is cleaned up when the session ends.
 
 use std::collections::HashMap;
+#[cfg(windows)]
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -83,9 +85,17 @@ impl ProcessGroup {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt as _;
-            command
-                .as_std_mut()
-                .creation_flags(win::CREATE_SUSPENDED | win::CREATE_NEW_PROCESS_GROUP);
+            let mut flags = win::CREATE_SUSPENDED | win::CREATE_NEW_PROCESS_GROUP;
+            // A session without a console (a tool shell, a service) must not
+            // leave the call's shell to allocate one: msys `bash.exe` then
+            // creates a *visible* console window — one per call — and can stall
+            // for seconds at start-up (M4 review round 2, G3). A session that
+            // has a console passes it on, which costs nothing and shows no
+            // window.
+            if !win::has_console() {
+                flags |= win::CREATE_NO_WINDOW;
+            }
+            command.as_std_mut().creation_flags(flags);
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -393,6 +403,109 @@ pub fn group_others(_pgid: u32) -> Option<usize> {
     None
 }
 
+/// The pids still in process group `pgid` on Linux. `None` when the platform
+/// cannot say.
+///
+/// `cancel` uses it to reach a *lost* job's tree: the group is led by the dead
+/// shim's pid, and a pid number cannot be reused while a group with that number
+/// still has a member, so a non-empty group is that job's tree and nothing
+/// else's (M4 review round 2, G2).
+#[cfg(target_os = "linux")]
+pub fn group_members(pgid: u32) -> Option<Vec<u32>> {
+    if pgid == 0 {
+        return None;
+    }
+    let mut members = Vec::new();
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(after) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
+            continue;
+        };
+        // `after` starts at field 3 (`state`): field 5 is `pgrp`.
+        if after
+            .split_whitespace()
+            .nth(2)
+            .and_then(|field| field.parse::<u32>().ok())
+            == Some(pgid)
+        {
+            members.push(pid);
+        }
+    }
+    Some(members)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn group_members(_pgid: u32) -> Option<Vec<u32>> {
+    None
+}
+
+/// Kill `pid` and every process the OS still reports as its descendant,
+/// deepest first. Returns how many were signalled.
+///
+/// This is how `cancel` reaches a *lost* job's tree on Windows (M4 review round
+/// 2, G2): the job object keeps no name once its last handle is gone, but the
+/// processes are still there and their parent links say where. The caller must
+/// have proved that `pid` is the command's own process first (its recorded
+/// start time); a child is only walked into when it is not older than its
+/// parent, so a recycled pid whose new holder has children of its own is left
+/// alone.
+#[cfg(windows)]
+pub fn terminate_tree(pid: u32) -> usize {
+    if pid == 0 {
+        return 0;
+    }
+    let me = std::process::id();
+    let mut created: HashMap<u32, Option<std::time::SystemTime>> = HashMap::new();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for info in win::snapshot() {
+        created.insert(info.pid, info.created);
+        children.entry(info.ppid).or_default().push(info.pid);
+    }
+    let mut order = vec![pid];
+    let mut seen: HashSet<u32> = HashSet::from([pid]);
+    let mut at = 0;
+    while at < order.len() {
+        let parent = order[at];
+        at += 1;
+        let Some(kids) = children.get(&parent) else {
+            continue;
+        };
+        for kid in kids {
+            if *kid == me || !seen.insert(*kid) {
+                continue;
+            }
+            if let (Some(Some(older)), Some(Some(younger))) =
+                (created.get(&parent), created.get(kid))
+                && younger < older
+            {
+                // Not this tree's: a child cannot predate its parent.
+                continue;
+            }
+            order.push(*kid);
+        }
+    }
+    let mut killed = 0;
+    for victim in order.iter().rev() {
+        win::terminate(*victim);
+        killed += 1;
+    }
+    killed
+}
+
+#[cfg(not(windows))]
+pub fn terminate_tree(_pid: u32) -> usize {
+    0
+}
+
 /// Windows: the shim's Job Object, and the two raw calls the session needs to
 /// spawn a suspended child into it.
 #[cfg(windows)]
@@ -420,7 +533,22 @@ pub mod win {
     pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
     pub const DETACHED_PROCESS: u32 = 0x0000_0008;
+    /// A console of its own, with no window: a console-subsystem child gets a
+    /// console it can use, without the cost (and the visible window) of a
+    /// detached process allocating one per job (M4 review round 2, G3).
+    pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+    /// Does this process have a console at all? A hidden console answers yes
+    /// (`GetConsoleOutputCP` works); a process without one gets 0, however it
+    /// was started (`DETACHED_PROCESS`, a service, a tool shell). This is what
+    /// tells a call's shim whether its shell would have to allocate a console
+    /// — and a console-subsystem child of a console-less parent allocates a
+    /// **visible** one (M4 review round 2, G3).
+    pub fn has_console() -> bool {
+        use windows_sys::Win32::System::Console::GetConsoleOutputCP;
+        unsafe { GetConsoleOutputCP() != 0 }
+    }
 
     /// Assign, query, terminate and change the job: everything the shim and the
     /// canceller need by name (`JOB_OBJECT_ALL_ACCESS`).
@@ -519,6 +647,71 @@ pub mod win {
                 TerminateJobObject(self.0, 1);
             }
         }
+
+        /// How many processes the job holds right now (`None` when the query
+        /// fails). A test harness asserts this is 0 after it terminates the
+        /// job, so a leaked tree fails the test instead of outliving it.
+        pub fn active_processes(&self) -> Option<u32> {
+            use windows_sys::Win32::System::JobObjects::{
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+                QueryInformationJobObject,
+            };
+
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+            let queried = unsafe {
+                QueryInformationJobObject(
+                    self.0,
+                    JobObjectBasicAccountingInformation,
+                    &mut info as *mut _ as *mut c_void,
+                    std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            (queried != 0).then_some(info.ActiveProcesses)
+        }
+
+        /// Hand a copy of this job handle to another process — the job's own
+        /// command — so the job object, and with it the **name** that `cancel`
+        /// opens, outlives the shim that made it.
+        ///
+        /// A job's name is removed when its last handle closes, and a killed
+        /// shim closes the last one; the job body lives on, unreachable. The
+        /// command is in the job and outlives the shim in the ordinary case
+        /// (`bash -c 'sleep … & wait'`), so a handle of its own keeps the name
+        /// (M4 review round 2, G2). Only a job that must survive its shim gets
+        /// one: a call's job before promotion must stay kill-on-close.
+        pub fn lend_to(&self, pid: u32) -> Result<(), String> {
+            use windows_sys::Win32::Foundation::{DuplicateHandle, HANDLE};
+            use windows_sys::Win32::System::Threading::{GetCurrentProcess, PROCESS_DUP_HANDLE};
+
+            unsafe {
+                let target = OpenProcess(PROCESS_DUP_HANDLE, 0, pid);
+                if target.is_null() {
+                    return Err(format!(
+                        "cannot open the command's process: {}",
+                        io::Error::last_os_error()
+                    ));
+                }
+                let mut borrowed: HANDLE = std::ptr::null_mut();
+                let ok = DuplicateHandle(
+                    GetCurrentProcess(),
+                    self.0,
+                    target,
+                    &mut borrowed,
+                    0,
+                    0,
+                    windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS,
+                );
+                CloseHandle(target);
+                if ok == 0 {
+                    return Err(format!(
+                        "cannot lend the job handle: {}",
+                        io::Error::last_os_error()
+                    ));
+                }
+            }
+            Ok(())
+        }
     }
 
     impl Drop for Job {
@@ -538,6 +731,49 @@ pub mod win {
                 CloseHandle(process);
             }
         }
+    }
+
+    /// One process as the OS reports it: enough to walk a tree by parentage.
+    #[derive(Debug, Clone, Copy)]
+    pub struct ProcInfo {
+        pub pid: u32,
+        pub ppid: u32,
+        pub created: Option<std::time::SystemTime>,
+    }
+
+    /// Every process on the machine: pid, parent pid and creation time.
+    ///
+    /// `cancel` uses it to reach a *lost* job's tree (M4 review round 2, G2):
+    /// the job object's name dies with its last handle, but the tree is still
+    /// there, and the parent links say which processes are its.
+    pub fn snapshot() -> Vec<ProcInfo> {
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS,
+        };
+
+        let mut out = Vec::new();
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return out;
+            }
+            let mut entry: PROCESSENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+            let mut more = Process32First(snapshot, &mut entry) != 0;
+            while more {
+                let pid = entry.th32ProcessID;
+                if pid != 0 {
+                    out.push(ProcInfo {
+                        pid,
+                        ppid: entry.th32ParentProcessID,
+                        created: start_time(pid),
+                    });
+                }
+                more = Process32Next(snapshot, &mut entry) != 0;
+            }
+            CloseHandle(snapshot);
+        }
+        out
     }
 
     /// When the process was created: the kernel's own answer, which is the same

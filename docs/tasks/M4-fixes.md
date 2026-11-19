@@ -14,5 +14,5 @@ Constraints to hold together (they pull against each other; the design must sati
 - a dead shim must not leave state `running` forever, and cancel must not kill a recycled pid
   (verify the pid's identity: start time or a token held by the shim).
 
-Gates: fmt, clippy -D warnings, full `cargo test`, `bash scripts/remote-check.sh the maintainer`. Update the
+Gates: fmt, clippy -D warnings, full `cargo test`, `bash scripts/remote-check.sh <machine>`. Update the
 `docs/PROGRESS.md` M4 row. Commit `M4: fixes` (explicit paths), `hc send t1x "<result>"`.

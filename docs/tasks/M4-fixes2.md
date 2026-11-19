@@ -2,7 +2,7 @@
 
 Read the round-2 review. `tests/review_m4b.rs` has red tests (B4, B7 at least): make them green
 without weakening them; every other suite stays green on Windows and (via
-`bash scripts/remote-check.sh the maintainer`) Linux.
+`bash scripts/remote-check.sh <machine>`) Linux.
 
 - **G1** pid identity: compare the recorded process start time exactly (no 120 s tolerance); if the
   platform cannot give a start time, refuse to signal rather than guess. Record why in DEVIATIONS.md.
@@ -18,16 +18,16 @@ without weakening them; every other suite stays green on Windows and (via
   small (measure with a test or a script; put the number in DEVIATIONS.md). Keep the "finished call's
   leftover tree dies with a killed session" guarantee.
 - **Repo scrub (public repo rule)**: no personal names, hostnames or private paths in any tracked
-  file: replace `the maintainera`, `a Linux box`, `the maintainer`, `a Linux box`, `a build box`, `a device` and the like in
+  file: replace the names and hostnames listed in the pattern file (kept outside the repo) in
   `docs/SPEC.md`, `docs/DEVIATIONS.md`, `docs/PROGRESS.md`, `docs/reviews/*`, `docs/tasks/*`,
   `Cargo.toml` (authors) with neutral wording (`the maintainer`, `host A`, `a Linux box`). The
   scripts keep taking the machine name as an argument (the orchestrator passes it); AGENTS.md
   and the task docs must not name it. Add `scripts/scrub-check.sh <pattern-file>` that fails if any
   tracked file matches patterns read from a file kept OUTSIDE the repo (the file path is an
-  argument), so the check itself does not leak the names; run it with the orchestrator-provided file
-  `C:/Users/the maintainer/kelir-scratch/scrub-patterns.txt` before reporting. (Git history keeps old names;
-  that is handled at publish time, do not rewrite it.)
+  argument), so the check itself does not leak the names; run it with the orchestrator-provided
+  pattern file before reporting. (Git history keeps old names; that is handled at publish time, do
+  not rewrite it.)
 
 Gates: fmt, clippy -D warnings, full `cargo test` (run it twice), `bash scripts/remote-check.sh
-the maintainer`, scrub-check clean. Update the `docs/PROGRESS.md` M4 row. Commit `M4: fixes 2` (explicit
+<machine>`, scrub-check clean. Update the `docs/PROGRESS.md` M4 row. Commit `M4: fixes 2` (explicit
 paths), `hc send t1x "<result>"`.

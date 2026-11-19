@@ -3,7 +3,7 @@
 Reviewed `26d0477..36d38c9` (implementer commits `3252c6f..36d38c9`) against `docs/SPEC.md` and
 `docs/tasks/M3.md`. Host: Windows 11, Git for Windows bash, `hc 0.1.21`, Herdr pane = ConPTY.
 Live model: `deepseek/deepseek-v4.1-flash-1017` on OpenRouter. Linux gate:
-`scripts/remote-check.sh the maintainer`.
+`scripts/remote-check.sh <machine>`.
 
 ## Verdict: FAIL (2 blockers, 4 should-fix, 5 nits)
 
@@ -28,7 +28,7 @@ these are fixed: `tests/review_m3.rs` has 6 failing tests, each proving one find
 | `e2e` / `e2e_m3` / `e2e_tui` / `e2e_verbs` | 16 / 9 / 15 / 22 passed |
 | `review_m0` / `review_m1` / `review_m2` | 8 / 5 / 2 passed |
 | `review_m3` (reviewer-added, 11) | **5 pass, 6 fail** (R1, R3, R5, R6, R7, R8 = the findings below) |
-| Linux (`remote-check.sh the maintainer`, HEAD `36d38c9` and again at `d79dd54`) | fmt, clippy clean; 228 unit, 16/10/15/22/8/5/2 passed (PTY tests too); `review_m3` fails the same 6 on Linux, passes the same 5 (incl. R9) |
+| Linux (`remote-check.sh <machine>`, HEAD `36d38c9` and again at `d79dd54`) | fmt, clippy clean; 228 unit, 16/10/15/22/8/5/2 passed (PTY tests too); `review_m3` fails the same 6 on Linux, passes the same 5 (incl. R9) |
 | release binary | 5.77 MB (limit 20 MB) |
 | idle RSS, TUI waiting for input | 13.3 MB working set, 3.4 MB private (limit 30 MB) |
 
@@ -44,7 +44,7 @@ these are fixed: `tests/review_m3.rs` has 6 failing tests, each proving one find
 | S4 | should-fix | `src/session.rs` (`run`), `src/resume.rs` (`interrupted`) | A kill between two turns (`turn_ended` written, no `session_ended`) makes a headless `resume` call the model with a request that **ends on the assistant's final answer**. `e2e_m3::a_log_that_was_never_closed...` asserts exactly that request. Providers treat a trailing assistant message as prefill or reject it; either way it is a paid, meaningless turn. Not live-verified. | Kill a `--keep` session while idle; `kelir resume <id>`. |
 | N1 | nit | `src/compact.rs` (`plan`) | Compaction is allowed when it cannot shrink anything: with a small context the summary + pins + kept tail is larger than the original (live: 478 -> 642 and 423 -> 712 tokens on a ~1 k-token session). Skip when the estimated `tokens_after >= tokens_before`, and say so. | `m3_compact.sh`, any short session. |
 | N2 | nit | `src/session.rs` | An agent-called `compact` is only an in-memory request; a kill between the tool's "queued" result and the next boundary loses it and a resume does not re-queue it. | Kill after the `compact` tool settles. |
-| N3 | nit | `src/ipc.rs` (`bind`), `src/session.rs` (`reopen`) | The "already running" check is connect-then-bind. Windows' first-pipe-instance rule closes the race (R9: always one winner, `Access is denied` for the other, 5/5). On Unix `bind` unlinks the socket path unconditionally ("the session dir is new" is no longer true with resume), so two simultaneous resumes can both pass. R9 passed once on the maintainer but that is not a proof. | `r9_...` on Linux, repeated. |
+| N3 | nit | `src/ipc.rs` (`bind`), `src/session.rs` (`reopen`) | The "already running" check is connect-then-bind. Windows' first-pipe-instance rule closes the race (R9: always one winner, `Access is denied` for the other, 5/5). On Unix `bind` unlinks the socket path unconditionally ("the session dir is new" is no longer true with resume), so two simultaneous resumes can both pass. R9 passed once on a Linux box but that is not a proof. | `r9_...` on Linux, repeated. |
 | N4 | nit | DEVIATIONS | The summarising request's usage and cost are not logged, so compaction spend is invisible to `kelir ls` (already documented as a known gap). | n/a |
 | N5 | nit | `docs/PROGRESS.md` | The M3 row says "A log that was never closed ..." twice. | n/a |
 

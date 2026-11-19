@@ -569,11 +569,19 @@ async fn a_verb_to_a_dead_session_errors_cleanly() {
     // The session dies without saying goodbye; the state dir still lists it.
     session.kill().await;
 
-    let answer = ctl_in(&session.state, &session.cwd, &session.config, &[&id, "end"]).await;
+    let answer = ctl_in(
+        &session.guard,
+        &session.state,
+        &session.cwd,
+        &session.config,
+        &[&id, "end"],
+    )
+    .await;
     assert_eq!(answer.code, 1, "{}", answer.stdout);
     assert!(answer.stderr.contains("not running"), "{}", answer.stderr);
     // `latest` resolves to the dead one and reports it, instead of hanging.
     let answer = ctl_in(
+        &session.guard,
         &session.state,
         &session.cwd,
         &session.config,
@@ -584,6 +592,7 @@ async fn a_verb_to_a_dead_session_errors_cleanly() {
     assert!(answer.stderr.contains("not running"), "{}", answer.stderr);
     // A session that never existed.
     let answer = ctl_in(
+        &session.guard,
         &session.state,
         &session.cwd,
         &session.config,
@@ -599,6 +608,7 @@ async fn a_verb_to_a_dead_session_errors_cleanly() {
     // An empty state dir.
     let empty = tempfile::tempdir().unwrap();
     let answer = ctl_in(
+        &session.guard,
         empty.path(),
         &session.cwd,
         &session.config,

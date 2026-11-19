@@ -3,7 +3,7 @@
 Reviewed `b3e3074..36a5df6` (implementer commits `a0c6f45..385a909`; the rest are docs) against
 `docs/SPEC.md` and `docs/tasks/M2.md`. Host: Windows 11, Git for Windows bash, `hc 0.1.21`, Herdr
 pane = ConPTY, 200x120. Live model: `deepseek/deepseek-v4.1-flash-1017` on OpenRouter. Linux gate:
-`scripts/remote-check.sh the maintainer`.
+`scripts/remote-check.sh <machine>`.
 
 ## Verdict: FAIL (1 blocker, 2 should-fix, 5 nits)
 
@@ -25,7 +25,7 @@ until F2 is fixed (`tests/review_m2.rs`: 1 of 2 fails).
 | `cargo test --test e2e` / `e2e_verbs` / `e2e_tui` | 16 / 21 / 14 passed |
 | `review_m0` / `review_m1` | 8 / 5 passed |
 | `review_m2` (reviewer-added) | R2 passes, **R1 fails** (F2) |
-| Linux (`remote-check.sh the maintainer`, HEAD `36a5df6`) | fmt, clippy clean; 194 unit, 16/14/21/8/5 passed (PTY tests too). Run before `review_m2` existed. |
+| Linux (`remote-check.sh <machine>`, HEAD `36a5df6`) | fmt, clippy clean; 194 unit, 16/14/21/8/5 passed (PTY tests too). Run before `review_m2` existed. |
 | release binary | 5.57 MB (limit 20 MB) |
 | idle RSS, TUI waiting for input | 12.5-12.9 MB working set, 2.5 MB private (limit 30 MB) |
 
@@ -33,7 +33,7 @@ until F2 is fixed (`tests/review_m2.rs`: 1 of 2 fails).
 
 | # | sev | where | finding | failing scenario |
 |---|---|---|---|---|
-| B1 | **blocker** | `src/herdr.rs:51-67`, `report` 131 | Herdr (`hc 0.1.21`) only accepts a record that is exactly `state=<word>`. kelir's records carry `;app=kelir` (and `;id=...`, `;msg=...`), so **no status is ever set**: `hc get`'s `status` is `null` while the screen says `kelir working`. DEVIATIONS claims the format is "what claude-code emits" and "what the Herdr core parses"; on this Herdr it is not. The unit and PTY tests only check the prefix `\x1b]7501;state=working`, so they cannot see it. | Real run (pane `live-m2-r1`, 3 turns, polled `hc get` every 4 s through a 90 s tool call): `status: None` throughout. Probe `scripts/live/m2_osc_probe.py` in plain panes: `state=working` -> `{'state':'working'}`; `state=working;app=kelir`, `...;id=ses_1`, `...;msg=aGk=`, `...;title=x`, `...;progress=10`, `...;kind=agent`, `...;agent=kelir`, `state=working;` (trailing `;`), `,`/`&`/space separators, `working;app=kelir` -> `null`; ST and BEL terminators both fine; same on a Linux core (the maintainer). A process renamed `claude.exe` emitting `app=claude-code` is also `null`, so it is not an agent-name allowlist. A bare `state=working` then `state=done` flips `status` as expected. |
+| B1 | **blocker** | `src/herdr.rs:51-67`, `report` 131 | Herdr (`hc 0.1.21`) only accepts a record that is exactly `state=<word>`. kelir's records carry `;app=kelir` (and `;id=...`, `;msg=...`), so **no status is ever set**: `hc get`'s `status` is `null` while the screen says `kelir working`. DEVIATIONS claims the format is "what claude-code emits" and "what the Herdr core parses"; on this Herdr it is not. The unit and PTY tests only check the prefix `\x1b]7501;state=working`, so they cannot see it. | Real run (pane `live-m2-r1`, 3 turns, polled `hc get` every 4 s through a 90 s tool call): `status: None` throughout. Probe `scripts/live/m2_osc_probe.py` in plain panes: `state=working` -> `{'state':'working'}`; `state=working;app=kelir`, `...;id=ses_1`, `...;msg=aGk=`, `...;title=x`, `...;progress=10`, `...;kind=agent`, `...;agent=kelir`, `state=working;` (trailing `;`), `,`/`&`/space separators, `working;app=kelir` -> `null`; ST and BEL terminators both fine; same on a Linux core (a Linux box). A process renamed `claude.exe` emitting `app=claude-code` is also `null`, so it is not an agent-name allowlist. A bare `state=working` then `state=done` flips `status` as expected. |
 | F2 | should-fix | `src/herdr.rs:116,135`, `src/tui.rs:892,899`, `src/session.rs` (`report`) | The session task writes OSC records straight to `std::io::stdout()` while the TUI task paints through ratatui's `Stdout`. crossterm emits one CSI as several small `write`s, so an OSC lands in the middle of one and the tail is printed as text. Seen live (real model): a stray `17;200H` line in the live area. | `tests/review_m2.rs::r1_...`: 40 short turns in a pty, scan the bytes for `ESC [ params ESC`. Fails every run (3-6 cut sequences, e.g. `\x1b[\x1b]7501;state=done...`, `\x1b[31;\x1b]7501;...`). Fix: send status through the TUI task (one writer), or share one lock around all stdout writes. |
 | F3 | should-fix | `src/tui.rs:905-912` (`finish`) | After `/quit` or a double Ctrl-C the shell's next output overwrote **row 1 of the pane** (the `session ses_...` banner line) instead of landing below the viewport: `kelir exit: 0` + the rest of the old text on that row. 2 of 2 exits in a Herdr/ConPTY pane. Cause not isolated (the raw tail is ConPTY's re-render; I could not see the cursor the shell started from). | Pane runs `m2_pane.sh`, then `echo kelir exit: $?`; `hc read` shows `kelir exit: 01m7qwj0...` where `session ses_01m7qwj0...` was. |
 | N1 | nit | `src/session.rs` idle `stop`, `src/tui.rs` `Reply` | Ctrl-C in an idle TUI prints `» stop: nothing is running` and then `» stop: now`: the reply says the verb was applied "now" for a stop that was dropped. | Ctrl-C in an idle pane. |

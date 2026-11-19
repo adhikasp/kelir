@@ -439,6 +439,13 @@ async fn cancel_kills_a_tree_of_children_and_records_it() {
         .to_string();
     assert!(id.starts_with("bg_"), "{}", started.stdout);
     assert!(started.stdout.contains("running"), "{}", started.stdout);
+    // If an assertion below fails, the job and its two infinite loops must not
+    // outlive the test (M4 review round 2, N8).
+    let mut guard = CancelOnDrop {
+        sandbox: &sandbox,
+        id: id.clone(),
+        done: false,
+    };
 
     let one = sandbox.cwd.join("one.txt");
     let two = sandbox.cwd.join("two.txt");
@@ -480,6 +487,23 @@ async fn cancel_kills_a_tree_of_children_and_records_it() {
         .await;
     assert_eq!(waited.code, 0, "{}", waited.stderr);
     assert!(waited.stdout.contains("cancelled"), "{}", waited.stdout);
+    guard.done = true;
+}
+
+/// Cancels its job when it goes out of scope, even when the test panicked:
+/// `Drop` cannot await, so it runs the cancel through the same binary.
+struct CancelOnDrop<'a> {
+    sandbox: &'a Sandbox,
+    id: String,
+    done: bool,
+}
+
+impl Drop for CancelOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.sandbox.cancel_now(&self.id);
+        }
+    }
 }
 
 /// The other half of the same guarantee: a session that dies **without**
@@ -644,4 +668,109 @@ async fn a_job_whose_shim_is_killed_settles_as_lost_and_wakes_the_model() {
     force_kill_tree(command, shim);
     let (code, stderr) = live.end().await;
     assert_eq!(code, 0, "{stderr}");
+}
+
+/// G3 of the round-2 review, the other spawn path: a **session** started
+/// without a console (a tool shell, a service, a scheduled task) must still be
+/// able to run a `bash` call. Its call's shim inherits the session's console;
+/// with none, the shim hands the shell no console, and msys `bash.exe` then
+/// allocates a visible one and stalls at start-up. The session gives such a
+/// call's shim `CREATE_NO_WINDOW` instead, which is a hidden console.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_session_without_a_console_runs_a_bash_call() {
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_cc",
+            "bash",
+            &json!({"command": "echo hi > call.txt"}),
+        ))),
+        Reply::Sse(sse(&text_turn("done", 0))),
+    ])
+    .await;
+    let mut live = LiveSession::start_with_flags(
+        &mock,
+        &["run", "--keep", "--json", "go"],
+        "",
+        DETACHED_PROCESS,
+    )
+    .await;
+    let started = live.wait_for("tool_started").await;
+    assert_eq!(started["name"], "bash", "{started}");
+    let settled = live.wait_for("tool_settled").await;
+    assert_eq!(settled["outcome"], "ok", "{settled}");
+    assert!(
+        live.cwd.join("call.txt").is_file(),
+        "the console-less session's call never ran"
+    );
+    let (code, stderr) = live.end().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// G3 of the round-2 review: a **console-less** parent (a tool shell, a service,
+/// a scheduled task) must not leave the job's shell to allocate a console of
+/// its own. msys `bash.exe` then draws a visible window and stalls at start-up,
+/// so the job stays `running` for ever — measured on this box as 160 stalled
+/// `bg run "echo hi"` jobs and their consoles. The `kelir` CLI here is created
+/// with `DETACHED_PROCESS`, exactly like a child of a console-less shell; its
+/// shim must still give the command a hidden console (`CREATE_NO_WINDOW`).
+#[cfg(windows)]
+#[tokio::test]
+async fn a_job_started_from_a_console_less_parent_runs_and_leaves_nothing_behind() {
+    use std::os::windows::process::CommandExt as _;
+
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    let sandbox = Sandbox::new("");
+    let bg = sandbox.state.join("bg");
+    let mut started = Vec::new();
+    for _ in 0..5 {
+        let mut command = sandbox.kelir_command("http://127.0.0.1:9/v1");
+        let child = command
+            .args(["bg", "run", "echo hi"])
+            .creation_flags(DETACHED_PROCESS)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start kelir bg run without a console");
+        started.push(child);
+    }
+    for mut child in started {
+        let _ = child.wait();
+    }
+
+    let statuses = || -> Vec<Value> {
+        std::fs::read_dir(&bg)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".status"))
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+            .collect()
+    };
+    wait_until(
+        "five console-less jobs to exit",
+        Duration::from_secs(10),
+        || {
+            let all = statuses();
+            all.len() == 5 && all.iter().all(|status| status["state"] == "exited")
+        },
+    )
+    .await;
+
+    for status in statuses() {
+        assert_eq!(status["state"], "exited", "{status}");
+        assert_eq!(status["exit_code"], 0, "{status}");
+        let out = std::fs::read_to_string(status["out"].as_str().unwrap_or("")).unwrap_or_default();
+        assert!(
+            out.contains("hi"),
+            "the command never ran: {out:?} ({status})"
+        );
+        let pid = status["pid"].as_u64().expect("the command's pid") as u32;
+        let shim = status["shim"].as_u64().expect("the shim's pid") as u32;
+        assert!(!pid_alive(pid), "the command outlived its job (pid {pid})");
+        assert!(!pid_alive(shim), "the shim outlived its job (pid {shim})");
+    }
 }

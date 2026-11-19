@@ -489,6 +489,9 @@ pub struct LiveSession {
     pub session_dir: PathBuf,
     /// Every NDJSON line read from the session so far.
     pub events: Vec<Value>,
+    /// The test's process guard: the session and everything it starts die with
+    /// the test (AGENTS.md hard rule).
+    pub guard: Arc<TreeGuard>,
 }
 
 pub struct Ctl {
@@ -536,6 +539,18 @@ fn pid_alive_here(pid: u32) -> bool {
 
 impl LiveSession {
     pub async fn start(mock: &Mock, args: &[&str], extra_config: &str) -> LiveSession {
+        Self::start_with_flags(mock, args, extra_config, 0).await
+    }
+
+    /// The same, with creation flags of the caller's own: a test that needs a
+    /// session without a console (a tool shell, a service) passes
+    /// `DETACHED_PROCESS` (M4 review round 2, G3).
+    pub async fn start_with_flags(
+        mock: &Mock,
+        args: &[&str],
+        extra_config: &str,
+        extra_flags: u32,
+    ) -> LiveSession {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().join("work");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -553,7 +568,11 @@ impl LiveSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = command.spawn().expect("spawn kelir");
+        let guard = Arc::new(TreeGuard::new("live session"));
+        let mut child = guard
+            .spawn_with(&mut command, extra_flags)
+            .await
+            .expect("spawn kelir");
         let stdout = child.stdout.take().expect("stdout");
         let stderr = child.stderr.take().expect("stderr");
         let buffer = Arc::new(Mutex::new(String::new()));
@@ -571,6 +590,7 @@ impl LiveSession {
             id: String::new(),
             session_dir: PathBuf::new(),
             events: Vec::new(),
+            guard,
         };
         let first = session.next_event().await;
         assert_eq!(first["type"], "session_started", "{first}");
@@ -631,14 +651,14 @@ impl LiveSession {
     pub async fn ctl(&self, args: &[&str]) -> Ctl {
         let mut full = vec![self.id.as_str()];
         full.extend_from_slice(args);
-        ctl_in(&self.state, &self.cwd, &self.config, &full).await
+        ctl_in(&self.guard, &self.state, &self.cwd, &self.config, &full).await
     }
 
     /// `kelir ctl latest …`: exercises session resolution.
     pub async fn ctl_latest(&self, args: &[&str]) -> Ctl {
         let mut full = vec!["latest"];
         full.extend_from_slice(args);
-        ctl_in(&self.state, &self.cwd, &self.config, &full).await
+        ctl_in(&self.guard, &self.state, &self.cwd, &self.config, &full).await
     }
 
     pub fn stderr(&self) -> String {
@@ -665,7 +685,18 @@ impl LiveSession {
     pub async fn end(self) -> (i32, String) {
         let answer = self.ctl(&["end"]).await;
         assert_eq!(answer.code, 0, "end was refused: {}", answer.stdout);
-        self.finish().await
+        // A clean end may leave a promoted job running on purpose (that is the
+        // M4 guarantee), and the test may still look at it. When something is
+        // still alive, the guard is parked until this test *process* exits,
+        // where the OS closes the job handle and kill-on-close reaps it; a test
+        // that leaves nothing running is still terminated and asserted here.
+        let parked = self.guard.active() > 0;
+        let guard = self.guard.clone();
+        let result = self.finish().await;
+        if parked {
+            std::mem::forget(guard);
+        }
+        result
     }
 
     /// Kill the session the way a crash or a `taskkill` would: the socket dies
@@ -703,6 +734,172 @@ pub struct Sandbox {
     pub cwd: PathBuf,
     pub config: PathBuf,
     pub state: PathBuf,
+    /// Every process this test starts lives in one Job Object, so a failed or
+    /// panicking test cannot leave a tree behind (AGENTS.md hard rule).
+    pub guard: std::sync::Arc<TreeGuard>,
+}
+
+/// Holds a test's process trees so they cannot outlive it.
+///
+/// The dev box is someone's desktop: a leaked `kelir`/`bash` (or a leaked
+/// console window) is a real mess, and an earlier round leaked hundreds
+/// (M4 review round 2, N8). On Windows every child the harness starts is
+/// created suspended, put in one kill-on-close Job Object and resumed; dropping
+/// the guard terminates the job and asserts nothing survived. On Unix the guard
+/// carries the same contract and relies on kelir's own tree rules (tests there
+/// spawn far fewer processes and no consoles).
+pub struct TreeGuard {
+    label: String,
+    #[cfg(windows)]
+    job: kelir::proc::win::Job,
+    #[cfg(not(windows))]
+    _private: (),
+}
+
+impl TreeGuard {
+    pub fn new(label: &str) -> TreeGuard {
+        #[cfg(windows)]
+        {
+            let name = format!("kelir-test-{}-{}", std::process::id(), kelir::bg::new_id());
+            let job = kelir::proc::win::Job::create_named(&name, true)
+                .unwrap_or_else(|| panic!("cannot create the test's job object {name}"));
+            TreeGuard {
+                label: label.to_string(),
+                job,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            TreeGuard {
+                label: label.to_string(),
+                _private: (),
+            }
+        }
+    }
+
+    /// Spawn a command whose whole tree stays in the guard.
+    pub async fn spawn(
+        &self,
+        command: &mut tokio::process::Command,
+    ) -> std::io::Result<tokio::process::Child> {
+        self.spawn_with(command, 0).await
+    }
+
+    /// The same, with creation flags of the caller's own (`extra` is OR-ed into
+    /// the guard's `CREATE_SUSPENDED`).
+    pub async fn spawn_with(
+        &self,
+        command: &mut tokio::process::Command,
+        extra: u32,
+    ) -> std::io::Result<tokio::process::Child> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            command
+                .as_std_mut()
+                .creation_flags(extra | kelir::proc::win::CREATE_SUSPENDED);
+            let child = command.spawn()?;
+            if let Some(pid) = child.id() {
+                self.adopt(pid);
+            }
+            Ok(child)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = extra;
+            command.spawn()
+        }
+    }
+
+    /// Spawn a synchronous command whose whole tree stays in the guard.
+    pub fn spawn_sync(
+        &self,
+        command: &mut std::process::Command,
+    ) -> std::io::Result<std::process::Child> {
+        self.spawn_sync_with(command, 0)
+    }
+
+    /// The same, with creation flags of the caller's own (`extra` is OR-ed into
+    /// the guard's `CREATE_SUSPENDED`).
+    pub fn spawn_sync_with(
+        &self,
+        command: &mut std::process::Command,
+        extra: u32,
+    ) -> std::io::Result<std::process::Child> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            command.creation_flags(extra | kelir::proc::win::CREATE_SUSPENDED);
+            let child = command.spawn()?;
+            self.adopt(child.id());
+            Ok(child)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = extra;
+            command.spawn()
+        }
+    }
+
+    /// How many processes are still alive in the guard.
+    pub fn active(&self) -> u32 {
+        #[cfg(windows)]
+        {
+            self.job.active_processes().unwrap_or(0)
+        }
+        #[cfg(not(windows))]
+        {
+            0
+        }
+    }
+
+    #[cfg(windows)]
+    fn adopt(&self, pid: u32) {
+        // A suspended child that cannot enter the job must not be left
+        // suspended: say so loudly, then let it run outside the guard.
+        match self
+            .job
+            .assign(pid)
+            .and_then(|()| kelir::proc::win::resume(pid).map_err(|error| error.to_string()))
+        {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!(
+                    "test harness: cannot contain pid {pid} in {}: {error}",
+                    self.label
+                );
+                let _ = kelir::proc::win::resume(pid);
+            }
+        }
+    }
+}
+
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            self.job.terminate_job();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while let Some(active) = self.job.active_processes() {
+                if active == 0 {
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let message = format!(
+                        "the test leaked {active} process(es) in {} — kill them by pid",
+                        self.label
+                    );
+                    if std::thread::panicking() {
+                        eprintln!("LEAK: {message}");
+                    } else {
+                        panic!("{message}");
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -748,6 +945,7 @@ impl Sandbox {
             cwd,
             config,
             state,
+            guard: std::sync::Arc::new(TreeGuard::new("sandbox")),
         }
     }
 
@@ -759,17 +957,22 @@ impl Sandbox {
             cwd: live.cwd.clone(),
             config: live.config.clone(),
             state: live.state.clone(),
+            guard: live.guard.clone(),
         }
     }
 
     /// Run the real binary against `base_url`, capturing stdout and stderr.
     pub async fn kelir(&self, base_url: &str, args: &[&str], env: &[(&str, &str)]) -> Output {
         let mut command = live_command(&self.cwd, &self.config, &self.state, base_url);
-        command.args(args);
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         for (key, value) in env {
             command.env(key, value);
         }
-        let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+        let child = self.guard.spawn(&mut command).await.expect("run kelir");
+        let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
             .await
             .expect("kelir did not finish within 60 s")
             .expect("run kelir");
@@ -778,6 +981,36 @@ impl Sandbox {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         }
+    }
+
+    /// A synchronous command with this sandbox's environment: for a test that
+    /// has to create the process with flags of its own (a console-less parent).
+    pub fn kelir_command(&self, base_url: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_kelir"));
+        command
+            .current_dir(&self.cwd)
+            .env("KELIR_CONFIG", &self.config)
+            .env("KELIR_CONFIG_DIR", self.state.join("no-config"))
+            .env("KELIR_STATE_DIR", &self.state)
+            .env("KELIR_BASE_URL", base_url)
+            .env("OPENROUTER_API_KEY", "test-openrouter-key")
+            .env("KELIR_GO_API_KEY", "test-go-key");
+        command
+    }
+
+    /// Cancel a job from synchronous code — a test's `Drop` — so a failing
+    /// test cannot leak an infinite job and its shim (M4 review round 2, N8).
+    pub fn cancel_now(&self, id: &str) {
+        let mut command = self.kelir_command("http://127.0.0.1:9/v1");
+        let _ = self
+            .guard
+            .spawn_sync(
+                command
+                    .args(["bg", "cancel", id])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .and_then(|mut child| child.wait());
     }
 
     pub fn session_ids(&self) -> Vec<String> {
@@ -832,7 +1065,13 @@ fn live_command(
 }
 
 /// `kelir ctl` against a state dir, with no live session in the test harness.
-pub async fn ctl_in(state: &Path, cwd: &Path, config: &Path, args: &[&str]) -> Ctl {
+pub async fn ctl_in(
+    guard: &TreeGuard,
+    state: &Path,
+    cwd: &Path,
+    config: &Path,
+    args: &[&str],
+) -> Ctl {
     let mut command = live_command(
         &cwd.to_path_buf(),
         &config.to_path_buf(),
@@ -843,7 +1082,9 @@ pub async fn ctl_in(state: &Path, cwd: &Path, config: &Path, args: &[&str]) -> C
     for arg in args {
         command.arg(arg);
     }
-    let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = guard.spawn(&mut command).await.expect("spawn ctl");
+    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
         .await
         .expect("ctl did not finish within 30 s")
         .expect("run ctl");

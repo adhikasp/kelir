@@ -24,5 +24,5 @@ without weakening it; all other suites stay green on Windows and (via `scripts/r
   bounded (cache the wrapped prefix) with a test on a 1 MB message. **N5** add a test-only panic
   injection (env `KELIR_TEST_PANIC=1`, documented) and test that the terminal is restored.
 
-Gates: fmt, clippy -D warnings, full `cargo test`, `bash scripts/remote-check.sh the maintainer`. Update the
+Gates: fmt, clippy -D warnings, full `cargo test`, `bash scripts/remote-check.sh <machine>`. Update the
 `docs/PROGRESS.md` M2 row. Commit `M2: fixes` (explicit paths), `hc send t1x "<result>"`.

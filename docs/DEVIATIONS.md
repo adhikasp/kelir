@@ -5,7 +5,7 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
 ## Models metadata comes from the provider (2026-11-19)
 
 The built-in window table is gone. It assumed 128k for every `deepseek` model, so the 1M-token
-model kelir now defaults to would have been compacted at a tenth of its real window (the maintainera,
+model kelir now defaults to would have been compacted at a tenth of its real window (the maintainer,
 2026-11-19). `src/models.rs` parses `GET {base}/models` from both providers into one normalised
 list (`context`, `tools`), caches it at `<state>/models-<provider>.json` for 24 hours, and backs off
 for an hour after a failed fetch so an offline box does not pay the timeout on every start. The
@@ -395,7 +395,9 @@ consuming a scripted reply) so a session can start in a test.
 - **`bg/<id>.status` is the job's whole state, written only by its shim.** The
   spec's `state`, `pid`, `exit_code`, `started`, `finished` plus the fields the
   machinery needs: `shim` (the shim's pid: the process group on Unix, the process
-  whose job holds the tree on Windows), `cmd`, `out`, `kind` (`job`|`call`),
+  whose job holds the tree on Windows), `shim_started` and `pid_started` (when
+  the shim and the command really started, read from the OS by the shim: the
+  only thing a reader will signal a pid on), `cmd`, `out`, `kind` (`job`|`call`),
   `promoted`, `call` (the provider call id that started it), `job` (the Windows
   job object's name) and `error` (why the command could not start). States are
   `running`, `exited`, `cancelled` — and `lost`, which a *reader* reports for a
@@ -469,10 +471,37 @@ consuming a scripted reply) so a session can start in a test.
   `state: "cancelled"`. The shim is the only writer while it lives, so the two
   can never interleave; if the job finished on its own first, that is reported
   and nothing is overwritten. **Nothing is signalled on the strength of a pid in
-  a status file**: `cancel` first checks that the process is the shim that wrote
-  the file (`proc::start_time` against the status's `started`, within 120 s) and
-  declines when it is not, because a status outlives its shim (a reboot, a
-  `taskkill /F`) and its pid can belong to somebody else by then (M4 review F5).
+  a status file.** The shim records its **own** start time, read from the OS in
+  its own process (`src/bg.rs` `Status::shim_started`, `proc::start_time`), and
+  `cancel` compares that exact value with the OS's answer for the pid, within one
+  second (M4 review round 2, G1). The job's `started` is not used at all: a job
+  can run for hours before its shim is lost, and a pid is reused within seconds,
+  so the old `started` ± 120 s window let a recycled pid pass for the shim and
+  be killed. A status that records no start time, a pid that now belongs to a
+  process that started at another time, and a platform that cannot report start
+  times (macOS) are all refused rather than guessed, and `bg ls`/`bg wait` show
+  such a status as `lost`, not `running`.
+- **A lost job's tree is still reachable, and `cancel` says exactly what it
+  cannot do** (M4 review round 2, G2). A job object's *name* dies with its last
+  handle, so a killed shim left the tree with `cancel` printing "nothing to
+  cancel" while the tree kept running. Two things fix that:
+  - the shim **lends its job handle to the command** (`Job::lend_to`,
+    `DuplicateHandle` into the command's process) when the job is born
+    (`kelir bg run`) or promoted — never before, so an unpromoted call's job
+    stays kill-on-close. The command is in the tree and outlives a killed shim
+    in the ordinary case, so the job keeps its name and `TerminateJobObject`
+    still reaches every process in it, msys's exec'd grandchildren included;
+  - when no handle is left, `cancel` falls back to what the status proves: a
+    tree walk from the command's own pid (`proc::terminate_tree`, parent links,
+    deepest first, and a child older than its parent is not walked into), with
+    the command's `pid_started` compared exactly as above. On Unix it uses the
+    shim's process group: a pid number cannot be reused while a group with that
+    number still has a member, so a non-empty group is that job's tree, while a
+    live process on the shim's pid that is not the shim is refused.
+  When none of that can be proved — no recorded pid or start time, a recycled
+  pid, a platform that cannot list the group, or a command that left its
+  children behind and died — `cancel` prints the reason and signals nothing
+  (exit 1), and `bg ls` still shows the job `lost`.
 - **Windows: the call's Job Object forbids breakaway and is `KILL_ON_JOB_CLOSE`
   until promotion.** M4's first cut allowed breakaway so a `kelir bg run` inside
   a call would not be trapped; an msys `spawn` asks for
@@ -500,22 +529,32 @@ consuming a scripted reply) so a session can start in a test.
   `cmd &` child of a *finished* call outlived a `SIGKILL`ed session, because the
   session's `killpg` only runs on a graceful exit (M4 review F6). The shim exits
   the instant the group is empty — the common case is unchanged, and a call
-  settles on its *status file*, not on the shim process. The one platform gap:
-  where `/proc` cannot be read (macOS) `group_others` answers `None` and the
-  shim does not linger, so that half of the guarantee holds only on a graceful
-  exit there; macOS is compile-only today.
+  settles on its *status file*, not on the shim process. The owner check stays
+  at 25 ms (`getppid()`, one cheap syscall, so a killed session is noticed at
+  once) while the `/proc` group count **backs off** from 25 ms to 1 s
+  (`LINGER_MAX`) as the lingering child lives on (M4 review round 2, G4): the
+  scan was ~23 % of a core per lingering shim, and it is what a dev server
+  started with `&` paid for hours. Measured on the Linux box with the release
+  binary and one 60 s child in the group (`/proc/<shim>/stat` utime+stime over
+  10 s, 100 Hz): **before 224–225 ticks = 22.4–22.5 % of one core; after 8–9
+  ticks = 0.8–0.9 %**, with the "a killed session takes the leftover tree"
+  guarantee unchanged (`tests/e2e_m4.rs`, `tests/review_m4.rs` R18/R19 and the
+  leftover-child tests still pass there). The one platform gap: where `/proc`
+  cannot be read (macOS) `group_others` answers `None` and the shim does not
+  linger, so that half of the guarantee holds only on a graceful exit there;
+  macOS is compile-only today.
 - **`kelir bg out --follow` reads only what is new** (seek to the offset, read to
   EOF), so following a job that writes a lot is not quadratic (M4 review N1).
 - **A job whose shim is gone is reported `lost`, and the status file is left
   alone** (M4 review F4). `running` is what the shim wrote; a reader
   (`bg ls`, `bg wait`, the session's watcher, `resume`) turns it into `lost` when
-  the shim is provably gone, with `error` saying so, so a `taskkill /F /IM
-  kelir.exe`, an OOM kill or a reboot can never leave a job that runs for ever.
-  Readers never write another process's status; `cancel` on a lost job reports
-  it and, on Windows, still takes the tree down by its job-object name (a name
-  is kelir's own namespace; a pid is not). A *call* whose shim dies before its
-  status settles now returns `outcome: "unknown"` with its partial output
-  instead of hanging, and its remaining tree is stopped.
+  the shim is provably gone — or when its identity cannot be proved — with
+  `error` saying so, so a `taskkill /F /IM kelir.exe`, an OOM kill or a reboot
+  can never leave a job that runs for ever. Readers never write another
+  process's status; `cancel` on a lost job reaches the tree as described above
+  and otherwise says why it cannot. A *call* whose shim dies before its status
+  settles now returns `outcome: "unknown"` with its partial output instead of
+  hanging, and its remaining tree is stopped.
 - **`kelir bg run` keeps the argument boundaries the caller wrote** (M4 review
   F3): one word is a command line as written (shell syntax allowed), several
   words are literal arguments, each quoted (`printf '[%s]' 'a b' c`). Shell
@@ -541,13 +580,33 @@ consuming a scripted reply) so a session can start in a test.
   it needs on its command line (`--dir --id --out --cmd --shell --shell-arg
   --kind --owner --call --job --sock`), so a shim is self-contained and
   detachable: `setsid` on Unix (the spec's word, via `pre_exec`),
-  `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, plus
+  `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`, plus
   `CREATE_BREAKAWAY_FROM_JOB` when the caller's job allows it, on Windows. A
   caller whose job forbids breakaway — a call's job, by design, or a harness's —
   gets the shim without the breakaway flag, which is still outside the *call's*
   job when the session starts it on request (`bg-spawn`). A call's shim is
   instead grouped by the session (`process_group(0)` / `CREATE_SUSPENDED` + Job
-  Object) so that `stop` can reach it.
+  Object) so that `stop` can reach it; a session that has **no console of its
+  own** gives that shim `CREATE_NO_WINDOW` too (`win::has_console`), so the call
+  never has to allocate a console either.
+- **Windows: the job's shim is `CREATE_NO_WINDOW`, not `DETACHED_PROCESS`**
+  (M4 review round 2, G3). A detached shim has no console, so its
+  console-subsystem child (`bash.exe`) makes one: a **visible console window per
+  job** on someone's desktop, and, once hundreds of those accumulate, a start-up
+  that stalls for minutes — measured on the dev box as 160 `bg run "echo hi"`
+  jobs whose shims never got past spawning `bash`, all with a console process of
+  their own. With `CREATE_NO_WINDOW` the shim gets a console with no window and
+  the command inherits it. It is still outside the session's console and, with
+  breakaway, outside its Job Object, so the job outlives the session exactly as
+  before (`tests/e2e_m4.rs`: a promoted tree survives a killed session; a `bg
+  run` made in a call survives it; a job started by a console-less CLI still
+  runs, and so does a `bash` call of a console-less session). Numbers on the dev
+  box, 20 concurrent `kelir bg run "echo hi"` from a console-less (DETACHED)
+  parent, timed until every status said `exited`: `DETACHED_PROCESS` 1.9 / 3.3 /
+  2.7 s wall, `CREATE_NO_WINDOW` 0.6 / 0.7 / 0.7 s. On a healthy box both finish
+  (20/20); the stall is the degraded state the incident left behind, and it does
+  not reproduce on demand, so the test asserts the guarantee (every job exits,
+  nothing left behind) rather than a timing.
 - **A call's kill is now "kill the shim's group/job"** (Unix `killpg` on the
   shim's group, Windows `TerminateJobObject`), and a task cancelled mid-call
   still kills its tree (a `Drop` guard in the tool). A leftover `cmd &` child
