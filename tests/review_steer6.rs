@@ -174,7 +174,6 @@ async fn f2_every_length_around_the_threshold_and_the_windows_cut_is_intact() {
 /// line limit once every `"` and `\` is escaped for CreateProcess. This is the
 /// quote-dense case.
 #[tokio::test]
-#[ignore = "STEER-6 review S1: on Windows the argument route halves runs of backslashes (pre-existing, msys argv parsing); run with --ignored"]
 async fn f2_a_quote_dense_command_just_under_the_threshold_is_not_cut() {
     for (id, ch, count) in [("q1", '"', 5_000usize), ("q2", '\\', 5_500)] {
         let payload: String = std::iter::repeat_n(ch, count).collect();
@@ -516,10 +515,11 @@ async fn f5_zero_disables_the_soft_target() {
     assert_eq!(log.iter().filter(|e| e["type"] == "compacted").count(), 0);
 }
 
-/// The short (argument) path mangles `\` on Windows (msys argv parsing); the
-/// file route does not. Compare both for the same payload.
+/// STEER-6 review S1, kept as a regression: on Windows the *argument* route
+/// halved runs of backslashes (msys argv parsing). One route now — a file, on
+/// Windows — so the same payload means the same bytes at any length. This was
+/// the failing test that proved it; the fix un-ignored it.
 #[tokio::test]
-#[ignore = "STEER-6 review S1: on Windows the argument route halves runs of backslashes (pre-existing, msys argv parsing); run with --ignored"]
 async fn f2_backslashes_and_dollars_are_literal_in_a_quoted_heredoc_short_and_long() {
     // Rust source `\\` is one real backslash: this payload holds runs of 2, 1, 3, 4.
     let payload = "a\\\\b \\n \\\\\\ c:\\\\dir \\\\\\\\ $HOME `x` \"q\" 'r'\n";
@@ -542,12 +542,12 @@ async fn f2_backslashes_and_dollars_are_literal_in_a_quoted_heredoc_short_and_lo
 }
 
 /// The cmd.exe fallback shell (`shell = ["cmd.exe", "/C"]`, what kelir picks on
-/// Windows with no bash): a long command is written to `cmd.bat` and must be
-/// RUN. `cmd.exe cmd.bat` (no `/C`) starts an interactive shell on a null stdin,
-/// runs nothing, and exits 0.
+/// Windows with no bash): the command is written to `cmd.bat` and must be RUN.
+/// `cmd.exe cmd.bat` (no `/C`) starts an interactive shell on a null stdin, runs
+/// nothing, and exits 0 — that was the B1 blocker; the switch now stays with the
+/// file, and this test is no longer ignored.
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "STEER-6 review B1: cmd.exe /C is dropped in script mode, so a long command never runs (exit 0); run with --ignored"]
 async fn f2_cmd_exe_runs_a_long_command_from_its_bat_file() {
     let short = "echo short> short.txt".to_string();
     let mut long = String::new();

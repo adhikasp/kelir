@@ -1094,4 +1094,35 @@ READ THE TAIL
         assert_eq!(kind_of("sift"), SourceKind::Skill);
         assert_eq!(SourceKind::Instruction.as_str(), "instruction");
     }
+
+    /// N3: the base prompt is a contract with the model, and `include_str!` makes
+    /// it part of every request's frozen prefix — a changed byte moves the cache
+    /// for every session. So the bytes are pinned: `tests/fixtures/
+    /// prompt.md.snapshot` is the prompt as released, and an edit has to update
+    /// the snapshot in the same commit (a rewording is then deliberate, not a
+    /// side effect of an unrelated change).
+    #[test]
+    fn the_base_prompt_is_byte_identical_to_its_snapshot() {
+        let prompt = crate::config::DEFAULT_PROMPT;
+        let snapshot = include_str!("../tests/fixtures/prompt.md.snapshot");
+        assert_eq!(
+            prompt,
+            snapshot,
+            "the base prompt changed ({} bytes now, {} in the snapshot); update \
+             tests/fixtures/prompt.md.snapshot and the retro rule list deliberately",
+            prompt.len(),
+            snapshot.len()
+        );
+        // The rendered base (the prompt with its skills directories named) is
+        // the prefix's head: same inputs, same bytes, and the placeholder is
+        // the only thing that moved.
+        let dir = temp_dir("snapshot");
+        let places = places_in(&dir);
+        let rendered = render_base(prompt, &places);
+        assert!(!rendered.contains(SKILLS_PLACEHOLDER), "{rendered}");
+        let head = prompt.split(SKILLS_PLACEHOLDER).next().unwrap();
+        assert!(rendered.starts_with(head), "{rendered}");
+        assert_eq!(rendered, render_base(prompt, &places), "not deterministic");
+        assert!(prompt.len() <= 1024, "{} bytes", prompt.len());
+    }
 }

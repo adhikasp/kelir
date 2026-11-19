@@ -39,11 +39,8 @@ const TRUNCATION_MARKERS: [&str; 3] = [
 /// to the result (never in place of it), so the shell's own warning and the
 /// explanation are read together: the dogfood model spent 12 steps blaming its
 /// own heredoc body for a cut it could not see.
-pub fn truncation_notice(text: &str) -> Option<&'static str> {
-    if TRUNCATION_MARKERS
-        .iter()
-        .any(|marker| text.contains(marker))
-    {
+pub fn truncation_notice(text: &str, exit_code: Option<i32>) -> Option<&'static str> {
+    if looks_cut(text, exit_code) {
         return Some(
             "[kelir: your command may have been cut short: write big files with `edit` \
              (empty `old`) instead of a heredoc, and check the exit code of each command.]",
@@ -51,6 +48,68 @@ pub fn truncation_notice(text: &str) -> Option<&'static str> {
     }
     None
 }
+
+/// Does this output look like a command that was **cut**, rather than one that
+/// merely printed a marker (STEER-6 review N1: `git grep "unexpected EOF" src`
+/// made the model re-read a command that was never cut)?
+///
+/// Three signals, and a marker alone is not one:
+///
+/// * a shell **diagnostic**: a line that has a marker and looks like
+///   `program: message` — `bash: warning: here-document at line 1 delimited by
+///   end-of-file (wanted 'X')`, `sh: -c: line 1: unexpected EOF while looking
+///   for matching ...`. Bash prints the heredoc warning *before* the body it did
+///   read, so where the line is does not matter;
+/// * a **failure**: exit code != 0 with a marker anywhere in the output — a
+///   truncated one-liner dies with a syntax error;
+/// * for a successful command, a marker in the last [`NOTICE_LINES`] lines.
+///
+/// A `git grep` hit (`src/spill.rs:33: "delimited by end-of-file"`) has no shell
+/// prefix, is not at the end of the output, and does not fail, so a search that
+/// finds these very strings stays quiet.
+fn looks_cut(text: &str, exit_code: Option<i32>) -> bool {
+    let failed = exit_code.is_some_and(|code| code != 0);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(NOTICE_LINES);
+    lines.iter().enumerate().any(|(index, line)| {
+        if !TRUNCATION_MARKERS
+            .iter()
+            .any(|marker| line.contains(marker))
+        {
+            return false;
+        }
+        shell_diagnostic(line) || failed || index >= start
+    })
+}
+
+/// Is this line a shell's own message about the command (`bash: …`,
+/// `sh: -c: line 3: …`) rather than program output? A shell names itself before
+/// the colon, and its heredoc warning carries `warning:`.
+fn shell_diagnostic(line: &str) -> bool {
+    let Some((prefix, rest)) = line.split_once(": ") else {
+        return false;
+    };
+    let prefix = prefix.trim();
+    let shell = prefix
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(prefix)
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    let known = matches!(
+        shell.as_str(),
+        "bash" | "sh" | "zsh" | "dash" | "ksh" | "cmd" | "powershell" | "pwsh" | "fish"
+    );
+    known || rest.to_ascii_lowercase().starts_with("warning:")
+}
+
+/// How many trailing lines count as "the end" of a command's output when the
+/// command succeeded. The shell's heredoc warning is the last thing it prints
+/// for a cut *script*, so three is generous; the whole output is not.
+pub const NOTICE_LINES: usize = 3;
 
 /// Line count from a streaming read: newlines, plus one for an unterminated
 /// final line.
@@ -196,7 +255,7 @@ impl Capture {
             } else {
                 out.push_str(&String::from_utf8_lossy(&self.inline));
             }
-            if let Some(notice) = truncation_notice(&out) {
+            if let Some(notice) = truncation_notice(&out, exit_code) {
                 if !out.ends_with('\n') {
                     out.push('\n');
                 }
@@ -225,7 +284,9 @@ impl Capture {
         }
         out.push_str(&format!("--- first {HEAD_BYTES} bytes ---\n{head}\n"));
         out.push_str(&format!("--- last {TAIL_BYTES} bytes ---\n{tail}\n"));
-        if let Some(notice) = truncation_notice(&head).or_else(|| truncation_notice(&tail)) {
+        if let Some(notice) =
+            truncation_notice(&head, exit_code).or_else(|| truncation_notice(&tail, exit_code))
+        {
             out.push_str(notice);
             out.push('\n');
         }
@@ -440,5 +501,84 @@ mod tests {
     fn partial_output_of_a_missing_file_is_an_error() {
         let path = std::env::temp_dir().join(format!("kelir-none-{}", ulid::Ulid::new()));
         assert!(partial(&path).is_err());
+    }
+
+    /// N1: the notice is for output that *was* cut. A marker in the middle of a
+    /// successful command's output (a search result that quotes the warning) is
+    /// not truncation, and the model was being told its command was cut when it
+    /// was not.
+    #[test]
+    fn a_marker_in_the_middle_of_a_successful_output_is_not_truncation() {
+        // The exact case the review found: a `git grep` for the marker itself
+        // matches inside `src/`, in the middle of a long successful output.
+        let mut lines = vec![
+            "src/spill.rs:33: const TRUNCATION_MARKERS: [&str; 3] = [".to_string(),
+            "src/spill.rs:34: \"delimited by end-of-file\",".to_string(),
+            "src/spill.rs:35: \"unexpected EOF\",".to_string(),
+        ];
+        for index in 0..20 {
+            lines.push(format!("docs/book.md:{index}: prose about EOF handling"));
+        }
+        let text = lines.join("\n");
+        assert_eq!(truncation_notice(&text, Some(0)), None, "{text}");
+        assert_eq!(truncation_notice(&text, None), None);
+        // From a command that failed, a marker anywhere is the notice's case: a
+        // failure is at least worth a look at the bytes that ran.
+        assert!(truncation_notice(&text, Some(1)).is_some());
+        // A grep hit is not a shell diagnostic, but a marker in a successful
+        // command's *last* lines still counts: the notice is a cheap hint at the
+        // tail, and that is enough (the reviewer's wording: "exit code != 0 or
+        // the marker in the last lines").
+        let last = ["a", "b", "c", "d", "src/x.rs:1: \"unexpected EOF\""].join("\n");
+        assert!(truncation_notice(&last, Some(0)).is_some());
+    }
+
+    /// A cut heredoc is the case the notice is for: the shell says so, it
+    /// usually still exits 0, and bash prints the warning *before* the body it
+    /// did read, so the marker is nowhere near the end.
+    #[test]
+    fn a_shell_diagnostic_is_noticed_wherever_the_shell_printed_it() {
+        let early = [
+            "bash: warning: here-document at line 1 delimited by end-of-file (wanted `X')",
+            "line one",
+            "line two",
+            "WRONG",
+        ]
+        .join("\n");
+        assert!(truncation_notice(&early, Some(0)).is_some());
+        // The `sh` variant of the same message, without `warning:`.
+        let dash = ["sh: -c: line 1: unexpected EOF while looking for matching `\"'"].join("\n");
+        assert!(truncation_notice(&dash, Some(2)).is_some());
+        // A failed command's marker, wherever it is.
+        let failed = ["a", "b", "boom: unexpected EOF", "more", "tail"].join("\n");
+        assert!(truncation_notice(&failed, Some(1)).is_some());
+        // A successful command with the marker only in its middle, and not a
+        // shell's own line: quiet.
+        let mid = ["a", "b", "prose: unexpected EOF", "c", "d", "e", "the end"].join("\n");
+        assert_eq!(truncation_notice(&mid, Some(0)), None);
+        // A successful command whose last lines carry the marker: a notice.
+        let tail = ["doing work", "line", "still: unexpected EOF"].join("\n");
+        assert!(truncation_notice(&tail, Some(0)).is_some());
+    }
+
+    #[test]
+    fn ordinary_output_gets_no_notice() {
+        assert_eq!(
+            truncation_notice(
+                "all good
+",
+                Some(0)
+            ),
+            None
+        );
+        assert_eq!(truncation_notice("", Some(0)), None);
+        assert_eq!(
+            truncation_notice(
+                "error: EOF expected
+",
+                Some(1)
+            ),
+            None
+        );
     }
 }
