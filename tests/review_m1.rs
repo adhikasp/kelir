@@ -107,8 +107,10 @@ async fn stop_during_the_stream_leaves_a_clean_log_and_next_request() {
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     let ended = session.wait_for("turn_ended").await;
     assert_eq!(ended["outcome"], "stopped");
-    // The held request is still open on the mock side; let it go.
-    gate.notify_waiters();
+    // The held request is still open on the mock side; let it go. `notify_one`
+    // stores a permit when the mock has not reached its `notified()` poll yet,
+    // where `notify_waiters` would be lost.
+    gate.notify_one();
     let answer = session.ctl(&["say", "carry on"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     session.wait_for("turn_ended").await;
@@ -183,7 +185,7 @@ async fn say_now_during_the_stream_is_delivered() {
     let answer = session.ctl(&["say", "--now", "urgent"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    gate.notify_waiters();
+    gate.notify_one();
     session.wait_for("turn_ended").await;
     let requests = mock.requests();
     assert_eq!(requests.len(), 2, "the urgent message got no step");

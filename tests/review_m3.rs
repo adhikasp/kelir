@@ -388,7 +388,6 @@ async fn r6_stop_is_answered_while_a_compaction_is_summarising() {
     let started = Instant::now();
     let answer = tokio::time::timeout(Duration::from_secs(3), live.ctl(&["stop"])).await;
     let waited = started.elapsed();
-    gate.notify_waiters();
     gate.notify_one();
     assert!(
         answer.is_ok(),
