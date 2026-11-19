@@ -1,8 +1,13 @@
 //! The session socket: newline-delimited JSON over a Unix socket (a named pipe
 //! on Windows), served by the session process.
 //!
-//! Request: `{"verb": "say", "args": {"text": "hi"}, "from": "ctl"}`.
+//! Request: `{"verb": "say", "args": {"text": "hi"}, "from": "ctl",
+//! "token": "…"}`.
 //! Answer: one line, `{"ok": true, …}` or `{"ok": false, "error": "…"}`.
+//!
+//! Reaching the socket is not authorisation (STEER-7): every request carries the
+//! session's per-session token, and the listener answers and drops a request
+//! that does not before the session sees it. See [`crate::trust`].
 //!
 //! The path is `<session dir>/sock` on Unix and `\\.\pipe\kelir-<session id>`
 //! on Windows; both open with the same code, so `kelir ctl` never needs to know
@@ -18,6 +23,7 @@
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(not(windows))]
@@ -61,6 +67,11 @@ pub struct Request {
     /// Who sent it: `ctl`, `tui`, `gate`…
     #[serde(default = "default_from")]
     pub from: String,
+    /// The session's token ([`crate::trust::TOKEN_ENV`]). A request that crosses
+    /// the socket without it is refused and dropped at the listener; the TUI and
+    /// the session's own watcher run inside the session and set it from memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 fn default_from() -> String {
@@ -73,7 +84,14 @@ impl Request {
             verb: verb.into(),
             args,
             from: from.into(),
+            token: None,
         }
+    }
+
+    /// The same request, carrying a token (what the client side does).
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
     }
 }
 
@@ -131,6 +149,19 @@ impl Response {
 pub struct Incoming {
     pub request: Request,
     pub reply: oneshot::Sender<Response>,
+    /// Set when the session itself raised this wake-up (its own `bg/` watcher),
+    /// which is not a request at all: there is no `Request` to answer, so the
+    /// action is carried here and the loop takes it directly. `None` for
+    /// everything that arrived on the socket or from the TUI (STEER-7: the
+    /// watcher no longer impersonates a `job` on the wire).
+    pub action: Option<Action>,
+}
+
+/// Work the session owes itself.
+#[derive(Debug)]
+pub enum Action {
+    /// A status file in this session's `bg/` started or settled.
+    Note(crate::bg::Status),
 }
 
 // The address: a path on Unix, a name on Windows.
@@ -197,7 +228,6 @@ fn record_socket_path(dir: &Path, path: &Path) {
 pub fn value(dir: &Path, id: &str) -> String {
     crate::util::path_string(&socket_path(dir, id))
 }
-
 #[cfg(windows)]
 pub fn value(_dir: &Path, id: &str) -> String {
     format!(r"\\.\pipe\{PIPE_PREFIX}{id}")
@@ -295,37 +325,61 @@ pub fn bind(dir: &Path, id: &str) -> Result<LocalListener, String> {
     #[cfg(unix)]
     let _ = std::fs::remove_file(&path);
     let address = name(dir, id)?;
-    let listener = ListenerOptions::new()
-        .name(address)
-        .create_tokio()
-        .map_err(|error| {
-            format!(
-                "cannot listen on the session socket {}: {error}",
-                value(dir, id)
-            )
-        })?;
+    #[cfg(windows)]
+    let options = {
+        // An explicit descriptor, not the platform default: a protected DACL
+        // with one ACE for this process's user (STEER-7). `create_tokio` copies
+        // it into the pipe, so the descriptor is released here.
+        use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
+        let descriptor = crate::perm::pipe_descriptor()
+            .map_err(|error| format!("cannot build the session pipe's DACL: {error}"))?;
+        ListenerOptions::new()
+            .name(address)
+            .security_descriptor(descriptor)
+    };
+    #[cfg(not(windows))]
+    let options = ListenerOptions::new().name(address);
+    let listener = options.create_tokio().map_err(|error| {
+        format!(
+            "cannot listen on the session socket {}: {error}",
+            value(dir, id)
+        )
+    })?;
     // `say` is a prompt-injection channel into a fully autonomous agent, so the
-    // socket is the user's alone: 0600 on Unix (a umask like 002 would
-    // otherwise let the group steer it). The Windows pipe DACL already denies
-    // other users write (M1 review N4).
+    // socket is the user's alone: 0600 on Unix, an owner-only pipe DACL on
+    // Windows. Both are *re-checked* after the fact — a umask, a stale file or a
+    // platform default that leaked in must fail the start, not warn (STEER-7).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        crate::perm::check_socket(&path)?;
         record_socket_path(dir, &path);
     }
+    #[cfg(windows)]
+    crate::perm::check_pipe(&value(dir, id))?;
     Ok(listener)
 }
 
 /// Accept connections forever. Every connection gets its own task; answers go
 /// back on each request's own channel, so two clients never block each other.
-pub fn serve(listener: LocalListener, tx: mpsc::UnboundedSender<Incoming>) {
+///
+/// The token check is here, at the boundary: a request without this session's
+/// token is answered and its connection closed before it reaches `tx`, so an
+/// unauthenticated caller cannot make the session do anything — or write a
+/// `verb` event (STEER-7).
+pub fn serve(
+    listener: LocalListener,
+    trust: Arc<crate::trust::Trust>,
+    tx: mpsc::UnboundedSender<Incoming>,
+) {
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok(stream) => {
                     let tx = tx.clone();
-                    tokio::spawn(async move { connection(stream, tx).await });
+                    let trust = trust.clone();
+                    tokio::spawn(async move { connection(stream, trust, tx).await });
                 }
                 // The listener only fails for good reasons (the pipe name was
                 // taken, the runtime is going away); retry so one bad accept
@@ -336,7 +390,11 @@ pub fn serve(listener: LocalListener, tx: mpsc::UnboundedSender<Incoming>) {
     });
 }
 
-async fn connection(stream: LocalStream, tx: mpsc::UnboundedSender<Incoming>) {
+async fn connection(
+    stream: LocalStream,
+    trust: Arc<crate::trust::Trust>,
+    tx: mpsc::UnboundedSender<Incoming>,
+) {
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read);
     let mut line = String::new();
@@ -350,27 +408,46 @@ async fn connection(stream: LocalStream, tx: mpsc::UnboundedSender<Incoming>) {
         if trimmed.is_empty() {
             continue;
         }
+        let mut close = false;
         let response = match serde_json::from_str::<Request>(trimmed) {
-            Ok(request) => {
-                let (reply, answer) = oneshot::channel();
-                if tx.send(Incoming { request, reply }).is_err() {
-                    let _ = write
-                        .write_all(Response::error("the session is ending").line().as_bytes())
-                        .await;
-                    let _ = write.write_all(b"\n").await;
-                    let _ = write.flush().await;
-                    return;
+            Ok(request) => match trust.accepts(&request) {
+                Ok(()) => {
+                    let (reply, answer) = oneshot::channel();
+                    if tx
+                        .send(Incoming {
+                            request,
+                            reply,
+                            action: None,
+                        })
+                        .is_err()
+                    {
+                        let _ = write
+                            .write_all(Response::error("the session is ending").line().as_bytes())
+                            .await;
+                        let _ = write.write_all(b"\n").await;
+                        let _ = write.flush().await;
+                        return;
+                    }
+                    match answer.await {
+                        Ok(response) => response,
+                        Err(_) => Response::error("the session did not answer"),
+                    }
                 }
-                match answer.await {
-                    Ok(response) => response,
-                    Err(_) => Response::error("the session did not answer"),
+                // An unauthenticated caller gets one answer and no more: it
+                // is not a client of this session.
+                Err(error) => {
+                    close = true;
+                    Response::error(error)
                 }
-            }
+            },
             Err(error) => Response::error(format!("bad request line: {error}")),
         };
         let mut out = response.line();
         out.push('\n');
         if write.write_all(out.as_bytes()).await.is_err() || write.flush().await.is_err() {
+            return;
+        }
+        if close {
             return;
         }
     }
@@ -391,16 +468,43 @@ pub async fn connect(dir: &Path, id: &str) -> Result<LocalStream, String> {
 
 /// One request/answer round trip, for `kelir ctl`.
 pub async fn request(dir: &Path, id: &str, request: &Request) -> Result<Response, String> {
+    connect_and_send(dir, id, request).await
+}
+
+/// The same round trip, with the session's token read from its own directory
+/// (`kelir ctl` from a human's terminal: it knows which session it sent to, so
+/// it reads that session's `<session dir>/token` instead of the environment).
+pub async fn request_with_token_file(
+    dir: &Path,
+    id: &str,
+    request: &Request,
+) -> Result<Response, String> {
+    let sent = match &request.token {
+        Some(_) => request.clone(),
+        None => request.clone().with_token(crate::trust::read_token(dir)),
+    };
+    connect_and_send(dir, id, &sent).await
+}
+
+/// The body of [`request`], for the wrappers that add a token first (and so
+/// cannot call it without shadowing their own `request` argument).
+async fn connect_and_send(dir: &Path, id: &str, request: &Request) -> Result<Response, String> {
     let stream = connect(dir, id).await?;
     round_trip(stream, request).await
 }
 
 /// The same round trip to an address taken from `KELIR_SOCK`, so a process that
 /// only inherited the variable (a bash child, the `kelir bg` CLI) can talk to
-/// its session without knowing the session dir or id.
+/// its session without knowing the session dir or id. The session's token comes
+/// from `KELIR_TOKEN`, which the session exports to the same children; a
+/// request that already carries one is left alone.
 pub async fn request_value(address: &str, request: &Request) -> Result<Response, String> {
+    let sent = match &request.token {
+        Some(_) => request.clone(),
+        None => request.clone().with_token(crate::trust::token_from_env()),
+    };
     let stream = connect_value(address).await?;
-    round_trip(stream, request).await
+    round_trip(stream, &sent).await
 }
 
 async fn round_trip(stream: LocalStream, request: &Request) -> Result<Response, String> {
@@ -515,9 +619,11 @@ mod tests {
 
     /// Bind, answer one request, and return the answer.
     async fn round_trip(dir: &Path, id: &str) -> Response {
+        let trust = Arc::new(crate::trust::Trust::create(dir.to_path_buf()).unwrap());
+        let token = trust.token().to_string();
         let listener = bind(dir, id).unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
-        serve(listener, tx);
+        serve(listener, trust, tx);
         tokio::spawn(async move {
             let incoming = rx.recv().await.unwrap();
             assert_eq!(incoming.request.verb, "say");
@@ -526,9 +632,17 @@ mod tests {
                 .send(Response::ok("say", 3, "queued", json!({})))
                 .unwrap();
         });
-        request(dir, id, &Request::new("say", json!({"text": "hi"}), "ctl"))
+        request_with_token_file(dir, id, &Request::new("say", json!({"text": "hi"}), "ctl"))
             .await
-            .unwrap()
+            .unwrap_or_else(|_| {
+                // The token file is the client's route, so a failure here is
+                // the route's, not the listener's: prove the token matched.
+                assert_eq!(
+                    crate::trust::read_token(dir).as_deref(),
+                    Some(token.as_str())
+                );
+                panic!("round trip failed")
+            })
     }
 
     #[tokio::test]
@@ -653,15 +767,18 @@ mod tests {
     }
 
     /// `KELIR_SOCK` alone must be enough to reach the session: `kelir bg` has
-    /// nothing else to go on inside a bash call.
+    /// nothing else to go on inside a bash call. The token comes with it
+    /// (`KELIR_TOKEN`), which is what makes the report acceptable (STEER-7).
     #[tokio::test]
     async fn the_exported_socket_value_reaches_the_session() {
         let id = "ses_ipc_value";
         let dir = temp_dir("value").join(id);
         std::fs::create_dir_all(&dir).unwrap();
+        let trust = Arc::new(crate::trust::Trust::create(dir.clone()).unwrap());
+        let token = trust.token().to_string();
         let listener = bind(&dir, id).unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
-        serve(listener, tx);
+        serve(listener, trust, tx);
         tokio::spawn(async move {
             if let Some(incoming) = rx.recv().await {
                 assert_eq!(incoming.request.verb, "bg");
@@ -669,11 +786,51 @@ mod tests {
                 let _ = incoming.reply.send(Response::ok("bg", 4, "now", json!({})));
             }
         });
-        let answer = request_value(&value(&dir, id), &Request::new("bg", json!({}), "job"))
-            .await
-            .unwrap();
+        let answer = request_value(
+            &value(&dir, id),
+            &Request::new("bg", json!({}), "job").with_token(Some(token.clone())),
+        )
+        .await
+        .unwrap();
         assert!(answer.ok);
         assert_eq!(answer.seq, Some(4));
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// The socket half of STEER-7: a request with no token, or another
+    /// session's, is answered and refused at the listener — the session never
+    /// sees it, so it cannot act on it or log it.
+    #[tokio::test]
+    async fn an_unauthenticated_request_never_reaches_the_session() {
+        let id = "ses_ipc_token";
+        let dir = temp_dir("token").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let trust = Arc::new(crate::trust::Trust::create(dir.clone()).unwrap());
+        let listener = bind(&dir, id).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
+        serve(listener, trust, tx);
+        let seen = tokio::spawn(async move {
+            // Nothing should ever arrive; the test ends the task.
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .ok()
+                .flatten()
+                .map(|incoming| incoming.request.verb)
+        });
+
+        for request in [
+            Request::new("say", json!({"text": "hi"}), "ctl"),
+            Request::new("say", json!({"text": "hi"}), "ctl")
+                .with_token(Some("a-token-from-another-session".into())),
+            Request::new("bg", json!({}), "job"),
+        ] {
+            let answer = super::request(&dir, id, &request).await.unwrap();
+            assert!(!answer.ok, "{answer:?}");
+            let error = answer.error.unwrap_or_default();
+            assert!(error.contains("refused"), "{error}");
+            assert!(!error.contains("a-token-from-another-session"));
+        }
+        assert_eq!(seen.await.unwrap(), None, "the session saw the request");
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 }

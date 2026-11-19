@@ -42,7 +42,11 @@ pub async fn ctl(args: CtlArgs) -> u8 {
     let mut last: Option<(String, String)> = None;
     for id in &candidates {
         let dir = paths::session_dir(id);
-        match ipc::request(&dir, id, &request).await {
+        // The token comes from the session's own `<session dir>/token`, which
+        // only its owner can read (STEER-7): a human's terminal knows which
+        // session it is steering, so it reads that file rather than the
+        // environment a tool child would get.
+        match ipc::request_with_token_file(&dir, id, &request).await {
             Ok(response) => {
                 println!("{}", response.line());
                 return if response.ok { 0 } else { 1 };

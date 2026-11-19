@@ -57,7 +57,7 @@ fn snapshot(app: &mut App) -> String {
 
 fn new_app() -> App {
     let (to_tui, verbs) = channels();
-    App::new(60, VIEWPORT_HEIGHT as usize, to_tui, verbs)
+    App::new(60, VIEWPORT_HEIGHT as usize, to_tui, verbs, String::new())
 }
 
 /// Every OSC 7501 record in a byte stream, exactly as it went out. Herdr

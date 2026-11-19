@@ -383,6 +383,8 @@ pub struct App {
     pub quit: bool,
     to_tui: mpsc::UnboundedSender<UiEvent>,
     verbs: mpsc::UnboundedSender<Incoming>,
+    /// The session's socket token, carried into every verb the UI sends.
+    token: String,
 }
 
 impl App {
@@ -391,6 +393,7 @@ impl App {
         height: usize,
         to_tui: mpsc::UnboundedSender<UiEvent>,
         verbs: mpsc::UnboundedSender<Incoming>,
+        token: String,
     ) -> Self {
         let width = width.max(1);
         Self {
@@ -409,6 +412,7 @@ impl App {
             quit: false,
             to_tui,
             verbs,
+            token,
         }
     }
 
@@ -615,9 +619,21 @@ impl App {
     /// Send one action through the session's verb channel — the same channel
     /// the socket feeds, logged and answered the same way.
     pub fn dispatch(&mut self, action: &Action) {
-        let request = Request::new(action.verb(), action.args(), "tui");
+        // The UI runs inside the session, so it carries the session's own token
+        // from memory (STEER-7): it goes through the same channel the socket
+        // feeds, which is where every verb is authenticated.
+        let request =
+            Request::new(action.verb(), action.args(), "tui").with_token(Some(self.token.clone()));
         let (reply, answer) = oneshot::channel();
-        if self.verbs.send(Incoming { request, reply }).is_err() {
+        if self
+            .verbs
+            .send(Incoming {
+                request,
+                reply,
+                action: None,
+            })
+            .is_err()
+        {
             // The session is gone; there is nothing left to drive.
             self.quit = true;
             return;
@@ -901,6 +917,7 @@ pub fn start(
     verbs: mpsc::UnboundedSender<Incoming>,
     banner: &[String],
     cap: Option<u32>,
+    token: String,
 ) -> std::io::Result<Tui> {
     let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, VIEWPORT_HEIGHT));
     let terminal = ratatui::try_init_with_options(ratatui::TerminalOptions {
@@ -919,6 +936,7 @@ pub fn start(
         height.min(VIEWPORT_HEIGHT) as usize,
         to_tui,
         verbs,
+        token,
     );
     for line in banner {
         app.push_text(line);
@@ -1141,7 +1159,13 @@ mod tests {
     fn app_of_width(width: usize) -> App {
         let (to_tui, _rx) = mpsc::unbounded_channel();
         let (verbs, _vrx) = mpsc::unbounded_channel();
-        App::new(width, VIEWPORT_HEIGHT as usize, to_tui, verbs)
+        App::new(
+            width,
+            VIEWPORT_HEIGHT as usize,
+            to_tui,
+            verbs,
+            String::new(),
+        )
     }
 
     #[test]
@@ -1583,7 +1607,7 @@ mod tests {
     async fn submitting_a_line_sends_the_verb_and_echoes_it() {
         let (to_tui, _rx) = mpsc::unbounded_channel();
         let (verbs, mut vrx) = mpsc::unbounded_channel();
-        let mut app = App::new(60, 8, to_tui, verbs);
+        let mut app = App::new(60, 8, to_tui, verbs, String::new());
 
         app.submit("fix the test");
         let incoming = vrx.try_recv().expect("a say was sent");
@@ -1606,7 +1630,7 @@ mod tests {
     async fn ctrl_c_stops_and_a_second_within_a_second_quits() {
         let (to_tui, _rx) = mpsc::unbounded_channel();
         let (verbs, mut vrx) = mpsc::unbounded_channel();
-        let mut app = App::new(60, 8, to_tui, verbs);
+        let mut app = App::new(60, 8, to_tui, verbs, String::new());
         app.press(Press::CtrlC);
         assert_eq!(vrx.try_recv().unwrap().request.verb, "stop");
         app.press(Press::CtrlC);

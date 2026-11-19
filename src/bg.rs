@@ -404,6 +404,9 @@ pub struct Launch<'a> {
     pub job: Option<String>,
     /// The session socket, exported to the command as `KELIR_SOCK`.
     pub sock: Option<String>,
+    /// The session's socket token, exported to the command as `KELIR_TOKEN`
+    /// (STEER-7): a job that reports itself over the socket must carry it.
+    pub token: Option<String>,
     /// The directory the command runs in. The shim is started there and the
     /// command inherits it, so a `--cwd` session (and a resumed session's
     /// recorded cwd) is the directory its commands see (M4 review F2).
@@ -452,6 +455,13 @@ pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> 
     }
     if let Some(sock) = &launch.sock {
         command.arg("--sock").arg(sock);
+    }
+    // The token goes through the environment, never the argv (STEER-7): a
+    // command line is world-readable on Linux (`/proc/<pid>/cmdline`) and a
+    // token in it would be a token anyone could read. The shim passes its own
+    // environment on to the command it starts, so nothing else is needed.
+    if let Some(token) = &launch.token {
+        command.env(crate::trust::TOKEN_ENV, token);
     }
     // The command inherits this directory; the shim sets nothing of its own.
     if let Some(cwd) = &launch.cwd {
@@ -517,6 +527,10 @@ pub struct SpawnRequest {
     pub job: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sock: Option<String>,
+    /// The token the client holds; the session compares it with its own before
+    /// it starts anything (STEER-7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
     /// The directory the client was in: a job started inside a call runs where
     /// the call does, and the session is not there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -535,6 +549,7 @@ impl SpawnRequest {
             call: launch.call.clone(),
             job: launch.job.clone(),
             sock: launch.sock.clone(),
+            token: launch.token.clone(),
             cwd: launch.cwd.as_ref().map(|cwd| path_string(cwd)),
         }
     }
@@ -553,6 +568,7 @@ impl SpawnRequest {
             call: self.call.clone(),
             job: self.job.clone(),
             sock: self.sock.clone(),
+            token: self.token.clone(),
             cwd: self.cwd.as_ref().map(PathBuf::from),
         }
     }
@@ -875,6 +891,9 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     if let Some(sock) = &args.sock {
         command.env("KELIR_SOCK", sock);
     }
+    // `KELIR_TOKEN` is not copied here: the shim was started with it in its
+    // own environment and the command inherits that environment, so the token
+    // is never in an argv and never written to a status file (STEER-7).
     // The command inherits the shim's process group on Unix, so the whole tree
     // dies with one `killpg`; on Windows it is created suspended and assigned
     // to the job before it can run any of the user's code (M0 review N2).
@@ -1202,6 +1221,10 @@ async fn run(args: BgRunArgs) -> u8 {
             .ok()
             .map(|sock| sock.trim().to_string())
             .filter(|sock| !sock.is_empty()),
+        // ...and its token, so the report this job sends is authenticated
+        // (STEER-7). It travels to the shim on its own command line, like the
+        // socket address; it is never printed.
+        token: crate::trust::token_from_env(),
         // A job runs where the caller was, exactly like a call does (M4 review
         // F2): explicit, because on Windows the session may start the shim from
         // its own directory.
@@ -1267,6 +1290,8 @@ async fn notify(status: &Status) {
         Ok(args) => args,
         Err(_) => return,
     };
+    // `request_value` adds `KELIR_TOKEN` when the request has none (STEER-7):
+    // a report without it is refused by the session's socket.
     let request = crate::ipc::Request::new("bg", args, "job");
     let _ = crate::ipc::request_value(sock.trim(), &request).await;
 }
@@ -1486,29 +1511,61 @@ async fn wait(args: BgWaitArgs) -> u8 {
 /// whatever inherited the pid (M4 review F5, and G1 of the round-2 review: the
 /// old check compared against the job's `started`, with two minutes of slack).
 /// A job whose shim is gone is `lost`, and [`stop_lost`] still reaches its tree.
-async fn cancel(id: &str) -> u8 {
-    let Some((dir, status)) = find(id) else {
+pub async fn cancel(id: &str) -> u8 {
+    let Some((dir, _status)) = find(id) else {
         eprintln!("kelir: no background job `{id}`");
+        return 2;
+    };
+    let mut out = Console;
+    cancel_at(&dir, id, &mut out).await
+}
+
+/// Where `cancel`'s sentences go: a human's terminal (`kelir bg cancel`), or the
+/// session's reply (`cancel` as a verb, STEER-7).
+trait CancelOut {
+    fn line(&mut self, text: String);
+    fn fail(&mut self, text: String);
+}
+
+struct Console;
+
+impl CancelOut for Console {
+    fn line(&mut self, text: String) {
+        println!("{text}");
+    }
+
+    fn fail(&mut self, text: String) {
+        eprintln!("kelir: bg cancel: {text}");
+    }
+}
+
+/// The kill itself, for one job in one `bg/` directory.
+async fn cancel_at(dir: &Path, id: &str, out: &mut dyn CancelOut) -> u8 {
+    let Some(status) = Status::read(&status_path(dir, id)) else {
+        out.fail(format!("no background job `{id}`"));
         return 2;
     };
     let status = status.observed();
     if status.settled() {
         if status.state == STATE_LOST {
-            return stop_lost(&status);
+            return stop_lost(&status, out);
         }
-        println!("{} {} (nothing to cancel)", status.id, status.state);
+        out.line(format!(
+            "{} {} (nothing to cancel)",
+            status.id, status.state
+        ));
         return 0;
     }
     // Only a pid that is provably the shim is signalled. `observed` has already
     // turned every other answer into `lost`; this is the platform that cannot
     // prove anything, and it is refused rather than guessed (G1).
     if shim_identity(&status) != ShimIdentity::Same {
-        eprintln!(
-            "kelir: bg cancel: {}: this platform cannot report process start times, so pid {} \
-             cannot be proved to be the job's shim; nothing was signalled",
+        out.fail(format!(
+            "{}: this platform cannot report process start times, so pid {} cannot be proved to \
+             be the job's shim; nothing was signalled",
             status.id,
             status.shim.map(|pid| pid.to_string()).unwrap_or_default()
-        );
+        ));
         return 1;
     }
     kill_tree(status.shim.or(status.pid).unwrap_or(0), &status.job);
@@ -1523,26 +1580,73 @@ async fn cancel(id: &str) -> u8 {
         }
         tokio::time::sleep(POLL).await;
     }
-    let mut final_status = Status::read(&status_path(&dir, &status.id)).unwrap_or(status.clone());
+    let mut final_status = Status::read(&status_path(dir, &status.id)).unwrap_or(status.clone());
     if final_status.settled() {
         // It finished on its own before the kill landed; that is the truth.
-        println!(
+        out.line(format!(
             "{} {} (it had already finished)",
             final_status.id, final_status.state
-        );
+        ));
         return 0;
     }
     final_status.state = STATE_CANCELLED.into();
     final_status.finished = Some(crate::event::now_ts());
-    match final_status.write(&status_path(&dir, &final_status.id)) {
+    match final_status.write(&status_path(dir, &final_status.id)) {
         Ok(()) => {
-            println!("{} cancelled", final_status.id);
+            out.line(format!("{} cancelled", final_status.id));
             0
         }
         Err(error) => {
-            eprintln!("kelir: bg cancel: cannot write the status file: {error}");
+            out.fail(format!("cannot write the status file: {error}"));
             1
         }
+    }
+}
+
+/// The session's `cancel` verb: the same kill, in *this session's* `bg/`, with
+/// the answer as a sentence (the client's `kelir ctl` prints it). Never a
+/// search across sessions: the caller has already proved the job is this
+/// session's own (STEER-7), so only its own `bg/` is looked at.
+pub async fn cancel_in(dir: &Path, id: &str) -> Result<String, String> {
+    if !crate::trust::valid_job_id(id) {
+        return Err(format!("`{id}` is not a job id"));
+    }
+    if Status::read(&status_path(dir, id)).is_none() {
+        return Err(format!("this session has no background job `{id}`"));
+    }
+    let mut sink = Sink::default();
+    let code = cancel_at(dir, id, &mut sink).await;
+    if code == 0 {
+        Ok(sink.text())
+    } else {
+        Err(sink.text())
+    }
+}
+
+/// The text [`cancel`] prints, collected rather than written: the session runs
+/// inside a TUI, where stdout is the terminal's.
+#[derive(Debug, Default)]
+struct Sink {
+    lines: std::cell::RefCell<Vec<String>>,
+}
+
+impl Sink {
+    fn text(&self) -> String {
+        self.lines.borrow().join("\n")
+    }
+
+    fn push(&self, text: impl Into<String>) {
+        self.lines.borrow_mut().push(text.into());
+    }
+}
+
+impl CancelOut for Sink {
+    fn line(&mut self, text: String) {
+        self.push(text);
+    }
+
+    fn fail(&mut self, text: String) {
+        self.push(text);
     }
 }
 
@@ -1553,23 +1657,21 @@ async fn cancel(id: &str) -> u8 {
 /// own pid on Windows. When nothing can be proved it says exactly what it could
 /// not do, and signals nothing (M4 review round 2, G2).
 #[cfg(unix)]
-fn stop_lost(status: &Status) -> u8 {
+fn stop_lost(status: &Status, out: &mut dyn CancelOut) -> u8 {
     let Some(shim) = status.shim.filter(|pid| *pid != 0) else {
-        eprintln!(
-            "kelir: bg cancel: {} is lost and records no shim pid; there is nothing to reach \
-             its tree by",
+        out.fail(format!(
+            "{} is lost and records no shim pid; there is nothing to reach its tree by",
             status.id
-        );
+        ));
         return 1;
     };
     // A live process with the shim's pid that is not the shim is a recycled
     // pid: its group is somebody else's.
     if process_alive(shim) && shim_identity(status) != ShimIdentity::Same {
-        eprintln!(
-            "kelir: bg cancel: {} is lost and pid {shim} now belongs to another process; \
-             nothing was signalled",
+        out.fail(format!(
+            "{} is lost and pid {shim} now belongs to another process; nothing was signalled",
             status.id
-        );
+        ));
         return 1;
     }
     match crate::proc::group_members(shim) {
@@ -1578,41 +1680,41 @@ fn stop_lost(status: &Status) -> u8 {
             // reused while a group with that number still has a member, so this
             // group is the job's tree and nothing else's.
             kill_tree(shim, &status.job);
-            println!(
+            out.line(format!(
                 "{} lost (its shim is gone; stopped the {} process(es) still in its group)",
                 status.id,
                 members.len()
-            );
+            ));
             0
         }
         // Empty, or a platform that cannot list the group.
         Some(_) => {
-            println!("{} lost (nothing to cancel)", status.id);
+            out.line(format!("{} lost (nothing to cancel)", status.id));
             0
         }
         None => {
-            eprintln!(
-                "kelir: bg cancel: {} is lost and this platform cannot list its process group; \
-                 nothing was signalled",
+            out.fail(format!(
+                "{} is lost and this platform cannot list its process group; nothing was \
+                 signalled",
                 status.id
-            );
+            ));
             1
         }
     }
 }
 
 #[cfg(windows)]
-fn stop_lost(status: &Status) -> u8 {
+fn stop_lost(status: &Status, out: &mut dyn CancelOut) -> u8 {
     // First the job object: a live handle somewhere (another process in the
     // tree) keeps the name, and terminating the job is exact.
     if let Some(name) = status.job.as_deref()
         && let Some(job) = crate::proc::win::Job::open(name)
     {
         job.terminate_job();
-        println!(
+        out.line(format!(
             "{} lost (its shim is gone; terminated the job object holding its tree)",
             status.id
-        );
+        ));
         return 0;
     }
     // Then the command's own pid, proved by the start time the shim recorded:
@@ -1622,47 +1724,46 @@ fn stop_lost(status: &Status) -> u8 {
         ShimIdentity::Same => {
             let pid = status.pid.unwrap_or(0);
             let killed = crate::proc::terminate_tree(pid);
-            println!(
+            out.line(format!(
                 "{} lost (its shim is gone; stopped {killed} process(es) from its recorded pid)",
                 status.id
-            );
+            ));
             0
         }
         ShimIdentity::Different => {
-            eprintln!(
-                "kelir: bg cancel: {} is lost and its command's pid {} now belongs to another \
-                 process; nothing was signalled",
+            out.fail(format!(
+                "{} is lost and its command's pid {} now belongs to another process; nothing was \
+                 signalled",
                 status.id,
                 status.pid.map(|pid| pid.to_string()).unwrap_or_default()
-            );
+            ));
             1
         }
         ShimIdentity::NoRecord => {
-            eprintln!(
-                "kelir: bg cancel: {} is lost and records no command pid and start time, so \
-                 there is nothing to prove its tree by; nothing was signalled",
+            out.fail(format!(
+                "{} is lost and records no command pid and start time, so there is nothing to \
+                 prove its tree by; nothing was signalled",
                 status.id
-            );
+            ));
             1
         }
         ShimIdentity::NoPlatform => {
-            eprintln!(
-                "kelir: bg cancel: {} is lost and this platform cannot report start times, so \
-                 its tree cannot be proved; nothing was signalled",
+            out.fail(format!(
+                "{} is lost and this platform cannot report start times, so its tree cannot be \
+                 proved; nothing was signalled",
                 status.id
-            );
+            ));
             1
         }
     }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn stop_lost(status: &Status) -> u8 {
-    eprintln!(
-        "kelir: bg cancel: {} is lost and this platform cannot reach a job's tree; nothing was \
-         signalled",
+fn stop_lost(status: &Status, out: &mut dyn CancelOut) -> u8 {
+    out.fail(format!(
+        "{} is lost and this platform cannot reach a job's tree; nothing was signalled",
         status.id
-    );
+    ));
     1
 }
 

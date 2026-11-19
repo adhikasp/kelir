@@ -46,6 +46,8 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
+    # STEER-7: the session token's randomness (BCryptGenRandom).
+    "Win32_Security_Cryptography",
     "Win32_System_Console",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
@@ -53,6 +55,9 @@ windows-sys = { version = "0.59", features = [
     # The concurrency governor's advisory slot locks.
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    # STEER-7: the session pipe's owner-only DACL, read back to prove it.
+    "Win32_Security_Authorization",
+    "Win32_System_SystemServices",
 ] }
 
 [dev-dependencies]

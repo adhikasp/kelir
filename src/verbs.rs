@@ -79,6 +79,12 @@ pub enum Verb {
     /// boundary it can get (and immediately when the session is idle); the wake
     /// message it records is the one that starts a turn.
     Bg(Box<crate::bg::Status>),
+    /// `cancel <id>`: kill one of this session's background jobs and record it
+    /// `cancelled` (STEER-7). A job id the session did not start is refused
+    /// before it gets here.
+    Cancel {
+        id: String,
+    },
     End,
 }
 
@@ -86,7 +92,11 @@ impl Verb {
     /// Where the verb is meant to apply; this is what the `verb` event says.
     pub fn scope(&self) -> &'static str {
         match self {
-            Verb::Say { now: true, .. } | Verb::Stop { .. } | Verb::End | Verb::Bg(..) => "now",
+            Verb::Say { now: true, .. }
+            | Verb::Stop { .. }
+            | Verb::End
+            | Verb::Bg(..)
+            | Verb::Cancel { .. } => "now",
             Verb::Say { .. } => "queued",
             Verb::Later { .. } => "turn_end",
             Verb::Model { .. }
@@ -96,12 +106,24 @@ impl Verb {
         }
     }
 
+    /// Is this verb an *action* rather than a message? An action does its work
+    /// and starts nothing: a `cancel` kills a job and must still be applied when
+    /// no boundary will ever come (an idle session), and it must never be
+    /// dropped where messages are taken out of the queue (STEER-7).
+    pub fn is_action(&self) -> bool {
+        matches!(self, Verb::Cancel { .. })
+    }
+
     /// Does it apply at this boundary?
     pub fn applies_at(&self, boundary: Boundary) -> bool {
         match self {
-            // `say`, `stop` and a job's own report take the first boundary they
-            // can get.
-            Verb::Say { .. } | Verb::Stop { .. } | Verb::End | Verb::Bg(..) => true,
+            // `say`, `stop`, `cancel` and a job's own report take the first
+            // boundary they can get.
+            Verb::Say { .. }
+            | Verb::Stop { .. }
+            | Verb::End
+            | Verb::Bg(..)
+            | Verb::Cancel { .. } => true,
             Verb::Later { .. } => boundary == Boundary::TurnEnd,
             Verb::Model { .. }
             | Verb::Tools { .. }
@@ -159,6 +181,25 @@ impl Scheduler {
     /// The verbs still pending (for a reply or a test).
     pub fn peek(&self) -> &[Pending] {
         &self.pending
+    }
+
+    /// Take the pending verbs `keep` selects, leaving the rest in order.
+    ///
+    /// A `cancel` is an action, not a message: it must not start a turn and it
+    /// must not be dropped where verbs leave the queue without a boundary
+    /// (STEER-7).
+    pub fn take_where(&mut self, mut keep: impl FnMut(&Verb) -> bool) -> Vec<Pending> {
+        let mut taken = Vec::new();
+        let mut rest = Vec::with_capacity(self.pending.len());
+        for pending in self.pending.drain(..) {
+            if keep(&pending.verb) {
+                taken.push(pending);
+            } else {
+                rest.push(pending);
+            }
+        }
+        self.pending = rest;
+        taken
     }
 }
 
@@ -262,10 +303,27 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             }
             Ok(Verb::Bg(Box::new(status)))
         }
+        // `cancel <id>`: kill one of this session's jobs. Whether the id is
+        // this session's own is checked before parsing (`trust::check_job`), so
+        // a refusal is recorded with its reason.
+        "cancel" => Ok(Verb::Cancel {
+            id: cancel_id(args)?,
+        }),
         other => Err(format!(
-            "unknown verb `{other}` (say, later, stop, model, tools, compact, skills, end)"
+            "unknown verb `{other}` (say, later, stop, model, tools, compact, skills, end, cancel)"
         )),
     }
+}
+
+/// The job id of a `cancel` request: the argument itself, or `{"id": …}`.
+pub fn cancel_id(args: &Value) -> Result<String, String> {
+    let id = string_arg(args, "id")
+        .or_else(|| string_arg(args, "job"))
+        .or_else(|| args.as_str().map(str::to_string))
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "cancel: missing the job id".to_string())?;
+    Ok(id)
 }
 
 /// The flags `kelir ctl` accepts, whatever the verb. Each one becomes the
@@ -303,6 +361,9 @@ pub fn cli_args(verb: &str, words: &[String], flags: &CliFlags) -> Result<Value,
                     args
                 }
                 "model" if !text.trim().is_empty() => json!({"model": text}),
+                // `kelir ctl <session> cancel <id>` (STEER-7): the id is the
+                // one positional word.
+                "cancel" if !text.trim().is_empty() => json!({"id": text}),
                 "compact" if !text.trim().is_empty() => json!({"focus": text}),
                 _ => json!({}),
             }
