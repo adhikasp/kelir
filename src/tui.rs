@@ -1183,7 +1183,20 @@ pub struct Areas {
 /// user who cannot see whether the agent runs has nothing left), then the
 /// live rows, then the facts row, then the editor to one row.
 pub fn layout(area: Rect) -> Areas {
-    layout_of(area.width as usize, area.height as usize)
+    let mut areas = layout_of(area.width as usize, area.height as usize);
+    // The rects are built from the row count alone; move them to where the
+    // caller's area really starts (an inline viewport does not start at row 0,
+    // and drawing at row 0 would paint over the scrollback above it).
+    for row in [
+        &mut areas.live,
+        &mut areas.state,
+        &mut areas.editor,
+        &mut areas.facts,
+    ] {
+        row.x = area.x;
+        row.y += area.y;
+    }
+    areas
 }
 
 fn layout_of(width: usize, height: usize) -> Areas {
@@ -2273,6 +2286,24 @@ mod tests {
             final_text: String::new(),
         });
         assert!(!app.tick(Instant::now()));
+    }
+
+    /// An inline viewport does not start at row 0: the rows must be positioned
+    /// from the frame's own origin, or every row is clipped (a real terminal
+    /// showed a stale screen because of exactly this).
+    #[test]
+    fn every_row_is_positioned_from_the_frames_own_origin() {
+        for top in [0u16, 6, 40] {
+            let areas = layout(Rect::new(3, top, 80, 8));
+            assert_eq!(areas.live.y, top, "live");
+            assert_eq!(areas.state.y, top + 3, "state");
+            assert_eq!(areas.editor.y, top + 4, "editor");
+            assert_eq!(areas.facts.y, top + 7, "facts");
+            for row in [areas.live, areas.state, areas.editor, areas.facts] {
+                assert_eq!(row.x, 3, "x follows the frame");
+                assert!(row.bottom() <= top + 8, "row inside the frame: {row:?}");
+            }
+        }
     }
 
     #[test]
