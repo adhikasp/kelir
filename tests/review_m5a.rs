@@ -2,8 +2,12 @@
 //!
 //! Tests that pass pin behaviour the milestone promises. The ones that once
 //! carried `#[ignore = "FINDING Fn: ..."]` each proved one defect in
-//! docs/reviews/m5a-review.md; the M5-A fixes job un-ignored them, and they now
-//! pass unchanged (no assertion weakened).
+//! docs/reviews/m5a-review.md; the M5-A fixes job un-ignored them and they now
+//! pass. Where a fix made the old assertion wrong rather than the code, the
+//! assertion was corrected and says so in place (the 3 MB file is now capped,
+//! F7; an edit back is now announced, F1); nothing was loosened. Two tests also
+//! wait for `tool_started` instead of `tool_settled`, because the watcher runs at
+//! the boundary after the call and writing the file afterwards raced it.
 //! Every directory is a tempdir: nothing here reads or writes a real home.
 
 mod support;
@@ -357,9 +361,7 @@ async fn a_huge_instruction_file_still_starts_and_is_recorded() {
     // whole, and the truncation is visible in the prompt and in the log. Before
     // the fix the system prompt was 3.1 MB.
     let tree = Tree::new();
-    let big = "rule: keep steps small and verified
-"
-    .repeat(3 * 1024 * 1024 / 36);
+    let big = "rule: keep steps small and verified\n".repeat(3 * 1024 * 1024 / 36);
     write(&tree.repo().join("AGENTS.md"), &big);
     let started = std::time::Instant::now();
     let (run, first) = run_in(&tree, &tree.repo(), "").await;
