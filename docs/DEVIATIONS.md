@@ -124,11 +124,36 @@ wait itself in `session::stream`. Where this differs from the brief:
   notification subscription or an open handle on a process that is already hosting
   someone's desktop, and the recorded set is a handful of small files — one base prompt,
   a few instruction files, one file per skill. The hash is also *exact*: an `mtime` that
-  changed while the body did not is not news, and a file edited back to a body the
-  context already carries (the system prompt's own, or an earlier `source` message's) is
-  not a duplicate. `src/sources.rs::Watch` holds that state; a resumed session rebuilds
-  it from the list `session_started` recorded, so it reports the edits a live session
-  would have.
+  changed while the body did not is not news. `src/sources.rs::Watch` holds that state
+  and a resumed session rebuilds it from the log's `sources[]` **and** its `source`
+  events, so it reports exactly the edits a live session would have and no repeats
+  (M5-A fixes F8).
+- **The watcher remembers one hash per source: the one the context currently carries.**
+  Not "every hash it ever carried" (M5-A fixes F1). A source edited A→B→A is announced
+  as A again, because the model's latest word on the file before that is B, and a rule
+  that is "no longer on disk" must not be the last thing the model was told. The same
+  holds after a `compact` folds the B message into a summary: the folded message is no
+  longer in the context, so the next boundary says what the file holds now even when its
+  bytes did not change. The `skills` verb follows the same rule against the last
+  `source` event of that name (F1b).
+- **One hashing rule for every reader: the whole file.** The render, the watcher and the
+  `skills` verb all read a source through `sources::read_source` — UTF-8 BOM dropped,
+  invalid UTF-8 decoded lossily and noted, size capped with a visible truncation notice —
+  and hash exactly those bytes. A skill's `source` message therefore carries its front
+  matter too (so its `description` arrives) and a skill added by `skills --path` is not
+  announced a second time by the watcher (F3, N5).
+- **`sources[]` gains a `kind`.** The spec's `{name, path, hash}` cannot tell a skill
+  directory called `notes.md` from an instruction file, so the log records what the
+  source was *where it was found*: `prompt`, `instruction` or `skill`. A resume reads it
+  back instead of guessing from the name (F9); a log written before this fix has no
+  `kind` and is read back from the name as before.
+- **The embedded base prompt records an empty `path`, not the string `embedded`.** A
+  sentinel is a path a reader (or the watcher) will try to open: any file named
+  `embedded` in the cwd became a bogus `source` message. `SourcePath` is a typed
+  `Embedded | File(PathBuf)` in the code, the log's empty string says the same, and a
+  config `prompt = "file"` records that file's real path (F2, F2b). The base prompt's
+  own `sources[]` entry also carries `kind: "prompt"`; its `source` events keep the kind
+  `instruction` (the spec's list has no `prompt`).
 - **Skills are recorded in `session_started.sources[]`.** The spec says `sources[]`
   carries `{name, path, hash}` "for everything that went in", and a skill does go in — as
   a *pull* target. Recording it is what lets a skill edited mid-session arrive as a
@@ -138,20 +163,35 @@ wait itself in `session::stream`. Where this differs from the brief:
 - **The base prompt's own edit arrives as `kind: "instruction"`.** The spec's `source`
   kinds (`hint`, `skill`, `instruction`, `memory`, `attachment`, `channel`) have no
   `prompt`, so the base prompt uses `instruction` and is told apart by its name,
-  `prompt.md`. The embedded default records its `path` as `embedded`, so a reader can
-  never mistake it for a project file that no longer exists.
+  `prompt.md`.
 - **`KELIR_HOME` overrides the home directory** (`paths::home`, after which `HOME` and
   `%USERPROFILE%` follow as before). Sources are discovered in `~/.claude/skills`, so a
   test run on a developer's machine would otherwise depend on that machine's skills; the
   test harness points `KELIR_HOME` at its own temp dir. It is the same kind of environment
   override as `KELIR_STATE_DIR`/`KELIR_CONFIG_DIR`, and nothing else reads it.
-- **The test harness scrubs `KELIR_SESSION_DIR`, `KELIR_SOCK`, `KELIR_CALL_ID` and
-  `KELIR_BIN` before every spawn.** kelir dogfoods itself, so a suite run from inside a
-  kelir session inherited that session's own job directory and socket: `bg out` read the
-  *session's* jobs, and a test could report (or cancel) a job in the session running it.
-  `e2e_m4`'s three process tests and `review_m4`'s R7 failed for exactly that reason at
-  clean HEAD. This is test infrastructure, not shipped behaviour, but it is recorded here
+- **The test harness scrubs every `KELIR_*` variable before every spawn** (and
+  `TERM_PROGRAM`/`HC_TERMINAL_ID`, the pane markers), *before* the test's own environment
+  goes on. kelir dogfoods itself, so a suite run from inside a kelir session inherited
+  that session's own job directory and socket: `bg out` read the *session's* jobs, and a
+  test could report (or cancel) a job in the session running it. `KELIR_PROMOTE_AFTER`,
+  `KELIR_HERDR`, `KELIR_CRASH_AT` and `KELIR_TEST_PANIC` were the same hazard: an
+  ambient value in a developer shell silently changed what the suite exercised (M5-A
+  fixes N2). This is test infrastructure, not shipped behaviour, but it is recorded here
   because it changes what the suite proves about process isolation.
+- **Instruction discovery walks up until the repository root or the home directory.**
+  The spec says "walking up from the cwd"; the brief for M5-A says "stops at the repo root
+  or home" (N3). Every `AGENTS.md`/`CLAUDE.md` found on the way is kept, nearest first —
+  a monorepo's root rules and a subdirectory's rules are both in the prompt (F4) — but a
+  file planted in `/tmp` or above the home directory is not.
+- **Sources are capped and every cap is stated.** One instruction file or skill body is
+  read up to 64 KiB, all instruction files together up to 256 KiB; going over cuts the
+  text on a char boundary and appends `[kelir: truncated; N bytes on disk, the first M
+  shown]`, and the log gets one `error` with `where: "source"` per file (F7). A file is
+  skipped rather than half-read when it does not fit the *total* budget, so the watcher
+  re-reads it the same way and cannot announce it again. A non-UTF-8 file is read lossily
+  with the same kind of note (F5), a `SKILL.md` without valid front matter is skipped
+  with its reason (F6), and a tracked source deleted mid-session is one note, not a
+  `source` event and not silence (N4).
 
 ## Models metadata comes from the provider (2026-11-19)
 

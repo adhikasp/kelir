@@ -543,6 +543,9 @@ pub async fn run_task(
     std::fs::write(&config, test_config(extra_config)).unwrap();
 
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_kelir"));
+    // Inherited `KELIR_*`/`TERM_PROGRAM` first, the test's own environment
+    // second: the scrub must never undo what the test deliberately set.
+    scrub_session_env(&mut command);
     command
         .args(args)
         .current_dir(&cwd)
@@ -565,7 +568,6 @@ pub async fn run_task(
     for (key, value) in env {
         command.env(key, value);
     }
-    scrub_session_env(&mut command);
 
     let mut child = command.spawn().expect("spawn kelir");
     if let Some(input) = stdin {
@@ -1188,6 +1190,7 @@ impl Sandbox {
     /// has to create the process with flags of its own (a console-less parent).
     pub fn kelir_command(&self, base_url: &str) -> std::process::Command {
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_kelir"));
+        scrub_session_env_std(&mut command);
         command
             .current_dir(&self.cwd)
             .env("KELIR_CONFIG", &self.config)
@@ -1197,7 +1200,6 @@ impl Sandbox {
             .env("KELIR_HOME", self.state.join("home"))
             .env("OPENROUTER_API_KEY", "test-openrouter-key")
             .env("KELIR_GO_API_KEY", "test-go-key");
-        scrub_session_env_std(&mut command);
         command
     }
 
@@ -1249,25 +1251,56 @@ impl Sandbox {
     }
 }
 
-/// The session variables kelir exports to a bash child. A test that runs from
-/// inside a kelir session (kelir dogfoods itself) would otherwise hand its own
-/// `bg/` directory and socket to the child, and `bg out` would read the
-/// session's jobs instead of the test's.
-const SESSION_ENV: [&str; 4] = [
-    "KELIR_SESSION_DIR",
-    "KELIR_SOCK",
-    "KELIR_CALL_ID",
-    "KELIR_BIN",
-];
+/// The variables a child kelir must not inherit from the kelir session (or the
+/// shell) that runs the suite.
+///
+/// `KELIR_SESSION_DIR`/`KELIR_SOCK`/`KELIR_CALL_ID`/`KELIR_BIN` are what kelir
+/// exports to a bash child: kelir dogfoods itself, so a suite run from inside a
+/// kelir session would otherwise hand its own `bg/` directory and socket to the
+/// child, and `bg out` would read *that* session's jobs (M4 review).
+/// `KELIR_PROMOTE_AFTER` would silently change promotion timing, `KELIR_HERDR`
+/// and `TERM_PROGRAM` would make the binary think it is in a pane, and
+/// `KELIR_CRASH_AT`/`KELIR_TEST_PANIC` are test hooks (M5-A fixes N2). The rest
+/// of `KELIR_*` is removed as well, by prefix, so a new variable cannot quietly
+/// leak in. `HC_TERMINAL_ID` (the Herdr marker) goes too.
+fn scrubbed_keys() -> Vec<String> {
+    let mut keys: Vec<String> = std::env::vars_os()
+        .map(|(key, _)| key.to_string_lossy().into_owned())
+        .filter(|key| key.starts_with("KELIR_"))
+        .collect();
+    for key in ["TERM_PROGRAM", "HC_TERMINAL_ID"] {
+        keys.push(key.to_string());
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
 
 fn scrub_session_env(command: &mut tokio::process::Command) {
-    for key in SESSION_ENV {
+    for key in scrubbed_keys() {
         command.env_remove(key);
     }
 }
 
 fn scrub_session_env_std(command: &mut std::process::Command) {
-    for key in SESSION_ENV {
+    for key in scrubbed_keys() {
+        command.env_remove(key);
+    }
+}
+
+/// The same scrub for a command a test builds itself (either flavour).
+pub fn scrub_std(command: &mut std::process::Command) {
+    scrub_session_env_std(command);
+}
+
+pub fn scrub_tokio(command: &mut tokio::process::Command) {
+    scrub_session_env(command);
+}
+
+/// The `portable_pty` flavour of the same scrub, for the TUI tests (which
+/// spawn through a pty rather than a `Command`).
+pub fn scrub_pty(command: &mut portable_pty::CommandBuilder) {
+    for key in scrubbed_keys() {
         command.env_remove(key);
     }
 }
@@ -1279,6 +1312,7 @@ fn live_command(
     base_url: &str,
 ) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_kelir"));
+    scrub_session_env(&mut command);
     command
         .current_dir(cwd)
         .env("KELIR_CONFIG", config)
@@ -1288,7 +1322,6 @@ fn live_command(
         .env("KELIR_HOME", state.join("home"))
         .env("OPENROUTER_API_KEY", "test-openrouter-key")
         .env("KELIR_GO_API_KEY", "test-go-key");
-    scrub_session_env(&mut command);
     command
 }
 

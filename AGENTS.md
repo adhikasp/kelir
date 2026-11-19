@@ -83,3 +83,12 @@ files) because several jobs edit `session.rs`/`config.rs`. Never kill processes 
 
 Every job that adds or changes a config key, CLI flag, env var, verb, event, file location or TUI key updates
 `docs/reference/` (see docs/tasks/STEER-11.md) in the same commit series; the drift test enforces it once it exists.
+
+## Never broadcast console signals (hard rule)
+
+Tests, scripts and tools must never send a console control event to process-group 0 or to a group they share with the
+session that runs them (`GenerateConsoleCtrlEvent(_, 0)`, `kill(0, SIGINT)`, `kill -INT 0`): it is delivered to every process on
+that console, including the kelir/agent session running the tests (it killed two dogfood sessions with exit 0xC000013A on
+2026-11-19). Start the child under test in its own process group (`CREATE_NEW_PROCESS_GROUP` on Windows, `setsid`/`setpgid` on
+Unix) and signal only that pid/group; if Windows console Ctrl-C delivery cannot be tested safely, cover it with a unit test of
+the handler plus a Unix-only e2e.
