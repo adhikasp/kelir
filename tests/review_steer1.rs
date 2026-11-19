@@ -272,17 +272,24 @@ fn a_cache_dated_in_the_future_does_not_lock_the_fetch_out() {
 /// configured window, and at the default when no metadata answered. The e2e
 /// arithmetic (a `window = 100` session that really compacts) is
 /// `e2e_m3::the_auto_trigger_compacts_at_eighty_percent_of_the_window`.
+///
+/// STEER-6 added an absolute soft target (`compact_at_tokens`, default 150K) on
+/// top of the fraction; these assertions pass `0` for it, which is the "no cap"
+/// case, so they still describe the window arithmetic alone. What the two
+/// combine to is `compact::tests::the_soft_target_caps_a_large_window` and
+/// `e2e_steer6::the_soft_target_compacts_a_big_window_early`.
 #[test]
 fn the_auto_trigger_scales_with_the_window() {
     use kelir::compact::{DEFAULT_WINDOW, should_auto};
+    const NO_TARGET: u64 = 0;
     // 80 % of 1 048 576 is 838 860.8: the first count that triggers is 838 861.
-    assert!(!should_auto(1_048_576, 0.8, 838_860));
-    assert!(should_auto(1_048_576, 0.8, 838_861));
+    assert!(!should_auto(1_048_576, 0.8, NO_TARGET, 838_860));
+    assert!(should_auto(1_048_576, 0.8, NO_TARGET, 838_861));
     // A small configured window triggers proportionally earlier.
-    assert!(!should_auto(8_192, 0.8, 6_553));
-    assert!(should_auto(8_192, 0.8, 6_554));
+    assert!(!should_auto(8_192, 0.8, NO_TARGET, 6_553));
+    assert!(should_auto(8_192, 0.8, NO_TARGET, 6_554));
     // With no metadata the default (128 000) still compacts at 102 400.
     assert_eq!(DEFAULT_WINDOW, 128_000);
-    assert!(!should_auto(DEFAULT_WINDOW, 0.8, 102_399));
-    assert!(should_auto(DEFAULT_WINDOW, 0.8, 102_400));
+    assert!(!should_auto(DEFAULT_WINDOW, 0.8, NO_TARGET, 102_399));
+    assert!(should_auto(DEFAULT_WINDOW, 0.8, NO_TARGET, 102_400));
 }

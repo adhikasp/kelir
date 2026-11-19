@@ -238,6 +238,7 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             system,
             sources,
             tools,
+            reasoning_effort,
         } => EventBody::SessionStarted {
             id,
             parent,
@@ -253,6 +254,7 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             },
             sources,
             tools,
+            reasoning_effort,
         },
         EventBody::User {
             text,
@@ -460,6 +462,12 @@ pub enum EventBody {
         sources: Vec<SourceInfo>,
         #[serde(default)]
         tools: Vec<String>,
+        /// The `reasoning_effort` sent with every request of this session, when
+        /// one is set. Recorded so the log and the request agree: the value is
+        /// part of what the provider was asked for, and a reader of a session
+        /// should not have to guess it (STEER-6).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<String>,
     },
     User {
         text: Payload,
@@ -833,6 +841,7 @@ mod tests {
             },
             sources: vec![],
             tools: vec!["bash".into(), "edit".into()],
+            reasoning_effort: None,
         }
     }
 

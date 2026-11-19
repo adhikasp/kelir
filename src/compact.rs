@@ -41,13 +41,39 @@ pub const AUTO_FRACTION: f64 = 0.8;
 /// doing; `compact_keep` in the config overrides it.
 pub const DEFAULT_KEEP: usize = 4;
 
-/// Passed the auto threshold? `at` is the fraction of the window (0.8 by
-/// default); the comparison is `>=`, so `window * at` exactly triggers.
-pub fn should_auto(window: u64, at: f64, tokens: u64) -> bool {
-    if window == 0 || !(0.0..=1.0).contains(&at) {
-        return false;
+/// Compaction is triggered once the context passes this many tokens, whatever
+/// the window is — unless the window-based trigger is smaller. A 1M-token window
+/// at 80 % is 800K tokens, and a real session passes 150K with 76 % of the
+/// context being old file reads (M5-A: 135 steps above 150K, 42.5M prompt
+/// tokens for a 300K-token job). The rate limit is charged on prompt volume, not
+/// on the price, so compacting early pays for itself.
+pub const DEFAULT_SOFT_TARGET: u64 = 150_000;
+
+/// The token count at which the auto trigger fires: the window-based threshold
+/// (`window * at`) capped by the absolute soft target. Whichever is smaller
+/// wins, so a small window keeps its fraction and a huge one still compacts at
+/// a sane size.
+pub fn auto_threshold(window: u64, at: f64, soft_target: u64) -> u64 {
+    let by_window = if window == 0 || !(0.0..=1.0).contains(&at) {
+        0
+    } else {
+        (window as f64 * at).ceil() as u64
+    };
+    match (by_window, soft_target) {
+        (0, 0) => 0,
+        (0, target) => target,
+        (by_window, 0) => by_window,
+        (by_window, target) => by_window.min(target),
     }
-    tokens >= (window as f64 * at).ceil() as u64
+}
+
+/// Passed the auto threshold? `at` is the fraction of the window (0.8 by
+/// default) and `soft_target` the absolute ceiling (0 when none); the comparison
+/// is `>=`, so the threshold exactly triggers. A threshold of 0 (no window and
+/// no target) never triggers.
+pub fn should_auto(window: u64, at: f64, soft_target: u64, tokens: u64) -> bool {
+    let threshold = auto_threshold(window, at, soft_target);
+    threshold > 0 && tokens >= threshold
 }
 
 /// A token estimate for a request: four bytes per token, rounded up, over the
@@ -286,6 +312,7 @@ mod tests {
                 },
                 sources: vec![],
                 tools: vec!["bash".into()],
+                reasoning_effort: None,
             },
         )
     }
@@ -350,17 +377,42 @@ mod tests {
 
     #[test]
     fn the_auto_trigger_is_eighty_percent_of_the_window() {
-        assert!(!should_auto(100, 0.8, 79));
-        assert!(should_auto(100, 0.8, 80));
-        assert!(should_auto(100, 0.8, 81));
-        assert!(should_auto(128_000, 0.8, 102_400));
-        assert!(!should_auto(128_000, 0.8, 102_399));
+        assert!(!should_auto(100, 0.8, 0, 79));
+        assert!(should_auto(100, 0.8, 0, 80));
+        assert!(should_auto(100, 0.8, 0, 81));
+        assert!(should_auto(128_000, 0.8, 0, 102_400));
+        assert!(!should_auto(128_000, 0.8, 0, 102_399));
         // A half trigger is configurable.
-        assert!(should_auto(1_000, 0.5, 500));
-        assert!(!should_auto(1_000, 0.5, 499));
+        assert!(should_auto(1_000, 0.5, 0, 500));
+        assert!(!should_auto(1_000, 0.5, 0, 499));
         // Nonsense never triggers.
-        assert!(!should_auto(0, 0.8, 10));
-        assert!(!should_auto(100, 1.5, 200));
+        assert!(!should_auto(0, 0.8, 0, 10));
+        assert!(!should_auto(100, 1.5, 0, 200));
+    }
+
+    #[test]
+    fn the_soft_target_caps_a_large_window() {
+        // A 1M window at 80 % is 800K; the default target compacts far earlier.
+        assert_eq!(auto_threshold(1_048_576, 0.8, DEFAULT_SOFT_TARGET), 150_000);
+        assert!(!should_auto(1_048_576, 0.8, DEFAULT_SOFT_TARGET, 149_999));
+        assert!(should_auto(1_048_576, 0.8, DEFAULT_SOFT_TARGET, 150_000));
+    }
+
+    #[test]
+    fn a_small_window_keeps_its_fraction() {
+        // 128K * 0.8 = 102,400, well under the target: the window wins.
+        assert_eq!(auto_threshold(128_000, 0.8, DEFAULT_SOFT_TARGET), 102_400);
+        // Exactly equal: still that number, not a surprise.
+        assert_eq!(auto_threshold(200_000, 0.75, DEFAULT_SOFT_TARGET), 150_000);
+    }
+
+    #[test]
+    fn a_zero_soft_target_or_window_is_not_a_threshold() {
+        assert_eq!(auto_threshold(0, 0.8, 0), 0);
+        assert_eq!(auto_threshold(0, 0.8, 1_000), 1_000);
+        assert_eq!(auto_threshold(1_000, 0.5, 0), 500);
+        // A nonsense fraction falls back to the target rather than to "never".
+        assert_eq!(auto_threshold(1_000, 1.5, 400), 400);
     }
 
     #[test]
@@ -589,6 +641,7 @@ mod tests {
             key: Some("k".into()),
             extra_headers: BTreeMap::new(),
             reasoning_field: None,
+            reasoning_effort: None,
             session_header: None,
         };
         Client::new(cfg, "ses_1", None).unwrap()

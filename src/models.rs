@@ -33,6 +33,12 @@ pub struct ModelInfo {
     /// Whether the model accepts tool calls, when the provider states it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<bool>,
+    /// Whether the model accepts several tool calls in one assistant message.
+    /// Advertised by OpenRouter in `supported_parameters`; Go states it
+    /// nowhere, so `None` there means "kelir asks anyway" (see
+    /// [`crate::provider::build_request`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_calls: Option<bool>,
 }
 
 /// The cached answer for one provider.
@@ -150,6 +156,10 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
                         .as_ref()
                         .map(|names| names.iter().any(|name| name == "tools"))
                 });
+            let parallel_calls = model
+                .supported_parameters
+                .as_ref()
+                .map(|names| names.iter().any(|name| name == "parallel_tool_calls"));
             ModelInfo {
                 id: model.id,
                 context: model
@@ -157,6 +167,7 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
                     .or(model.limit.and_then(|limit| limit.context))
                     .filter(|context| *context > 0),
                 tools,
+                parallel_calls,
             }
         })
         .collect())

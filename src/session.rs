@@ -971,6 +971,11 @@ impl Session {
             },
             sources: prepared.system.sources.clone(),
             tools: session.tool_names.clone(),
+            // What the loop asks for, from the provider config `prepare` read
+            // (a `model` verb later swaps the client, and the request carries
+            // whatever the new provider says). `None` (config `none`) means no
+            // field is sent at all.
+            reasoning_effort: prepared.cfg.reasoning_effort(&prepared.provider_name),
         })?;
         if session.has_task {
             session.record(EventBody::User {
@@ -1778,7 +1783,14 @@ impl Session {
                     .compact_floor
                     .map(|floor| tokens > floor)
                     .unwrap_or(true);
-                if above_floor && compact::should_auto(window, self.cfg.auto_compact_at, tokens) {
+                if above_floor
+                    && compact::should_auto(
+                        window,
+                        self.cfg.auto_compact_at,
+                        self.cfg.compact_at_tokens,
+                        tokens,
+                    )
+                {
                     self.compact_request = Some(CompactRequest {
                         by: "auto",
                         focus: None,
@@ -2219,9 +2231,21 @@ impl Session {
             self.check_sources()?;
 
             let folded = crate::fold::fold(&self.events, &self.dir)?;
-            let request =
-                self.client
-                    .build(&self.model, &folded.request_messages(), &self.tool_specs());
+            // Ask for several calls in one message only when the provider says
+            // the model takes them (`models.rs`); the loop already runs a batch
+            // concurrently and appends results in call order.
+            let parallel = self
+                .models
+                .as_ref()
+                .and_then(|cache| crate::models::lookup(&cache.models, &self.model))
+                .and_then(|info| info.parallel_calls)
+                .unwrap_or(false);
+            let request = self.client.build_with(
+                &self.model,
+                &folded.request_messages(),
+                &self.tool_specs(),
+                parallel,
+            );
             let request_text = serde_json::to_string(&request.body).unwrap_or_default();
             self.step += 1;
             let step = self.step;
@@ -2976,6 +3000,7 @@ mod tests {
             window: None,
             model_windows: Default::default(),
             auto_compact_at: 0.8,
+            compact_at_tokens: crate::compact::DEFAULT_SOFT_TARGET,
             compact_prompt: String::new(),
             skills_dirs: vec![],
             compact_keep: 0,
@@ -3006,6 +3031,7 @@ mod tests {
                     key: None,
                     extra_headers: Default::default(),
                     reasoning_field: None,
+                    reasoning_effort: None,
                     session_header: None,
                 },
             );
