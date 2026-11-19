@@ -592,7 +592,6 @@ mod tests {
             "../elsewhere",
             "bg/../../elsewhere",
             "..",
-            "..\\..\\elsewhere",
             "\\\\host\\share\\x",
             "//host/share/x",
         ] {
@@ -601,8 +600,12 @@ mod tests {
                 "{bad} escaped"
             );
         }
+        // A backslash is a separator only on Windows; on Unix it is an ordinary
+        // character, so `..\..\elsewhere` is one harmless filename there and
+        // an escape here (STEER-7; the Linux gate caught the first version).
         #[cfg(windows)]
         {
+            assert!(resolve_inside(&dir.join("bg"), r"..\..\elsewhere").is_err());
             assert!(resolve_inside(&dir, r"D:\elsewhere").is_err());
             assert!(resolve_inside(&dir, r"\\?\C:\Windows").is_err());
         }
