@@ -100,7 +100,6 @@ pub fn install() {
             let mut last: Option<Instant> = None;
             loop {
                 streams.one().await;
-                listener.count.fetch_add(1, Ordering::SeqCst);
                 let now = Instant::now();
                 let twice = last
                     .map(|at| now.duration_since(at) <= DOUBLE)
@@ -112,14 +111,32 @@ pub fn install() {
                     let _ = std::io::Write::flush(&mut std::io::stderr());
                     std::process::exit(130);
                 }
-                // Set the level *before* the wakeup: a wait that checks the
-                // level and then parks must see either `true` or the
-                // notification, never neither.
-                listener.requested.store(true, Ordering::SeqCst);
-                listener.wake.notify_waiters();
+                post(listener);
             }
         });
     });
+}
+
+/// Record one interrupt: bump the count, set the level, wake the waiters. The
+/// handler calls this, and so do the unit tests — the whole point of the level
+/// is that this part is testable without a signal.
+///
+/// The order matters. The level goes up **before** the wakeup, so a wait that
+/// checks the level and then parks can see either `true` (a wait arriving
+/// later) or the notification (a wait already parked), never neither.
+fn post(listener: &'static Listener) {
+    listener.count.fetch_add(1, Ordering::SeqCst);
+    listener.requested.store(true, Ordering::SeqCst);
+    listener.wake.notify_waiters();
+}
+
+/// [`post`] on the process listener, for the unit tests.
+#[cfg(test)]
+fn post_for_tests() {
+    install();
+    if let Some(listener) = ARMED.get() {
+        post(listener);
+    }
 }
 
 /// Resolves when an interrupt is pending — **immediately** if one arrived
@@ -262,30 +279,53 @@ impl WindowsSignal for tokio::signal::windows::CtrlBreak {
 
 #[cfg(test)]
 mod tests {
-    // Never *send* this process an interrupt here: a console control event on
-    // Windows reaches every process on the console (the runner included), and a
-    // Unix `SIGINT` would end the suite. What a unit test can prove is the
-    // plumbing — the listener installs once, stays installed, and a wait that
-    // subscribes is simply pending while nothing happens. The waiting path is
+    // Never *send* this process an interrupt from these tests: a console
+    // control event on Windows reaches every process on the console (the runner
+    // included), and a Unix `SIGINT` would end the suite. What they prove is
+    // the *state machine* — the level, the wakeup and the clearing — driven
+    // through the same `post` the handler calls. The signal-to-handler half is
     // driven end to end on Unix by a real `SIGINT` to a real session:
-    // `tests/e2e_steer5.rs::an_interrupt_during_a_wait_ends_the_turn_stopped`.
+    // `tests/e2e_steer5.rs::an_interrupt_during_a_wait_ends_the_turn_stopped`
+    // and `::an_interrupt_before_the_wait_begins_is_not_lost`.
+    //
+    // The tests in this module share the process-wide listener, so they take a
+    // lock: `cargo test` runs them concurrently on several threads otherwise,
+    // and one test's `take` would clear another's level. They are
+    // `current_thread` for exactly that reason — a `std` mutex may not be held
+    // across an await on a runtime that could move the task to another worker
+    // thread, and a single-threaded runtime is also what makes "the notifier
+    // task ran" deterministic.
 
-    use super::{install, interrupted};
+    use super::{interrupted, post_for_tests};
     use std::time::Duration;
 
-    #[tokio::test]
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().await
+    }
+
+    fn clear() {
+        while super::take() {}
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn the_listener_installs_once_and_waits_are_pending_until_a_signal() {
-        install();
-        install(); // idempotent: the second call keeps the first sender
+        let _serial = serial().await;
+        super::install();
+        super::install(); // idempotent
+        clear();
         for _ in 0..3 {
             let polled = tokio::time::timeout(Duration::from_millis(20), interrupted());
             assert!(polled.await.is_err(), "nothing signalled this test");
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn a_wait_dropped_mid_poll_leaves_the_listener_alone() {
-        install();
+        let _serial = serial().await;
+        super::install();
+        clear();
         let mut wait = Box::pin(interrupted());
         assert!(
             tokio::time::timeout(Duration::from_millis(10), &mut wait)
@@ -295,5 +335,74 @@ mod tests {
         drop(wait);
         let again = tokio::time::timeout(Duration::from_millis(10), interrupted());
         assert!(again.await.is_err(), "a dropped wait poisoned the listener");
+    }
+
+    /// An interrupt raised while **nothing is waiting** is still there for the
+    /// next wait. This is the bug the Linux gate caught (STEER-5 fixes round
+    /// 2): the old edge-triggered channel dropped it, because
+    /// `watch::Sender::send` discards its value when there are no receivers and
+    /// the wait took the already-bumped value as its baseline.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_interrupt_with_no_waiter_parked_is_not_lost() {
+        let _serial = serial().await;
+        super::install();
+        clear();
+        post_for_tests();
+        // No `select!` was parked when that landed: the level alone has to
+        // answer, and it has to answer at once.
+        let answered = tokio::time::timeout(Duration::from_millis(500), interrupted()).await;
+        assert!(
+            answered.is_ok(),
+            "the interrupt was lost because no wait was parked"
+        );
+        assert!(super::take(), "the level was set");
+        // One interrupt ends one turn.
+        let again = tokio::time::timeout(Duration::from_millis(50), interrupted());
+        assert!(again.await.is_err(), "the level was not cleared by `take`");
+    }
+
+    /// A wait that is already parked is woken, which is the other half.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_parked_wait_is_woken() {
+        let _serial = serial().await;
+        super::install();
+        clear();
+        let waiter = tokio::spawn(async {
+            interrupted().await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        post_for_tests();
+        let woken = tokio::time::timeout(Duration::from_millis(500), waiter).await;
+        assert!(woken.is_ok(), "a parked wait was not woken");
+        assert!(super::take());
+    }
+
+    /// The stress the brief asks for: 200 rounds of "signal, then wait", the
+    /// order that used to lose it, with the interruption delivered before the
+    /// wait even exists. Cheap here (no process, no network); the same window
+    /// end to end is `an_interrupt_before_the_wait_begins_is_not_lost`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn two_hundred_signals_before_their_wait_are_all_seen() {
+        let _serial = serial().await;
+        super::install();
+        clear();
+        let mut lost = 0;
+        for round in 0..200 {
+            post_for_tests();
+            // Yield so the notifier task and this one interleave as they do
+            // under a real runner: half the rounds are polled immediately, half
+            // after a suspension.
+            if round % 2 == 0 {
+                tokio::task::yield_now().await;
+            }
+            let seen = tokio::time::timeout(Duration::from_millis(200), interrupted()).await;
+            if seen.is_err() {
+                lost += 1;
+                continue;
+            }
+            assert!(super::take(), "round {round}");
+        }
+        assert_eq!(lost, 0, "{lost} of 200 signals were lost");
+        assert!(super::count() >= 200, "the handler counted them");
     }
 }

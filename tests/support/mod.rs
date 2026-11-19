@@ -29,6 +29,10 @@ pub enum Reply {
     /// value sends a connection-level header without a value, which is not
     /// needed; every entry is `name: value`.
     HttpWith(u16, Vec<(String, String)>, String),
+    /// `HttpWith`, held until the test opens the gate: the retry wait has not
+    /// started yet, so it lets a test deliver a signal *before* the session
+    /// enters the wait (STEER-5 fixes round 2).
+    GatedHttpWith(u16, Vec<(String, String)>, String, Arc<tokio::sync::Notify>),
 }
 
 #[derive(Debug, Clone)]
@@ -335,6 +339,20 @@ async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
                 "HTTP/1.1 {status} Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(body.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        }
+        Some(Reply::GatedHttpWith(status, extra, body, gate)) => {
+            gate.notified().await;
+            let mut head = format!(
+                "HTTP/1.1 {status} Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n",
+                body.len()
+            );
+            for (name, value) in &extra {
+                head.push_str(&format!("{name}: {value}\r\n"));
+            }
+            head.push_str("\r\n");
             let _ = stream.write_all(head.as_bytes()).await;
             let _ = stream.write_all(body.as_bytes()).await;
             let _ = stream.shutdown().await;

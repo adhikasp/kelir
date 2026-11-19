@@ -701,3 +701,91 @@ async fn an_interrupt_during_a_wait_ends_the_turn_stopped() {
     let _ = session.ctl(&["end"]).await;
     let _ = session.finish().await;
 }
+
+/// The lost-SIGINT stress test (STEER-5 fixes round 2).
+///
+/// The bug was a lost wakeup, not load: `signals::interrupted` was edge
+/// triggered, so an interrupt that arrived *before* the wait that would act on
+/// it was gone for ever (`watch::Sender::send` drops its value when nothing is
+/// subscribed, and a later subscriber took the bumped value as its baseline).
+/// The e2e above passed alone and failed about one run in three under load,
+/// because the `error` event and the wait's first poll are far apart enough for
+/// a `kill -INT` to land in between.
+///
+/// This drives that window deliberately instead of hoping for it: the mock
+/// holds the 429 at a gate, so the session cannot have entered a wait yet, the
+/// test signals, then opens the gate. `signals::interrupted` must answer from
+/// the level alone, because no wait was parked when the signal arrived. The
+/// loop is there for the *other* half — a wait entered after an interrupt was
+/// already consumed by an earlier wait — and to catch a fix that wins by luck.
+///
+/// Unix only: a console control event on Windows addresses a whole console
+/// (AGENTS.md hard rule), so the Windows half is `signals`' own unit tests.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_interrupt_before_the_wait_begins_is_not_lost() {
+    const ROUNDS: usize = 20;
+    let mut late = Vec::new();
+    for round in 0..ROUNDS {
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        let mock = Mock::start(vec![Reply::GatedHttpWith(
+            429,
+            vec![("Retry-After".into(), "3600".into())],
+            "slow down".into(),
+            gate.clone(),
+        )])
+        .await;
+        let mut session = LiveSession::start(
+            &mock,
+            &["run", "--keep", "--json", "go"],
+            "retry_max_wait = 7200\n",
+        )
+        .await;
+        // The session is waiting on the mock, so it has not entered a retry
+        // wait and no waiter is parked: an interrupt now can only be seen
+        // through the level.
+        let started = Instant::now();
+        session.interrupt().await;
+        // Let the handler run before the 429 creates the wait that should see
+        // it. Without this the two orders race and the test would pass on the
+        // old code half the time; with it, the old code never sees the signal.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        gate.notify_one();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let ended = tokio::time::timeout_at(deadline, session.wait_for("turn_ended")).await;
+        let elapsed = started.elapsed();
+        match ended {
+            Ok(event) => {
+                assert_eq!(
+                    event["outcome"], "stopped",
+                    "round {round}: an interrupt is a stop, not {:?}",
+                    event["outcome"]
+                );
+                if elapsed > Duration::from_secs(2) {
+                    late.push(elapsed);
+                }
+            }
+            Err(_) => panic!(
+                "round {round}: the interrupt was lost; the turn never ended (seen: {:?}, \
+                 stderr: {})",
+                session
+                    .events
+                    .iter()
+                    .map(|event| event["type"].clone())
+                    .collect::<Vec<_>>(),
+                session.stderr()
+            ),
+        }
+        let _ = session.ctl(&["end"]).await;
+        let _ = session.finish().await;
+        // No `signals::DOUBLE` wait between rounds: the double-interrupt window
+        // is per *process* and every round starts a new session.
+    }
+    // "Immediately" (STEER-5 / review B2) is two seconds: a round that needed
+    // longer is a lost wakeup that a poll interval papered over.
+    assert!(
+        late.is_empty(),
+        "{} of {ROUNDS} rounds took over 2 s to stop: {late:?}",
+        late.len()
+    );
+}
