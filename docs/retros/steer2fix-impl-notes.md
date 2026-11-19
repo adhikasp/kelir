@@ -92,10 +92,11 @@ and the bound is a memory guard, not an expectation. Unit test drives it through
 
 ## Gates
 
-`bash scripts/gate.sh --linux=the maintainer`: fmt, clippy `-D warnings`, nextest 696 run / 696 passed
-(9 skipped), doctest, and the Linux half. Note: the first gate's Linux half ran against the
-*unfixed* HEAD because the remote check checks out `HEAD_SHA` from a git bundle — uncommitted work is
-not exported. The commit was made and the gate re-run; see the commit message for the result.
+`bash scripts/gate.sh --linux=the maintainer`: fmt ok, clippy `-D warnings` ok, nextest **690 run / 690 passed**
+(9 skipped, 1 retried flake — `e2e_m4 a_promoted_job_survives_a_killed_session_and_resume_folds_it_in`,
+the known STEER-9 one), doctest ok, **Linux (the maintainer) ok**. Note: the first gate's Linux half ran
+against the *unfixed* HEAD because the remote check checks out `HEAD_SHA` from a git bundle —
+uncommitted work is not exported. The commit was made and the gate re-run green.
 
 ## What I did not do
 
