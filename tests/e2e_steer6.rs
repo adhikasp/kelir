@@ -532,3 +532,60 @@ async fn the_default_effort_is_gated_on_the_advertised_parameter() {
         "the log must agree with the request"
     );
 }
+
+/// N2, live: a PowerShell shell (`shell = ["powershell", "-NoProfile",
+/// "-Command"]`) gets `-File cmd.ps1`, and the script really runs. `-Command
+/// <path>` would have run the path as PowerShell source; dropping the switch
+/// would read stdin (null here) and run nothing. Skipped where PowerShell is
+/// absent, and it uses the inbox `powershell.exe`: a Store `pwsh` is an AppX
+/// alias, whose process Windows refuses to put in a Job Object
+/// (`cannot assign it to the job: Access is denied`), which is a Windows
+/// packaging limit, not a kelir one (the STEER-6 reviewer hit the same wall).
+#[cfg(windows)]
+#[tokio::test]
+async fn a_powershell_shell_runs_its_ps1_through_minus_file() {
+    if std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "exit 0"])
+        .status()
+        .map(|status| !status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("powershell is not installed here: skipping the PowerShell route");
+        return;
+    }
+    let cmd = "Write-Output 'ps1 ran' | Set-Content ps.txt".to_string();
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn("c1", "bash", &json!({"command": cmd})))),
+        Reply::Sse(sse(&text_turn("done", 0))),
+    ])
+    .await;
+    let run = run_task(
+        &mock,
+        &["run", "--json", "t"],
+        &[],
+        None,
+        "shell = [\"powershell\", \"-NoProfile\", \"-Command\"]\n",
+    )
+    .await;
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    let settled = run.one_event("tool_settled");
+    assert_eq!(settled["outcome"], "ok", "the ps1 did not run: {settled}");
+    let written = std::fs::read_to_string(run.cwd.join("ps.txt")).unwrap_or_default();
+    assert!(
+        written.contains("ps1 ran"),
+        "ps.txt = {written:?}; settled: {settled}"
+    );
+    // The script lives beside the call's output, as `cmd.ps1`.
+    let script = std::path::PathBuf::from(settled["out_path"].as_str().unwrap())
+        .parent()
+        .unwrap()
+        .join("cmd.ps1");
+    assert!(script.is_file(), "no {}", script.display());
+    assert!(
+        std::fs::read(&script)
+            .unwrap()
+            .windows(2)
+            .all(|pair| pair != b"\n\n"),
+        "a .ps1 gets CRLF, one terminator"
+    );
+}

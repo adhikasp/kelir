@@ -30,6 +30,12 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   ran), and `-Command <path>` would run the path as PowerShell source. A POSIX shell reads the
   script from its own argv, so its `-c` goes. Any argument before the switch (`cmd.exe /D /C`) is
   kept. A shell kelir does not know (`--eval`) is left exactly as configured.
+  Verified with the inbox `powershell.exe` in an e2e test (`-File cmd.ps1`, output written by the
+  script). A Store-installed `pwsh` cannot be used as a call shell at all on Windows: it is an
+  AppX execution alias, and Windows refuses to put the process an alias starts into a Job Object
+  (`cannot assign it to the job: Access is denied`, os error 5). That is the app-packaging model,
+  not a kelir bug (the STEER-6 reviewer hit the same wall probing `pwsh`); use the inbox
+  `powershell.exe`, or `bash`, as `shell`.
 - **A script's line endings are normalised, and only those.** A POSIX shell gets LF: a CRLF
   `cmd.sh` puts a `\r` at the end of every line and breaks a heredoc terminator outright.
   `cmd.exe` and PowerShell get CRLF. A lone `\r` inside a payload (how a heredoc writes a literal

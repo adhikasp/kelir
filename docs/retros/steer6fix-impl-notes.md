@@ -39,8 +39,13 @@ test pins `cmd.exe /C <path>` and `cmd.exe /D /C <path>`.
   binary on Windows: the reviewer's backslash/quoted-heredoc and quote-dense cases.
 - **N2 — PowerShell**: `-Command`/`-command` now yields `cmd.ps1` and `-File <path>`;
   `-Command <path>` would have run the path as PowerShell source. Unit-tested for the file bytes
-  (CRLF, one terminator) and the argv (`-NoProfile -File cmd.ps1`). Not live-probed (`pwsh` is
-  present on the dev box and answers a `-Command` line; the e2e path needs no PowerShell).
+  (CRLF, one terminator) and the argv (`-NoProfile -File cmd.ps1`). Live: e2e
+  `a_powershell_shell_runs_its_ps1_through_minus_file` drives `shell = ["powershell",
+  "-NoProfile", "-Command"]` through the real binary and checks the script really writes its
+  output. Finding on the way: a **Store** `pwsh` cannot be a call shell at all — it is an AppX
+  execution alias and Windows refuses to put the alias's process in a Job Object
+  (`cannot assign it to the job: Access is denied`), the same wall the STEER-6 reviewer hit. Not
+  kelir's bug; the inbox `powershell.exe` works, and DEVIATIONS records the limit.
 - **Exit code, cwd and env** are unchanged: the shim still spawns the shell with the same stdio,
   cwd and env; the reviewer's `f2_cwd_env_and_exit_code_are_preserved` still passes.
 - **N4 — CRLF, documented**: POSIX scripts get LF (a CRLF `cmd.sh` breaks a heredoc terminator);
@@ -129,7 +134,7 @@ written once after the spawn, as before.
 ## Still open (not this brief)
 
 - `kelir bg run <cmd>` past ~32 KB is still an OS argv ceiling (DEVIATIONS).
-- `pwsh` live drive: not done (unit + e2e only; the reviewer's probe died on an unrelated job
-  error).
+- Store `pwsh` as a call shell: blocked by AppX alias + Job Object (DEVIATIONS); the inbox
+  `powershell.exe` is verified.
 - `models::lookup` still matches on the last path segment, so `other/model` matches `test/model`
   (pre-existing, noted by the reviewer; a fix is a separate change).
