@@ -659,6 +659,80 @@ mod tests {
     }
 
     #[test]
+    fn an_absolute_hint_is_measured_from_the_responses_own_date() {
+        // 22:13:20 is `now()`; the response says it was written at 22:13:50 and
+        // the provider wants the caller back at 22:15:20, so the wait is 90 s
+        // whatever this machine's clock believes (N1). A skewed clock would
+        // make it "none at all" (hammering) or hours (a pause).
+        let headers = [
+            ("Date", "Tue, 14 Nov 2023 22:13:50 GMT"),
+            ("Retry-After", "Tue, 14 Nov 2023 22:15:20 GMT"),
+        ];
+        assert_eq!(
+            header_hint(headers.into_iter(), now()),
+            Some(Duration::from_secs(90)),
+            "the response's own Date is the clock for its absolute hints"
+        );
+        // A reset header written as an epoch is measured the same way.
+        let epoch = [
+            ("date", "Tue, 14 Nov 2023 22:13:50 GMT"),
+            ("x-ratelimit-reset-requests", "1700000120"),
+        ];
+        assert_eq!(
+            header_hint(epoch.into_iter(), now()),
+            Some(Duration::from_secs(90))
+        );
+        // No Date header: the local clock, as before.
+        let no_date = [("Retry-After", "Tue, 14 Nov 2023 22:14:50 GMT")];
+        assert_eq!(
+            header_hint(no_date.into_iter(), now()),
+            Some(Duration::from_secs(90))
+        );
+    }
+
+    #[test]
+    fn a_hint_is_never_shorter_than_the_floor() {
+        let policy = Policy {
+            base_ms: 2_000,
+            cap_ms: 120_000,
+            max_wait: None,
+            max_attempts: None,
+        };
+        // `Retry-After: 0` from a gateway that never stops saying it (S2).
+        assert_eq!(
+            delay(&policy, 0, Some(Duration::ZERO), &mut Fixed(0)),
+            HINT_FLOOR
+        );
+        // A past date is the same answer.
+        assert_eq!(
+            delay(&policy, 3, Some(Duration::ZERO), &mut Fixed(0)),
+            HINT_FLOOR
+        );
+        // A fast configured schedule keeps its own (shorter) floor, so a test
+        // or a person tuning the schedule is not overruled.
+        let fast = Policy {
+            base_ms: 20,
+            cap_ms: 40,
+            max_wait: None,
+            max_attempts: None,
+        };
+        assert_eq!(
+            delay(&fast, 0, Some(Duration::ZERO), &mut Fixed(0)),
+            Duration::from_millis(20)
+        );
+        // A real hint is honoured as it is.
+        assert_eq!(
+            delay(&policy, 0, Some(Duration::from_secs(3)), &mut Fixed(0)),
+            Duration::from_secs(3)
+        );
+        // A tiny but non-zero hint is lifted to the floor too.
+        assert_eq!(
+            delay(&policy, 0, Some(Duration::from_millis(1)), &mut Fixed(0)),
+            HINT_FLOOR
+        );
+    }
+
+    #[test]
     fn the_headers_are_read_in_priority_order() {
         let headers = [
             ("x-ratelimit-reset-requests", "0s"),

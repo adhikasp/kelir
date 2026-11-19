@@ -90,14 +90,23 @@ async fn a_429_without_a_header_follows_the_configured_schedule() {
     .await;
     let waited = started.elapsed();
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    assert_eq!(provider_errors(&run.events).len(), 1);
+    let errors = provider_errors(&run.events);
+    assert_eq!(errors.len(), 1);
     assert_eq!(mock.request_count(), 2);
     // Full jitter draws from the ceiling, so the wait is a bound rather than a
-    // value: never past the 400 ms cap, and a process start is the only fixed
-    // cost. The production 2 s base would be far outside this.
+    // value. Assert on the wait the log *recorded*, not on the wall clock: a
+    // busy runner makes the latter a flake (STEER-9), and the former is the
+    // thing under test — the configured 400 ms schedule, never the 2 s default.
+    let logged = errors[0]["retry_in_ms"]
+        .as_u64()
+        .expect("a wait was recorded");
     assert!(
-        waited < Duration::from_millis(1_600),
-        "the configured 400 ms schedule was not used: {waited:?}"
+        logged <= 400,
+        "the configured 400 ms schedule was not used: {logged} ms"
+    );
+    assert!(
+        waited < Duration::from_secs(30),
+        "the run took {waited:?}; the wait itself was {logged} ms"
     );
 }
 
