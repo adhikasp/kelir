@@ -74,7 +74,7 @@ impl CallLine {
             parts.push("ok".to_string());
         }
         if self.bytes > 0 {
-            parts.push(format!("{}", bytes_label(self.bytes)));
+            parts.push(bytes_label(self.bytes));
         }
         if let Some(elapsed) = self.elapsed {
             parts.push(format!("{:.1}s", elapsed.as_secs_f64()));
@@ -271,10 +271,10 @@ fn group_rows(
             continue;
         }
         lines.push(call.line(theme, width));
-        if let Some(tail) = call.tail_line(theme, width) {
-            if call.failed() {
-                lines.push(tail);
-            }
+        if call.failed()
+            && let Some(tail) = call.tail_line(theme, width)
+        {
+            lines.push(tail);
         }
     }
     lines
