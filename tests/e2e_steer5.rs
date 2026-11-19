@@ -233,23 +233,25 @@ async fn a_mid_stream_disconnect_after_a_tool_call_is_not_retried() {
 }
 
 /// `stop` during a wait ends the turn **stopped**, at once, not after the wait.
+/// The hint is an hour, so "at once" and "waited it out" cannot be confused on
+/// a slow runner the way a 30 s hint can.
 #[tokio::test]
 async fn stop_during_a_wait_ends_the_turn_stopped() {
     let mock = Mock::start(vec![
         Reply::HttpWith(
             429,
-            vec![("Retry-After".into(), "30".into())],
+            vec![("Retry-After".into(), "3600".into())],
             "slow down".into(),
         ),
         Reply::Sse(sse(&text_turn("never asked", 0))),
     ])
     .await;
-    // A budget that would happily wait the 30 s out: only the `stop` ends it,
-    // so a paused turn here would mean the budget answered instead of the verb.
+    // A budget that could wait the hour out: only the `stop` ends it, so a
+    // paused turn here would mean the budget answered instead of the verb.
     let mut session = LiveSession::start(
         &mock,
         &["run", "--keep", "--json", "go"],
-        "retry_max_wait = 600\n",
+        "retry_max_wait = 7200\n",
     )
     .await;
     let error = session.wait_for("error").await;
@@ -264,9 +266,11 @@ async fn stop_during_a_wait_ends_the_turn_stopped() {
         ended["outcome"], "stopped",
         "a stopped wait is not an error: {ended}"
     );
+    // The bound separates "at once" from "waited the hour out"; it is not a
+    // latency assertion, because starting a `kelir ctl` process is part of it.
     assert!(
-        waited < Duration::from_secs(1),
-        "the stop waited {waited:?} for a 30 s Retry-After"
+        waited < Duration::from_secs(20),
+        "the stop waited {waited:?} for the Retry-After"
     );
     assert_eq!(mock.request_count(), 1, "the retry was sent after the stop");
     let (code, stderr) = session.end().await;
@@ -579,7 +583,7 @@ async fn say_now_during_a_wait_retries_at_once_with_the_message() {
     let mock = Mock::start(vec![
         Reply::HttpWith(
             429,
-            vec![("Retry-After".into(), "30".into())],
+            vec![("Retry-After".into(), "3600".into())],
             "slow down".into(),
         ),
         Reply::Sse(sse(&text_turn("on the new plan", 0))),
@@ -588,7 +592,7 @@ async fn say_now_during_a_wait_retries_at_once_with_the_message() {
     let mut session = LiveSession::start(
         &mock,
         &["run", "--keep", "--json", "go"],
-        "retry_max_wait = 600\n",
+        "retry_max_wait = 7200\n",
     )
     .await;
     session.wait_for("error").await;
@@ -601,7 +605,7 @@ async fn say_now_during_a_wait_retries_at_once_with_the_message() {
         "`say --now` cannot answer `now` and then wait 30 s"
     );
     let ended = session.wait_for("turn_ended").await;
-    assert!(started.elapsed() < Duration::from_secs(5), "waited it out");
+    assert!(started.elapsed() < Duration::from_secs(20), "waited it out");
     assert_eq!(ended["outcome"], "done", "{ended}");
     let requests = mock.requests();
     assert_eq!(requests.len(), 2, "the retry is one request");
@@ -623,20 +627,20 @@ async fn model_during_a_wait_retries_at_once_on_the_new_model() {
     let mock = Mock::start(vec![
         Reply::HttpWith(
             429,
-            vec![("Retry-After".into(), "30".into())],
+            vec![("Retry-After".into(), "3600".into())],
             "slow down".into(),
         ),
         Reply::Sse(sse(&text_turn("swapped", 0))),
     ])
     .await;
-    let config = "retry_max_wait = 600\n[providers.opencode-go]\nmax_concurrent_requests = 1\n";
+    let config = "retry_max_wait = 7200\n[providers.opencode-go]\nmax_concurrent_requests = 1\n";
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], config).await;
     session.wait_for("error").await;
     let started = Instant::now();
     let answer = session.ctl(&["model", "opencode-go/go/model"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     let ended = session.wait_for("turn_ended").await;
-    assert!(started.elapsed() < Duration::from_secs(5), "waited it out");
+    assert!(started.elapsed() < Duration::from_secs(20), "waited it out");
     assert_eq!(ended["outcome"], "done", "{ended}");
     let requests = mock.requests();
     assert_eq!(requests[1].body["model"], "go/model");
@@ -665,7 +669,7 @@ async fn an_interrupt_during_a_wait_ends_the_turn_stopped() {
     let mock = Mock::start(vec![
         Reply::HttpWith(
             429,
-            vec![("Retry-After".into(), "30".into())],
+            vec![("Retry-After".into(), "3600".into())],
             "slow down".into(),
         ),
         Reply::Sse(sse(&text_turn("still here", 0))),
@@ -674,7 +678,7 @@ async fn an_interrupt_during_a_wait_ends_the_turn_stopped() {
     let mut session = LiveSession::start(
         &mock,
         &["run", "--keep", "--json", "go"],
-        "retry_max_wait = 600\n",
+        "retry_max_wait = 7200\n",
     )
     .await;
     session.wait_for("error").await;
@@ -682,7 +686,7 @@ async fn an_interrupt_during_a_wait_ends_the_turn_stopped() {
     session.interrupt().await;
     let ended = session.wait_for("turn_ended").await;
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(20),
         "the interrupt waited out the Retry-After"
     );
     assert_eq!(
