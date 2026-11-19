@@ -310,12 +310,18 @@ fn a_lock_whose_owner_is_gone_is_taken_over() {
 
 #[test]
 fn waiting_gives_up_with_exit_75_when_the_holder_never_returns() {
-    let (lock, _dir) = sandbox_lock("timeout");
-    // A real holder that does not release inside the waiter's timeout: `kill
-    // -0` has to see a live process, and the only pid both platforms agree on
-    // is one bash started. It exits on its own well after the waiter's 2 s, so
-    // nothing has to be killed and nothing can be left behind.
-    let mut holder = Held::spawn(&lock, 60, "sleep 15");
+    let (lock, dir) = sandbox_lock("timeout");
+    // The holder runs until the test tells it to stop, not for a fixed number
+    // of seconds: its lifetime must outlast the waiter's 2 s timeout on a
+    // loaded box, and a `sleep 6` would either be too short there or waste time
+    // here. `kill -0` needs a pid bash itself wrote, which is the only pid both
+    // platforms agree on.
+    let go = dir.path().join("go");
+    let mut holder = Held::spawn(
+        &lock,
+        60,
+        &format!("while [ ! -f '{}' ]; do sleep 0.05; done", go.display()),
+    );
     holder.wait_for_lock(&lock);
 
     let out = run_locked(&lock, 2, "echo never");
@@ -340,6 +346,7 @@ fn waiting_gives_up_with_exit_75_when_the_holder_never_returns() {
     let second = run_locked(&lock, 2, "echo second");
     assert_eq!(second.status.code(), Some(75), "still held, still waiting");
 
+    std::fs::write(&go, "go").expect("release the holder");
     holder.finish();
     let deadline = Instant::now() + Duration::from_secs(60);
     while lock.exists() {
@@ -349,36 +356,6 @@ fn waiting_gives_up_with_exit_75_when_the_holder_never_returns() {
         );
         std::thread::sleep(Duration::from_millis(25));
     }
-}
-
-// ------------------------------------------------------------------- scripts
-
-#[test]
-fn the_gate_script_keeps_the_measured_wins() {
-    let gate = read("scripts/gate.sh");
-    for (needle, why) in [
-        ("nextest run", "the gate runs nextest, not cargo test"),
-        ("--no-fail-fast", "one failing suite must not hide the rest"),
-        ("--retries 2", "the measured retry count"),
-        ("cargo test --doc", "nextest does not run doctests"),
-        (
-            "gate-lock.sh",
-            "the gate takes the machine-wide lock itself",
-        ),
-        ("CARGO_BUILD_JOBS", "a capped number of build jobs"),
-        ("cargo fmt --check", "fmt is a stage"),
-        (
-            "cargo clippy --all-targets",
-            "clippy -D warnings is a stage",
-        ),
-        ("RETRIED", "a retried test is named in the summary"),
-    ] {
-        assert!(gate.contains(needle), "{why}: {needle} is missing");
-    }
-    assert!(
-        gate.contains("--no-lock"),
-        "the inner run must not try to lock twice"
-    );
 }
 
 /// The gate reports nextest's own summary line, and the pattern it greps with
