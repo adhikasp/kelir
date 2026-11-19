@@ -27,6 +27,7 @@ use tokio::time::Instant;
 
 use crate::bg;
 use crate::proc::ProcessGroup;
+use crate::shellcmd;
 use crate::spill::Capture;
 use crate::tools::{Ctx, ToolOutcome};
 
@@ -41,11 +42,22 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
     }
 
     let bg_dir = ctx.session_dir.join("bg");
+    // A long command goes to a file *here*, before the shim exists: the command
+    // is what the shell runs (`cmd.sh`), and it also keeps a 40 KB command off
+    // the shim's own command line, where Windows refuses to start it at all
+    // (`os error 206`). The shell's argv then drops the `-c`: `bash cmd.sh`.
+    let shell_args: Vec<String> = ctx.shell.iter().skip(1).cloned().collect();
+    let cmd_file = match shellcmd::input(command, &shell_args, &call_dir) {
+        Ok(shellcmd::ShellInput::Argument(_)) => None,
+        Ok(shellcmd::ShellInput::Script(path)) => Some(path),
+        Err(error) => return ToolOutcome::error(error),
+    };
     let launch = bg::Launch {
         dir: bg_dir.clone(),
         id: dir.to_string(),
         out: out_path.clone(),
         cmd: command.to_string(),
+        cmd_file,
         shell: ctx.shell.clone(),
         kind: bg::KIND_CALL,
         owner: Some(std::process::id()),

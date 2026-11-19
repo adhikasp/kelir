@@ -192,23 +192,23 @@ pub fn specs() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "edit",
-                "description": "Replace exact strings in one file. One change: `old` + `new`. Several: `edits: [{old, new, replace_all?}, ...]`, applied in order against the evolving text, all or none. Each `old` must match exactly once unless `replace_all` is true. An empty `old` creates a missing file with `new`. Line endings are preserved. Prefer this to a python/sed patch: those can fail with exit 0.",
+                "description": "Replace exact strings in one file. One change: `old` + `new`. Several: `edits`, applied in order against the evolving text, all or none. Each `old` matches exactly once unless `replace_all`. An empty `old` creates a missing file. Line endings are preserved. Prefer this to a python/sed patch, which can fail with exit 0.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "File to edit, relative to the session cwd or absolute."},
-                        "old": {"type": "string", "description": "Exact text to replace; empty only when creating a missing file."},
+                        "path": {"type": "string", "description": "File, relative to the cwd or absolute."},
+                        "old": {"type": "string", "description": "Exact text to replace; empty creates a missing file."},
                         "new": {"type": "string", "description": "Replacement text."},
-                        "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one."},
+                        "replace_all": {"type": "boolean", "description": "Replace every occurrence."},
                         "edits": {
                             "type": "array",
-                            "description": "Several changes to one file, applied in order; all apply or none does. Use this instead of `old`/`new`.",
+                            "description": "Several changes, in order; all or none.",
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "old": {"type": "string", "description": "Exact text to replace; empty creates a missing file."},
-                                    "new": {"type": "string", "description": "Replacement text."},
-                                    "replace_all": {"type": "boolean", "description": "Replace every occurrence of this hunk."}
+                                    "old": {"type": "string"},
+                                    "new": {"type": "string"},
+                                    "replace_all": {"type": "boolean"}
                                 },
                                 "required": ["old", "new"],
                                 "additionalProperties": false
