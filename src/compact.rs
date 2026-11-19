@@ -313,6 +313,7 @@ mod tests {
                 sources: vec![],
                 tools: vec!["bash".into()],
                 reasoning_effort: None,
+                key_origin: None,
             },
         )
     }
@@ -639,6 +640,9 @@ mod tests {
             base_url: "https://example.invalid/v1".into(),
             key_env: None,
             key: Some("k".into()),
+            key_cmd: None,
+            key_origin: None,
+            key_expires_at_ms: None,
             extra_headers: BTreeMap::new(),
             reasoning_field: None,
             reasoning_effort: None,

@@ -21,6 +21,7 @@ use crate::chat::ToolCall;
 use crate::cli::{AskArgs, CommonArgs, ResumeArgs, RunArgs};
 use crate::compact;
 use crate::config::{self, Config};
+use crate::credentials;
 use crate::event::{
     Blobs, EventBody, EventLog, LogEvent, LoggedToolCall, Payload, SystemInfo, read_events,
     spill_payloads,
@@ -162,6 +163,12 @@ struct Prepared {
     provider_name: String,
     model: String,
     client: Client,
+    /// The provider config the client was built from, its key included: the
+    /// session keeps it as `active_provider`.
+    provider_cfg: crate::config::ProviderConfig,
+    /// Where this session's key came from (`env OPENROUTER_API_KEY`,
+    /// `opencode auth export opencode`). Recorded in `session_started`.
+    key_origin: Option<String>,
     id: String,
     dir: PathBuf,
     task: String,
@@ -222,6 +229,11 @@ struct Session {
     provider_name: String,
     model: String,
     client: Client,
+    /// The config of the provider the client is talking to, with its key: the
+    /// one a re-read or a `model` verb starts from. Held here (not only in
+    /// `cfg.providers`, whose entry has no key) because the key lives in memory
+    /// and nowhere else.
+    active_provider: crate::config::ProviderConfig,
     ctx: Ctx,
     json: bool,
     echo_assistant: bool,
@@ -853,6 +865,9 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             provider_name: reopened.provider_name,
             model: reopened.model,
             client: reopened.client,
+            provider_cfg: reopened.cfg_provider.clone(),
+            // A resume keeps the origin the log recorded.
+            key_origin: reopened.key_origin,
             id: reopened.id,
             dir: reopened.dir,
             task,
@@ -898,6 +913,11 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         task_text(&opts.task).await.map_err(Failure::Usage)?
     };
     let id = new_session_id();
+    // The key is resolved here, at session start, and held in memory only
+    // (STEER-2). `config::load` stays pure: reading opencode's store is a
+    // process read, and a config load happens in tests and in `doctor` too.
+    let mut provider_cfg = provider_cfg;
+    let credential = credentials::resolve(&mut provider_cfg).map_err(Failure::Usage)?;
     let client = Client::new(provider_cfg.clone(), &id, cfg.cache_ttl.clone())
         .map_err(|error| Failure::Usage(error.message))?;
     // Model metadata from the provider, cached beside the session state; a
@@ -932,6 +952,8 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         provider_name,
         model,
         client,
+        provider_cfg: provider_cfg.clone(),
+        key_origin: Some(credential.describe()),
         id,
         dir,
         task,
@@ -975,6 +997,8 @@ struct ReopenedSession {
     provider_name: String,
     model: String,
     client: Client,
+    /// Where the log's session said its key came from.
+    key_origin: Option<String>,
     /// The config of the provider the log is on: the governor is built from it.
     cfg_provider: crate::config::ProviderConfig,
     reopened: Reopened,
@@ -1057,6 +1081,8 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
     let provider_cfg = cfg
         .provider(&provider_name)
         .map_err(|error| Failure::Usage(error.to_string()))?;
+    let mut provider_cfg = provider_cfg;
+    credentials::resolve(&mut provider_cfg).map_err(Failure::Usage)?;
     let client = Client::new(provider_cfg.clone(), &id, cfg.cache_ttl.clone())
         .map_err(|error| Failure::Usage(error.message))?;
     let system_text = events
@@ -1083,6 +1109,10 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
         provider_name,
         model,
         client,
+        key_origin: events.iter().rev().find_map(|event| match &event.body {
+            EventBody::SessionStarted { key_origin, .. } => key_origin.clone(),
+            _ => None,
+        }),
         cfg_provider: provider_cfg,
         reopened: Reopened {
             in_flight: resume::interrupted(&events),
@@ -1135,6 +1165,7 @@ impl Session {
             provider_name: prepared.provider_name.clone(),
             model: prepared.model.clone(),
             client: prepared.client.clone(),
+            active_provider: prepared.provider_cfg.clone(),
             ctx,
             json: prepared.json,
             echo_assistant: !prepared.ask && !prepared.tui,
@@ -1209,6 +1240,8 @@ impl Session {
             // provider would reject. A `model` verb later swaps the client and
             // the request follows the new provider.
             reasoning_effort: session.first_effort(),
+            // Where the key came from, never the key (STEER-2).
+            key_origin: prepared.key_origin.clone(),
         })?;
         // What the render had to say about its sources (a non-UTF-8 file read
         // lossily, a truncation, a malformed skill skipped): recorded once, so
@@ -1920,21 +1953,33 @@ impl Session {
             .map(str::to_string)
             .unwrap_or_else(|| self.provider_name.clone());
         let model = model.to_string();
-        let provider_cfg = self
-            .cfg
-            .provider(&provider)
-            .map_err(|error| error.to_string())?;
+        let provider_cfg = if provider == self.provider_name {
+            // The same provider: the key already in memory is the live one, and
+            // a re-read here could only cost a process start.
+            self.active_provider.clone()
+        } else {
+            // A swap to another provider needs *that* provider's key, resolved
+            // the same way the start resolved this one (STEER-2). It happens
+            // once, on a verb, so the bounded read is fine here.
+            let mut provider_cfg = self
+                .cfg
+                .provider(&provider)
+                .map_err(|error| error.to_string())?;
+            credentials::resolve(&mut provider_cfg)?;
+            provider_cfg
+        };
         // The governor belongs to the provider a request goes to: a swap to a
         // governed provider must take its slots (and a swap away must stop
         // being held to the old limit). `max_concurrent_requests` is read from
         // the provider config the swap resolved to, never from the one the
         // session started on (STEER-5 review S1).
         let governor = governor_for(&provider_cfg);
-        let client = Client::new(provider_cfg, &self.id, self.cfg.cache_ttl.clone())
+        let client = Client::new(provider_cfg.clone(), &self.id, self.cfg.cache_ttl.clone())
             .map_err(|error| error.message)?;
         self.provider_name = provider;
         self.model = model;
         self.client = client;
+        self.active_provider = provider_cfg;
         self.governor = governor;
         // Another model, possibly another provider: resolve from the cached
         // list (never the network mid-turn); a model the list does not know
@@ -2724,6 +2769,11 @@ impl Session {
             // Sources edited on disk while the turn ran: one `source` message
             // each, at the tail. Never a system rewrite.
             self.check_sources()?;
+            // A key that is within two minutes of its expiry is re-read before
+            // the request: opencode refreshes its token whenever it runs, so a
+            // copied-out one goes stale before its own `expires` does
+            // (STEER-2).
+            self.refresh_expiring_key();
 
             let folded = crate::fold::fold(&self.events, &self.dir)?;
             // Ask for several calls in one message when the provider says the
@@ -2879,6 +2929,127 @@ impl Session {
         true
     }
 
+    /// Re-read a key that is about to expire, before the next request uses it.
+    ///
+    /// The credential the log's source published may be minutes from its
+    /// `expires`; opencode refreshes its own token whenever it runs, so reading
+    /// the source again is the cheapest fix there is. A re-read that fails or
+    /// hands back the same value is not an error here: the request goes out, and
+    /// if the provider refuses it the 401/403 path does the rest. Never printed,
+    /// never logged beyond a one-line `error` event that names the source.
+    fn refresh_expiring_key(&mut self) {
+        let Some(expires) = self.active_provider.key_expires_at_ms else {
+            return;
+        };
+        let now = crate::models::now_ms();
+        if expires.saturating_sub(now) >= credentials::EXPIRY_MARGIN.as_millis() as u64 {
+            return;
+        }
+        let before = self.active_provider.key.clone();
+        match credentials::resolve(&mut self.active_provider) {
+            Ok(fresh) => {
+                if self.active_provider.key == before {
+                    // Same value, so the same expiry: the provider will say so.
+                    return;
+                }
+                if let Ok(client) = Client::new(
+                    self.active_provider.clone(),
+                    &self.id,
+                    self.cfg.cache_ttl.clone(),
+                ) {
+                    self.client = client;
+                }
+                let _ = self.record(EventBody::Error {
+                    location: "provider".into(),
+                    message: format!(
+                        "the key from {} was about to expire ({}); re-read it, new expiry {}",
+                        fresh.describe(),
+                        credentials::format_ms(expires),
+                        fresh.expiry_text()
+                    ),
+                    retryable: false,
+                    status: None,
+                    attempt: None,
+                    retry_in_ms: None,
+                });
+            }
+            Err(message) => {
+                // Not fatal: the request goes out with the key we have.
+                if !self.json && !self.tui {
+                    eprintln!("kelir: {message}");
+                }
+            }
+        }
+    }
+
+    /// Re-read the key after a refusal that means "this credential is stale"
+    /// (HTTP 401/403) and rebuild the request with it, once per request.
+    ///
+    /// opencode refreshes its token whenever it runs, so a re-read can return a
+    /// live one even though ours expired; when it does not, the failure stays
+    /// the failure it was. The OAuth refresh endpoint is deliberately not
+    /// called: opencode rotates the refresh token, and a second refresher would
+    /// invalidate the account it shares with us.
+    fn reread_credential(
+        &mut self,
+        error: &provider::ProviderError,
+        request: &mut provider::BuiltRequest,
+        attempt: u32,
+        reread: &mut bool,
+    ) -> bool {
+        if *reread || !matches!(error.status, Some(401 | 403)) {
+            return false;
+        }
+        *reread = true;
+        let before = self.active_provider.key.clone();
+        let fresh = match credentials::resolve(&mut self.active_provider) {
+            Ok(fresh) => fresh,
+            Err(message) => {
+                self.record_error(message, error.status, attempt);
+                return false;
+            }
+        };
+        if self.active_provider.key == before {
+            // The source had nothing newer: retrying the same key buys nothing,
+            // and the provider's own message (a refusal, not a wait) is the
+            // answer.
+            return false;
+        }
+        if let Ok(client) = Client::new(
+            self.active_provider.clone(),
+            &self.id,
+            self.cfg.cache_ttl.clone(),
+        ) {
+            self.client = client;
+        }
+        let messages = crate::fold::fold(&self.events, &self.dir)
+            .map(|folded| folded.request_messages())
+            .unwrap_or_default();
+        *request = self.step_request(&messages);
+        self.record_error(
+            format!(
+                "{}: re-read the key from {} and retrying once",
+                error.message,
+                fresh.describe()
+            ),
+            error.status,
+            attempt,
+        );
+        true
+    }
+
+    /// An `error` event and a sync, for the two credential paths.
+    fn record_error(&mut self, message: String, status: Option<u16>, attempt: u32) {
+        let _ = self.record(EventBody::Error {
+            location: "provider".into(),
+            message,
+            retryable: false,
+            status,
+            attempt: Some(attempt),
+            retry_in_ms: None,
+        });
+    }
+
     /// Stream one response, taking verbs while it is in flight. A `stop` ends
     /// the turn without committing the half-response; anything else waits for
     /// the next boundary.
@@ -2923,6 +3094,9 @@ impl Session {
         // (STEER-6 review S3): the second 400 is the answer, not a queue of
         // fields to keep removing.
         let mut dropped: Option<String> = None;
+        // Whether this request already re-read the key once (see
+        // [`Session::reread_credential`]).
+        let mut reread = false;
         loop {
             // The governor (opt-in) can make this request wait for a slot that
             // another local kelir holds. That wait is visible and interruptible
@@ -2988,6 +3162,14 @@ impl Session {
                     // Not a wait: the retry is sent at once, so no countdown.
                     retry_in_ms: None,
                 })?;
+                self.sync();
+                continue;
+            }
+            // The credential went stale: opencode rotates its own token, so the
+            // store may hold a fresh one already (STEER-2). One re-read per
+            // request, then the request is sent again. Never our own OAuth
+            // refresh: rotating the refresh token would break opencode.
+            if self.reread_credential(&error, &mut built, attempt, &mut reread) {
                 self.sync();
                 continue;
             }
@@ -3836,6 +4018,9 @@ mod tests {
             base_url: "https://example.invalid/v1".into(),
             key_env: None,
             key: Some("test".into()),
+            key_cmd: None,
+            key_origin: None,
+            key_expires_at_ms: None,
             extra_headers: Default::default(),
             reasoning_field: None,
             reasoning_effort: None,
@@ -3880,6 +4065,7 @@ mod tests {
             provider_name: "openrouter".into(),
             model: model.into(),
             client: Client::new(test_provider(), "ses_1", None).unwrap(),
+            active_provider: test_provider(),
             ctx: Ctx::new(dir, std::env::temp_dir(), vec![], 0, String::new()),
             json: true,
             echo_assistant: false,
@@ -3975,6 +4161,9 @@ mod tests {
                     base_url: "http://x/v1".into(),
                     key_env: None,
                     key: None,
+                    key_cmd: None,
+                    key_origin: None,
+                    key_expires_at_ms: None,
                     extra_headers: Default::default(),
                     reasoning_field: None,
                     reasoning_effort: None,
