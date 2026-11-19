@@ -2894,12 +2894,19 @@ impl Session {
         if wait.is_zero() {
             return Ok(Waited::Timeout);
         }
+        // An interrupt that landed before this wait began is still pending (the
+        // flag is level-triggered and no one else consumes it), so a wait never
+        // has to be entered at exactly the right instant to see it — the race
+        // that made the Linux gate flake (STEER-5 fixes round 2).
         let deadline = tokio::time::sleep(wait);
         tokio::pin!(deadline);
         loop {
             tokio::select! {
                 _ = &mut deadline => return Ok(Waited::Timeout),
                 _ = crate::signals::interrupted() => {
+                    // One interrupt ends one turn: clear the level so the next
+                    // wait is not ended by the same Ctrl-C.
+                    crate::signals::take();
                     // The turn ends `stopped`, exactly like `stop`: the log
                     // says so and a one-shot run exits 0.
                     return Ok(Waited::End(Box::new(StreamEnd::Stopped(
