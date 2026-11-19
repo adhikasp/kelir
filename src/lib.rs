@@ -17,6 +17,7 @@ pub mod event;
 pub mod fold;
 pub mod herdr;
 pub mod ipc;
+pub mod markdown;
 pub mod models;
 pub mod paths;
 pub mod proc;
