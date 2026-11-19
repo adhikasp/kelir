@@ -218,6 +218,17 @@ async fn r4_a_crash_during_a_resume_resumes_again_without_double_results() {
         .await;
     assert_ne!(first.code, 0);
     let id = sandbox.only_session();
+    // Since M4 an unpromoted call is shim -> shell -> command and its tree dies
+    // with the session, so a crash 150 ms after dispatch may land before the
+    // command's first write (a loaded box): 0 and 1 runs are both honest for a
+    // call whose outcome is unknown. The counts are taken once the trees are
+    // gone, and what must hold is that nothing ever raises them afterwards.
+    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+    let one_at_first_crash = sandbox.lines_in("one.log");
+    assert!(
+        one_at_first_crash <= 1,
+        "call_1 ran {one_at_first_crash} times"
+    );
     let second = sandbox
         .kelir(
             &mock.base_url(),
@@ -229,6 +240,17 @@ async fn r4_a_crash_during_a_resume_resumes_again_without_double_results() {
         second.code, 0,
         "the resume should have crashed: {}",
         second.stderr
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+    let (one_at_second_crash, two_at_second_crash) =
+        (sandbox.lines_in("one.log"), sandbox.lines_in("two.log"));
+    assert_eq!(
+        one_at_second_crash, one_at_first_crash,
+        "the first resume re-ran call_1"
+    );
+    assert!(
+        two_at_second_crash <= 1,
+        "call_2 ran {two_at_second_crash} times"
     );
     let third = sandbox
         .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
@@ -259,9 +281,18 @@ async fn r4_a_crash_during_a_resume_resumes_again_without_double_results() {
     let last = mock.requests().pop().unwrap();
     let ids = tool_ids(&last);
     assert_eq!(ids, vec!["call_1", "call_2"], "{ids:?}");
-    // Each command ran exactly once (it started before the crash both times).
-    assert_eq!(sandbox.lines_in("one.log"), 1);
-    assert_eq!(sandbox.lines_in("two.log"), 1);
+    // No command ran twice, and the last resume ran nothing at all: the counts
+    // are what they were when the trees died.
+    assert_eq!(
+        sandbox.lines_in("one.log"),
+        one_at_second_crash,
+        "the last resume re-ran call_1"
+    );
+    assert_eq!(
+        sandbox.lines_in("two.log"),
+        two_at_second_crash,
+        "the last resume re-ran call_2"
+    );
 }
 
 /// R5: a hand-torn log (cut mid-line at several offsets) resumes; the fragment
