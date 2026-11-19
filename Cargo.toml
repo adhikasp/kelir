@@ -59,3 +59,12 @@ tempfile = "3"
 strip = true
 lto = true
 codegen-units = 1
+
+# The reviewer's binary (docs/BUILD.md): the same code as release but built to
+# be driven, not shipped. Thin LTO and 16 codegen units cut the build from
+# minutes to tens of seconds; anything that ships (release above, and the
+# binary the live-drive matrix runs) keeps fat LTO and one codegen unit.
+[profile.review]
+inherits = "release"
+lto = "thin"
+codegen-units = 16

@@ -1,0 +1,19 @@
+# Build speed for this repo (BUILD-INFRA, docs/BUILD.md has the numbers).
+#
+# debug = "line-tables-only" keeps file:line in panic backtraces and drops
+# variable/type info, which is most of the debug build's time and disk: a cold
+# test build went 73 s -> 45 s and the target dir 3.9 GB -> 1.4 GB.
+# It lives here (not in Cargo.toml) so a machine that wants full symbols can
+# override it per checkout without touching the manifest the release uses.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
+# rust-lld ships inside the Rust toolchain, so no Visual Studio link.exe and no
+# vcvars environment are needed, and it links an incremental test binary about
+# 11% faster (median 8.4 s vs 9.5 s, n=12 each, docs/BUILD.md). Windows only:
+# Linux keeps its default linker (lld there is a separate package).
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
