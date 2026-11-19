@@ -154,6 +154,18 @@ pub struct CtlArgs {
     /// `tools --enable <name>` (repeatable).
     #[arg(long, value_name = "TOOL")]
     pub enable: Vec<String>,
+    /// `skills --path <file-or-dir>`: the file (or skill directory) to read.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<PathBuf>,
+    /// `skills --text <body>`: the source's text, inline.
+    #[arg(long, value_name = "TEXT")]
+    pub text: Option<String>,
+    /// `skills --name <name>`: the source's name (default: the path's).
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// `skills --kind <skill|instruction>` (default `skill`).
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
 }
 
 /// `kelir bg …` inside a bash call (or standalone): jobs live in the session's

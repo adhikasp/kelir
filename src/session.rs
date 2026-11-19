@@ -920,6 +920,10 @@ impl Session {
             models: prepared.models,
             watch: crate::sources::Watch::default(),
         };
+        // The watcher re-checks exactly what the frozen system was rendered
+        // from: a resume reads that list back from the log, so it reports the
+        // same edits the live session would have.
+        session.watch = crate::sources::Watch::from_rendered(&prepared.system);
         if let Some(read) = prepared.resume {
             // A turn that was in flight continues without a new task.
             session.has_task |= read.in_flight;
@@ -942,7 +946,6 @@ impl Session {
             sources: prepared.system.sources.clone(),
             tools: session.tool_names.clone(),
         })?;
-        session.watch = crate::sources::Watch::from_rendered(&prepared.system);
         if session.has_task {
             session.record(EventBody::User {
                 text: prepared.task.clone().into(),

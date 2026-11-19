@@ -268,19 +268,26 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
     }
 }
 
+/// The flags `kelir ctl` accepts, whatever the verb. Each one becomes the
+/// matching key of the request's `args`.
+#[derive(Debug, Clone, Default)]
+pub struct CliFlags {
+    pub now: bool,
+    pub call: Option<String>,
+    pub reason: Option<String>,
+    pub disable: Vec<String>,
+    pub enable: Vec<String>,
+    pub path: Option<std::path::PathBuf>,
+    pub text: Option<String>,
+    pub name: Option<String>,
+    pub kind: Option<String>,
+}
+
 /// Build a request's `args` from the `kelir ctl` command line.
 ///
 /// A single positional that parses as a JSON object is the args verbatim; the
 /// flags are then merged over it. Otherwise the positional words are text.
-pub fn cli_args(
-    verb: &str,
-    words: &[String],
-    now: bool,
-    call: Option<&str>,
-    reason: Option<&str>,
-    disable: &[String],
-    enable: &[String],
-) -> Result<Value, String> {
+pub fn cli_args(verb: &str, words: &[String], flags: &CliFlags) -> Result<Value, String> {
     let mut args = match json_object(words) {
         Some(object) => object,
         None => {
@@ -301,20 +308,34 @@ pub fn cli_args(
             }
         }
     };
-    if now {
+    if flags.now {
         args["now"] = json!(true);
     }
-    if let Some(call) = call {
+    if let Some(call) = &flags.call {
         args["call"] = json!(call);
     }
-    if let Some(reason) = reason {
+    if let Some(reason) = &flags.reason {
         args["reason"] = json!(reason);
     }
-    if !disable.is_empty() {
-        args["disable"] = json!(disable);
+    if !flags.disable.is_empty() {
+        args["disable"] = json!(flags.disable);
     }
-    if !enable.is_empty() {
-        args["enable"] = json!(enable);
+    if !flags.enable.is_empty() {
+        args["enable"] = json!(flags.enable);
+    }
+    if let Some(path) = &flags.path {
+        // Forward slashes everywhere: the path crosses a JSON round trip and
+        // then a `PathBuf` on this platform.
+        args["path"] = json!(crate::util::path_string(path));
+    }
+    if let Some(text) = &flags.text {
+        args["text"] = json!(text);
+    }
+    if let Some(name) = &flags.name {
+        args["name"] = json!(name);
+    }
+    if let Some(kind) = &flags.kind {
+        args["kind"] = json!(kind);
     }
     // Validate before the request leaves the machine: `ctl` should catch a bad
     // invocation itself, not the session.
@@ -605,23 +626,48 @@ mod tests {
     #[test]
     fn cli_words_become_text_and_flags_merge() {
         let words = vec!["change".to_string(), "of".to_string(), "plan".to_string()];
-        let args = cli_args("say", &words, true, None, None, &[], &[]).unwrap();
+        let args = cli_args(
+            "say",
+            &words,
+            &CliFlags {
+                now: true,
+                ..CliFlags::default()
+            },
+        )
+        .unwrap();
         assert_eq!(args, json!({"text": "change of plan", "now": true}));
 
-        let args = cli_args("stop", &[], false, Some("call_2"), Some("wrong"), &[], &[]).unwrap();
+        let args = cli_args(
+            "stop",
+            &[],
+            &CliFlags {
+                call: Some("call_2".into()),
+                reason: Some("wrong".into()),
+                ..CliFlags::default()
+            },
+        )
+        .unwrap();
         assert_eq!(args, json!({"call": "call_2", "reason": "wrong"}));
 
-        let args = cli_args("stop", &["enough".to_string()], false, None, None, &[], &[]).unwrap();
+        let args = cli_args("stop", &["enough".to_string()], &CliFlags::default()).unwrap();
         assert_eq!(args, json!({"reason": "enough"}));
 
-        let args = cli_args("tools", &[], false, None, None, &["bash".to_string()], &[]).unwrap();
+        let args = cli_args(
+            "tools",
+            &[],
+            &CliFlags {
+                disable: vec!["bash".into()],
+                ..CliFlags::default()
+            },
+        )
+        .unwrap();
         assert_eq!(args, json!({"disable": ["bash"]}));
     }
 
     #[test]
     fn compact_words_become_the_focus() {
         let words = vec!["the".to_string(), "failing".to_string(), "test".to_string()];
-        let args = cli_args("compact", &words, false, None, None, &[], &[]).unwrap();
+        let args = cli_args("compact", &words, &CliFlags::default()).unwrap();
         assert_eq!(args, json!({"focus": "the failing test"}));
         assert_eq!(
             parse("compact", &args).unwrap(),
@@ -629,7 +675,7 @@ mod tests {
                 focus: Some("the failing test".into())
             }
         );
-        let args = cli_args("compact", &[], false, None, None, &[], &[]).unwrap();
+        let args = cli_args("compact", &[], &CliFlags::default()).unwrap();
         assert_eq!(args, json!({}));
         assert_eq!(
             parse("compact", &args).unwrap(),
@@ -638,18 +684,96 @@ mod tests {
     }
 
     #[test]
+    fn skills_names_a_source_and_checks_it() {
+        let verb = parse("skills", &json!({"name": "sift", "text": "read the tail"})).unwrap();
+        assert_eq!(
+            verb,
+            Verb::Skills {
+                kind: crate::sources::SourceKind::Skill,
+                name: "sift".into(),
+                path: None,
+                text: Some("read the tail".into()),
+            }
+        );
+        assert_eq!(verb.scope(), "next_step");
+        assert!(verb.applies_at(Boundary::BeforeStep));
+        assert!(!verb.applies_at(Boundary::AfterTools));
+        // An instruction source, named by a path.
+        let verb = parse(
+            "skills",
+            &json!({"kind": "instruction", "name": "house.md", "path": "a/b.md"}),
+        )
+        .unwrap();
+        assert_eq!(
+            verb,
+            Verb::Skills {
+                kind: crate::sources::SourceKind::Instruction,
+                name: "house.md".into(),
+                path: Some("a/b.md".into()),
+                text: None,
+            }
+        );
+        // Nothing to add, an unknown kind, or a name that could escape a
+        // directory are all refused before anything is logged.
+        assert!(parse("skills", &json!({"name": "x"})).is_err());
+        assert!(parse("skills", &json!({"text": "x"})).is_err());
+        assert!(
+            parse("skills", &json!({"name": "x", "text": "y", "kind": "hint"}))
+                .unwrap_err()
+                .contains("unknown kind")
+        );
+        let backslash = "a\\b";
+        for bad in ["../x", "a/b", backslash, ".hidden", " "] {
+            assert!(
+                parse("skills", &json!({"name": bad, "text": "y"})).is_err(),
+                "{bad} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cli_builds_a_skills_verb_from_its_flags() {
+        let flags = CliFlags {
+            path: Some(std::path::PathBuf::from("skills/sift")),
+            name: Some("sift".into()),
+            kind: Some("skill".into()),
+            ..CliFlags::default()
+        };
+        let args = cli_args("skills", &[], &flags).unwrap();
+        assert_eq!(args["name"], "sift");
+        assert_eq!(args["path"], "skills/sift");
+        assert_eq!(args["kind"], "skill");
+        assert!(parse("skills", &args).is_ok());
+        // Inline text needs no path.
+        let flags = CliFlags {
+            name: Some("house".into()),
+            text: Some("always run the gates".into()),
+            ..CliFlags::default()
+        };
+        let args = cli_args("skills", &[], &flags).unwrap();
+        assert!(parse("skills", &args).is_ok());
+        // `ctl` validates locally: a skills verb with nothing to add never
+        // leaves the machine.
+        let flags = CliFlags {
+            name: Some("x".into()),
+            ..CliFlags::default()
+        };
+        assert!(cli_args("skills", &[], &flags).is_err());
+    }
+
+    #[test]
     fn a_json_positional_is_the_args() {
         let words = vec![r#"{"text":"from json","now":true}"#.to_string()];
-        let args = cli_args("say", &words, false, None, None, &[], &[]).unwrap();
+        let args = cli_args("say", &words, &CliFlags::default()).unwrap();
         assert_eq!(args, json!({"text": "from json", "now": true}));
         // Words that are not a JSON object stay text.
         let words = vec!["{not json}".to_string()];
-        let args = cli_args("say", &words, false, None, None, &[], &[]).unwrap();
+        let args = cli_args("say", &words, &CliFlags::default()).unwrap();
         assert_eq!(args, json!({"text": "{not json}"}));
     }
 
     #[test]
     fn an_empty_say_from_the_cli_is_rejected() {
-        assert!(cli_args("say", &[], false, None, None, &[], &[]).is_err());
+        assert!(cli_args("say", &[], &CliFlags::default()).is_err());
     }
 }

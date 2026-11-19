@@ -11,15 +11,18 @@ use crate::ipc::{self, Request};
 use crate::{paths, verbs};
 
 pub async fn ctl(args: CtlArgs) -> u8 {
-    let request_args = match verbs::cli_args(
-        &args.verb,
-        &args.args,
-        args.now,
-        args.call.as_deref(),
-        args.reason.as_deref(),
-        &args.disable,
-        &args.enable,
-    ) {
+    let flags = verbs::CliFlags {
+        now: args.now,
+        call: args.call.clone(),
+        reason: args.reason.clone(),
+        disable: args.disable.clone(),
+        enable: args.enable.clone(),
+        path: args.path.clone(),
+        text: args.text.clone(),
+        name: args.name.clone(),
+        kind: args.kind.clone(),
+    };
+    let request_args = match verbs::cli_args(&args.verb, &args.args, &flags) {
         Ok(value) => value,
         Err(message) => {
             eprintln!("kelir: {message}");

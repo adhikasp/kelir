@@ -1029,6 +1029,35 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         assert_eq!(found[0].0, "one");
     }
 
+    /// The `skills` verb's two shapes, at the level the session uses them: a
+    /// skill directory is read as its `SKILL.md` body, and an instruction file
+    /// as its whole text.
+    #[test]
+    fn a_skill_directory_reads_as_its_body() {
+        let dir = temp_dir("skill-read");
+        write(
+            &dir.join("sift").join("SKILL.md"),
+            "---
+name: sift
+description: d
+---
+
+READ THE TAIL
+",
+        );
+        let text = read(&dir.join("sift").join("SKILL.md")).unwrap();
+        let skill = parse_skill(&text).unwrap();
+        assert_eq!(skill.name, "sift");
+        assert_eq!(
+            skill.body,
+            "READ THE TAIL
+"
+        );
+        // A directory without a SKILL.md is not a skill source.
+        std::fs::create_dir_all(dir.join("empty")).unwrap();
+        assert!(read(&dir.join("empty").join("SKILL.md")).is_none());
+    }
+
     #[test]
     fn kinds_are_read_back_from_a_source_name() {
         assert_eq!(kind_of("prompt.md"), SourceKind::Base);

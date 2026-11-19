@@ -672,8 +672,24 @@ impl LiveSession {
             guard,
         };
         let first = session.next_event().await;
-        assert_eq!(first["type"], "session_started", "{first}");
-        session.id = first["id"].as_str().expect("session id").to_string();
+        // A fresh session starts with `session_started`; a resume picks the
+        // log up with `resumed`, and its id is the one it was given.
+        match first["type"].as_str() {
+            Some("session_started") => {
+                session.id = first["id"].as_str().expect("session id").to_string();
+            }
+            Some("resumed") => {
+                let sessions =
+                    kelir::paths::sessions_newest_first_in(&session.state.join("sessions"));
+                assert_eq!(
+                    sessions.len(),
+                    1,
+                    "a resume of one session, got {sessions:?}"
+                );
+                session.id = sessions[0].clone();
+            }
+            other => panic!("a session's first event was {other:?}: {first}"),
+        }
         session.session_dir = session.state.join("sessions").join(&session.id);
         session
     }

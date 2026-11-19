@@ -605,6 +605,13 @@ async fn a_bg_run_inside_a_call_outlives_a_killed_session() {
         .env("KELIR_STATE_DIR", &live.state)
         .env("KELIR_CONFIG", &live.config)
         .env("KELIR_CONFIG_DIR", live.state.join("no-config"))
+        // Never the session that runs the suite: `KELIR_SESSION_DIR` would
+        // point `bg` at that session's jobs and `KELIR_SOCK` would report a
+        // test's job into it (kelir dogfoods itself).
+        .env_remove("KELIR_SESSION_DIR")
+        .env_remove("KELIR_SOCK")
+        .env_remove("KELIR_CALL_ID")
+        .env_remove("KELIR_BIN")
         .output();
     for _ in 0..20 {
         if !pid_alive(pid) {
