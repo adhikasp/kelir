@@ -1012,6 +1012,10 @@ impl App {
                 self.dispatch(&action);
             }
             Ok(Parsed::Note(note)) => self.push_text(&note),
+            Ok(Parsed::View(view)) => match view {
+                commands::View::Expand(ordinal) => self.expand(ordinal),
+                commands::View::Collapse => self.set_policy(self.policy.toggled()),
+            },
             Err(message) => {
                 if !message.is_empty() {
                     self.push_text(&format!("kelir: {message}"));

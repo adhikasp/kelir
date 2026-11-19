@@ -96,12 +96,24 @@ impl Action {
     }
 }
 
+/// A local view command: no verb, no session state, no event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum View {
+    /// `/expand [n|last]`: append call `n`'s output to the scrollback (the
+    /// default is the last call). It cannot unfold a committed line.
+    Expand(Option<u64>),
+    /// `/collapse` and a bare `/expand` toggle the policy for *future* calls.
+    Collapse,
+}
+
 /// A parsed line: a session action, or something only the TUI shows.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Parsed {
     Action(Action),
     /// Local information (help, usage): no verb, no session state.
     Note(String),
+    /// A local view change (expand/collapse): the TUI's own state only.
+    View(View),
 }
 
 /// `/name args` → `(name, args)`.
@@ -127,6 +139,25 @@ pub fn parse(line: &str) -> Result<Parsed, String> {
         return Ok(Parsed::Action(Action::Submit(trimmed.to_string())));
     }
     let (name, rest) = split_command(trimmed);
+    // The local view commands return before the verb table.
+    match name {
+        "expand" => {
+            return Ok(match non_empty(rest) {
+                None => Parsed::View(View::Expand(None)),
+                Some(word) if word == "last" => Parsed::View(View::Expand(None)),
+                Some(word) => match word.parse::<u64>() {
+                    Ok(ordinal) if ordinal > 0 => Parsed::View(View::Expand(Some(ordinal))),
+                    _ => {
+                        return Err(format!(
+                            "/expand takes a call number (1, 2, …) or `last`, not `{word}`"
+                        ));
+                    }
+                },
+            });
+        }
+        "collapse" => return Ok(Parsed::View(View::Collapse)),
+        _ => {}
+    }
     let action = match name {
         "stop" => Action::Stop(non_empty(rest)),
         "say-now" | "say_now" | "now" => Action::SayNow(text_arg("say-now", rest)?),
@@ -192,6 +223,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "/compact [focus]",
         "summarise the earlier context, keeping the task and your messages",
+    ),
+    (
+        "/expand [n|last]",
+        "append a call's output here (a committed line cannot be unfolded)",
+    ),
+    (
+        "/collapse",
+        "one line per tool call for the calls after this one",
     ),
     ("/quit", "end the session (a second Ctrl-C does the same)"),
     ("/help", "this list"),
