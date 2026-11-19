@@ -337,15 +337,18 @@ equivalent is `deepseek-v4.1-flash`.
 
 - **`openrouter`**: `OPENROUTER_API_KEY`, then `key_env` (a variable named in the table), then
   `key_cmd = ["cmd", …]` (its trimmed stdout).
-- **`opencode-go`**: an explicit override first — `KELIR_GO_API_KEY` (or `key_env`), then
+- **`opencode-go`**: an explicit override first — `KELIR_GO_API_KEY`, then `key_env`, then
   `key_cmd` — and otherwise **opencode's own credential**, read through the supported
   `opencode auth export opencode` CLI (JSON array; the `integrationID == "opencode"` entry with
-  `active: true`; token `value.access`, expiry `value.expires` in epoch ms). No SQLite and no
+  `active: true`; token `value.access`, expiry `value.expires` in epoch ms). A store entry that
+  is expired or inside its two-minute margin is read **once more** (opencode refreshes its own
+  token when it runs) before an expired one becomes a usage error naming the expiry. No SQLite and no
   reading `opencode.db`; no OAuth refresh of kelir's own, because opencode rotates the refresh
   token and a second refresher would break the account it shares with kelir. The `opencode`
   executable is found on `PATH` (`.exe`/`.cmd`/`.bat`/`.com` on Windows, a `.cmd` shim through
   `COMSPEC /C`), run with no console window, no inherited stdin, a 5 s bound and the whole tree
-  killed by pid if it overruns; its output is never echoed. The dev box measures the read at
+  killed by pid if it overruns; its output is never echoed and is read up to 64 MiB, past which
+  the read fails with a clear message. The dev box measures the read at
   ~0.33–0.39 s (worst cold ~1.7 s), so session start pays it once, before the first request.
 
 A literal `key = "…"` in a config file is refused with a warning (it goes stale, shadows a live

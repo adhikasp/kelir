@@ -40,17 +40,24 @@ pub fn doctor(args: DoctorArgs) -> u8 {
     }
 
     let reports: Vec<Value> = wanted.iter().map(|name| report(&cfg, name)).collect();
-    let usable = reports
-        .iter()
-        .filter(|report| report["ok"].as_bool().unwrap_or(false))
-        .count();
+    // Exit 1 only for a provider that matters: the one this session would use,
+    // or one whose credential is *broken* (expired). A machine that uses Go
+    // deliberately has no OPENROUTER_API_KEY, and that is information, not a
+    // failure (STEER-2 review, nit 5) — but an expired store credential is a
+    // real fault wherever it shows up.
+    let failing = |report: &Value| {
+        !report["ok"].as_bool().unwrap_or(false)
+            && (report["default"].as_bool().unwrap_or(false)
+                || report["expired"].as_bool().unwrap_or(false))
+    };
+    let failed = reports.iter().filter(|report| failing(report)).count();
 
     if args.json {
         let value = json!({
             "type": "doctor",
             "kelir_version": crate::VERSION,
             "providers": reports,
-            "ok": usable == reports.len(),
+            "ok": failed == 0,
         });
         println!("{value}");
     } else {
@@ -59,7 +66,7 @@ pub fn doctor(args: DoctorArgs) -> u8 {
             print_report(report);
         }
     }
-    if usable == reports.len() { 0 } else { 1 }
+    if failed == 0 { 0 } else { 1 }
 }
 
 /// One provider: its configuration and where its key comes from.
@@ -104,9 +111,14 @@ fn report(cfg: &Config, name: &str) -> Value {
         }
         Err(error) => {
             // The message says what is missing and how to fix it; it never
-            // quotes a key (nothing here holds one).
+            // quotes a key (nothing here holds one). An expired credential
+            // comes back as an error (it is a usage error, not a key), so the
+            // report says *which* fault it is: `expired` is what makes `doctor`
+            // exit 1 for a provider other than the selected one.
+            let expired = error.contains("expired at");
+            value["expired"] = json!(expired);
             value["error"] = json!(error);
-            if name == config::PROVIDER_GO {
+            if name == config::PROVIDER_GO || expired {
                 value["fix"] = json!(credentials::REFRESH_FIX);
             }
         }

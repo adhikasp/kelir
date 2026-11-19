@@ -2,8 +2,11 @@
 //!
 //! Exactly two providers, and each one has its own first-match-wins list:
 //!
-//! * **OpenRouter** — the variable `key_env` names (`OPENROUTER_API_KEY` by
-//!   default), then `key_cmd` (a command whose stdout is the key).
+//! * **OpenRouter** — `OPENROUTER_API_KEY`, then the variable `key_env` names,
+//!   then `key_cmd` (a command whose stdout is the key). `key_env` is a
+//!   *fallback*, never a replacement: a config that names a variable which
+//!   happens to be unset must not hide the machine's usual one (STEER-2
+//!   fix).
 //! * **OpenCode Go** — the same two as an *explicit override*, then opencode's
 //!   own credential store, read through the supported `opencode auth export
 //!   opencode` CLI. No SQLite, no reading `opencode.db`, and no OAuth refresh of
@@ -20,6 +23,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::config::{ProviderConfig, ProviderKind};
@@ -40,8 +45,22 @@ pub const EXPIRY_MARGIN: Duration = Duration::from_secs(120);
 pub const OPENROUTER_ENV: &str = "OPENROUTER_API_KEY";
 
 /// The explicit override for OpenCode Go's credential: set it and it wins over
-/// opencode's own store.
+/// opencode's own store. It is also the `key_env` a config leaves unset.
 pub const GO_ENV: &str = "KELIR_GO_API_KEY";
+
+/// How long to wait before re-reading a store entry that is already expired:
+/// opencode rotates a token as a side effect of running, and the CLI call that
+/// produced the parse may have been racing exactly that write.
+pub const REREAD_DELAY: Duration = Duration::from_millis(250);
+
+/**
+ * The most of a helper's stdout kelir reads (64 MiB). It is a memory bound, not a
+ * size expectation: opencode's export is kilobytes (a 30 MB one was measured
+ * during review and is handled), and a helper that streams past this is not
+ * answering with a credential. Without a bound a misbehaving helper could grow
+ * this process's memory until the machine swaps (STEER-2 review, nit 6).
+ */
+pub const MAX_HELPER_STDOUT: usize = 64 * 1024 * 1024;
 
 /// Where a key came from. Recorded and printed; the key itself is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,20 +200,30 @@ pub fn resolve_with(
     env: &dyn Fn(&str) -> Option<String>,
     run: &dyn Fn(&[String]) -> Result<String, String>,
 ) -> Result<Credential, String> {
+    // The default variable first, then the one `key_env` names (when that is a
+    // different name), then `key_cmd`: SPEC.md, "first match wins". For Go the
+    // default is the explicit override and the store answers after it.
     let default_env = match provider.kind {
         ProviderKind::OpenRouter => OPENROUTER_ENV,
         ProviderKind::OpencodeGo => GO_ENV,
     };
-    let env_name = provider
+    let named_env = provider
         .key_env
         .clone()
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| default_env.to_string());
-    if let Some(value) = env(&env_name)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .filter(|name| !name.trim().is_empty());
+    let mut candidates: Vec<String> = vec![default_env.to_string()];
+    if let Some(name) = named_env
+        && name != default_env
     {
-        return Ok(Credential::new(value, Origin::Env(env_name)));
+        candidates.push(name);
+    }
+    for env_name in candidates {
+        if let Some(value) = env(&env_name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Credential::new(value, Origin::Env(env_name)));
+        }
     }
     if let Some(argv) = provider.key_cmd.as_ref().filter(|argv| !argv.is_empty()) {
         let started = Instant::now();
@@ -226,23 +255,44 @@ pub fn resolve_with(
 }
 
 /// opencode's own credential, read through its supported CLI and re-read once
-/// when it is already about to expire (opencode refreshes its token when it
-/// runs, so the second read may be the fresh one).
+/// when it is already about to expire — expired on the first read included:
+/// opencode refreshes its token when it runs, so the second read may be the
+/// fresh one. Exactly one re-read; past that the expiry is the answer.
 fn store_credential(
     run: &dyn Fn(&[String]) -> Result<String, String>,
 ) -> Result<Credential, String> {
     let started = Instant::now();
     let mut credential = read_store(run)?;
     let now = crate::models::now_ms();
-    if credential.expires_within_margin(now)
-        && let Ok(fresh) = read_store(run)
-        && !fresh.expires_within_margin(now)
-        && fresh.expires_at_ms != credential.expires_at_ms
-    {
-        credential = fresh;
+    if credential.expires_within_margin(now) {
+        pause_before_reread();
+        if let Ok(fresh) = read_store(run)
+            && !fresh.expires_within_margin(now)
+            && fresh.expires_at_ms != credential.expires_at_ms
+        {
+            credential = fresh;
+        }
     }
     credential.read_ms = started.elapsed().as_millis() as u64;
+    if credential.is_expired(crate::models::now_ms()) {
+        let at = credential
+            .expires_at_ms
+            .map(format_ms)
+            .unwrap_or_else(|| "an unknown time".to_string());
+        return Err(format!(
+            "the opencode credential expired at {at}: {REFRESH_FIX}"
+        ));
+    }
     Ok(credential)
+}
+
+/// A short, quiet pause before the one re-read: opencode writes the rotated
+/// token as a side effect of running, so an immediate second read can win the
+/// race against that write. Unit tests skip it (they inject the runner, so
+/// there is no CLI to race); the real binary pays 250 ms once, at most.
+fn pause_before_reread() {
+    #[cfg(not(test))]
+    std::thread::sleep(REREAD_DELAY);
 }
 
 /// One `opencode auth export opencode` and its parse.
@@ -260,7 +310,7 @@ fn read_store(run: &dyn Fn(&[String]) -> Result<String, String>) -> Result<Crede
              / `[providers.opencode-go] key_cmd`)"
         )
     })?;
-    let token = parse_auth_export(&stdout, crate::models::now_ms())
+    let token = parse_auth_export(&stdout)
         .map_err(|error| format!("provider `opencode-go`: opencode's credential store: {error}"))?;
     let key = token.access;
     Ok(Credential {
@@ -283,9 +333,10 @@ pub struct StoreToken {
 /// `integrationID` is `opencode` and whose `active` is true; the token is
 /// `value.access` and `value.expires` is epoch milliseconds).
 ///
-/// An expired entry is an error that says when it expired and what a person can
-/// do about it — never a request with a token that cannot work.
-pub fn parse_auth_export(json: &str, now_ms: u64) -> Result<StoreToken, String> {
+/// An expired entry parses; the caller ([`store_credential`]) re-reads once and
+/// only then fails with the expiry time — never a request with a token that
+/// cannot work.
+pub fn parse_auth_export(json: &str) -> Result<StoreToken, String> {
     let value: serde_json::Value = serde_json::from_str(json.trim())
         .map_err(|error| format!("auth export is not JSON ({error})"))?;
     let entries = value
@@ -319,14 +370,9 @@ pub fn parse_auth_export(json: &str, now_ms: u64) -> Result<StoreToken, String> 
             .as_str()
             .and_then(|text| text.trim().parse().ok())
     });
-    if let Some(expires) = expires_at_ms
-        && expires <= now_ms
-    {
-        return Err(format!(
-            "the opencode credential expired at {}: {REFRESH_FIX}",
-            format_ms(expires)
-        ));
-    }
+    // A stale entry parses: the *caller* decides whether to re-read once before
+    // failing, because an entry that is expired on the first read may already
+    // have been rotated by the time the second one runs (STEER-2 fix 1).
     Ok(StoreToken {
         access: access.to_string(),
         expires_at_ms,
@@ -360,8 +406,21 @@ fn program_name(argv: &[String]) -> String {
 /// * past `timeout` the **tree** is killed by pid/group and reaped, so a hung
 ///   helper cannot outlive the read (AGENTS.md: no leaked processes);
 /// * a failure is a one-line sentence: the helper's own output is never echoed,
-///   because a credential manager prints credentials.
+///   because a credential manager prints credentials;
+/// * stdout is read up to [`MAX_HELPER_STDOUT`] and no further: a helper that
+///   streams past that is not printing a credential, and an unbounded read
+///   would let it dictate this process's memory.
 pub fn run_command(argv: &[String], timeout: Duration) -> Result<String, String> {
+    run_command_bounded(argv, timeout, MAX_HELPER_STDOUT)
+}
+
+/// [`run_command`] with the stdout bound spelled out, so the bound itself is
+/// testable without making the test read tens of megabytes.
+fn run_command_bounded(
+    argv: &[String],
+    timeout: Duration,
+    max_stdout: usize,
+) -> Result<String, String> {
     let program = argv
         .first()
         .ok_or_else(|| "empty command".to_string())?
@@ -394,13 +453,25 @@ pub fn run_command(argv: &[String], timeout: Duration) -> Result<String, String>
     let pid = child.id();
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
-    let out_reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(pipe) = stdout_pipe.as_mut() {
-            let _ = std::io::Read::read_to_string(pipe, &mut text);
-        }
-        text
-    });
+    // Set by the reader when the helper outran the bound: the child is then
+    // blocked on a pipe nobody drains and has to be stopped, not waited for.
+    let overran = Arc::new(AtomicBool::new(false));
+    let out_reader = {
+        let overran = Arc::clone(&overran);
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(pipe) = stdout_pipe.as_mut() {
+                // Bounded: one byte past the limit tells "exactly at the limit"
+                // apart from "more than the limit".
+                let mut taken = std::io::Read::take(pipe, max_stdout as u64 + 1);
+                let _ = std::io::Read::read_to_string(&mut taken, &mut text);
+            }
+            if text.len() > max_stdout {
+                overran.store(true, Ordering::Relaxed);
+            }
+            text
+        })
+    };
     let err_reader = std::thread::spawn(move || {
         let mut text = String::new();
         if let Some(pipe) = stderr_pipe.as_mut() {
@@ -418,7 +489,7 @@ pub fn run_command(argv: &[String], timeout: Duration) -> Result<String, String>
                 return Err(format!("`{program}`: cannot read its status: {error}"));
             }
         }
-        if started.elapsed() >= timeout {
+        if overran.load(Ordering::Relaxed) || started.elapsed() >= timeout {
             kill_tree(pid);
             let _ = child.wait();
             break None;
@@ -427,6 +498,19 @@ pub fn run_command(argv: &[String], timeout: Duration) -> Result<String, String>
     };
     let stdout = out_reader.join().unwrap_or_default();
     let _ = err_reader.join();
+    if stdout.len() > max_stdout {
+        // Reading stopped at the bound, so the helper may still be writing into
+        // a pipe nobody drains: it must not outlive the read. Only a child that
+        // is still alive is killed (a reaped pid may belong to someone else).
+        if matches!(child.try_wait(), Ok(None)) {
+            kill_tree(pid);
+            let _ = child.wait();
+        }
+        return Err(format!(
+            "`{program}` printed more than {} MiB; a key or an auth export is far smaller",
+            max_stdout.div_ceil(1024 * 1024)
+        ));
+    }
     match status {
         Some(status) if status.success() => Ok(stdout.trim().to_string()),
         Some(status) => Err(match status.code() {
@@ -598,7 +682,7 @@ mod tests {
 
     #[test]
     fn the_active_opencode_entry_is_the_one_that_counts() {
-        let token = parse_auth_export(EXPORT, 1_700_000_000_000).unwrap();
+        let token = parse_auth_export(EXPORT).unwrap();
         assert_eq!(token.access, "oc_sk_live");
         assert_eq!(token.expires_at_ms, Some(1_795_513_914_282));
     }
@@ -607,47 +691,103 @@ mod tests {
     fn an_inactive_or_missing_entry_is_an_error_that_names_the_fix() {
         // Inactive: the same shape with `active: false`.
         let inactive = EXPORT.replace("\"active\":true", "\"active\":false");
-        let error = parse_auth_export(&inactive, 1).unwrap_err();
+        let error = parse_auth_export(&inactive).unwrap_err();
         assert!(error.contains("no active `opencode` entry"), "{error}");
         assert!(error.contains("opencode auth login"), "{error}");
         // Another integration only: also no entry.
         let other = r#"[{"integrationID":"github","active":true,"value":{"access":"gho_x"}}]"#;
-        assert!(parse_auth_export(other, 1).is_err());
+        assert!(parse_auth_export(other).is_err());
         // An empty store (fresh install).
-        assert!(parse_auth_export("[]", 1).is_err());
+        assert!(parse_auth_export("[]").is_err());
     }
 
     #[test]
-    fn an_expired_credential_says_when_it_expired_and_what_to_do() {
-        // `expires` in the past: refusing a request with it is the whole point
-        // (STEER-2: never send a credential that cannot work).
-        let now = 1_800_000_000_000;
-        let error = parse_auth_export(EXPORT, now).unwrap_err();
+    fn a_stale_entry_parses_and_the_caller_decides_what_to_do() {
+        // `expires` in the past still parses: the re-read decision belongs to
+        // `store_credential`, so that an entry which is expired on the first
+        // read gets its one re-read before kelir gives up (STEER-2 fix 1).
+        let token = parse_auth_export(EXPORT).unwrap();
+        assert_eq!(token.access, "oc_sk_live");
+        assert_eq!(token.expires_at_ms, Some(1_795_513_914_282));
+    }
+
+    #[test]
+    fn a_store_credential_that_stays_expired_fails_with_the_time_and_the_fix() {
+        // Read twice and still expired: refusing before a request is the point
+        // (never send a credential that cannot work).
+        let past = crate::models::now_ms().saturating_sub(60_000);
+        let reads = std::cell::Cell::new(0);
+        let error = store_credential(&|_| {
+            reads.set(reads.get() + 1);
+            Ok(format!(
+                r#"[{{"integrationID":"opencode","active":true,"value":{{"access":"oc_sk_stale","expires":{past}}}}}]"#
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(reads.get(), 2, "exactly one re-read");
         assert!(error.contains("expired at"), "{error}");
         assert!(error.contains(REFRESH_FIX), "{error}");
-        // And at the exact instant: expired, not "still good".
-        assert!(
-            parse_auth_export(EXPORT, 1_795_513_914_282)
-                .unwrap_err()
-                .contains("expired")
-        );
-        assert!(parse_auth_export(EXPORT, 1_795_513_914_281).is_ok());
+        assert!(!error.contains("oc_sk_stale"));
+    }
+
+    #[test]
+    fn an_entry_expired_on_the_first_read_recovers_on_the_re_read() {
+        // opencode refreshes its own token when it runs; the second read may
+        // already carry the fresh one, so the first expiry is not the answer.
+        let now = crate::models::now_ms();
+        let past = now.saturating_sub(60_000);
+        let later = now + 3_600_000;
+        let reads = std::cell::Cell::new(0);
+        let credential = store_credential(&|_| {
+            reads.set(reads.get() + 1);
+            let (access, expires) = if reads.get() == 1 {
+                ("oc_sk_dead", past)
+            } else {
+                ("oc_sk_fresh", later)
+            };
+            Ok(format!(
+                r#"[{{"integrationID":"opencode","active":true,"value":{{"access":"{access}","expires":{expires}}}}}]"#
+            ))
+        })
+        .unwrap();
+        assert_eq!(reads.get(), 2);
+        assert_eq!(credential.key(), "oc_sk_fresh");
+        assert_eq!(credential.expires_at_ms, Some(later));
+    }
+
+    #[test]
+    fn a_second_read_that_is_still_expired_keeps_the_first_answer() {
+        // Two expired reads: the message names the expiry the store reported,
+        // and no third read happens.
+        let now = crate::models::now_ms();
+        let past = now.saturating_sub(60_000);
+        let reads = std::cell::Cell::new(0);
+        let error = store_credential(&|_| {
+            reads.set(reads.get() + 1);
+            let expires = if reads.get() == 1 { past } else { past + 1 };
+            Ok(format!(
+                r#"[{{"integrationID":"opencode","active":true,"value":{{"access":"oc_sk_stale","expires":{expires}}}}}]"#
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(reads.get(), 2, "no third read");
+        assert!(error.contains("expired at"), "{error}");
     }
 
     #[test]
     fn malformed_json_and_a_missing_access_are_errors_not_panics() {
         for bad in ["", "not json", "{}", "{\"a\":1}", "[1,2,3]"] {
-            let error = parse_auth_export(bad, 1).unwrap_err();
+            let error = parse_auth_export(bad).unwrap_err();
             assert!(!error.is_empty(), "{bad:?}");
         }
         // The right entry, no token.
         let no_access = r#"[{"integrationID":"opencode","active":true,"value":{"expires":1}}]"#;
-        let error = parse_auth_export(no_access, 1).unwrap_err();
+        let error = parse_auth_export(no_access).unwrap_err();
         assert!(error.contains("value.access"), "{error}");
         // The right entry, an empty token.
         let empty =
             r#"[{"integrationID":"opencode","active":true,"value":{"access":"  ","expires":1}}]"#;
-        assert!(parse_auth_export(empty, 1).is_err());
+        assert!(parse_auth_export(empty).is_err());
     }
 
     #[test]
@@ -658,7 +798,7 @@ mod tests {
           {"integrationID":"opencode","active":true,"value":{"access":"oc_sk_new","expires":"1795513914282","future":true}},
           {"integrationID":"opencode","active":true,"value":{"access":"oc_sk_second"}}
         ]"#;
-        let token = parse_auth_export(extra, 1_700_000_000_000).unwrap();
+        let token = parse_auth_export(extra).unwrap();
         assert_eq!(token.access, "oc_sk_new", "the first active entry wins");
         // A numeric string is still an expiry, not "no expiry".
         assert_eq!(token.expires_at_ms, Some(1_795_513_914_282));
@@ -668,7 +808,7 @@ mod tests {
     fn a_key_without_an_expiry_is_read_as_no_expiry() {
         let entry =
             r#"[{"integrationID":"opencode","active":true,"value":{"access":"oc_sk_forever"}}]"#;
-        let token = parse_auth_export(entry, 1).unwrap();
+        let token = parse_auth_export(entry).unwrap();
         assert_eq!(token.access, "oc_sk_forever");
         assert_eq!(token.expires_at_ms, None);
     }
@@ -742,15 +882,26 @@ mod tests {
         assert_eq!(credential.key(), "oc_sk_override");
         assert_eq!(credential.origin, Origin::Env(GO_ENV.to_string()));
 
-        // `key_env` names another variable, and that wins too.
+        // `key_env` names another variable; it is tried after the default one,
+        // so with `KELIR_GO_API_KEY` unset the named variable answers.
         let named = provider(ProviderKind::OpencodeGo, Some("MY_GO_KEY"), None);
+        let credential = resolve_with(&named, &env_of(&[("MY_GO_KEY", "oc_sk_named")]), &|_| {
+            Ok(EXPORT.into())
+        })
+        .unwrap();
+        assert_eq!(credential.key(), "oc_sk_named");
+        assert_eq!(credential.origin, Origin::Env("MY_GO_KEY".to_string()));
+
+        // Both set: the default override name wins, the named one is the
+        // fallback (the same rule as OpenRouter's `OPENROUTER_API_KEY`).
         let credential = resolve_with(
             &named,
-            &env_of(&[("MY_GO_KEY", "oc_sk_named"), (GO_ENV, "ignored")]),
+            &env_of(&[("MY_GO_KEY", "oc_sk_named"), (GO_ENV, "oc_sk_default")]),
             &|_| Ok(EXPORT.into()),
         )
         .unwrap();
-        assert_eq!(credential.key(), "oc_sk_named");
+        assert_eq!(credential.key(), "oc_sk_default");
+        assert_eq!(credential.origin, Origin::Env(GO_ENV.to_string()));
 
         // `key_cmd` beats the store as well.
         let cmd = provider(ProviderKind::OpencodeGo, None, Some(&["go-key"]));
@@ -972,5 +1123,31 @@ mod tests {
                 started.elapsed()
             );
         }
+    }
+
+    /// Nit 6: a helper that streams far past a credential is stopped at the
+    /// bound with a clear message — never read into memory without a limit.
+    #[test]
+    fn a_helper_that_floods_stdout_is_stopped_at_the_bound() {
+        let started = Instant::now();
+        // A small bound through the same code path the real one uses: the
+        // message must name the bound, and the helper must not be left
+        // writing into a pipe nobody drains.
+        #[cfg(unix)]
+        let argv = ["cat".to_string(), "/dev/zero".to_string()];
+        #[cfg(windows)]
+        let argv = [
+            "cmd".to_string(),
+            "/C".to_string(),
+            "for /L %i in (1,1,900000) do @echo 0123456789abcdef0123456789abcdef".to_string(),
+        ];
+        let error = run_command_bounded(&argv, Duration::from_secs(30), 4096).unwrap_err();
+        assert!(error.contains("more than"), "{error}");
+        assert!(error.contains("MiB"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

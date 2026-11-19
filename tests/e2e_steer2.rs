@@ -289,6 +289,34 @@ async fn a_401_rereads_the_store_and_retries_once() {
     let _ = fake.root();
 }
 
+/// An entry that is expired on the first read is read again once: opencode
+/// refreshes its own token when it runs, so the second read may already carry
+/// the fresh one (STEER-2 fix 1).
+#[tokio::test]
+async fn a_store_entry_expired_on_the_first_read_recovers_on_the_re_read() {
+    let past = now_ms().saturating_sub(60_000);
+    let fresh = "oc_go_refreshed_e2e";
+    let fake = FakeOpencode::new(&export(SECRET, past), &export(fresh, far_future()));
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let run = run_task(
+        &mock,
+        &["run", "--json", "--provider", "opencode-go", "hi"],
+        &[("KELIR_GO_API_KEY", ""), ("PATH", &fake.path)],
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(
+        mock.requests()[0].header("authorization"),
+        Some(format!("Bearer {fresh}").as_str())
+    );
+    let written = everything_written(&run);
+    assert!(!written.contains(SECRET), "the stale key leaked");
+    assert!(!written.contains(fresh), "the fresh key leaked");
+    let _ = fake.root();
+}
+
 /// An expired credential is refused before a request is made, with the fix in
 /// the message: a request with a token that cannot work is not tried.
 #[tokio::test]
@@ -442,6 +470,85 @@ async fn a_third_provider_name_is_refused_naming_the_two() {
     assert_eq!(mock.request_count(), 0);
 }
 
+/// A `[providers.<name>]` table with an unknown name is a migration message:
+/// which table, which file, and what to rename it to (STEER-2 fix 3). The
+/// diagnostic tool reports it too, instead of a bare exit 2.
+#[tokio::test]
+async fn an_unknown_provider_table_says_where_it_is_and_what_to_rename() {
+    let mock = Mock::start(vec![]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"kelir\"\nmodel = \"test/model\"\n\
+         [providers.kelir]\nkind = \"openrouter\"\nkey_env = \"KELIR_OPENROUTER_API_KEY\"\n",
+    )
+    .unwrap();
+    let path = config.to_string_lossy().into_owned();
+    for args in [
+        vec!["run", "--json", "hi"],
+        vec!["doctor"],
+        vec!["ask", "hi"],
+    ] {
+        let run = run_task(&mock, &args, &[("KELIR_CONFIG", &path)], None, "").await;
+        assert_eq!(run.code, 2, "{:?}: {}{}", args, run.stdout, run.stderr);
+        for needle in [
+            "[providers.kelir]",
+            path.as_str(),
+            "exactly two",
+            "Rename the table",
+            "key_env",
+        ] {
+            assert!(
+                run.stderr.contains(needle),
+                "{:?}: missing {needle:?} in {}",
+                args,
+                run.stderr
+            );
+        }
+        assert_eq!(mock.request_count(), 0, "{args:?}");
+    }
+}
+
+/// OpenRouter's key sources are `OPENROUTER_API_KEY` first, then `key_env`, then
+/// `key_cmd` (SPEC: first match wins). A `key_env` that names an unset variable
+/// must not hide the machine's usual one (STEER-2 fix 2) — the migrated
+/// maintainer config names `KELIR_OPENROUTER_API_KEY`.
+#[tokio::test]
+async fn openrouter_reads_the_default_env_before_key_env_and_key_cmd() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&text_turn("ok", 0))),
+        Reply::Sse(sse(&text_turn("ok", 0))),
+    ])
+    .await;
+    // `OPENROUTER_API_KEY` (set by the harness) answers, whatever `key_env` says.
+    let named_unset = "[providers.openrouter]\nkey_env = \"KELIR_UNSET_FOR_THIS_TEST\"\n";
+    let run = run_task(&mock, &["run", "--json", "hi"], &[], None, named_unset).await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(
+        mock.requests()[0].header("authorization"),
+        Some("Bearer test-openrouter-key")
+    );
+
+    // No `OPENROUTER_API_KEY`: the named variable answers next.
+    let run = run_task(
+        &mock,
+        &["run", "--json", "hi"],
+        &[
+            ("OPENROUTER_API_KEY", ""),
+            ("KELIR_NAMED_KEY", "sk-from-key-env"),
+        ],
+        None,
+        "[providers.openrouter]\nkey_env = \"KELIR_NAMED_KEY\"\n",
+    )
+    .await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(
+        mock.requests().last().unwrap().header("authorization"),
+        Some("Bearer sk-from-key-env")
+    );
+}
+
 /// `kelir doctor` prints each provider's source, expiry and read time — and
 /// never the secret.
 #[tokio::test]
@@ -504,6 +611,55 @@ async fn doctor_reports_the_source_and_never_the_key() {
         text.stdout
     );
     assert!(!text.stdout.contains(SECRET));
+    let _ = fake.root();
+}
+
+/// `kelir doctor` fails (exit 1) only for a provider that matters: a session on
+/// Go has no `OPENROUTER_API_KEY`, and that is reported as information, not as
+/// a failure (STEER-2 review, nit 5).
+#[tokio::test]
+async fn doctor_does_not_fail_for_the_provider_this_session_does_not_use() {
+    let fake = FakeOpencode::new(&export(SECRET, far_future()), &export(SECRET, far_future()));
+    let mock = Mock::start(vec![]).await;
+    let run = run_task(
+        &mock,
+        &["doctor", "--json", "--provider", "opencode-go"],
+        &[("KELIR_GO_API_KEY", ""), ("PATH", &fake.path)],
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let report: Value = serde_json::from_str(run.stdout.trim()).expect("doctor is JSON");
+    assert_eq!(report["ok"], true, "{report}");
+    assert_eq!(report["providers"][0]["ok"], true, "{report}");
+
+    // Both providers reported (no `--provider`), Go selected by the config and
+    // healthy, OpenRouter has no key: still exit 0, and the OpenRouter line is
+    // reported as information, not as the reason the command failed.
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"opencode-go\"\nmodel = \"go/model\"\n",
+    )
+    .unwrap();
+    let both = run_task(
+        &mock,
+        &["doctor"],
+        &[
+            ("KELIR_CONFIG", &config.to_string_lossy()),
+            ("KELIR_GO_API_KEY", ""),
+            ("OPENROUTER_API_KEY", ""),
+            ("PATH", &fake.path),
+        ],
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(both.code, 0, "{}{}", both.stdout, both.stderr);
+    assert!(both.stdout.contains("FAIL openrouter"), "{}", both.stdout);
+    assert!(both.stdout.contains("ok   opencode-go"), "{}", both.stdout);
     let _ = fake.root();
 }
 

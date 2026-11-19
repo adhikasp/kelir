@@ -194,6 +194,29 @@ pub fn unknown_provider(name: &str) -> ConfigError {
     ))
 }
 
+/// The error a `[providers.<name>]` table with an unknown name gives (STEER-2
+/// fix 3): it says which table, in which file, that the name *is* the provider
+/// (`kind = …` is no longer used), and what to rename it to. `sources` is the
+/// config files that were merged, in the order they were read; a diagnostic
+/// tool (`kelir doctor`) must be able to point at the file, not just the name.
+pub fn unknown_provider_table(name: &str, sources: &[PathBuf]) -> ConfigError {
+    let files = if sources.is_empty() {
+        "the config file".to_string()
+    } else {
+        sources
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    ConfigError(format!(
+        "`[providers.{name}]` in {files}: unknown provider `{name}`: the table name *is* the provider and there are exactly \
+         two, `{PROVIDER_OPENROUTER}` and `{PROVIDER_GO}` (`kind = \"…\"` is no longer used). Rename the table to \
+         `[providers.{PROVIDER_OPENROUTER}]` or `[providers.{PROVIDER_GO}]`, then check `provider = \"…\"` in the same file; \
+         `key_env` keeps working"
+    ))
+}
+
 fn builtin_provider(name: &str) -> Option<RawProvider> {
     match name {
         PROVIDER_OPENROUTER => Some(RawProvider {
@@ -223,18 +246,22 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         .filter(|p| !p.as_os_str().is_empty());
 
     let mut merged = toml::Value::Table(Default::default());
+    let mut sources: Vec<PathBuf> = Vec::new();
     match explicit {
         Some(path) => {
             let value = read_toml(&path)?;
             merge(&mut merged, value);
+            sources.push(path);
         }
         None => {
             let machine = paths::machine_config_path();
             if machine.exists() {
                 merge(&mut merged, read_toml(&machine)?);
+                sources.push(machine);
             }
             if let Some(project) = find_project_config() {
                 merge(&mut merged, read_toml(&project)?);
+                sources.push(project);
             }
         }
     }
@@ -252,8 +279,8 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     // message a person needs.
     if let Some(_literal) = raw.key.as_deref().filter(|key| !key.trim().is_empty()) {
         eprintln!(
-            "kelir: warning: `key` in a config file is ignored: use the environment\
-             ({} / {}) or `key_cmd = [\"cmd\", …]`",
+            "kelir: warning: `key` in a config file is ignored: use the environment (\
+             {} / {}) or `key_cmd = [\"cmd\", …]`",
             crate::credentials::OPENROUTER_ENV,
             crate::credentials::GO_ENV
         );
@@ -267,13 +294,13 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
 
     // Exactly two providers, and only those two: a table for anything else is a
     // usage error that names the pair (a maintainer's config called theirs
-    // `kelir`).
+    // `kelir`) and the file to edit (STEER-2 fix 3).
     if let Some(other) = raw
         .providers
         .keys()
         .find(|name| !PROVIDERS.contains(&name.as_str()))
     {
-        return Err(unknown_provider(other));
+        return Err(unknown_provider_table(other, &sources));
     }
 
     let mut providers = BTreeMap::new();
@@ -282,8 +309,8 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         let user = raw.providers.get(name).cloned().unwrap_or_default();
         if let Some(_literal) = user.key.as_deref().filter(|key| !key.trim().is_empty()) {
             eprintln!(
-                "kelir: warning: `[providers.{name}] key` is ignored: use `key_env`,\
-                 `key_cmd`, or the environment"
+                "kelir: warning: `[providers.{name}] key` is ignored: use `key_env`, `key_cmd`,\
+                 or the environment"
             );
         }
         let entry = overlay(base, user);
@@ -773,7 +800,8 @@ extra_headers = { "x-extra" = "yes" }
     #[test]
     fn a_third_provider_name_is_refused_and_the_error_names_the_two() {
         // A maintainer's config called its provider `kelir`; there are exactly
-        // two now, and the error has to say which (STEER-2).
+        // two now, and the error has to say which (STEER-2), in which table and
+        // in which file, and how to migrate (STEER-2 fix 3).
         for text in [
             "[providers.local]\nkey_env = \"NOPE_KEY\"\n",
             "[providers.weird]\nkind = \"gemini\"\nbase_url = \"x\"\n",
@@ -783,6 +811,14 @@ extra_headers = { "x-extra" = "yes" }
             assert!(error.contains("exactly two"), "{error}");
             assert!(error.contains(PROVIDER_OPENROUTER), "{error}");
             assert!(error.contains(PROVIDER_GO), "{error}");
+            assert!(error.contains("[providers.local]") || error.contains("[providers.weird]"));
+            assert!(
+                error.contains(&path.display().to_string()),
+                "the file to edit: {error}"
+            );
+            assert!(error.contains("Rename the table"), "{error}");
+            assert!(error.contains("key_env"), "{error}");
+            assert!(!error.contains("kind = \"…\" is no longer used\n"));
         }
     }
 
