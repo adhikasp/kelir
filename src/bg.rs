@@ -316,6 +316,31 @@ pub fn promote_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.promote"))
 }
 
+/// The marker a `cancel` writes before it kills anything (STEER-7). Between the
+/// kill and the final `cancelled` status (up to [`CANCEL_WAIT`]) the status file
+/// still says `running` and its shim is already dead, which readers would report
+/// as `lost` — the session's own watcher recorded exactly that, so a `cancel`
+/// shown in the log as "the job was lost". The marker tells every reader "a
+/// cancel is in flight; keep waiting", and only `cancel` writes or removes it.
+pub fn cancel_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{id}.cancel"))
+}
+
+/// Is a `cancel` in flight for this job?
+pub fn cancelling(dir: &Path, id: &str) -> bool {
+    cancel_path(dir, id).is_file()
+}
+
+/// A status as a reader should understand it, given the `bg/` directory it was
+/// read from: [`Status::observed`], except that a job whose `cancel` marker is
+/// present is still `running` (it is about to be, not lost).
+pub fn observed_in(dir: &Path, status: &Status) -> Status {
+    if status.state == STATE_RUNNING && cancelling(dir, &status.id) {
+        return status.clone();
+    }
+    status.observed()
+}
+
 /// The name of the Job Object a call's tree lives in. Unique per session and
 /// call, so two sessions never share one.
 pub fn job_name(session: &str, dir_name: &str) -> String {
@@ -336,7 +361,8 @@ pub fn job_name(session: &str, dir_name: &str) -> String {
 
 /// Every status file in `dir`, newest first, skipping temp files and anything
 /// that does not parse. A status whose shim is gone comes back as `lost`
-/// ([`Status::observed`]), so a listing never shows a job that runs for ever.
+/// ([`Status::observed`]), so a listing never shows a job that runs for ever —
+/// unless a `cancel` is in flight, when it is still running ([`observed_in`]).
 pub fn list(dir: &Path) -> Vec<Status> {
     let mut out: Vec<Status> = std::fs::read_dir(dir)
         .into_iter()
@@ -345,7 +371,7 @@ pub fn list(dir: &Path) -> Vec<Status> {
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("status"))
         .filter_map(|path| Status::read(&path))
-        .map(|status| status.observed())
+        .map(|status| observed_in(dir, &status))
         .collect();
     out.sort_by(|a, b| b.started.cmp(&a.started).then(a.id.cmp(&b.id)));
     out
@@ -1396,14 +1422,14 @@ fn out(args: BgOutArgs) -> u8 {
             Err(_) => 0,
         }
     } else {
-        follow(&path, &status_path(&dir, &status.id))
+        follow(&path, &status_path(&dir, &status.id), &dir)
     }
 }
 
 /// `--follow`: print the file as it grows, and stop once the job settled and
 /// nothing new arrived. Only the bytes past the offset are read, so following a
 /// job that writes a lot costs the same as following a quiet one (M4 review N1).
-fn follow(path: &Path, status_file: &Path) -> u8 {
+fn follow(path: &Path, status_file: &Path, dir: &Path) -> u8 {
     use std::io::{Read as _, Seek as _, Write as _};
     let mut offset = 0u64;
     let mut quiet = 0u32;
@@ -1431,7 +1457,7 @@ fn follow(path: &Path, status_file: &Path) -> u8 {
             // Once the job settled and the file stopped growing for a few
             // polls, `--follow` is done — like `tail -f` with an end.
             let settled = Status::read(status_file)
-                .map(|status| status.observed().settled())
+                .map(|status| observed_in(dir, &status).settled())
                 .unwrap_or(true);
             if settled {
                 quiet += 1;
@@ -1454,7 +1480,7 @@ async fn wait(args: BgWaitArgs) -> u8 {
     let deadline = args
         .timeout
         .map(|secs| std::time::Instant::now() + Duration::from_secs(secs));
-    let mut status = status.observed();
+    let mut status = observed_in(&dir, &status);
     loop {
         if status.settled() {
             println!(
@@ -1491,8 +1517,8 @@ async fn wait(args: BgWaitArgs) -> u8 {
         tokio::time::sleep(Duration::from_millis(50)).await;
         status = match Status::read(&status_path(&dir, &args.id)) {
             // A shim that died while we waited is not a job that runs for ever
-            // (M4 review F4).
-            Some(status) => status.observed(),
+            // (M4 review F4) — unless a `cancel` is in flight for it.
+            Some(status) => observed_in(&dir, &status),
             None => {
                 eprintln!("kelir: bg wait: the status file of {} vanished", args.id);
                 return 1;
@@ -1545,7 +1571,7 @@ async fn cancel_at(dir: &Path, id: &str, out: &mut dyn CancelOut) -> u8 {
         out.fail(format!("no background job `{id}`"));
         return 2;
     };
-    let status = status.observed();
+    let status = observed_in(dir, &status);
     if status.settled() {
         if status.state == STATE_LOST {
             return stop_lost(&status, out);
@@ -1568,6 +1594,12 @@ async fn cancel_at(dir: &Path, id: &str, out: &mut dyn CancelOut) -> u8 {
         ));
         return 1;
     }
+    // From here until the `cancelled` status is written the status file still
+    // says `running` with a dead shim; any reader in that window would call the
+    // job `lost` (the session's watcher did, and the log said so — STEER-7).
+    // The marker says "a cancel is in flight", and the guard removes it on
+    // every way out, including the ones that change nothing.
+    let _marker = CancelMarker::write(dir, &status.id);
     kill_tree(status.shim.or(status.pid).unwrap_or(0), &status.job);
     #[cfg(windows)]
     if let Some(shim) = status.shim {
@@ -1600,6 +1632,26 @@ async fn cancel_at(dir: &Path, id: &str, out: &mut dyn CancelOut) -> u8 {
             out.fail(format!("cannot write the status file: {error}"));
             1
         }
+    }
+}
+
+/// The `cancel` marker, removed when this value goes away: every path out of
+/// [`cancel_at`] clears it, including the ones that kill nothing.
+struct CancelMarker {
+    path: std::path::PathBuf,
+}
+
+impl CancelMarker {
+    fn write(dir: &Path, id: &str) -> Self {
+        let path = cancel_path(dir, id);
+        let _ = std::fs::write(&path, b"cancelling\n");
+        Self { path }
+    }
+}
+
+impl Drop for CancelMarker {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -2043,6 +2095,37 @@ mod tests {
         assert_eq!(line(&["echo", "it's"]), r"echo 'it'\''s'");
         assert_eq!(line(&["echo", ""]), "echo ''");
         assert_eq!(line(&["nc", "-l", "8080"]), "nc -l 8080");
+    }
+
+    /// A `cancel` in flight is not a lost job (STEER-7): between the kill and
+    /// the `cancelled` status the shim is dead and the file still says
+    /// `running`, so every reader has to be told what is happening. The
+    /// session's own watcher recorded `lost` for a job a test had just
+    /// cancelled, which is how this was found.
+    #[test]
+    fn a_cancel_in_flight_is_not_a_lost_job() {
+        let dir = temp_dir("cancelling");
+        let status = sample();
+        // No shim at all, so `observed` alone would call it lost.
+        assert_ne!(status.observed().state, STATE_RUNNING);
+        assert_ne!(observed_in(&dir, &status).state, STATE_RUNNING);
+
+        let marker = CancelMarker::write(&dir, &status.id);
+        assert!(cancelling(&dir, &status.id));
+        assert_eq!(observed_in(&dir, &status).state, STATE_RUNNING);
+        // Every way out of `cancel_at` clears the marker, including a refusal.
+        std::fs::remove_file(status_path(&dir, &status.id)).ok();
+        drop(marker);
+        assert!(!cancelling(&dir, &status.id));
+        assert_ne!(observed_in(&dir, &status).state, STATE_RUNNING);
+
+        // A settled job stays settled whatever a stale marker says.
+        let mut settled = sample();
+        settled.state = STATE_CANCELLED.into();
+        let marker = CancelMarker::write(&dir, &settled.id);
+        assert_eq!(observed_in(&dir, &settled).state, STATE_CANCELLED);
+        drop(marker);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A job whose shim is gone is never reported as running for ever: the

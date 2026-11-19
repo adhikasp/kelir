@@ -2116,9 +2116,23 @@ impl Session {
     /// socket and the watcher, or a watcher restarted by a resume) is recorded
     /// once.
     fn note_bg(&mut self, status: &crate::bg::Status) -> Result<bool, String> {
-        // A job whose shim is gone can never settle on its own: it is recorded
-        // as `lost` rather than left running for ever (M4 review F4).
-        let status = status.observed();
+        // The file is the truth as of now, the argument is a snapshot from when
+        // the report was made. Re-reading matters: a job can die between the
+        // two (a `cancel` in flight kills the shim, then writes `cancelled`),
+        // and recording the snapshot after calling its dead shim `lost` put
+        // the wrong outcome in the log — the state the job is in *when it is
+        // recorded* is what the log should say (STEER-7).
+        let dir = self.trust.bg_dir();
+        let status = match crate::bg::Status::read(&crate::bg::status_path(&dir, &status.id)) {
+            Some(fresh) => crate::bg::observed_in(&dir, &fresh),
+            // A status file that vanished mid-flight: the report is all there
+            // is. A job whose shim is gone can never settle on its own, so it
+            // is recorded as `lost` rather than left running for ever (M4
+            // review F4) — unless a `cancel` is in flight, when the shim's
+            // death is the cancel's doing (STEER-7).
+            None => crate::bg::observed_in(&dir, status),
+        };
+
         let status = &status;
         // The id is this session's own from here on (STEER-7): a status file in
         // its `bg/` reached it, so a later report or cancel for the same id is
