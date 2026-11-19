@@ -4,15 +4,37 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
 
 ## STEER-6: the retro's loop changes (2026-11-19)
 
-- **A command over 6000 bytes runs from a file, on every OS.** The spec's shell row is
-  `bash -c` (or `cmd.exe /C`), i.e. the command as the last argument. On Windows, Git for
-  Windows' `bash.exe` silently cuts a command line past ~8,191 characters, and a cut heredoc
-  usually exits 0 (three M5-A calls, one STEER-4 call, each with a half-written file). A long
-  command is therefore written to `<call dir>/cmd.sh` (`cmd.bat` for `cmd.exe`) and the shell
-  is run on the file with no `-c`. The threshold applies on Linux and macOS too, so the code
-  path is exercised by the whole suite on every platform instead of only by the one where the
-  cut happens. The file lives in the call's own directory, not a temp dir: the exact bytes that
-  ran stay readable, which is what makes a cut diagnosable.
+- **On Windows a command always runs from a file; on Unix a long one does.** The spec's shell
+  row is `bash -c` (or `cmd.exe /C`), i.e. the command as the last argument. Two things break
+  that on Windows:
+  - a command line past ~8,191 characters is silently **cut** by Git for Windows' `bash.exe`,
+    and a cut heredoc usually exits 0 (three M5-A calls, one STEER-4 call, each with a
+    half-written file);
+  - every run of backslashes is **halved** on the way to the shell (the Win32 command line, then
+    msys' argv rewriting), at any length: `printf 'a\nb'` prints a newline, a regex or a Windows
+    path means something else by the time the shell sees it (STEER-6 review S1, reproduced on the
+    baseline binary). A length threshold cannot fix that one, because the mangling happens below
+    it.
+
+  So the rule is one route per platform: on Windows every command is written to
+  `<call dir>/cmd.sh` (`cmd.bat` for `cmd.exe`, `cmd.ps1` for PowerShell) and the shell is handed
+  the path; on Unix a short command keeps `-c` (no msys layer, one fewer write) and a command
+  over `SHELL_CMD_MAX = 6000` bytes goes through the same file route. The Windows route is not a
+  length threshold, so a command's meaning cannot change at a boundary; the file lives in the
+  call's own directory, not a temp dir, so the exact bytes that ran stay readable, which is what
+  makes a cut diagnosable. `kelir bg run` writes `bg/<id>.sh` for the same reason (one directory
+  holds every job, so the name carries the id).
+- **The shell keeps the switch that makes it read a file.** `cmd.exe` gets `/C <path>` and
+  PowerShell `-File <path>`, because `cmd.exe <path>` starts an interactive shell on a null stdin
+  that runs nothing and exits 0 (STEER-6 review B1: a long command reported success and never
+  ran), and `-Command <path>` would run the path as PowerShell source. A POSIX shell reads the
+  script from its own argv, so its `-c` goes. Any argument before the switch (`cmd.exe /D /C`) is
+  kept. A shell kelir does not know (`--eval`) is left exactly as configured.
+- **A script's line endings are normalised, and only those.** A POSIX shell gets LF: a CRLF
+  `cmd.sh` puts a `\r` at the end of every line and breaks a heredoc terminator outright.
+  `cmd.exe` and PowerShell get CRLF. A lone `\r` inside a payload (how a heredoc writes a literal
+  CR to a file) is untouched. `KELIR_SHELL_RAW=cr` sends a POSIX script byte-for-byte instead, for
+  a caller that needs the raw bytes.
 - **A long command also stays off the shim's own command line.** `kelir bg-shim` used to take
   the command as `--cmd <text>`, and Windows refuses to *start* a process whose command line is
   past ~32 KB (`os error 206`) — so a 40 KB heredoc failed before the shim existed. It travels
@@ -40,10 +62,50 @@ Small, deliberate differences, with the reason. Everything else tracks the spec.
   the context being old file reads. Compaction now fires at
   `min(window * auto_compact_at, compact_at_tokens)`; the default target is 150,000 and `0`
   disables the cap, so the window fraction alone decides, exactly as before.
-- **`parallel_tool_calls` is set only on OpenRouter, and only for a model that advertises
-  it.** The spec says parallel calls are allowed; the request said nothing. OpenRouter's
-  `supported_parameters` is where the capability is stated. Go's model list states no such
-  capability, so the field is not guessed at there.
+- **`parallel_tool_calls` is asked for when the model is known to take it — and the answer does
+  not depend on a warm cache.** The spec says parallel calls are allowed; the request said
+  nothing. OpenRouter's `supported_parameters` states the capability per model, and that wins when
+  the list has an entry. But the list is metadata fetched with a bound, so it can be missing
+  (first session on a machine, an unreachable endpoint) or stale; the loop then fell back to *not*
+  asking, which made F4's benefit silently depend on machine state (STEER-6 review S2: live, a
+  480-model list through a proxy took > 1.5 s, the cache was stored empty, and the request had no
+  field although the model advertises it). The rule now:
+  - the provider's list entry, when there is one (both directions: `false` is believed);
+  - else a conservative built-in family table (`deepseek/`, `anthropic/`, `openai/`, `gpt-4`,
+    `gpt-5`, `google/`, `gemini-`, `qwen/`, `kimi`, …);
+  - else `false`: an unknown model on an unknown gateway is not asked.
+  A slow `/models` fetch is also no longer recorded as a failure (only a real error is), so a
+  proxy that answers in 2 s does not leave the cache empty for an hour. `parallel_tool_calls` is
+  still only sent to OpenRouter: Go's list states no such capability, and a family name is not
+  evidence about *that* gateway's acceptance.
+- **`reasoning_effort` is gated on what the provider advertises, with one retry on a 400.** The
+  field used to go to every model on every provider; a model or gateway that refuses it turned
+  every step into a hard error until the person found the config key (STEER-6 review S3). Now:
+  - listed and advertising `reasoning_effort` (or the `reasoning` object form it is shorthand
+    for) -> sent;
+  - listed without it -> not sent, even when the config names one: the provider said no;
+  - the list has the model but no capability list at all (OpenCode Go) -> unknown, so the
+    default still goes (measured as honoured on Go, see above);
+  - the list has no entry for the model -> only when the person set `reasoning_effort`
+    explicitly. The default `medium` is kelir's own choice and does not go to a model nobody
+    vouched for.
+  An HTTP 400 whose body names the field is retried **once** without it, logged as an `error`
+  note, and remembered: no later request in the session carries it. The retry does not spend the
+  provider-attempt budget (a 400 is not transient). `session_started.reasoning_effort` records
+  what is actually sent, so the log and the request agree.
+- **The "your command may have been cut" notice needs evidence.** The spill notice fired on any
+  output that contained one of the shell's truncation markers, including a command that merely
+  printed them: `git grep "unexpected EOF" src` matched `spill.rs` itself, and the model was told
+  a command that ran fine may have been cut (STEER-6 review N1). It now fires when a marker is in
+  a shell's own diagnostic line (`bash: warning: here-document at line 1 delimited by
+  end-of-file …`, printed *before* the body it did read), or the command failed, or (for a
+  successful command) the marker is in the last three lines. A successful search that quotes the
+  markers in its middle stays quiet.
+- **The base prompt is pinned byte-for-byte.** It is embedded at build time and is the head of
+  every request's frozen prefix, so a changed byte moves the cache for every session.
+  `tests/fixtures/prompt.md.snapshot` holds the released bytes and a unit test compares them;
+  rewording the prompt means updating the snapshot deliberately in the same commit (the rule
+  list in `sources.rs` still pins the lines a retro put there).
 
 ## Sources and skills (M5-A, 2026-11-19)
 
