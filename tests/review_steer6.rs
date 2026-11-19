@@ -540,3 +540,48 @@ async fn f2_backslashes_and_dollars_are_literal_in_a_quoted_heredoc_short_and_lo
     assert_eq!(l, payload, "the file route altered the payload");
     assert_eq!(s, payload, "the argument route altered the payload");
 }
+
+/// The cmd.exe fallback shell (`shell = ["cmd.exe", "/C"]`, what kelir picks on
+/// Windows with no bash): a long command is written to `cmd.bat` and must be
+/// RUN. `cmd.exe cmd.bat` (no `/C`) starts an interactive shell on a null stdin,
+/// runs nothing, and exits 0.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "STEER-6 review B1: cmd.exe /C is dropped in script mode, so a long command never runs (exit 0); run with --ignored"]
+async fn f2_cmd_exe_runs_a_long_command_from_its_bat_file() {
+    let short = "echo short> short.txt".to_string();
+    let mut long = String::new();
+    for i in 0..400 {
+        long.push_str(&format!(
+            "REM padding line {i} to pass the six thousand byte threshold\r\n"
+        ));
+    }
+    long.push_str("echo long> long.txt\r\n");
+    assert!(long.len() > 6_000);
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn("s", "bash", &json!({"command": short})))),
+        Reply::Sse(sse(&tool_turn("l", "bash", &json!({"command": long})))),
+        Reply::Sse(sse(&text_turn("done", 0))),
+    ])
+    .await;
+    let run = run_task(
+        &mock,
+        &["run", "--json", "go"],
+        &[],
+        None,
+        "shell = [\"cmd.exe\", \"/C\"]\n",
+    )
+    .await;
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert!(
+        run.cwd.join("short.txt").is_file(),
+        "the short command did not run: {}",
+        result_of(&run, "s")
+    );
+    assert_eq!(settled(&run, "l")["exit_code"], 0);
+    assert!(
+        run.cwd.join("long.txt").is_file(),
+        "a long cmd.exe command reported exit 0 but never ran: {}",
+        result_of(&run, "l")
+    );
+}
