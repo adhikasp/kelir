@@ -510,6 +510,18 @@ enum Attempt {
     End(StreamEnd),
 }
 
+/// What a retry or slot wait ended as.
+enum Waited {
+    /// The wait ran out: try again.
+    Timeout,
+    /// A verb applied at once ends the wait and the attempt is re-sent right
+    /// away (`say --now`, `model`): the request is a new one, so it is rebuilt
+    /// from the fold the verb just changed.
+    Retry,
+    /// A verb (or a signal) ended the turn.
+    End(Box<StreamEnd>),
+}
+
 /// What waiting for a governor slot ended as: a slot (or none, when the
 /// governor is off), or a verb ending the turn.
 enum SlotWait {
@@ -1541,6 +1553,16 @@ impl Session {
     fn apply(&mut self, boundary: Boundary) -> Result<Applied, String> {
         let mut applied = Applied::default();
         for pending in self.scheduler.due(boundary) {
+            self.apply_pending(pending, &mut applied)?;
+        }
+        self.sync();
+        Ok(applied)
+    }
+
+    /// Apply one verb. The caller decides when: a boundary, or a wait the verb
+    /// is allowed to cut short.
+    fn apply_pending(&mut self, pending: Pending, applied: &mut Applied) -> Result<(), String> {
+        {
             match pending.verb {
                 Verb::Say { text, now } => {
                     // A message from anywhere but this UI gets echoed, so a
@@ -1632,8 +1654,7 @@ impl Session {
                 }
             }
         }
-        self.sync();
-        Ok(applied)
+        Ok(())
     }
 
     /// `skills`: read one skill or instruction source (from a file, a skill
@@ -1726,11 +1747,18 @@ impl Session {
             .cfg
             .provider(&provider)
             .map_err(|error| error.to_string())?;
+        // The governor belongs to the provider a request goes to: a swap to a
+        // governed provider must take its slots (and a swap away must stop
+        // being held to the old limit). `max_concurrent_requests` is read from
+        // the provider config the swap resolved to, never from the one the
+        // session started on (STEER-5 review S1).
+        let governor = governor_for(&provider_cfg);
         let client = Client::new(provider_cfg, &self.id, self.cfg.cache_ttl.clone())
             .map_err(|error| error.message)?;
         self.provider_name = provider;
         self.model = model;
         self.client = client;
+        self.governor = governor;
         // Another model, possibly another provider: resolve from the cached
         // list (never the network mid-turn); a model the list does not know
         // falls back to the default window and `state` says so.
@@ -2566,12 +2594,18 @@ impl Session {
         // The first request is the one `drive_turn` built (and hashed into
         // `step_started`); a retry is a new request and is built again.
         let mut built = request.build(self);
+        // A `model`/`say --now` that cut a wait short already applied its verb,
+        // so the next request is built (new model, new fold) but the
+        // `before_step` boundary is not run again.
+        let mut rebuild = false;
         loop {
             // The governor (opt-in) can make this request wait for a slot that
             // another local kelir holds. That wait is visible and interruptible
-            // like any other.
+            // like any other. A compaction's summary is a provider request on
+            // the same account, so it takes a slot like every other request
+            // (STEER-5 review S1; only a turn's first request used to).
             let mut slot: Option<crate::governor::Slot> = None;
-            if !summary && let Some(governor) = self.governor.clone() {
+            if let Some(governor) = self.governor.clone() {
                 match self.await_slot(rx, &governor, &mut inbox_open).await? {
                     SlotWait::Taken(taken) => slot = taken,
                     SlotWait::Interrupted(end) => return Ok(end),
@@ -2593,7 +2627,11 @@ impl Session {
                 if let Some(reason) = applied.stopped {
                     return Ok(StreamEnd::Stopped(reason));
                 }
+                rebuild = true;
+            }
+            if rebuild {
                 built = request.build(self);
+                rebuild = false;
             }
             budget.record_attempt();
             let outcome = self.attempt(rx, &built, summary, &mut inbox_open).await;
@@ -2653,8 +2691,28 @@ impl Session {
             };
             budget.charge(wait);
             self.show_wait(error.status, wait, attempt);
-            if let Some(end) = self.wait_for(rx, wait, &mut inbox_open).await? {
-                return Ok(end);
+            match self.wait_for(rx, wait, &mut inbox_open).await? {
+                Waited::Timeout => {}
+                // `model`/`say --now`: a *new* request, sent now, with a fresh
+                // slot and a fresh budget. The wait belonged to a request that
+                // is no longer the one being made (the review's "a model swap
+                // to a provider that is not rate limited must not sit out the
+                // old provider's wait"), and the message must reach the model
+                // now, not at the end of a `Retry-After` that can be days long.
+                Waited::Retry => {
+                    self.emit(UiEvent::RetryingDone);
+                    budget = crate::retry::Budget::new(budget_wait, policy.max_attempts);
+                    attempt = 1;
+                    rebuild = true;
+                    continue;
+                }
+                // A verb ended the turn during the wait: the wait's note is
+                // cleared here too, so no swap/`end` race can leave a stale
+                // countdown behind (STEER-5 review N4).
+                Waited::End(end) => {
+                    self.emit(UiEvent::RetryingDone);
+                    return Ok(*end);
+                }
             }
             self.emit(UiEvent::RetryingDone);
             attempt = attempt.saturating_add(1);
@@ -2724,33 +2782,107 @@ impl Session {
         });
     }
 
-    /// Wait `wait`, taking verbs. `stop`, `say --now` and `end` interrupt it;
-    /// anything else waits for its boundary. `Some(end)` when the turn ends
-    /// here.
+    /// Wait `wait`, taking verbs.
+    ///
+    /// A wait is where a person's correction must not be made to sit still
+    /// (STEER-5 review B2): `stop`, `end` and a signal end the turn now,
+    /// `say --now` and `model` end the *wait* now — the verb is applied, and
+    /// the caller re-sends the request at once rather than finishing somebody
+    /// else's `Retry-After` (up to seven days of it). `later`, `tools`,
+    /// `compact` and `skills` apply at their boundary as always, and a queued
+    /// `say` joins the fold at the next boundary. A signal is handled the same
+    /// way as `stop`: it must not kill a session mid-wait while the log says
+    /// nothing.
     async fn wait_for(
         &mut self,
         rx: &mut Inbox,
         wait: Duration,
         inbox_open: &mut bool,
-    ) -> Result<Option<StreamEnd>, String> {
+    ) -> Result<Waited, String> {
         if wait.is_zero() {
-            return Ok(None);
+            return Ok(Waited::Timeout);
         }
         let deadline = tokio::time::sleep(wait);
         tokio::pin!(deadline);
-        let mut interrupt: Option<StreamEnd> = None;
-        while interrupt.is_none() {
+        loop {
             tokio::select! {
-                _ = &mut deadline => break,
-                incoming = rx.recv(), if *inbox_open => {
-                    match incoming {
-                        Some(incoming) => self.take_interrupt(incoming, &mut interrupt),
-                        None => *inbox_open = false,
+                _ = &mut deadline => return Ok(Waited::Timeout),
+                _ = crate::signals::interrupted() => {
+                    // The turn ends `stopped`, exactly like `stop`: the log
+                    // says so and a one-shot run exits 0.
+                    return Ok(Waited::End(Box::new(StreamEnd::Stopped(
+                        "interrupted (Ctrl-C)".into(),
+                    ))));
+                }
+                incoming = rx.recv(), if *inbox_open => match incoming {
+                    Some(incoming) => {
+                        let mut end: Option<StreamEnd> = None;
+                        let resume = self.take_wait_verb(incoming, &mut end)?;
+                        if let Some(end) = end {
+                            return Ok(Waited::End(Box::new(end)));
+                        }
+                        if resume {
+                            return Ok(Waited::Retry);
+                        }
                     }
+                    None => *inbox_open = false,
                 }
             }
         }
-        Ok(interrupt)
+    }
+
+    /// Handle one verb that arrived *during* a retry or slot wait. Returns
+    /// whether the wait should end with the request re-sent at once.
+    fn take_wait_verb(
+        &mut self,
+        incoming: Incoming,
+        interrupt: &mut Option<StreamEnd>,
+    ) -> Result<bool, String> {
+        let Some(pending) = self.accept(incoming) else {
+            return Ok(false);
+        };
+        match &pending.verb {
+            Verb::Stop { call: None, reason } => {
+                *interrupt = Some(StreamEnd::Stopped(
+                    reason.clone().unwrap_or_else(|| "stopped by user".into()),
+                ));
+                Ok(false)
+            }
+            Verb::End => {
+                *interrupt = Some(StreamEnd::End);
+                Ok(false)
+            }
+            // `say --now`: the message is the point, and it is in the fold the
+            // moment it is recorded, so the retry carries it.
+            Verb::Say { .. } | Verb::Model { .. } => {
+                let mut applied = Option::<StreamEnd>::None;
+                self.apply_one(pending, &mut applied)?;
+                if let Some(end) = applied {
+                    *interrupt = Some(end);
+                }
+                Ok(true)
+            }
+            _ => {
+                // Anything else keeps the boundary it asked for (`later` at the
+                // turn end, a tool/skill change at `before_step`).
+                self.scheduler.push(pending);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Apply one verb now (the body of [`Session::apply`]'s loop for one
+    /// `Pending`).
+    fn apply_one(&mut self, pending: Pending, end: &mut Option<StreamEnd>) -> Result<(), String> {
+        let mut applied = Applied::default();
+        self.apply_pending(pending, &mut applied)?;
+        if applied.end {
+            *end = Some(StreamEnd::End);
+        }
+        if let Some(reason) = applied.stopped {
+            *end = Some(StreamEnd::Stopped(reason));
+        }
+        Ok(())
     }
 
     /// Wait for a governor slot, polling (there is nothing to be told about: the
@@ -2779,9 +2911,15 @@ impl Session {
                     until: Instant::now() + Duration::from_secs(86_400),
                 });
             }
-            if let Some(end) = self.wait_for(rx, SLOT_POLL, inbox_open).await? {
-                self.emit(UiEvent::RetryingDone);
-                return Ok(SlotWait::Interrupted(end));
+            match self.wait_for(rx, SLOT_POLL, inbox_open).await? {
+                // The slot poll is a poll: a verb that ends the *wait* just
+                // means "look again", and the next look takes the slot if it is
+                // free. The verb itself was already applied or queued.
+                Waited::Timeout | Waited::Retry => {}
+                Waited::End(end) => {
+                    self.emit(UiEvent::RetryingDone);
+                    return Ok(SlotWait::Interrupted(*end));
+                }
             }
         }
     }

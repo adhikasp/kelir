@@ -23,11 +23,18 @@ pub const DEFAULT_WAIT_SECS: u64 = 30 * 60;
 /// A parsed provider hint is clamped to this, so an absurd `Retry-After` cannot
 /// overflow anything (the budget still decides whether the wait happens).
 pub const MAX_PARSED: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// The shortest wait a provider's own hint can shorten a retry to. A gateway
+/// that answers `429 Retry-After: 0` forever must not turn "backoff" into a
+/// hot loop; the floor is capped by the schedule's own first ceiling, so a
+/// person who configured a faster schedule gets that instead.
+pub const HINT_FLOOR: Duration = Duration::from_millis(250);
+
 /// How many provider requests one budget allows. The brief says "attempts are
 /// unlimited inside the budget"; this is the finite stand-in, because a
 /// provider that fails instantly would otherwise spin a zero-wait loop and the
-/// budget would never fill. The budget is the real limit.
-pub const MAX_ATTEMPTS: u32 = 200;
+/// budget would never fill. The budget is the real limit: with the default
+/// schedule the waits grow to the 120 s cap long before the count is reached.
+pub const MAX_ATTEMPTS: u32 = 60;
 
 /// The backoff schedule (`retry_base_ms`, `retry_cap_ms`, `retry_max_wait`,
 /// `retry_max_attempts` in `config.toml`).
@@ -114,7 +121,12 @@ impl Rng for Xorshift {
 /// in step.
 pub fn delay(policy: &Policy, attempt: u32, hint: Option<Duration>, rng: &mut dyn Rng) -> Duration {
     if let Some(hint) = hint {
-        return hint.min(MAX_PARSED);
+        // A hint is what the provider asked for, but never a zero wait: a
+        // gateway that answers `Retry-After: 0` (or a reset header already in
+        // the past) for ever would otherwise get a request per millisecond
+        // (STEER-5 review S2).
+        let floor = policy.ceiling(0).min(HINT_FLOOR);
+        return hint.max(floor).min(MAX_PARSED);
     }
     let nanos = policy.ceiling(attempt).as_nanos().min(u128::from(u64::MAX)) as u64;
     if nanos == 0 {
@@ -342,26 +354,52 @@ pub fn parse_duration_spec(text: &str) -> Option<Duration> {
     any.then(|| Duration::from_secs_f64(total).min(MAX_PARSED))
 }
 
-/// The wait one response's headers ask for: `Retry-After` when it is there,
-/// otherwise the largest reset header (the latest of the exhausted windows).
-/// Names are matched case-insensitively.
+/// The wait one response's headers ask for: `Retry-After` when it is there and
+/// not zero, otherwise the *shortest* reset header.
+///
+/// The shortest, not the longest: a provider that reports both a per-minute and
+/// a daily window writes both, and the one that fired is the tight one. Waiting
+/// the daily window out because it happens to be the larger number turns a
+/// minute's wait into hours (STEER-5 review N2).
+///
+/// Absolute hints (an HTTP-date, an epoch, an RFC 3339 timestamp) are measured
+/// against the response's own `Date` header when it has one: a skewed local
+/// clock would otherwise turn a 90 s hint into no wait at all (or into hours;
+/// review N1). Names are matched case-insensitively.
 pub fn header_hint<'a>(
     headers: impl Iterator<Item = (&'a str, &'a str)>,
     now: SystemTime,
 ) -> Option<Duration> {
+    let headers: Vec<(String, String)> = headers
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.to_string()))
+        .collect();
+    let now = headers
+        .iter()
+        .find(|(name, _)| name == "date")
+        .and_then(|(_, value)| http_date(value))
+        .unwrap_or(now);
     let mut retry_after = None;
     let mut reset: Option<Duration> = None;
-    for (name, value) in headers {
-        let name = name.to_ascii_lowercase();
+    for (name, value) in &headers {
         if name == "retry-after" {
             retry_after = retry_after.or_else(|| parse_retry_after(value, now));
-        } else if is_reset_header(&name)
+        } else if is_reset_header(name)
             && let Some(wait) = parse_reset(value, now)
+            // An already-open window ("0s", a past date) says nothing about
+            // when to come back; a window that is still closed is the answer.
+            && !wait.is_zero()
         {
-            reset = Some(reset.map_or(wait, |current: Duration| current.max(wait)));
+            reset = Some(reset.map_or(wait, |current: Duration| current.min(wait)));
         }
     }
-    retry_after.or(reset)
+    // A `Retry-After: 0` (or a date already past) says "retry now"; when the
+    // same response also names a real reset window, the window is the better
+    // answer.
+    match (retry_after, reset) {
+        (Some(hint), Some(window)) if hint.is_zero() => Some(window),
+        (Some(hint), _) => Some(hint),
+        (None, reset) => reset,
+    }
 }
 
 fn is_reset_header(name: &str) -> bool {
@@ -629,8 +667,14 @@ mod tests {
         ];
         assert_eq!(
             header_hint(headers.into_iter(), now()),
-            Some(Duration::from_secs(120)),
-            "the latest of the exhausted windows"
+            Some(Duration::from_secs(30)),
+            "the shortest window: the tight one is the one that fired (N2)"
+        );
+        // A zero `Retry-After` beside a real window: the window is the answer.
+        let zero_after = [("Retry-After", "0"), ("x-ratelimit-reset-requests", "2m")];
+        assert_eq!(
+            header_hint(zero_after.into_iter(), now()),
+            Some(Duration::from_secs(120))
         );
         let with_retry_after = [("Retry-After", "3"), ("x-ratelimit-reset-requests", "2m")];
         assert_eq!(
@@ -644,7 +688,8 @@ mod tests {
         ];
         assert_eq!(
             header_hint(anthropic.into_iter(), now()),
-            Some(Duration::from_secs(45))
+            Some(Duration::from_secs(10)),
+            "the shorter of the two windows"
         );
         assert_eq!(header_hint(std::iter::empty(), now()), None);
     }

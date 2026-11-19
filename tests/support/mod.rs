@@ -889,6 +889,28 @@ impl LiveSession {
         let _ = self.child.wait().await;
     }
 
+    /// Send the session a real interrupt, Unix only: `SIGINT` to the session's
+    /// own pid.
+    ///
+    /// Windows is deliberately not here. A console control event cannot be
+    /// aimed at one process: `GenerateConsoleCtrlEvent` addresses a *process
+    /// group*, and a child started without `CREATE_NEW_PROCESS_GROUP` shares
+    /// the test runner's group — sending Ctrl-Break would broadcast to every
+    /// process on that console, the test harness and the shell that started it
+    /// included (it did exactly that on 2026-11-19). The Windows side of the
+    /// signal path is the handler registration itself, covered by the unit test
+    /// in `src/signals.rs`; the wait that consumes it is covered here, since the
+    /// `stop` verb takes the identical branch.
+    #[cfg(unix)]
+    pub async fn interrupt(&self) {
+        let pid = self.pid();
+        let seen = std::process::Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .expect("run kill");
+        assert!(seen.success(), "kill -INT {pid} failed: {seen:?}");
+    }
+
     /// Wait for the process to exit on its own.
     pub async fn finish(mut self) -> (i32, String) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);

@@ -211,6 +211,27 @@ impl Client {
         self.cfg.kind
     }
 
+    /// What the `error` event and the screen say about a refused request.
+    ///
+    /// An outage (a retryable status) gets the status and its class and nothing
+    /// else: it is a wait, and no part of the body helps a person or a script
+    /// decide anything. A refusal (400/401/403/404/422) keeps its (bounded,
+    /// secret-redacted) body, because "unknown model" is the answer that lets a
+    /// human fix the invocation.
+    fn message_for(&self, code: u16, body: &str) -> String {
+        let reason = crate::retry::status_reason(code);
+        if crate::retry::status_is_retryable(code) {
+            return format!("http {code}: {reason}");
+        }
+        let body = crate::util::redact(body.trim(), self.cfg.key.as_deref());
+        let body = crate::util::truncate_chars(&body, 500);
+        if body.is_empty() {
+            format!("http {code}: {reason}")
+        } else {
+            format!("http {code}: {reason}: {body}")
+        }
+    }
+
     /// The provider's own model list, for the metadata kelir does not hardcode
     /// (context window, tool support). Both providers serve `GET /models`;
     /// OpenRouter's is public, Go's wants the same key as a completion.
@@ -290,13 +311,14 @@ impl Client {
                     .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?))),
                 std::time::SystemTime::now(),
             );
+            // The body is read to drain the connection, and it is *not* put on
+            // the event: a gateway that quotes the request (or a 4xx that
+            // prints the key) would write a credential into `events.jsonl` and
+            // into NDJSON stdout (STEER-5 review S3).
             let body = response.text().await.unwrap_or_default();
             return Err(ProviderError::http(
                 code,
-                format!(
-                    "http {code}: {}",
-                    crate::util::truncate_chars(body.trim(), 500)
-                ),
+                self.message_for(code, &body),
                 retry_after,
             ));
         }
@@ -548,6 +570,31 @@ mod tests {
             chat_completions_url("http://127.0.0.1:8080/v1/"),
             "http://127.0.0.1:8080/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn a_refusal_keeps_a_redacted_body_and_an_outage_keeps_none() {
+        let mut cfg = openrouter();
+        cfg.key = Some("sk-or-v1-a-real-looking-key".into());
+        let client = Client::new(cfg, "ses_1", None).unwrap();
+        // An outage: the status and its class, never the body.
+        assert_eq!(
+            client.message_for(
+                503,
+                "upstream said: Bearer sk-or-v1-a-real-looking-key refused"
+            ),
+            "http 503: provider error"
+        );
+        assert_eq!(
+            client.message_for(429, "slow down"),
+            "http 429: rate limited"
+        );
+        // A refusal: the body is the answer, minus any credential.
+        assert_eq!(
+            client.message_for(400, "unknown model; key sk-or-v1-a-real-looking-key"),
+            "http 400: provider refused: unknown model; key [redacted]"
+        );
+        assert_eq!(client.message_for(404, "  "), "http 404: provider refused");
     }
 
     #[test]

@@ -558,3 +558,133 @@ async fn a_killed_slot_holder_frees_the_slot() {
     assert_eq!(next.ctl(&["end"]).await.code, 0, "end");
     let _ = next.finish().await;
 }
+
+// ------------------------------------------------------------ interruptibility
+
+/// `say --now` during a wait does not wait it out: the message is in the fold
+/// the moment it arrives, and the request is re-sent at once (STEER-5 review
+/// B2). The wait's budget was worth ten minutes here, so only the verb can end
+/// it early.
+#[tokio::test]
+async fn say_now_during_a_wait_retries_at_once_with_the_message() {
+    let mock = Mock::start(vec![
+        Reply::HttpWith(
+            429,
+            vec![("Retry-After".into(), "30".into())],
+            "slow down".into(),
+        ),
+        Reply::Sse(sse(&text_turn("on the new plan", 0))),
+    ])
+    .await;
+    let mut session = LiveSession::start(
+        &mock,
+        &["run", "--keep", "--json", "go"],
+        "retry_max_wait = 600\n",
+    )
+    .await;
+    session.wait_for("error").await;
+    let started = Instant::now();
+    let answer = session.ctl(&["say", "--now", "forget that, do this"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    assert_eq!(
+        answer.response()["applies"],
+        "now",
+        "`say --now` cannot answer `now` and then wait 30 s"
+    );
+    let ended = session.wait_for("turn_ended").await;
+    assert!(started.elapsed() < Duration::from_secs(5), "waited it out");
+    assert_eq!(ended["outcome"], "done", "{ended}");
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 2, "the retry is one request");
+    assert!(
+        requests[1]
+            .body
+            .to_string()
+            .contains("forget that, do this"),
+        "the retried request does not carry the message"
+    );
+    let _ = session.ctl(&["end"]).await;
+    let _ = session.finish().await;
+}
+
+/// `model` during a wait: the retry goes out at once, on the new model, with a
+/// fresh budget and the new provider's governor (STEER-5 review B2 + S1).
+#[tokio::test]
+async fn model_during_a_wait_retries_at_once_on_the_new_model() {
+    let mock = Mock::start(vec![
+        Reply::HttpWith(
+            429,
+            vec![("Retry-After".into(), "30".into())],
+            "slow down".into(),
+        ),
+        Reply::Sse(sse(&text_turn("swapped", 0))),
+    ])
+    .await;
+    let config = "retry_max_wait = 600\n[providers.opencode-go]\nmax_concurrent_requests = 1\n";
+    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], config).await;
+    session.wait_for("error").await;
+    let started = Instant::now();
+    let answer = session.ctl(&["model", "opencode-go/go/model"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let ended = session.wait_for("turn_ended").await;
+    assert!(started.elapsed() < Duration::from_secs(5), "waited it out");
+    assert_eq!(ended["outcome"], "done", "{ended}");
+    let requests = mock.requests();
+    assert_eq!(requests[1].body["model"], "go/model");
+    // The provider the session swapped to is governed: its request took a slot.
+    let locks = session.state.join("locks");
+    let used = std::fs::read_dir(&locks)
+        .map(|dir| dir.count())
+        .unwrap_or(0);
+    assert!(used > 0, "the swapped-to provider took no slot ({locks:?})");
+    let _ = session.ctl(&["end"]).await;
+    let _ = session.finish().await;
+}
+
+/// A Ctrl-C during a wait ends the turn `stopped` — the same answer the `stop`
+/// verb gets — instead of killing a session whose log says nothing (STEER-5
+/// review B2). A `--keep` session stays up for the next message.
+///
+/// Unix only, and by `SIGINT` to the session's own pid: a console control event
+/// on Windows addresses a whole console, so a test that sends one kills the
+/// test runner too (AGENTS.md; it did, 2026-11-19). The Windows side of the path
+/// is `signals::interrupted`'s registration, which the module's unit test
+/// polls, and the wait branch it feeds, which `stop` covers on every platform.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_interrupt_during_a_wait_ends_the_turn_stopped() {
+    let mock = Mock::start(vec![
+        Reply::HttpWith(
+            429,
+            vec![("Retry-After".into(), "30".into())],
+            "slow down".into(),
+        ),
+        Reply::Sse(sse(&text_turn("still here", 0))),
+    ])
+    .await;
+    let mut session = LiveSession::start(
+        &mock,
+        &["run", "--keep", "--json", "go"],
+        "retry_max_wait = 600\n",
+    )
+    .await;
+    session.wait_for("error").await;
+    let started = Instant::now();
+    session.interrupt().await;
+    let ended = session.wait_for("turn_ended").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the interrupt waited out the Retry-After"
+    );
+    assert_eq!(
+        ended["outcome"], "stopped",
+        "an interrupted wait is a stop, not an error: {ended}"
+    );
+    // A `--keep` session is still up and takes the next message.
+    let answer = session.ctl(&["say", "carry on"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let ended = session.wait_for("turn_ended").await;
+    assert_eq!(ended["outcome"], "done", "{ended}");
+    let _ = session.ctl(&["end"]).await;
+    let _ = session.finish().await;
+}

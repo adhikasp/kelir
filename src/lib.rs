@@ -25,6 +25,7 @@ pub mod resume;
 pub mod retry;
 pub mod scrollback;
 pub mod session;
+pub mod signals;
 pub mod sources;
 pub mod spill;
 pub mod sse;

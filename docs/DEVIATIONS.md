@@ -11,35 +11,75 @@ wait itself in `session::stream`. Where this differs from the brief:
   "unlimited".** The brief says attempts are unlimited inside `retry_max_wait`.
   A provider that answers instantly with 429 would then spin: the budget is
   spent in time, and a zero-wait loop never spends any. So `retry::MAX_ATTEMPTS`
-  (200) caps the count regardless, `retry_max_attempts` in `config.toml` caps it
+  (60) caps the count regardless, `retry_max_attempts` in `config.toml` caps it
   further, and `retry_max_wait = 0` (unlimited waiting) does **not** mean
   unlimited attempts. `retry_max_attempts = 0` is read as unset, not as "never
-  retry" (a person who wants no retries sets `retry_max_attempts = 1`).
+  retry" (a person who wants no retries sets `retry_max_attempts = 1`). With the
+  default schedule the waits reach the 120 s cap after seven attempts, so the
+  budget — not the count — is what ends a normal outage.
+- **A provider hint can never shorten a retry below a floor.** `Retry-After: 0`,
+  a reset header of `0s` and a date already past are all well-formed answers that
+  mean "now"; taken literally, a gateway that answers that way for ever got a
+  request every few milliseconds (the review measured 309/s). The floor is
+  `min(250 ms, retry_base_ms)`, so a person who configured a fast test schedule
+  keeps it and the default schedule never waits less than a quarter second
+  (STEER-5 review S2). An absurd *large* hint is still honoured, and still
+  pauses the turn when it does not fit the budget.
 - **A `Retry-After` longer than what the budget has left pauses at once.** The
   brief says to honour the header; waiting 4 s of a 1 s budget and *then* failing
   would honour neither. The provider's hint is clamped to the budget, and a hint
   that does not fit pauses the turn immediately.
-- **`turn_ended` outcome `paused` is added minimally** (STEER-4's outcome, which
-  is not on this branch): the event carries the shared `final_text` payload with
-  the message "provider unavailable after N attempts / M: <reason>; say
-  `continue` to retry", a one-shot `run` exits 0 for it, Herdr gets `idle`
-  (nothing is working and nothing failed), and the TUI's status word is
-  `paused`. `resume::interrupted` treats `paused` like `stopped`, so a resume
-  (or a later `say`) retries from the same fold. If STEER-4's version of the
-  outcome lands first, the merge is one variant and one `match` arm.
-- **A queued `before_step` boundary applies between two attempts.** The brief
-  asks that `model` during a wait "uses the new model", and a retry is a fresh
-  request: so the retry path runs the `before_step` boundary first, which also
-  lets a queued `say` join the fold and `end` take effect. The `verb` event
-  still records the swap and the boundary it applied at.
-- **`error {where: "provider"}` keeps the provider's body; the wait's visible
-  line does not.** The log is the session's own record of what came back (its
-  `error` event's `message` is `http 429: <body up to 500 chars>`, unchanged from
-  M0). The line printed for the wait, which is what a person sees and what
-  NDJSON carries as a separate `retry` line, is `rate limited (429): retrying in
-  34 s, attempt 5, say stop to cancel`: status and reason only, never a body.
-  A credential can only appear in the session's own log, which never leaves the
-  machine.
+- **There is one `paused` outcome with a `reason`.** STEER-4's step cap and
+  STEER-5's exhausted retry budget are the same event with two causes: the
+  event carries the shared `final_text` payload with the message "provider
+  unavailable after N attempts / M: <reason>; say `continue` to retry" and a
+  `reason` of `provider`; the step cap's `reason` is `steps` and its message is
+  "turn paused after N steps; say continue to resume". A one-shot `run` exits 0
+  for either, a `--keep` session stays up with a fresh step count and a fresh
+  budget, Herdr gets `blocked` for both (the one word this Herdr shows for
+  "waiting for a human" — the STEER-4 rule, now the rule for every pause), and
+  the TUI's status word is `paused`. `resume::interrupted` treats `paused` like
+  `stopped`, so a resume (or a later `say`) retries from the same fold.
+- **A queued `before_step` verb applies between two attempts; a `now` verb cuts
+  the wait short.** The brief asks that `model` during a wait "uses the new
+  model", and a retry is a fresh request: so an ordinary wait that runs out
+  applies the `before_step` boundary before re-sending, which also lets a queued
+  `say` join the fold and `end` take effect. A verb whose answer is `applies:
+  "now"` (`say --now`, `model`) does not wait for that boundary: it is applied
+  the moment it arrives, the wait ends, and the request goes out at once —
+  rebuilt from the new fold or the new model, with a fresh budget and the new
+  provider's governor. A person's correction must not sit out a `Retry-After`
+  that can be a week long (STEER-5 review B2). The `verb` event still records
+  which boundary it applied at.
+- **A signal is a `stop`, but only while a wait is running.** Ctrl-C (and
+  SIGTERM on Unix, Ctrl-Break on Windows) during a retry or slot wait ends the
+  turn `stopped` with the reason `interrupted (Ctrl-C)` and leaves a `--keep`
+  session up, instead of killing a process whose log says nothing. The handler
+  is registered only while the wait is polled and removed when it ends, so a
+  Ctrl-C during a request in flight or while a tool runs still kills the process
+  — the case `kelir resume` is written for. Test coverage: the Unix half is
+  driven end to end by a real `SIGINT` to a real session
+  (`tests/e2e_steer5.rs::an_interrupt_during_a_wait_ends_the_turn_stopped`);
+  the Windows half (the handler registration, which no test may exercise by
+  *sending* a console event, because `GenerateConsoleCtrlEvent` addresses a
+  whole console and not one process) is a unit test of the registration in
+  `src/signals.rs`. This is the one remaining honest gap: no automated test
+  presses Ctrl-C on a Windows console.
+- **A retryable provider error's message is the status and its class, never the
+  body.** For an outage the `error` event's `message` is `http 503: provider
+  error` or `http 429: rate limited`: it is a wait, nothing in the body helps a
+  person or a script decide anything, and a gateway that quotes the request (or
+  a 4xx that prints the key) would otherwise write a credential into
+  `events.jsonl` and into NDJSON stdout (STEER-5 review S3; this file used to
+  accept the body because it "never leaves the machine", which is not true of
+  stdout). A *refusal* (400/401/403/404/422) still carries its body — "unknown
+  model" is the answer that lets a human fix the invocation — bounded to 500
+  characters and with the session's own key replaced by `[redacted]`.
+- **NDJSON carries the wait as the `error` event, not as a separate line.** The
+  visible line ("rate limited (429): retrying in 34 s, attempt 5, say stop to
+  cancel") goes to the TUI's scrollback and status line and to stderr in human
+  mode; under `--json` stdout stays one event per line, and the wait *is* the
+  `error` event with `retryable`, `status`, `attempt` and `retry_in_ms`.
 - **The concurrency governor counts what is in flight, not what is configured.**
   A slot is held for exactly one request: `[providers.<name>]
   max_concurrent_requests = N` takes an advisory OS lock on
@@ -53,7 +93,27 @@ wait itself in `session::stream`. Where this differs from the brief:
   does not have.
 - **The governor's slot wait is not an `error` event.** It is kelir waiting for
   its own sibling, not a provider failure, so it is a visible line and a status
-  line only. It is interruptible like a retry wait (`stop`, `say --now`, `end`).
+  line only. It is interruptible like a retry wait: `stop`, `end` and a signal
+  end the turn, `say --now` and `model` apply at once and simply look for the
+  slot again.
+- **The governor follows the provider a request goes to.**
+  `max_concurrent_requests` is read from the config entry the `model` verb
+  resolved to, every time, so a swap to a governed provider starts taking its
+  slots and a swap away stops being held to the old limit (STEER-5 review S1).
+  A compaction's summary is a provider request on the same account and takes a
+  slot like any step.
+- **A retry hint prefers the `Date` header and the tightest reset window.**
+  Absolute hints (an HTTP-date, an epoch, an RFC 3339 stamp) are measured from
+  the response's own `Date` when it has one, so a skewed local clock cannot turn
+  a 90 s hint into none at all (review N1). When a response carries several
+  reset headers (`x-ratelimit-reset-requests` and friends) the *shortest* still
+  closed window wins: a provider reports every window it counts, and the one
+  that fired is the tight one, not the daily one (review N2).
+- **A compaction summary is tried once, never retried.** A 429 on the
+  summarising request skips that compaction — the context stays as it was and
+  the next step runs, with a `where: "compact"` error in the log — rather than
+  spending the turn's waiting budget on a summary nobody asked for. A step
+  always gets the budget (review N3; M3 review N4 made the same call).
 
 ## Sources and skills (M5-A, 2026-11-19)
 
