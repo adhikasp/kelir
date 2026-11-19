@@ -40,9 +40,11 @@ passed**: 267 lib, 16 e2e, 13 e2e_m3, 8 e2e_m4, 15 e2e_tui, 23 e2e_verbs, 8 revi
 review_m1, 2 review_m2, 11 review_m3, 19 review_m4, 7 review_m4b. (The lib/e2e_m3/e2e_m4 counts
 differ by platform because five unit tests and two e2e tests are `cfg`-gated; the totals agree.)
 
-After my additions (`tests/review_steer1.rs`, one assertion in `tests/e2e_tui.rs`), re-run:
-`cargo fmt --check` clean, clippy clean, **395 passed, 0 failed, 2 ignored** (the two ignored tests
-are the findings below and fail with `-- --ignored`; Linux re-run is green too — see the commit).
+After my additions (`tests/review_steer1.rs`, one assertion in `tests/e2e_tui.rs`), on the review
+commit `d02c87c`: `cargo fmt --check` clean, clippy clean, **395 passed, 0 failed, 2 ignored** on
+Windows (the two ignored tests are the findings below and fail with `-- --ignored`), and on Linux
+(`scripts/remote-check.sh the maintainer`, same commit) `FMT-OK`, clippy clean, **400 passed, 0 failed, 2
+ignored**.
 
 ## Findings
 
