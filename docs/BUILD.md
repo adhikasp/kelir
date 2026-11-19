@@ -144,12 +144,28 @@ passed 8/8 under the same load in isolation and 5/5 with `cargo test`. The failu
 race on a loaded box (STEER-9, `docs/QUEUE.md:61`), not the per-process test model. Nextest only makes it
 easier to *see*, because it names the retry.
 
-**The TUI suite has a group of its own.** `.config/nextest.toml` puts `binary(e2e_tui)` in a `pty` test group
-with `max-threads = 2`: `cargo test` runs one test *binary* at a time, so the PTY tests never used to run
-beside the mock-server e2e suites; nextest `-j 4` runs them beside three other suites, and the PTY suite is
-the first to feel it. It passed 6/6 alone at `-j 4` and 0/6 failures with the group; the underlying flake
-still exists (it failed 1/6 at `-j 1` on its own), which is STEER-9's to fix. The group only stops an
-existing flake from turning a different job's gate red.
+**Two test groups.** `cargo test` runs one test *binary* at a time, so the PTY tests and the
+process-heavy ones never used to run beside the mock-server e2e suites; nextest `-j 4` runs four at once, and
+those suites are the ones that feel it. `.config/nextest.toml` caps them:
+
+| group | filter | cap | why |
+|---|---|---|---|
+| `pty` | `binary(e2e_tui)` | 2 | 17 tests each driving a real terminal |
+| `process-heavy` | `binary(e2e_m4) \| binary(review_m4b) \| binary(review_m4)` | 2 | each kills a session and scans for surviving pids |
+
+Measured over repeated full runs at `-j 4`:
+
+| config | full suite | failures |
+|---|---|---|
+| no groups | 66-70 s | 1 red in ~4 runs (a different test each time) |
+| both groups at 2 | 87-92 s | 0 in 6 runs |
+| `process-heavy` at 3 | 75-156 s | 2 of 5 runs red |
+| every suite but the lib at 2 | 122-126 s | 0, but 56 s slower than needed |
+
+The 22 s is the price of a gate that is green: the brief's point is that load flakes cost more than
+compiles because they force 2-4x re-runs, and four red-in-four runs cost more wall time than 22 s each.
+The underlying flakes still exist (see the table above; `review_m4b` fails 1-in-8 alone), which is STEER-9's
+to fix — the groups only stop a known flake from turning a different job's gate red.
 
 Three different tests retried in three consecutive full runs, each one reproduced outside nextest, and every
 one of them is STEER-9's property, not this change's. So the gate names a retry and stays green

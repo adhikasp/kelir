@@ -157,6 +157,22 @@ fn the_nextest_profile_matches_the_gate_rules() {
         "the TUI suite is assigned to that group"
     );
     assert!(config.contains("binary(e2e_tui)"), "by its binary name");
+    // The process-heavy suites (they kill sessions and scan for surviving pids)
+    // get the same treatment, at the measured cap.
+    let heavy = config
+        .split("[test-groups.process-heavy]")
+        .nth(1)
+        .expect("a process-heavy test group")
+        .split("[[profile.")
+        .next()
+        .unwrap_or("");
+    assert!(heavy.contains("max-threads = 2"), "{heavy}");
+    for suite in ["e2e_m4", "review_m4b", "review_m4"] {
+        assert!(
+            config.contains(&format!("binary({suite})")),
+            "{suite} is in the process-heavy group"
+        );
+    }
 }
 
 // ---------------------------------------------------------------- gate lock

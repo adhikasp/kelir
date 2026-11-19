@@ -27,3 +27,16 @@ max-threads = 2
 [[profile.default.overrides]]
 filter = 'binary(e2e_tui)'
 test-group = 'pty'
+
+# The three process-heavy suites whose *existing* flakes (STEER-9) are the ones
+# that turn a loaded run red: each kills sessions, waits for trees to die and
+# scans for surviving pids. `cargo test` ran one test *binary* at a time, so
+# they never shared the box; nextest -j 4 runs four. Two at a time is enough to
+# keep the total under the worst case and costs about a second on a full run
+# (measured), because these are seconds each, not minutes.
+[test-groups.process-heavy]
+max-threads = 2
+
+[[profile.default.overrides]]
+filter = 'binary(e2e_m4) | binary(review_m4b) | binary(review_m4)'
+test-group = 'process-heavy'
