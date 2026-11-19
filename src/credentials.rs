@@ -781,6 +781,14 @@ mod tests {
             program_name(&argv(&["/home/someone/bin/getkey", "--flag"])),
             "getkey"
         );
+        // A Windows path is split by `Path` on Windows; on Unix a backslash is
+        // an ordinary character in a name, so only the separator-bearing form
+        // is portable.
+        assert_eq!(
+            program_name(&argv(&["C:/Users/someone/bin/getkey.cmd"])),
+            "getkey.cmd"
+        );
+        #[cfg(windows)]
         assert_eq!(
             program_name(&argv(&[r"C:\Users\someone\bin\getkey.cmd"])),
             "getkey.cmd"
