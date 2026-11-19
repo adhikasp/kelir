@@ -1973,11 +1973,19 @@ impl Session {
             if message.from != "tui" {
                 self.emit(UiEvent::Info(format!("› {}", one_line(&message.text))));
             }
+            // A message deferred to the end of a turn (`/later`) is the same
+            // message: the list of the images its text points at goes with it
+            // (N5), or a queued prompt would be the one shape whose
+            // `attachments[]` lied.
+            let attachments = crate::attachments::paths_in(&message.text)
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect();
             self.record(EventBody::User {
                 text: Payload::text(message.text),
                 from: message.from,
                 delivery: message.delivery.to_string(),
-                attachments: Vec::new(),
+                attachments,
             })?;
         }
         self.sync();
