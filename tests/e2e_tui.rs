@@ -349,6 +349,7 @@ fn drive_in_a_pty(
     command.env("KELIR_CONFIG", &config);
     command.env("KELIR_CONFIG_DIR", state.join("no-config"));
     command.env("KELIR_STATE_DIR", &state);
+    command.env("KELIR_HOME", state.join("home"));
     command.env("KELIR_BASE_URL", &base_url);
     command.env("OPENROUTER_API_KEY", "test-openrouter-key");
     command.env("TERM", "xterm-256color");
@@ -712,6 +713,7 @@ fn panic_in_a_pty(
     command.env("KELIR_CONFIG", &config);
     command.env("KELIR_CONFIG_DIR", state.join("no-config"));
     command.env("KELIR_STATE_DIR", &state);
+    command.env("KELIR_HOME", state.join("home"));
     command.env("KELIR_BASE_URL", "http://127.0.0.1:9");
     command.env("OPENROUTER_API_KEY", "test-openrouter-key");
     command.env("TERM", "xterm-256color");

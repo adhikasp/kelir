@@ -179,9 +179,14 @@ async fn the_window_does_not_change_the_request_bytes() {
         window_of(&mut on_provider).await,
         (262_144, "api".to_string())
     );
+    let state = on_provider.state.clone();
     on_provider.end().await;
 
-    let mut on_config = LiveSession::start(
+    // The second session is the *same machine*: it reuses the state dir, so
+    // the home and config dirs its system prompt names (as the skills
+    // directories) are the same strings. Only the window differs.
+    let mut on_config = LiveSession::start_reusing(
+        state,
         &config_mock,
         &["run", "--keep", "--json", "--cwd", &cwd, "say hi"],
         "window = 4096\n",

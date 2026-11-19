@@ -472,6 +472,9 @@ pub async fn run_task(
         .env("KELIR_CONFIG_DIR", temp.path().join("no-config"))
         .env("KELIR_STATE_DIR", temp.path().join("state"))
         .env("KELIR_BASE_URL", mock.base_url())
+        // No real home: a run's sources are its own temp dirs, never this
+        // machine's `~/.claude/skills` (a test must not depend on a desktop).
+        .env("KELIR_HOME", temp.path().join("home"))
         .env("OPENROUTER_API_KEY", "test-openrouter-key")
         .env("KELIR_GO_API_KEY", "test-go-key")
         .stdin(if stdin.is_some() {
@@ -484,6 +487,7 @@ pub async fn run_task(
     for (key, value) in env {
         command.env(key, value);
     }
+    scrub_session_env(&mut command);
 
     let mut child = command.spawn().expect("spawn kelir");
     if let Some(input) = stdin {
@@ -1068,8 +1072,10 @@ impl Sandbox {
             .env("KELIR_CONFIG_DIR", self.state.join("no-config"))
             .env("KELIR_STATE_DIR", &self.state)
             .env("KELIR_BASE_URL", base_url)
+            .env("KELIR_HOME", self.state.join("home"))
             .env("OPENROUTER_API_KEY", "test-openrouter-key")
             .env("KELIR_GO_API_KEY", "test-go-key");
+        scrub_session_env_std(&mut command);
         command
     }
 
@@ -1121,6 +1127,29 @@ impl Sandbox {
     }
 }
 
+/// The session variables kelir exports to a bash child. A test that runs from
+/// inside a kelir session (kelir dogfoods itself) would otherwise hand its own
+/// `bg/` directory and socket to the child, and `bg out` would read the
+/// session's jobs instead of the test's.
+const SESSION_ENV: [&str; 4] = [
+    "KELIR_SESSION_DIR",
+    "KELIR_SOCK",
+    "KELIR_CALL_ID",
+    "KELIR_BIN",
+];
+
+fn scrub_session_env(command: &mut tokio::process::Command) {
+    for key in SESSION_ENV {
+        command.env_remove(key);
+    }
+}
+
+fn scrub_session_env_std(command: &mut std::process::Command) {
+    for key in SESSION_ENV {
+        command.env_remove(key);
+    }
+}
+
 fn live_command(
     cwd: &PathBuf,
     config: &PathBuf,
@@ -1134,8 +1163,10 @@ fn live_command(
         .env("KELIR_CONFIG_DIR", state.join("no-config"))
         .env("KELIR_STATE_DIR", state)
         .env("KELIR_BASE_URL", base_url)
+        .env("KELIR_HOME", state.join("home"))
         .env("OPENROUTER_API_KEY", "test-openrouter-key")
         .env("KELIR_GO_API_KEY", "test-go-key");
+    scrub_session_env(&mut command);
     command
 }
 

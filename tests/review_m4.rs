@@ -363,6 +363,10 @@ async fn r7_a_job_writing_a_lot_of_output() {
         .args(["bg", "out", &id, "--follow"])
         .env("KELIR_STATE_DIR", &sandbox.state)
         .env("KELIR_CONFIG", &sandbox.config)
+        .env_remove("KELIR_SESSION_DIR")
+        .env_remove("KELIR_SOCK")
+        .env_remove("KELIR_CALL_ID")
+        .env_remove("KELIR_BIN")
         .stdout(std::process::Stdio::null())
         .status()
         .await

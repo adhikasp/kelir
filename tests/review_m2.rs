@@ -61,6 +61,7 @@ fn drive(
     let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_kelir"));
     command.cwd(&cwd);
     command.env("KELIR_STATE_DIR", &state);
+    command.env("KELIR_HOME", state.join("home"));
     command.env("KELIR_CONFIG_DIR", state.join("no-config"));
     command.env("KELIR_BASE_URL", &base_url);
     command.env("OPENROUTER_API_KEY", "test-openrouter-key");
