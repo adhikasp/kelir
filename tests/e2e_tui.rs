@@ -196,13 +196,20 @@ fn snapshot_streaming_text_in_the_live_area() {
     let screen = snapshot(&mut app);
     // The unclosed `**` stays literal (a streamed prefix is not a mistake).
     assert!(screen.contains("Hello **wor"), "{screen:?}");
-    app.apply(UiEvent::Delta("ld**\n".into()));
+    app.apply(UiEvent::Delta("ld**\n\n".into()));
     let screen = snapshot(&mut app);
     let state = screen.lines().nth(3).unwrap_or_default();
     assert!(state.contains("writing"), "{screen:?}");
+    // A closed block goes straight into the scrollback now (S1): the closed
+    // emphasis shows there, with no literal markers.
+    let committed: Vec<String> = app.take_scroll().iter().map(line_text).collect();
     assert!(
-        !screen.contains("**"),
-        "the closed emphasis renders: {screen:?}"
+        committed.iter().any(|row| row.contains("Hello world")),
+        "the closed emphasis renders: {committed:?}"
+    );
+    assert!(
+        !committed.iter().any(|row| row.contains("**")),
+        "no literal markers: {committed:?}"
     );
     let facts = screen.lines().nth(7).unwrap_or_default();
     assert!(

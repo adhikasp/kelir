@@ -515,6 +515,15 @@ impl Message {
         block.committed = count;
     }
 
+    /// Every block is decided: nothing held may be joined to what comes next.
+    /// Called when something other than prose interrupts the message (a tool
+    /// call), so a held list block cannot swallow the sentence after it.
+    fn settle(&mut self) {
+        for block in &mut self.blocks {
+            block.joins = false;
+        }
+    }
+
     /// The rows of every final block: all but the last, plus the last one when
     /// nothing is streaming any more. Handed out once each.
     fn settled_rows(&mut self, layout: Layout) -> Vec<Row> {
@@ -780,6 +789,30 @@ impl App {
         // next delta, at the new width.
     }
 
+    /// A tool call interrupts the message: the text that had streamed before it
+    /// is a finished block and goes into the scrollback *now*, so the call's
+    /// line lands after it and before whatever the model says next (`B1`).
+    /// Returns whether there was prose to flush.
+    fn interrupt_prose(&mut self) -> bool {
+        // Only prose in flight needs flushing; an empty stream must not reset
+        // the splitter's fence/table state mid-block.
+        if self.stream.is_empty() {
+            self.message.settle();
+            self.commit_settled();
+            return false;
+        }
+        let block = self.stream.finish();
+        let flushed = block.is_some();
+        if let Some(block) = block {
+            self.message.push_block(&block);
+        }
+        // A call is not a continuation: nothing in the message may swallow what
+        // follows one, so the held block is decided here.
+        self.message.settle();
+        self.commit_settled();
+        flushed
+    }
+
     /// A complete block arrived: it is held (it may still be continued by the
     /// next block), and everything before it is committed.
     fn absorb_block(&mut self, block: &str) {
@@ -910,11 +943,13 @@ impl App {
                 ));
             }
             UiEvent::Delta(text) => {
-                // Prose starts: the open tool group closes before the first row
-                // of it is queued, so the transcript's order is the order the
-                // events happened in (`B1`). A group of calls settled without
-                // prose between them stays open here, so consecutive calls still
-                // fold. One blank row separates the two blocks of history.
+                // Prose follows tool lines: the open group closes before the
+                // first row of it is queued, so the transcript's order is the
+                // order the events happened in (`B1`), with one blank row
+                // between the two blocks. A group of calls settled without
+                // prose between them stays open here, so consecutive calls
+                // still fold. (The stream was flushed when the call started:
+                // see `interrupt_prose`.)
                 if self.close_group() && !self.scroll.is_empty() {
                     self.separate();
                 }
@@ -946,6 +981,13 @@ impl App {
                 self.commit_live(&text);
             }
             UiEvent::ToolStarted { name, input } => {
+                // A call is the one thing that cannot be part of a paragraph:
+                // the prose that announced it is finished and goes into the
+                // scrollback now, so the call's line lands after it and before
+                // whatever the model says next (`B1`).
+                if self.interrupt_prose() && !self.scroll.is_empty() {
+                    self.separate();
+                }
                 self.status.running += 1;
                 self.activity.tool_started(now, &call_label(&name, &input));
             }
@@ -961,6 +1003,11 @@ impl App {
                 out_path,
                 tail,
             } => {
+                // A session that resumes mid-turn can settle a call whose start
+                // this process never saw: the same rule holds, flush first.
+                if self.interrupt_prose() && !self.scroll.is_empty() {
+                    self.separate();
+                }
                 self.status.running = self.status.running.saturating_sub(1);
                 self.activity.tool_settled(now);
                 self.call_ordinal += 1;
@@ -2082,6 +2129,22 @@ mod tests {
         app_of_width(60)
     }
 
+    /// One settled `bash` call, as the session reports it.
+    fn tool_settled(command: &str) -> UiEvent {
+        UiEvent::ToolSettled {
+            name: "bash".into(),
+            input: json!({ "command": command }),
+            outcome: "ok".into(),
+            exit_code: Some(0),
+            elapsed_ms: 100,
+            bytes: 4,
+            lines: 1,
+            spilled: false,
+            out_path: String::new(),
+            tail: String::new(),
+        }
+    }
+
     fn app_of_width(width: usize) -> App {
         let (to_tui, _rx) = mpsc::unbounded_channel();
         let (verbs, _vrx) = mpsc::unbounded_channel();
@@ -2291,6 +2354,92 @@ mod tests {
             .flat_map(|line| line.spans.iter())
             .any(|span| span.style.add_modifier.contains(Modifier::BOLD));
         assert!(styled, "the bold run survives into the scrollback");
+    }
+
+    /// The turn shapes the review named: calls then an answer, an answer then
+    /// calls, and the two interleaved. The committed rows are in event order in
+    /// every case (`B1`) — a model that writes its sentence before running the
+    /// call it announces must not have that sentence land above the call.
+    #[test]
+    fn the_committed_rows_follow_the_order_of_events_in_every_turn_shape() {
+        // calls, then prose.
+        let mut app = app_of_width(80);
+        app.apply(tool_settled("git --version"));
+        app.apply(UiEvent::ToolStarted {
+            name: "bash".into(),
+            input: json!({"command": "python --version"}),
+        });
+        app.apply(tool_settled("python --version"));
+        app.apply(UiEvent::Assistant {
+            text: "Both are installed.".into(),
+        });
+        app.apply(UiEvent::TurnEnded {
+            outcome: "done".into(),
+            final_text: String::new(),
+        });
+        let rows: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let git = rows
+            .iter()
+            .position(|r| r.contains("git --version"))
+            .unwrap();
+        let python = rows
+            .iter()
+            .position(|r| r.contains("python --version"))
+            .unwrap();
+        let prose = rows.iter().position(|r| r.contains("Both are")).unwrap();
+        assert!(git < python && python < prose, "{rows:?}");
+
+        // Prose, then calls, then prose: the piece before the calls stays above
+        // them, and the piece after them below, even with no blank line between
+        // the pieces (the model streams one paragraph across the call).
+        let mut app = app_of_width(80);
+        app.apply(UiEvent::Delta("Let me check both versions first.\n".into()));
+        app.apply(tool_settled("git --version"));
+        app.apply(UiEvent::Delta(
+            " Both are installed, so the answer comes after.\n".into(),
+        ));
+        app.apply(UiEvent::Assistant {
+            text: "Let me check both versions first.\n Both are installed, so the answer comes after.\n"
+                .into(),
+        });
+        app.apply(UiEvent::TurnEnded {
+            outcome: "done".into(),
+            final_text: String::new(),
+        });
+        let rows: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let before = rows
+            .iter()
+            .position(|r| r.contains("Let me check both"))
+            .unwrap();
+        let call = rows
+            .iter()
+            .position(|r| r.contains("git --version"))
+            .unwrap();
+        let after = rows
+            .iter()
+            .position(|r| r.contains("Both are installed"))
+            .unwrap();
+        assert!(
+            before < call && call < after,
+            "event order, not paragraph order: {rows:?}"
+        );
+
+        // Calls between two prose blocks, then a fold: still ordered.
+        let mut app = app_of_width(80);
+        for c in ["a", "b", "c"] {
+            app.apply(tool_settled(c));
+        }
+        app.apply(UiEvent::Delta("Done.".into()));
+        app.apply(UiEvent::Assistant {
+            text: "Done.".into(),
+        });
+        let rows: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let fold = rows
+            .iter()
+            .position(|r| r.contains("ran 3 commands"))
+            .unwrap();
+        let prose = rows.iter().position(|r| r.contains("Done.")).unwrap();
+        assert!(fold < prose, "{rows:?}");
     }
 
     /// The design note's spacing rule (review N1): one blank row between a
