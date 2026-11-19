@@ -454,7 +454,7 @@ pub struct App {
     session_dir: Option<std::path::PathBuf>,
     /// The image paths already turned into pointers at submit, so a line
     /// submitted twice (history) does not save the same file twice.
-    pub(crate) absorbed: std::collections::HashSet<String>,
+    absorbed: std::collections::HashSet<String>,
     /// A note the state row shows (`saving image…`), cleared by the next event.
     pub note: String,
     /// When the current retry wait ends, so the countdown is read from the
@@ -600,9 +600,9 @@ impl App {
     }
 
     fn commit_pending(&mut self) {
-        for block in std::mem::take(&mut self.pending_blocks) {
-            let _ = block;
-        }
+        // The blocks are already rendered into `pending_rows`; they are kept
+        // only so a resize can re-render what has not been committed.
+        self.pending_blocks.clear();
         let rows = std::mem::take(&mut self.pending_rows);
         let theme = self.theme;
         for row in rows {
@@ -1177,7 +1177,6 @@ impl App {
 /// of non-space characters whose extension is one kelir knows. The caller
 /// decides whether it is a real file; this only finds the candidates.
 fn next_path(text: &str) -> Option<(usize, String)> {
-    let bytes = text.as_bytes();
     let mut best: Option<(usize, String)> = None;
     for quote in ['"', '\''] {
         if let Some(open) = text.find(quote) {
@@ -1204,7 +1203,6 @@ fn next_path(text: &str) -> Option<(usize, String)> {
             offset += token.len();
         }
     }
-    let _ = bytes;
     best
 }
 
