@@ -153,3 +153,6 @@ retries). Decisions (maintainer: "fix that, retry with backoff"):
   tokens), python-heredoc patches over `edit`. -> brief **STEER-6** (docs/tasks/STEER-6.md), runs after STEER-5 (a slot
   and provider capacity), as a kelir-implemented job in its own worktree.
 - Order: steer4, steer5 (running) -> M5-A review fixes -> steer6 -> steer1fix -> steer2 -> steer3 -> M5-B -> M6...
+
+- 14:00 M5-A review = PASS WITH FIXES (0 blockers, 11 should-fix, docs/reviews/m5a-review.md); fixes job **m5afix**
+  (docs/tasks/M5-A-fixes.md) in kelir-wt/m5afix; running now with steer4 and steer5 (three kelir workers).
