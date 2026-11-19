@@ -2,6 +2,59 @@
 
 Small, deliberate differences, with the reason. Everything else tracks the spec.
 
+## Retrying provider errors (STEER-5, 2026-11-19)
+
+The brief is `docs/tasks/STEER-5.md`; the policy lives in `src/retry.rs` and the
+wait itself in `session::stream`. Where this differs from the brief:
+
+- **Attempts are bounded by a waiting budget, plus a finite stand-in for
+  "unlimited".** The brief says attempts are unlimited inside `retry_max_wait`.
+  A provider that answers instantly with 429 would then spin: the budget is
+  spent in time, and a zero-wait loop never spends any. So `retry::MAX_ATTEMPTS`
+  (200) caps the count regardless, `retry_max_attempts` in `config.toml` caps it
+  further, and `retry_max_wait = 0` (unlimited waiting) does **not** mean
+  unlimited attempts. `retry_max_attempts = 0` is read as unset, not as "never
+  retry" (a person who wants no retries sets `retry_max_attempts = 1`).
+- **A `Retry-After` longer than what the budget has left pauses at once.** The
+  brief says to honour the header; waiting 4 s of a 1 s budget and *then* failing
+  would honour neither. The provider's hint is clamped to the budget, and a hint
+  that does not fit pauses the turn immediately.
+- **`turn_ended` outcome `paused` is added minimally** (STEER-4's outcome, which
+  is not on this branch): the event carries the shared `final_text` payload with
+  the message "provider unavailable after N attempts / M: <reason>; say
+  `continue` to retry", a one-shot `run` exits 0 for it, Herdr gets `idle`
+  (nothing is working and nothing failed), and the TUI's status word is
+  `paused`. `resume::interrupted` treats `paused` like `stopped`, so a resume
+  (or a later `say`) retries from the same fold. If STEER-4's version of the
+  outcome lands first, the merge is one variant and one `match` arm.
+- **A queued `before_step` boundary applies between two attempts.** The brief
+  asks that `model` during a wait "uses the new model", and a retry is a fresh
+  request: so the retry path runs the `before_step` boundary first, which also
+  lets a queued `say` join the fold and `end` take effect. The `verb` event
+  still records the swap and the boundary it applied at.
+- **`error {where: "provider"}` keeps the provider's body; the wait's visible
+  line does not.** The log is the session's own record of what came back (its
+  `error` event's `message` is `http 429: <body up to 500 chars>`, unchanged from
+  M0). The line printed for the wait, which is what a person sees and what
+  NDJSON carries as a separate `retry` line, is `rate limited (429): retrying in
+  34 s, attempt 5, say stop to cancel`: status and reason only, never a body.
+  A credential can only appear in the session's own log, which never leaves the
+  machine.
+- **The concurrency governor counts what is in flight, not what is configured.**
+  A slot is held for exactly one request: `[providers.<name>]
+  max_concurrent_requests = N` takes an advisory OS lock on
+  `<state root>/locks/<base-url-host>-<slot>` for the duration of one
+  `POST /chat/completions`, polling every 100 ms, with the status line saying
+  "waiting for a provider slot (N)". Two config names pointing at one endpoint
+  share the endpoint's slots, because that is what the provider's limit is per.
+  `0`/unset is off. Linux and macOS use `flock`, Windows `LockFileEx` (not
+  `File::try_lock`, which needs Rust 1.89 and the MSRV is 1.88); both are
+  released by the kernel when the holder dies, which is the property a pid file
+  does not have.
+- **The governor's slot wait is not an `error` event.** It is kelir waiting for
+  its own sibling, not a provider failure, so it is a visible line and a status
+  line only. It is interruptible like a retry wait (`stop`, `say --now`, `end`).
+
 ## Models metadata comes from the provider (2026-11-19)
 
 The built-in window table is gone. It assumed 128k for every `deepseek` model, so the 1M-token

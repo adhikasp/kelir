@@ -106,7 +106,7 @@ are never inline: the event holds the path.
 | `verb` | `name`, `args`, `from` | every verb received, applied or not |
 | `gate` | `gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?` | every gate run, including fail-open ones |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by` (`user`, `agent`, `auto`), `tokens_before`, `tokens_after` | the fold replaces everything up to `through_seq` except the pins |
-| `turn_ended` | `outcome` (`done`, `stopped`, `error`), `final_text` | |
+| `turn_ended` | `outcome` (`done`, `stopped`, `error`, `paused`), `final_text` | |
 | `error` | `where`, `message`, `retryable` | provider errors, broken gates, torn lines |
 | `resumed` | `from_seq`, `unsettled[]` | `unsettled` lists started-but-unsettled calls |
 | `session_ended` | `reason` | |
@@ -312,6 +312,24 @@ User-Agent. Cost (and Go's `allowance`) come from the final usage chunk
 (`stream_options.include_usage`). Keys from the environment (`OPENROUTER_API_KEY`, the Go
 `oc_sk_…` key); never printed. The default model is `deepseek/deepseek-v4.1-flash-1017` on
 OpenRouter (the maintainer's call, 2026-11-19); the Go equivalent is `deepseek-v4.1-flash`.
+
+**Transient provider errors are ridden out, not fatal.** 429, 408, every 5xx
+(incl. 529/loaded) and a request that dies before any tool call of the step began
+are retried: `Retry-After` (seconds or HTTP-date) and the reset headers
+(`x-ratelimit-reset*`, `anthropic-ratelimit-*-reset`) are honoured when present,
+otherwise exponential with full jitter (base 2 s, factor 2, cap 120 s). The whole
+request works inside one waiting budget (`retry_max_wait`, default 30 min, `0` =
+unlimited); when it runs out the turn is **paused** (`turn_ended` outcome
+`paused`, "provider unavailable …; say `continue` to retry"), never failed, and
+the next `say` retries from the same fold. Every wait writes an `error` event
+(`where: "provider"`, `retryable`, status, attempt, `retry_in_ms`) and a visible
+line ("rate limited (429): retrying in 34 s, attempt 5, say stop to cancel"), and
+it is interruptible: `stop`, `say --now`, `later`, `model` (the retry uses the new
+model), `end` and a signal take effect at once; a stopped wait ends the turn
+`stopped`. 400/401/403/404 are never retried. `[providers.<name>]
+max_concurrent_requests = N` is an opt-in client-side governor: N advisory OS
+file locks under `<state root>/locks/`, so several local kelir processes never
+overlap more than N requests on one account, and a crashed holder leaks nothing.
 
 kelir keeps no table of model facts. It reads the provider's own `GET {base}/models` —
 `context_length` and `supported_parameters` on OpenRouter, `limit.context` and a `capabilities`
