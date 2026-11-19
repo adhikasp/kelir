@@ -479,9 +479,7 @@ impl Message {
             && continues_item(text)
         {
             // The two texts, separated by the blank line the splitter cut.
-            last.text.push_str("
-
-");
+            last.text.push_str("\n\n");
             last.text.push_str(text);
             last.joins = markdown::ends_in_item(&last.text);
             return;
