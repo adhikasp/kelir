@@ -13,8 +13,14 @@ fn env_path(var: &str) -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
-fn home() -> PathBuf {
-    env_path("HOME")
+/// The home directory, from `$HOME`/`%USERPROFILE%`.
+///
+/// `KELIR_HOME` overrides it: the tests point it at a scratch directory so a
+/// run never reads the machine's own `~/.claude/skills` (discovery must see the
+/// same inputs every time, and a person's home is not a test fixture).
+pub fn home() -> PathBuf {
+    env_path("KELIR_HOME")
+        .or_else(|| env_path("HOME"))
         .or_else(|| env_path("USERPROFILE"))
         .unwrap_or_else(|| PathBuf::from("."))
 }

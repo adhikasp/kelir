@@ -23,6 +23,7 @@ pub mod provider;
 pub mod resume;
 pub mod scrollback;
 pub mod session;
+pub mod sources;
 pub mod spill;
 pub mod sse;
 pub mod stream;

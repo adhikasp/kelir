@@ -10,10 +10,11 @@ use serde::Deserialize;
 
 use crate::paths;
 
-pub const DEFAULT_PROMPT: &str = "\
-You are kelir, an autonomous agent harness. Reach for \
-`bash` to read, search and run things, and `edit` to change a file. Prefer \
-small steps you can verify, and say what you did when you are done.";
+/// The base prompt, embedded at build time (`src/prompt.md`, at most 1 KB).
+///
+/// It names the skills directories and carries no listing: skills are pull, so
+/// the model reads a `SKILL.md` with `bash` when the task calls for one.
+pub const DEFAULT_PROMPT: &str = include_str!("prompt.md");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -53,6 +54,9 @@ pub struct Config {
     pub auto_compact_at: f64,
     /// The summary prompt (`compact_prompt`/`compact.md`, else embedded).
     pub compact_prompt: String,
+    /// Extra skills directories (`skills_dirs`), machine layer: they are named
+    /// in the base prompt and searched read-only.
+    pub skills_dirs: Vec<PathBuf>,
     /// Messages kept verbatim after a compaction.
     pub compact_keep: usize,
     /// A bash call still running after this long is promoted to a background
@@ -88,6 +92,7 @@ struct RawConfig {
     auto_compact_at: Option<f64>,
     compact_prompt: Option<String>,
     compact_keep: Option<usize>,
+    skills_dirs: Vec<PathBuf>,
     promote_after: Option<u64>,
 }
 
@@ -233,6 +238,11 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         model_windows: raw.model_windows,
         auto_compact_at,
         compact_prompt,
+        skills_dirs: raw
+            .skills_dirs
+            .into_iter()
+            .map(|path| expand_home(&path.to_string_lossy()))
+            .collect(),
         compact_keep: raw.compact_keep.unwrap_or(crate::compact::DEFAULT_KEEP),
         promote_after: promote_after(raw.promote_after)?,
     })
@@ -281,6 +291,21 @@ impl Config {
             .copied()
             .filter(|window| *window > 0)
             .or(self.window.filter(|window| *window > 0))
+    }
+}
+
+/// `~/x` and `$HOME/x` in a configured path, so a `skills_dirs` entry is
+/// portable between a person's config and a machine's.
+fn expand_home(path: &str) -> PathBuf {
+    let path = path.trim();
+    let rest = path
+        .strip_prefix("~/")
+        .or_else(|| path.strip_prefix("~\\"))
+        .or_else(|| path.strip_prefix("$HOME/"))
+        .or_else(|| path.strip_prefix("$HOME\\"));
+    match rest {
+        Some(rest) => paths::home().join(rest),
+        None => PathBuf::from(path),
     }
 }
 

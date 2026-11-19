@@ -162,7 +162,9 @@ struct Prepared {
     dir: PathBuf,
     task: String,
     cwd: PathBuf,
-    system_text: String,
+    /// The frozen system prompt: the text, its hash, and the sources that went
+    /// in (`session_started.system` and `sources[]`).
+    system: crate::sources::Rendered,
     sock: String,
     json: bool,
     ask: bool,
@@ -196,6 +198,9 @@ struct Reopened {
     tools: Vec<String>,
     /// The frozen system text; kept so the log is never rewritten.
     system_text: String,
+    /// The sources the frozen system was rendered from, as `session_started`
+    /// recorded them: the watcher re-checks exactly these.
+    sources: Vec<crate::event::SourceInfo>,
     cwd: PathBuf,
 }
 
@@ -265,6 +270,9 @@ struct Session {
     window_source: &'static str,
     /// The provider's model list as this process learned it.
     models: Option<crate::models::Cache>,
+    /// The sources in this context, re-checked at every boundary: an edit on
+    /// disk becomes a `source` message, never a system rewrite.
+    watch: crate::sources::Watch,
 }
 
 /// A compaction asked for by someone; it applies at the next `before_step`.
@@ -612,7 +620,11 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             keep: opts.keep,
             tui: opts.tui,
             herdr,
-            system_text: reopened.reopened.system_text.clone(),
+            system: crate::sources::Rendered {
+                hash: crate::sources::hash_of(&reopened.reopened.system_text),
+                text: reopened.reopened.system_text.clone(),
+                sources: reopened.reopened.sources.clone(),
+            },
             cwd: reopened.reopened.cwd.clone(),
             cfg,
             provider_name: reopened.provider_name,
@@ -680,7 +692,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             dir.display()
         ))
     })?;
-    let system_text = render_system(&cfg.system_prompt, &cwd);
+    let system = render_system(&cfg, &cwd);
     // The address this session is expected to use; `drive` re-reads it after
     // `ipc::bind`, because Unix may fall back to a shorter socket path.
     let sock = ipc::value(&dir, &id);
@@ -700,7 +712,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         dir,
         task,
         cwd,
-        system_text,
+        system,
         sock,
         resume: None,
         window,
@@ -806,6 +818,15 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
         })
         .unwrap_or_else(|| Ok(String::new()))
         .unwrap_or_default();
+    // The sources `session_started` recorded: the watcher re-checks exactly
+    // these, so a resumed session reports the same edits it would have live.
+    let sources = events
+        .iter()
+        .find_map(|event| match &event.body {
+            EventBody::SessionStarted { sources, .. } => Some(sources.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
 
     Ok(ReopenedSession {
         id: id.clone(),
@@ -825,6 +846,7 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
                 tools
             },
             system_text,
+            sources,
             cwd,
             events,
         },
@@ -896,6 +918,7 @@ impl Session {
             window: prepared.window,
             window_source: prepared.window_source,
             models: prepared.models,
+            watch: crate::sources::Watch::default(),
         };
         if let Some(read) = prepared.resume {
             // A turn that was in flight continues without a new task.
@@ -903,7 +926,6 @@ impl Session {
             session.reopen(read)?;
             return Ok(session);
         }
-        let hash = crate::util::fnv1a64_hex(prepared.system_text.as_bytes());
         session.record(EventBody::SessionStarted {
             id: prepared.id.clone(),
             parent: None,
@@ -914,12 +936,13 @@ impl Session {
             provider: prepared.provider_name.clone(),
             model: prepared.model.clone(),
             system: SystemInfo {
-                text: prepared.system_text.clone().into(),
-                hash,
+                text: prepared.system.text.clone().into(),
+                hash: prepared.system.hash.clone(),
             },
-            sources: Vec::new(),
+            sources: prepared.system.sources.clone(),
             tools: session.tool_names.clone(),
         })?;
+        session.watch = crate::sources::Watch::from_rendered(&prepared.system);
         if session.has_task {
             session.record(EventBody::User {
                 text: prepared.task.clone().into(),
@@ -1387,10 +1410,107 @@ impl Session {
                         applied.messages += 1;
                     }
                 }
+                // Adds or replaces one source, as a message at the tail: the
+                // system prompt (and the provider's cache) is untouched.
+                Verb::Skills {
+                    kind,
+                    name,
+                    path,
+                    text,
+                } => {
+                    match self.apply_skills(kind, &name, path.as_deref(), text.as_deref()) {
+                        Ok(()) => applied.messages += 1,
+                        // A bad source must not kill the session: it is
+                        // recorded and the turn continues.
+                        Err(message) => {
+                            self.record(EventBody::Error {
+                                location: "verb".into(),
+                                message,
+                                retryable: false,
+                            })?;
+                        }
+                    }
+                }
             }
         }
         self.sync();
         Ok(applied)
+    }
+
+    /// `skills`: read one skill or instruction source (from a file, a skill
+    /// directory, or the verb's own text) and add it to the context as a
+    /// `source` message. Adding a name that is already there replaces it, even
+    /// when the new body is byte-identical: the message is the record.
+    fn apply_skills(
+        &mut self,
+        kind: crate::sources::SourceKind,
+        name: &str,
+        path: Option<&str>,
+        text: Option<&str>,
+    ) -> Result<(), String> {
+        let (body, resolved) = match (text, path) {
+            (Some(text), _) => (text.to_string(), None),
+            (None, Some(path)) => {
+                let path = std::path::PathBuf::from(path);
+                let file = if path.is_file() {
+                    path.clone()
+                } else {
+                    path.join("SKILL.md")
+                };
+                let body = std::fs::read_to_string(&file).map_err(|error| {
+                    format!(
+                        "skills: cannot read {}: {error}",
+                        crate::util::path_string(&file)
+                    )
+                })?;
+                // A skill's front matter must parse: a broken `SKILL.md` is
+                // refused here rather than handed to the model as if it were
+                // one.
+                if kind == crate::sources::SourceKind::Skill {
+                    let skill = crate::sources::parse_skill(&body)?;
+                    if skill.name != name {
+                        return Err(format!(
+                            "skills: {} names itself `{}`, not `{name}`",
+                            crate::util::path_string(&file),
+                            skill.name
+                        ));
+                    }
+                }
+                let body = if kind == crate::sources::SourceKind::Skill {
+                    skill_body(&body)
+                } else {
+                    body
+                };
+                (body, Some(file))
+            }
+            (None, None) => return Err("skills: nothing to add".into()),
+        };
+        let hash = crate::sources::hash_of(&body);
+        let reused = self.events.iter().any(|event| {
+            matches!(
+                &event.body,
+                EventBody::Source { name: existing, text: Some(text), .. }
+                    if existing == name
+                        && text.inline_str().map(crate::sources::hash_of) == Some(hash.clone())
+            )
+        });
+        if reused {
+            return Err(format!(
+                "skills: `{name}` already carries exactly this text"
+            ));
+        }
+        if let Some(path) = &resolved {
+            self.watch.add(
+                kind,
+                name,
+                &crate::util::path_string(path),
+                &crate::sources::hash_of(&body),
+            );
+        }
+        self.record_source(kind, name, &body, resolved.as_deref())?;
+        self.emit(UiEvent::Info(format!("» skills: {name}")));
+        self.sync();
+        Ok(())
     }
 
     /// `model` swaps the provider/model for the rest of the session. It applies
@@ -1452,7 +1572,8 @@ impl Session {
                 Verb::Stop { .. }
                 | Verb::Model { .. }
                 | Verb::Tools { .. }
-                | Verb::Compact { .. } => {}
+                | Verb::Compact { .. }
+                | Verb::Skills { .. } => {}
             }
         }
         if end {
@@ -1507,6 +1628,55 @@ impl Session {
         self.emit(UiEvent::Info(format!("» {}", one_line(&text))));
         self.sync();
         Ok(true)
+    }
+
+    /// Record one `source` event: context that arrived after the start. It
+    /// renders as a message at the tail, so the system prefix (and its cache)
+    /// is untouched.
+    fn record_source(
+        &mut self,
+        kind: crate::sources::SourceKind,
+        name: &str,
+        text: &str,
+        path: Option<&Path>,
+    ) -> Result<(), String> {
+        self.record(EventBody::Source {
+            kind: kind.event_kind().to_string(),
+            name: name.to_string(),
+            text: Some(Payload::text(text)),
+            path: path.map(crate::util::path_string),
+        })?;
+        if let Some(path) = path {
+            self.watch.add(
+                kind,
+                name,
+                &crate::util::path_string(path),
+                &crate::sources::hash_of(text),
+            );
+        }
+        self.watch.note_text(kind, name, text);
+        Ok(())
+    }
+
+    /// The per-boundary mtime/hash check of the recorded sources: a file
+    /// edited on disk since it went into the context becomes one `source`
+    /// message. The system prompt is never rewritten (that is what keeps the
+    /// provider's cache warm).
+    fn check_sources(&mut self) -> Result<usize, String> {
+        let changes = self.watch.changes();
+        let count = changes.len();
+        for change in changes {
+            let path = change.path.clone();
+            self.record_source(change.kind, &change.name, &change.text, Some(&path))?;
+            self.emit(UiEvent::Info(format!(
+                "» source changed on disk: {}",
+                crate::util::path_string(&path)
+            )));
+        }
+        if count > 0 {
+            self.sync();
+        }
+        Ok(count)
     }
 
     fn record_messages(&mut self, messages: Vec<Message>) -> Result<(), String> {
@@ -1978,6 +2148,9 @@ impl Session {
             if let Some(end) = self.maybe_compact(rx).await? {
                 return Ok(end);
             }
+            // Sources edited on disk while the turn ran: one `source` message
+            // each, at the tail. Never a system rewrite.
+            self.check_sources()?;
 
             let folded = crate::fold::fold(&self.events, &self.dir)?;
             let request =
@@ -2602,6 +2775,14 @@ fn print_result_event(
     let _ = lock.flush();
 }
 
+/// A `SKILL.md`'s body without its front matter (the message carries the
+/// skill's text, not a second copy of its metadata).
+fn skill_body(text: &str) -> String {
+    crate::sources::parse_skill(text)
+        .map(|skill| skill.body)
+        .unwrap_or_else(|_| text.to_string())
+}
+
 fn compact_input(args: &Value) -> String {
     let text = args
         .get("command")
@@ -2621,14 +2802,40 @@ fn new_session_id() -> String {
     format!("ses_{}", ulid::Ulid::new().to_string().to_lowercase())
 }
 
-fn render_system(base: &str, cwd: &Path) -> String {
-    format!(
-        "{}\n\n# Environment\ncwd: {}\nos: {}\ndate: {}\n",
-        base.trim_end(),
-        crate::util::path_string(cwd),
-        std::env::consts::OS,
-        today()
-    )
+/// Render the system prompt once, from the config and the cwd's sources.
+///
+/// The skills directories come from the config (`skills_dirs`) plus the
+/// conventional ones; the base prompt is the config's, the machine
+/// `prompt.md`, or the embedded default (the project's `.kelir/prompt.md` wins
+/// inside [`crate::sources::render_system`]).
+fn render_system(cfg: &Config, cwd: &Path) -> crate::sources::Rendered {
+    let places = crate::sources::places(cwd, &cfg.skills_dirs, Some(crate::paths::config_dir()));
+    let base_path = prompt_path(&cfg.system_prompt);
+    let date = today();
+    crate::sources::render_system(&crate::sources::Inputs {
+        base: &cfg.system_prompt,
+        base_path: base_path.as_deref(),
+        places: &places,
+        cwd,
+        date: &date,
+    })
+}
+
+/// The file the config's base prompt came from, when it came from one (the
+/// embedded default records itself as [`crate::sources::EMBEDDED`]).
+fn prompt_path(prompt: &str) -> Option<PathBuf> {
+    if prompt == crate::config::DEFAULT_PROMPT {
+        return None;
+    }
+    let machine = crate::paths::config_dir().join("prompt.md");
+    if machine.is_file()
+        && std::fs::read_to_string(&machine)
+            .map(|text| text == prompt)
+            .unwrap_or(false)
+    {
+        return Some(machine);
+    }
+    None
 }
 
 /// The date goes in, never the time: the system prefix must be stable for the
@@ -2671,9 +2878,16 @@ mod tests {
 
     #[test]
     fn system_prompt_has_a_date_and_no_time() {
-        let text = render_system("base", Path::new("work"));
-        assert!(text.starts_with("base\n"));
-        assert!(text.contains("cwd: work"));
+        let system = crate::sources::render_system(&crate::sources::Inputs {
+            base: "base",
+            base_path: None,
+            places: &crate::sources::Places::default(),
+            cwd: Path::new("work"),
+            date: "2026-11-19",
+        });
+        let text = system.text;
+        assert!(text.starts_with("base\n"), "{text}");
+        assert!(text.contains("cwd: work"), "{text}");
         let date_line = text.lines().find(|line| line.starts_with("date:")).unwrap();
         // `date: YYYY-MM-DD`: the only colon is the label's.
         assert_eq!(date_line.chars().filter(|c| *c == ':').count(), 1);
@@ -2682,8 +2896,25 @@ mod tests {
 
     #[test]
     fn system_prompt_is_stable_within_a_run() {
-        let a = render_system("base", Path::new("tmp"));
-        let b = render_system("base", Path::new("tmp"));
+        let cfg = Config {
+            provider: String::new(),
+            model: String::new(),
+            shell: vec![],
+            spill_limit: 0,
+            max_steps: 0,
+            cache_ttl: None,
+            system_prompt: crate::config::DEFAULT_PROMPT.to_string(),
+            providers: Default::default(),
+            window: None,
+            model_windows: Default::default(),
+            auto_compact_at: 0.8,
+            compact_prompt: String::new(),
+            skills_dirs: vec![],
+            compact_keep: 0,
+            promote_after: std::time::Duration::from_secs(0),
+        };
+        let a = render_system(&cfg, Path::new("tmp"));
+        let b = render_system(&cfg, Path::new("tmp"));
         assert_eq!(a, b);
     }
 

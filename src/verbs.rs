@@ -63,6 +63,16 @@ pub enum Verb {
     Compact {
         focus: Option<String>,
     },
+    /// Add or replace one skill or instruction source. It arrives as a
+    /// `source` message at the tail, never as a system rewrite.
+    Skills {
+        kind: crate::sources::SourceKind,
+        name: String,
+        /// The file (or skill directory) to read at apply time.
+        path: Option<String>,
+        /// The text, inline: what a test or a script sends.
+        text: Option<String>,
+    },
     /// A job reported itself or changed state: `kelir bg run` sends this over
     /// the session socket, and the session's own watcher sends the same thing
     /// for a job that settled. It is bookkeeping, so it applies at the first
@@ -79,7 +89,10 @@ impl Verb {
             Verb::Say { now: true, .. } | Verb::Stop { .. } | Verb::End | Verb::Bg(..) => "now",
             Verb::Say { .. } => "queued",
             Verb::Later { .. } => "turn_end",
-            Verb::Model { .. } | Verb::Tools { .. } | Verb::Compact { .. } => "next_step",
+            Verb::Model { .. }
+            | Verb::Tools { .. }
+            | Verb::Compact { .. }
+            | Verb::Skills { .. } => "next_step",
         }
     }
 
@@ -90,9 +103,10 @@ impl Verb {
             // can get.
             Verb::Say { .. } | Verb::Stop { .. } | Verb::End | Verb::Bg(..) => true,
             Verb::Later { .. } => boundary == Boundary::TurnEnd,
-            Verb::Model { .. } | Verb::Tools { .. } | Verb::Compact { .. } => {
-                boundary == Boundary::BeforeStep
-            }
+            Verb::Model { .. }
+            | Verb::Tools { .. }
+            | Verb::Compact { .. }
+            | Verb::Skills { .. } => boundary == Boundary::BeforeStep,
         }
     }
 }
@@ -197,6 +211,40 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             }
             Ok(Verb::Tools { disable, enable })
         }
+        // A skill or an instruction source added or replaced by a human: it
+        // lands as a `source` message at the next boundary.
+        "skills" => {
+            let name = string_arg(args, "name")
+                .or_else(|| args.as_str().map(str::to_string))
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| "skills: missing `name`".to_string())?;
+            if !valid_source_name(&name) {
+                return Err(format!(
+                    "skills: `{name}` is not a source name (letters, digits, `.`, `_`, `-`)"
+                ));
+            }
+            let path = string_arg(args, "path").filter(|path| !path.trim().is_empty());
+            let text = string_arg(args, "text").filter(|text| !text.trim().is_empty());
+            if path.is_none() && text.is_none() {
+                return Err("skills: pass `path` (a file or a skill directory) or `text`".into());
+            }
+            let kind = match args.get("kind").and_then(Value::as_str).unwrap_or("skill") {
+                "skill" => crate::sources::SourceKind::Skill,
+                "instruction" => crate::sources::SourceKind::Instruction,
+                other => {
+                    return Err(format!(
+                        "skills: unknown kind `{other}` (skill, instruction)"
+                    ));
+                }
+            };
+            Ok(Verb::Skills {
+                kind,
+                name,
+                path,
+                text,
+            })
+        }
         "end" => Ok(Verb::End),
         // Applies at the next `before_step`: the summary is a provider call and
         // must not land inside a tool batch.
@@ -215,7 +263,7 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             Ok(Verb::Bg(Box::new(status)))
         }
         other => Err(format!(
-            "unknown verb `{other}` (say, later, stop, model, tools, compact, end)"
+            "unknown verb `{other}` (say, later, stop, model, tools, compact, skills, end)"
         )),
     }
 }
@@ -301,6 +349,17 @@ fn string_arg(args: &Value, key: &str) -> Option<String> {
 
 fn flag(args: &Value, key: &str) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// A source name: what a `sources[]` entry is called, and what a `skills` verb
+/// replaces. No separators, so it can never escape a directory.
+fn valid_source_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && !name.starts_with('.')
 }
 
 fn name_list(args: &Value, key: &str) -> Result<Vec<String>, String> {
