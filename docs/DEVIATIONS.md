@@ -1029,3 +1029,70 @@ consuming a scripted reply) so a session can start in a test.
   still kills its tree (a `Drop` guard in the tool). A leftover `cmd &` child
   keeps running, as documented for M0: the group/job is held by the session and
   by a lingering shim, so it dies when the session does.
+
+## Two providers, and OpenCode Go's key from opencode itself (STEER-2, 2026-11-19)
+
+The brief is `docs/tasks/STEER-2.md`; the code is `src/credentials.rs` and `src/doctor.rs`. Where
+this differs from the spec text, or needed a call the brief left open:
+
+- **`kind` is gone from the provider tables.** The brief says a `[providers.<name>]` table only
+  overrides settings of the two providers, and the name decides the provider. A `kind = "…"` key in
+  one of those tables is therefore ignored rather than honoured: `[providers.opencode-go] kind =
+  "openrouter"` still configures `opencode-go`. It is the same rule as a literal `key` — a config
+  that names a provider a second way is a config that can disagree with itself.
+- **A literal `key` is warned about, not fatal.** A config file with `key = "…"` (top level or in a
+  provider table) loads, prints one warning to stderr naming the two supported sources, and never
+  uses the value. Failing the load would make an existing config unusable for the sake of a warning
+  it does not need, and a maintainer's old config must keep starting.
+- **`key_env` is a fallback, not a replacement.** SPEC's first-match list is `OPENROUTER_API_KEY`,
+  then `key_env`, then `key_cmd`; the code briefly let `key_env` replace the default name, which a
+  migrated config with `key_env = "KELIR_OPENROUTER_API_KEY"` would have turned into "missing API
+  key" on a machine where only `OPENROUTER_API_KEY` is set. Fixed for both providers: the default
+  variable is tried first, the named one second (Go's default is `KELIR_GO_API_KEY`, which keeps the
+  override semantics above).
+- **An expired store entry is read twice, not refused on the first read.** `parse_auth_export` now
+  parses a stale entry and `store_credential` decides: expired-or-inside-the-margin means one quiet
+  250 ms pause and one re-read (opencode rotates its token as a side effect of running, so the first
+  read can race that write); if it is still expired, that is the usage error naming the expiry and
+  `REFRESH_FIX`. Never a third read, never a request with a token that cannot work.
+- **The `[providers.<name>]` migration error names the table and the file.** `config::load` records
+  the files it merged and reports `` `[providers.kelir]` in <path>: … rename the table to
+  `[providers.openrouter]` or `[providers.opencode-go]` (`kind = …` is no longer used)``. The
+  `provider = "<name>"` / `--provider` error stays the short one that names the pair.
+- **`kelir doctor` exits 1 only for a provider that matters.** The selected provider failing, or any
+  provider whose credential is *expired*, is a failure; a provider with no key that this session does
+  not use is reported as information (`JSON ok` is true). A machine that runs Go deliberately has no
+  `OPENROUTER_API_KEY`, and `doctor` should not call that a broken install.
+- **A helper's stdout is read up to 64 MiB.** Past the bound the read stops, the child is killed
+  (it is blocked on a pipe nobody drains) and the error says the helper printed more than the bound.
+  64 MiB rather than 1 MiB because a real opencode export on the dev box was measured at 30 MB with
+  padding, and the bound is a memory guard, not a size expectation.
+- **The store read is synchronous, and it cannot overlap the model-list fetch.** The brief asks for
+  the read to run concurrently with other startup work. It cannot run beside `GET {base}/models`:
+  that fetch authenticates with the *same* key (Go's list wants it), so the key has to exist first.
+  What could overlap is the config load, the cwd check and the system render, which together cost
+  microseconds. So `credentials::resolve` blocks for at most `AUTH_TIMEOUT` (5 s), called from
+  `prepare`/`reopen` and from a `model` verb that swaps provider, before the first request is built
+  (a background task holding the key would put the secret in another place). Measured on the dev
+  box: `opencode auth export opencode` 1221 ms cold, 289/308/296 ms after; the whole `kelir ask` on
+  `opencode-go` 1964/2063 ms through the store vs 1661/1483 ms with `KELIR_GO_API_KEY` set, i.e.
+  the read costs ~0.4 s of a cold start that is dominated by the first network round trip.
+- **`opencode auth export opencode` is run twice at most, and never in a loop.** When the store's
+  entry is expired or inside the two-minute margin the read is repeated once, because the CLI
+  refreshes a token as a side effect of running; if the second read is no fresher, an expired entry
+  is the usage error naming its expiry and a nearly-expired one is used (the 401 path is then one
+  more read and one retry). There is no third read and no polling.
+- **The 401/403 re-read is one per request, not one per turn.** `reread` is reset when the request
+  is rebuilt for a new reason (a `model` swap, a `say --now`), so a turn cannot loop on it: the
+  second 401 in a row is the answer and ends the step as a refusal.
+- **An expired store credential is a usage error (exit 2) before any request.** The brief says to
+  fail with the expiry time and the fix; failing *before* the request, rather than after a 401, is
+  what keeps a token that cannot work off the wire at all.
+- **`key_cmd` is named by its file name in messages and in `key_origin`.** A `key_cmd =
+  ["C:/Users/someone/bin/getkey"]` would otherwise put a private path into `session_started` and
+  into `kelir doctor`'s output; the repo's public-log rule and the brief's "no private paths" both
+  apply. Only the program's own name is recorded.
+- **The Go provider's `key_env` stays `KELIR_GO_API_KEY` in the config entry.** It is what the
+  precedence list starts with *when set*; the store is the default that answers when it is not.
+  `config::load` therefore stays pure (no process read, so `kelir doctor` and a unit test can load a
+  config without starting a helper) and the resolution happens exactly once, at session start.

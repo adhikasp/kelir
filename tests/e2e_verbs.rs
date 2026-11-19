@@ -340,7 +340,7 @@ async fn model_swap_applies_at_the_next_step() {
     session.end().await;
 }
 
-/// A swap can name another configured provider: `provider/model`.
+/// A swap can name the other provider: `provider/model` (STEER-2: exactly two).
 #[tokio::test]
 async fn model_swap_can_change_the_provider() {
     let mock = Mock::start(vec![
@@ -352,18 +352,20 @@ async fn model_swap_can_change_the_provider() {
         Reply::Sse(sse(&text_turn("done", 0))),
     ])
     .await;
-    let extra = "[providers.alt]\nkind = \"custom\"\nbase_url = \"http://example.invalid/v1\"\n";
+    // The swap takes `opencode-go`'s own key source: `KELIR_GO_API_KEY`, which
+    // the test harness sets, so no `opencode` process is started here.
+    let extra = "";
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], extra).await;
     session.wait_for("tool_started").await;
 
-    let answer = session.ctl(&["model", "alt/some-model"]).await;
+    let answer = session.ctl(&["model", "opencode-go/some-model"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     session.wait_for("tool_settled").await;
     session.wait_for("turn_ended").await;
 
     let log = session.log();
     let steps = of_type(&log, "step_started");
-    assert_eq!(steps[1]["provider"], "alt");
+    assert_eq!(steps[1]["provider"], "opencode-go");
     assert_eq!(steps[1]["model"], "some-model");
 
     session.end().await;

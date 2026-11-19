@@ -86,7 +86,8 @@ Reaching the socket is **not** authorisation. Two things gate every request:
 | `compact` | compacts this session's context (see *Compaction*); takes an optional `focus` |
 
 Everything else is a CLI the model reaches through `bash`, so it costs no tool schema:
-`kelir mcp …` (MCP servers), `kelir bg …` (background jobs), `kelir ls` (sessions and children).
+`kelir mcp …` (MCP servers), `kelir bg …` (background jobs), `kelir ls` (sessions and children),
+`kelir doctor` (which provider is wired to which key source — never the key; see *Providers*).
 
 **Parallel tool calls are allowed.** All calls in one assistant message run concurrently; their
 results are appended in **call order, not completion order**, so the log and the next request are
@@ -123,7 +124,7 @@ are never inline: the event holds the path.
 
 | type | key fields | notes |
 |---|---|---|
-| `session_started` | `id`, `parent?`, `depth`, `cwd`, `os`, `kelir_version`, `provider`, `model`, `system` (rendered text + hash), `sources[]` (name, path, hash), `tools[]` | the frozen request prefix is recorded here |
+| `session_started` | `id`, `parent?`, `depth`, `cwd`, `os`, `kelir_version`, `provider`, `model`, `system` (rendered text + hash), `sources[]` (name, path, hash), `tools[]`, `reasoning_effort?`, `key_origin?` | the frozen request prefix is recorded here. `key_origin` names the key's *source* (`env OPENROUTER_API_KEY`, `key_cmd getkey`, `opencode auth export opencode`), never the key |
 | `user` | `text`, `from` (`tui`, `ctl`, `channel`, `job`, `gate`), `delivery` (`now`, `next`, `later`), `attachments[]` | a human message; also what compaction pins |
 | `source` | `kind` (`hint`, `skill`, `instruction`, `memory`, `attachment`, `channel`), `name`, `text` or `path` | context that arrived after the start; rendered as a message at the tail |
 | `step_started` | `step`, `provider`, `model`, `request_hash` | one per provider request |
@@ -355,13 +356,52 @@ command line carries neither), so its report is accepted; a shim from a *differe
 
 ## Providers
 
-One OpenAI Chat Completions client; OpenRouter and OpenCode Go
-(`https://opencode.ai/inference/go`) are config entries with base URL, key source, extra headers,
-`reasoning_field` and a fallback list. Go needs `x-opencode-session` and a `kelir/<version>`
-User-Agent. Cost (and Go's `allowance`) come from the final usage chunk
-(`stream_options.include_usage`). Keys from the environment (`OPENROUTER_API_KEY`, the Go
-`oc_sk_…` key); never printed. The default model is `deepseek/deepseek-v4.1-flash-1017` on
-OpenRouter (the maintainer's call, 2026-11-19); the Go equivalent is `deepseek-v4.1-flash`.
+One OpenAI Chat Completions client, and exactly two providers: `openrouter` and `opencode-go`
+(`https://opencode.ai/inference/go`). `provider = "…"` (config, `KELIR_CONFIG`, `--provider`)
+accepts only those two; anything else is a usage error that names them. There are no ad-hoc
+provider names and no `kind = …`: the name *is* the provider. An optional
+`[providers.openrouter]` / `[providers.opencode-go]` table only overrides that provider's settings
+(`base_url`, extra headers, key source, `reasoning_field`, `reasoning_effort`, `session_header`,
+`max_concurrent_requests`), and a table for any other name is the same usage error.
+
+Go needs `x-opencode-session` and a `kelir/<version>` User-Agent. Cost (and Go's `allowance`) come
+from the final usage chunk (`stream_options.include_usage`). The default model is
+`deepseek/deepseek-v4.1-flash-1017` on OpenRouter (the maintainer's call, 2026-11-19); the Go
+equivalent is `deepseek-v4.1-flash`.
+
+**Key sources, first match wins** — see [`src/credentials.rs`]:
+
+- **`openrouter`**: `OPENROUTER_API_KEY`, then `key_env` (a variable named in the table), then
+  `key_cmd = ["cmd", …]` (its trimmed stdout).
+- **`opencode-go`**: an explicit override first — `KELIR_GO_API_KEY`, then `key_env`, then
+  `key_cmd` — and otherwise **opencode's own credential**, read through the supported
+  `opencode auth export opencode` CLI (JSON array; the `integrationID == "opencode"` entry with
+  `active: true`; token `value.access`, expiry `value.expires` in epoch ms). A store entry that
+  is expired or inside its two-minute margin is read **once more** (opencode refreshes its own
+  token when it runs) before an expired one becomes a usage error naming the expiry. No SQLite and no
+  reading `opencode.db`; no OAuth refresh of kelir's own, because opencode rotates the refresh
+  token and a second refresher would break the account it shares with kelir. The `opencode`
+  executable is found on `PATH` (`.exe`/`.cmd`/`.bat`/`.com` on Windows, a `.cmd` shim through
+  `COMSPEC /C`), run with no console window, no inherited stdin, a 5 s bound and the whole tree
+  killed by pid if it overruns; its output is never echoed and is read up to 64 MiB, past which
+  the read fails with a clear message. The dev box measures the read at
+  ~0.33–0.39 s (worst cold ~1.7 s), so session start pays it once, before the first request.
+
+A literal `key = "…"` in a config file is refused with a warning (it goes stale, shadows a live
+store and copies a secret around) and is never used. A key is read once at session start, held in
+memory only, and never written to the log, a status file, `observe`, an error message or the
+process command line; `session_started.key_origin` records only the *source* (`env
+OPENROUTER_API_KEY`, `key_cmd getkey`, `opencode auth export opencode`).
+
+**Freshness.** A key whose source publishes an expiry (opencode's store does) is re-read before a
+request when it is within two minutes of `expires`; a 401/403 re-reads the source once and retries
+the request once with the new key. When it is still expired the turn fails with the expiry time and
+the fix ("run any `opencode` command once so it refreshes its credential, then retry").
+
+**`kelir doctor [--json] [--provider <name>]`** prints both providers (or one), their base URL,
+which source answered, the expiry and the read time, and the fix when there is none — never a key.
+It sends no request, so it is offline and free; exit 0 when every provider checked has a usable
+key.
 
 **Transient provider errors are ridden out, not fatal.** 429, 408, every 5xx
 (incl. 529/loaded) and a request that dies before any tool call of the step began

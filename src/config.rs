@@ -20,15 +20,36 @@ pub const DEFAULT_PROMPT: &str = include_str!("prompt.md");
 pub enum ProviderKind {
     OpenRouter,
     OpencodeGo,
-    Custom,
+}
+
+impl ProviderKind {
+    /// The one name this provider is configured and addressed by.
+    pub fn name(self) -> &'static str {
+        match self {
+            ProviderKind::OpenRouter => PROVIDER_OPENROUTER,
+            ProviderKind::OpencodeGo => PROVIDER_GO,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
     pub kind: ProviderKind,
     pub base_url: String,
+    /// The variable this provider's key is read from, when one is named
+    /// ([`crate::credentials`] has the precedence per provider).
     pub key_env: Option<String>,
+    /// A command whose trimmed stdout is the key, when the environment says
+    /// nothing. Never a literal in the config file (see [`load`]).
+    pub key_cmd: Option<Vec<String>>,
+    /// The resolved key. Filled at session start by [`crate::credentials`] and
+    /// held in memory only; never serialised, logged or put on a command line.
     pub key: Option<String>,
+    /// Where the key came from (`env OPENROUTER_API_KEY`, `opencode auth export
+    /// opencode`), for `kelir doctor` and a one-line notice. Never the secret.
+    pub key_origin: Option<String>,
+    /// When the source publishes an expiry (opencode's store does), epoch ms.
+    pub key_expires_at_ms: Option<u64>,
     pub extra_headers: BTreeMap<String, String>,
     pub reasoning_field: Option<String>,
     /// How much hidden reasoning the model should spend on this session's
@@ -114,6 +135,10 @@ struct RawConfig {
     cache_ttl: Option<String>,
     prompt: Option<String>,
     providers: BTreeMap<String, RawProvider>,
+    /// A key written into the config file itself. Rejected with a warning that
+    /// names the two supported sources: a literal goes stale, shadows a live
+    /// one and puts a secret in more places than it needs to be (STEER-2).
+    key: Option<String>,
     window: Option<u64>,
     model_windows: BTreeMap<String, u64>,
     auto_compact_at: Option<f64>,
@@ -141,9 +166,12 @@ enum ShellSpec {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct RawProvider {
-    kind: Option<String>,
     base_url: Option<String>,
     key_env: Option<String>,
+    key_cmd: Option<Vec<String>>,
+    /// A literal key in a provider table: warned about and ignored, never used
+    /// (the same rule as the top-level `key`).
+    key: Option<String>,
     extra_headers: BTreeMap<String, String>,
     reasoning_field: Option<String>,
     reasoning_effort: Option<String>,
@@ -154,18 +182,55 @@ struct RawProvider {
 pub const PROVIDER_OPENROUTER: &str = "openrouter";
 pub const PROVIDER_GO: &str = "opencode-go";
 
+/// The providers kelir has, in the order messages name them.
+pub const PROVIDERS: [&str; 2] = [PROVIDER_OPENROUTER, PROVIDER_GO];
+
+/// The error `provider = "..."` and `--provider` give for anything else: it
+/// names both providers, because a maintainer's old config said `kelir` and the
+/// only useful answer is what the two real ones are.
+pub fn unknown_provider(name: &str) -> ConfigError {
+    ConfigError(format!(
+        "unknown provider `{name}`: kelir has exactly two, `{PROVIDER_OPENROUTER}` and `{PROVIDER_GO}`"
+    ))
+}
+
+/// The error a `[providers.<name>]` table with an unknown name gives (STEER-2
+/// fix 3): it says which table, in which file, that the name *is* the provider
+/// (`kind = …` is no longer used), and what to rename it to. `sources` is the
+/// config files that were merged, in the order they were read; a diagnostic
+/// tool (`kelir doctor`) must be able to point at the file, not just the name.
+pub fn unknown_provider_table(name: &str, sources: &[PathBuf]) -> ConfigError {
+    let files = if sources.is_empty() {
+        "the config file".to_string()
+    } else {
+        sources
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    ConfigError(format!(
+        "`[providers.{name}]` in {files}: unknown provider `{name}`: the table name *is* the provider and there are exactly \
+         two, `{PROVIDER_OPENROUTER}` and `{PROVIDER_GO}` (`kind = \"…\"` is no longer used). Rename the table to \
+         `[providers.{PROVIDER_OPENROUTER}]` or `[providers.{PROVIDER_GO}]`, then check `provider = \"…\"` in the same file; \
+         `key_env` keeps working"
+    ))
+}
+
 fn builtin_provider(name: &str) -> Option<RawProvider> {
     match name {
         PROVIDER_OPENROUTER => Some(RawProvider {
-            kind: Some("openrouter".into()),
             base_url: Some("https://openrouter.ai/api/v1".into()),
-            key_env: Some("OPENROUTER_API_KEY".into()),
+            key_env: Some(crate::credentials::OPENROUTER_ENV.into()),
             ..RawProvider::default()
         }),
         PROVIDER_GO => Some(RawProvider {
-            kind: Some("opencode-go".into()),
             base_url: Some("https://opencode.ai/inference/go/v1".into()),
-            key_env: Some("KELIR_GO_API_KEY".into()),
+            // `KELIR_GO_API_KEY` is the *override*; the default source is
+            // opencode's own store (STEER-2). `key_env` is the variable kelir
+            // looks at first, and the default store is what happens when it is
+            // unset.
+            key_env: Some(crate::credentials::GO_ENV.into()),
             session_header: Some("x-opencode-session".into()),
             ..RawProvider::default()
         }),
@@ -181,18 +246,22 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         .filter(|p| !p.as_os_str().is_empty());
 
     let mut merged = toml::Value::Table(Default::default());
+    let mut sources: Vec<PathBuf> = Vec::new();
     match explicit {
         Some(path) => {
             let value = read_toml(&path)?;
             merge(&mut merged, value);
+            sources.push(path);
         }
         None => {
             let machine = paths::machine_config_path();
             if machine.exists() {
                 merge(&mut merged, read_toml(&machine)?);
+                sources.push(machine);
             }
             if let Some(project) = find_project_config() {
                 merge(&mut merged, read_toml(&project)?);
+                sources.push(project);
             }
         }
     }
@@ -204,50 +273,71 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     // `raw`.
     let retry = retry_policy(&raw)?;
 
+    // A literal key in the config file is refused with a warning (STEER-2):
+    // `key = "…"` goes stale, shadows a live store and puts a secret in a file
+    // that gets copied around. Naming the two supported sources is the whole
+    // message a person needs.
+    if let Some(_literal) = raw.key.as_deref().filter(|key| !key.trim().is_empty()) {
+        eprintln!(
+            "kelir: warning: `key` in a config file is ignored: use the environment (\
+             {} / {}) or `key_cmd = [\"cmd\", …]`",
+            crate::credentials::OPENROUTER_ENV,
+            crate::credentials::GO_ENV
+        );
+    }
+
     let shell = match raw.shell {
         Some(ShellSpec::One(shell)) => vec![shell, "-c".into()],
         Some(ShellSpec::Many(argv)) if !argv.is_empty() => argv,
         _ => default_shell(),
     };
 
-    let mut providers = BTreeMap::new();
-    let mut names: Vec<String> = vec![PROVIDER_OPENROUTER.into(), PROVIDER_GO.into()];
-    for name in raw.providers.keys() {
-        if !names.contains(name) {
-            names.push(name.clone());
-        }
+    // Exactly two providers, and only those two: a table for anything else is a
+    // usage error that names the pair (a maintainer's config called theirs
+    // `kelir`) and the file to edit (STEER-2 fix 3).
+    if let Some(other) = raw
+        .providers
+        .keys()
+        .find(|name| !PROVIDERS.contains(&name.as_str()))
+    {
+        return Err(unknown_provider_table(other, &sources));
     }
-    for name in names {
-        let base = builtin_provider(&name).unwrap_or_default();
-        let user = raw.providers.get(&name).cloned().unwrap_or_default();
+
+    let mut providers = BTreeMap::new();
+    for name in PROVIDERS {
+        let base = builtin_provider(name).unwrap_or_default();
+        let user = raw.providers.get(name).cloned().unwrap_or_default();
+        if let Some(_literal) = user.key.as_deref().filter(|key| !key.trim().is_empty()) {
+            eprintln!(
+                "kelir: warning: `[providers.{name}] key` is ignored: use `key_env`, `key_cmd`,\
+                 or the environment"
+            );
+        }
         let entry = overlay(base, user);
-        let kind = match entry.kind.as_deref() {
-            Some("openrouter") => ProviderKind::OpenRouter,
-            Some("opencode-go") => ProviderKind::OpencodeGo,
-            Some("custom") => ProviderKind::Custom,
-            Some(other) => {
-                return Err(ConfigError(format!(
-                    "provider `{name}`: unknown kind `{other}` (openrouter, opencode-go, custom)"
-                )));
-            }
-            None if name == PROVIDER_OPENROUTER => ProviderKind::OpenRouter,
-            None if name == PROVIDER_GO => ProviderKind::OpencodeGo,
-            None => ProviderKind::Custom,
+        let kind = if name == PROVIDER_OPENROUTER {
+            ProviderKind::OpenRouter
+        } else {
+            ProviderKind::OpencodeGo
         };
         let base_url = entry
             .base_url
             .clone()
             .filter(|url| !url.is_empty())
             .ok_or_else(|| ConfigError(format!("provider `{name}`: base_url is required")))?;
-        let key = entry.key_env.as_deref().and_then(secret_from_env);
-        let (effort, effort_explicit) = reasoning_effort(entry.reasoning_effort, &name)?;
+        let (effort, effort_explicit) = reasoning_effort(entry.reasoning_effort, name)?;
         providers.insert(
-            name,
+            name.to_string(),
             ProviderConfig {
                 kind,
                 base_url,
+                // The key itself is resolved at session start
+                // ([`crate::credentials`]): it may need a process read, and a
+                // config load must stay pure (a test, a `doctor`, an editor).
                 key_env: entry.key_env,
-                key,
+                key_cmd: entry.key_cmd,
+                key: None,
+                key_origin: None,
+                key_expires_at_ms: None,
                 extra_headers: entry.extra_headers,
                 reasoning_field: entry.reasoning_field,
                 reasoning_effort: effort,
@@ -273,7 +363,11 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         compact_at_tokens: raw
             .compact_at_tokens
             .unwrap_or(crate::compact::DEFAULT_SOFT_TARGET),
-        provider: raw.provider.unwrap_or_else(|| PROVIDER_OPENROUTER.into()),
+        provider: match raw.provider {
+            Some(name) if PROVIDERS.contains(&name.as_str()) => name,
+            Some(other) => return Err(unknown_provider(&other)),
+            None => PROVIDER_OPENROUTER.into(),
+        },
         model: raw
             .model
             .unwrap_or_else(|| "deepseek/deepseek-v4.1-flash-1017".into()),
@@ -397,7 +491,7 @@ impl Config {
             .providers
             .get(name)
             .cloned()
-            .ok_or_else(|| ConfigError(format!("unknown provider `{name}`")))?;
+            .ok_or_else(|| unknown_provider(name))?;
         // A stand-in for either provider (the mock server in tests, a proxy).
         if let Some(url) = std::env::var_os("KELIR_BASE_URL")
             .map(|url| url.to_string_lossy().trim().to_string())
@@ -453,9 +547,10 @@ fn secret_from_env(name: &str) -> Option<String> {
 
 fn overlay(base: RawProvider, user: RawProvider) -> RawProvider {
     RawProvider {
-        kind: user.kind.or(base.kind),
         base_url: user.base_url.or(base.base_url),
         key_env: user.key_env.or(base.key_env),
+        key_cmd: user.key_cmd.or(base.key_cmd),
+        key: user.key.or(base.key),
         extra_headers: {
             let mut headers = base.extra_headers;
             headers.extend(user.extra_headers);
@@ -703,17 +798,87 @@ extra_headers = { "x-extra" = "yes" }
     }
 
     #[test]
-    fn custom_provider_needs_a_base_url() {
-        let path = temp_config("[providers.local]\nkey_env = \"NOPE_KEY\"\n");
-        let error = load(Some(&path)).unwrap_err();
-        assert!(error.to_string().contains("base_url"), "{error}");
+    fn a_third_provider_name_is_refused_and_the_error_names_the_two() {
+        // A maintainer's config called its provider `kelir`; there are exactly
+        // two now, and the error has to say which (STEER-2), in which table and
+        // in which file, and how to migrate (STEER-2 fix 3).
+        for text in [
+            "[providers.local]\nkey_env = \"NOPE_KEY\"\n",
+            "[providers.weird]\nkind = \"gemini\"\nbase_url = \"x\"\n",
+        ] {
+            let path = temp_config(text);
+            let error = load(Some(&path)).unwrap_err().to_string();
+            assert!(error.contains("exactly two"), "{error}");
+            assert!(error.contains(PROVIDER_OPENROUTER), "{error}");
+            assert!(error.contains(PROVIDER_GO), "{error}");
+            assert!(error.contains("[providers.local]") || error.contains("[providers.weird]"));
+            assert!(
+                error.contains(&path.display().to_string()),
+                "the file to edit: {error}"
+            );
+            assert!(error.contains("Rename the table"), "{error}");
+            assert!(error.contains("key_env"), "{error}");
+            assert!(!error.contains("kind = \"…\" is no longer used\n"));
+        }
     }
 
     #[test]
-    fn unknown_provider_kind_is_refused() {
-        let path = temp_config("[providers.weird]\nkind = \"gemini\"\nbase_url = \"x\"\n");
-        let error = load(Some(&path)).unwrap_err();
-        assert!(error.to_string().contains("unknown kind"), "{error}");
+    fn provider_flag_and_config_accept_only_the_two_names() {
+        let path = temp_config("provider = \"kelir\"\n");
+        let error = load(Some(&path)).unwrap_err().to_string();
+        assert!(error.contains("exactly two"), "{error}");
+        for name in PROVIDERS {
+            let path = temp_config(&format!("provider = \"{name}\"\n"));
+            assert_eq!(load(Some(&path)).unwrap().provider, name);
+        }
+    }
+
+    #[test]
+    fn the_two_provider_tables_only_override_their_settings() {
+        // A `[providers.openrouter]` table that names a kind is not how a
+        // provider is chosen any more: the name is the provider.
+        let path = temp_config(
+            "[providers.opencode-go]\nbase_url = \"http://127.0.0.1:1/v1\"\nkind = \"openrouter\"\n",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        let go = cfg.providers.get(PROVIDER_GO).unwrap();
+        assert_eq!(
+            go.kind,
+            ProviderKind::OpencodeGo,
+            "the name decides the kind"
+        );
+        assert_eq!(go.base_url, "http://127.0.0.1:1/v1");
+    }
+
+    #[test]
+    fn a_literal_key_in_the_config_is_ignored_not_used() {
+        // Warned about (to stderr) and refused: a literal goes stale, shadows a
+        // live store and puts a secret in a file that gets copied (STEER-2).
+        let path = temp_config(
+            "key = \"sk-literal-not-used\"\n[providers.openrouter]\nkey = \"sk-also-not-used\"\n",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        let openrouter = cfg.providers.get(PROVIDER_OPENROUTER).unwrap();
+        assert_eq!(openrouter.key, None, "a config-file key is never used");
+        assert_eq!(openrouter.key_env.as_deref(), Some("OPENROUTER_API_KEY"));
+    }
+
+    #[test]
+    fn key_sources_are_the_two_documented_ones_per_provider() {
+        let path = temp_config(
+            "[providers.openrouter]\nkey_cmd = [\"pass\", \"show\", \"kelir\"]\n\
+             [providers.opencode-go]\nkey_env = \"MY_GO_KEY\"\n",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        let openrouter = cfg.providers.get(PROVIDER_OPENROUTER).unwrap();
+        assert_eq!(
+            openrouter.key_cmd.as_deref(),
+            Some(["pass".to_string(), "show".to_string(), "kelir".to_string()].as_slice())
+        );
+        assert_eq!(
+            cfg.providers.get(PROVIDER_GO).unwrap().key_env.as_deref(),
+            Some("MY_GO_KEY")
+        );
     }
 
     #[test]

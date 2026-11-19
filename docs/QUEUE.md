@@ -231,3 +231,22 @@ and the final config surface), before M5-B.
   heredocs to the 8 KB cut.
 - Running: buildinfra (t13n), tui2fix (t13t). Next to launch when a slot frees: steer11 (self-docs; after tui2 merges because it
   extends docs/reference created by tui2), steer7, steer8, steer9, steer1fix, steer2, then M5-B, M6.
+
+## Update (2026-11-20 06:40) — buildinfra merged (gate green), under review; workers
+
+- **buildinfra merged to main** (566379c) pending review; the new `bash scripts/gate.sh --linux` passed on the merged main:
+  fmt, clippy, nextest 641/641 (2 skipped), doctests, Linux. Use it instead of my gates.sh from now on. Reviewer pane running
+  (safety of the remote `prune`, lock under concurrency, nextest retries, lld/profile, doc numbers).
+- Known issue to fix before M12: `scripts/gate.sh` defaults the Linux machine name to a private host (repo must stay public-clean).
+- Running: steer2 (t144), steer7 (t145), tui2m (t146: merging main into tui2, conflicts).
+
+## Update (2026-11-20 08:10) — steer2 merged; user config migrated
+
+- **steer2 merged** (bac8851). On the maintainer's machine: `%APPDATA%\kelir\config.toml` migrated (`[providers.kelir]` -> `[providers.openrouter]`,
+  `key_env = "KELIR_OPENROUTER_API_KEY"`; backup `config.toml.bak-pre-steer2`); the `max_steps` stopgap line **deleted** (unlimited is the
+  default since STEER-4); the copied `KELIR_GO_API_KEY` removed from the user environment and from the private `.env` (kelir reads
+  opencode's store directly; `kelir doctor` verified: expires 2026-11-24, read in 383 ms). NOTE: the maintainer's own installed
+  `~/.cargo/bin/kelir.exe` is an OLD build (default 100 steps, old provider rules): reinstall with `cargo install --path . --locked`
+  when no kelir pane is using it.
+- Pinned binary now kelir-s5.exe (steer2, steer5, steer6, steer4).
+- Running: steer7 (t145), buildinfrafix (t148), tui2fix2 (t14d). Next: steer1fix/steer8/steer9/steer11 as slots free; then merges of buildinfrafix, tui2.

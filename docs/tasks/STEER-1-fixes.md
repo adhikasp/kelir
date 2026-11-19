@@ -20,3 +20,11 @@ no-leaked-processes rule.
   tested as intentional). **N4** every fetch failure is recorded (an `error`-kind or `state` field
   with a short reason: 401, offline, malformed, timeout) and shown in `kelir observe`/TUI banner.
 - Update docs/DEVIATIONS.md and the `docs/PROGRESS.md` STEER-1 row; commit `STEER-1: fixes` (explicit paths).
+
+## Note (2026-11-20, orchestrator): main has changed a lot since this brief was written
+STEER-2 (providers, credentials), STEER-5 (retry/backoff), STEER-6 (capability gates that READ the cached model list: `parallel_tool_calls`,
+`reasoning_effort`, vision) and the TUI v2 work all landed or are landing. Re-read `src/models.rs` and every caller before changing it:
+the cache key, the fetch timing and the atomic write now also affect those capability gates, and S2 (take the fetch off the critical path)
+must not make the first request lose its capability data (use a conservative built-in allow-list until the list arrives, and refresh the
+cache without waiting for a `model` verb). Use `bash scripts/gate.sh --linux=<machine from your prompt>` for gates; write the work-dir name
+`kelir-verify-steer1fix` conventions as in AGENTS.md. Your review file for this brief is docs/reviews/STEER-1-review.md.
