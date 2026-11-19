@@ -131,6 +131,7 @@ one round red.
 | test | runner | how it failed |
 |---|---|---|
 | `e2e_m4::a_client_cannot_fabricate_a_background_job` | nextest under load | "end was refused": `LiveSession::end` got a non-zero exit from `kelir ctl <id> end` with empty stdout/stderr |
+| `e2e_tui::a_ctrl_c_before_the_first_message_does_not_stop_the_turn` | nextest, four suites at once | retried: the PTY screen did not show the turn finishing in time |
 | `review_steer1::a_failing_model_list_does_not_fail_the_session` | nextest on Linux | `TRY 2 PASS`, 0.07 s |
 | `review_m4::r12_a_graceful_exit_leaves_a_promoted_job_running` | `cargo test`, previously | "end was refused" (`docs/QUEUE.md`) |
 
@@ -139,6 +140,13 @@ six busy loops gave one "end was refused" (runs 1-4 passed, run 5 failed). `a_cl
 passed 8/8 under the same load in isolation and 5/5 with `cargo test`. The failure is the known `ctl end`
 race on a loaded box (STEER-9, `docs/QUEUE.md:61`), not the per-process test model. Nextest only makes it
 easier to *see*, because it names the retry.
+
+**The TUI suite has a group of its own.** `.config/nextest.toml` puts `binary(e2e_tui)` in a `pty` test group
+with `max-threads = 2`: `cargo test` runs one test *binary* at a time, so the PTY tests never used to run
+beside the mock-server e2e suites; nextest `-j 4` runs them beside three other suites, and the PTY suite is
+the first to feel it. It passed 6/6 alone at `-j 4` and 0/6 failures with the group; the underlying flake
+still exists (it failed 1/6 at `-j 1` on its own), which is STEER-9's to fix. The group only stops an
+existing flake from turning a different job's gate red.
 
 That is why `scripts/gate.sh` fails on a retry by default instead of hiding it: with `--retries 2` a green
 run still says which test was retried, and the operator decides (`KELIR_GATE_ALLOW_RETRIES=1`) when a known

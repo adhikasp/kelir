@@ -144,6 +144,19 @@ fn the_nextest_profile_matches_the_gate_rules() {
     ] {
         assert!(profile.contains(needle), "{why}: {needle}");
     }
+    // The PTY suite gets a group of its own: its tests each drive a real
+    // terminal and one of them is an existing STEER-9 flake, so it must not be
+    // the suite that brings down an otherwise green gate.
+    let groups = config
+        .split("[test-groups.pty]")
+        .nth(1)
+        .expect("a pty test group for the TUI suite");
+    assert!(groups.contains("max-threads = 2"), "{groups}");
+    assert!(
+        config.contains("test-group = 'pty'"),
+        "the TUI suite is assigned to that group"
+    );
+    assert!(config.contains("binary(e2e_tui)"), "by its binary name");
 }
 
 // ---------------------------------------------------------------- gate lock
