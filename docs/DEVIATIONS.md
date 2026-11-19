@@ -730,6 +730,9 @@ consuming a scripted reply) so a session can start in a test.
   `/expand 3` would silently change the policy instead of showing the next
   call). Here: `/expand [n|last]` always appends (default: the last call), and
   `/collapse` is the one that toggles the policy. The help text says so.
+- **The state row's working token count is an estimate** (`~120 tok`), for the
+  same reason: a streaming `completion_tokens` delta is not part of the OpenAI
+  SSE shape.
 - **A message that carries images is serialised through `ChatMessage::to_wire`**
   (content becomes the list of parts). Every message without images serialises
   through the same function and produces exactly the previous JSON, so the
