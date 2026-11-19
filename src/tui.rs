@@ -172,7 +172,8 @@ impl Default for Status {
     }
 }
 
-fn tokens(count: u64) -> String {
+/// Token counts as humans read them: `999`, `1.5k`, `12.1k`.
+pub fn tokens(count: u64) -> String {
     if count < 1000 {
         count.to_string()
     } else {
