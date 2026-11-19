@@ -222,3 +222,12 @@ and the final config surface), before M5-B.
   fresh QA reviewer t13k doing the emulator-render visual review; retro docs/retros/tui2.md landed (8 KB cut again, double
   `cargo test` runs = 37% of wall, no compaction, a git stash/reset incident lost work).
 - Queue after: merge steer6c, steer5fix, tui2; then steer11 (self-docs), steer7, steer8, steer9, steer1fix, steer2, M5-B, M6.
+
+## Update (2026-11-20 05:10) — steer6 and steer5 merged
+
+- **steer6 merged** (48d32df) and **steer5 merged** (8170721): retry/backoff on 429 and friends, interruptible waits, paused-not-failed,
+  governor; script-file shell route (no 8 KB cut), reasoning_effort gate, multi-edit, compact_at_tokens, prompt lines.
+- Pinned binary refreshed to kelir-s4.exe (has both); all launchers use it, so new workers ride out 429s and no longer lose
+  heredocs to the 8 KB cut.
+- Running: buildinfra (t13n), tui2fix (t13t). Next to launch when a slot frees: steer11 (self-docs; after tui2 merges because it
+  extends docs/reference created by tui2), steer7, steer8, steer9, steer1fix, steer2, then M5-B, M6.
