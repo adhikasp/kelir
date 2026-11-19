@@ -2,18 +2,26 @@
 
 Order of work, one writer on `src/` at a time. Update as items move.
 
-1. M4 fixes round 2 + repo scrub (docs/tasks/M4-fixes2.md): in flight.
-2. No-flash tester verdict (docs/reviews/NOFLASH.md): in flight; findings feed item 1.
-3. STEER-1 review (docs/tasks/STEER-1.md): model defaults + provider model metadata, fresh reviewer.
-4. STEER-2 (two providers, opencode credential read directly): first job for kelir-as-implementer.
-5. STEER-3 (markdown in the TUI): kelir-as-implementer.
-6. M5 sources/skills/hint/observe, M6 MCP, M7 spawn/brief, M8 gates, M9 jobs/sessions,
-   M10 Telegram, M11 attach: each with implementer -> reviewer -> retro (3 passes).
+0. **M5-A: sources + skills** (`docs/tasks/M5-A.md`) — read `AGENTS.md`, `CLAUDE.md` and the skills
+   directories at session start, plus the `source` event and the `skills` verb. Promoted ahead of
+   everything else (the maintainera, 2026-11-19): every later job gets better once the harness reads the
+   repo's own instructions, so kelir itself implements this one.
+1. M4 fixes round 2 + repo scrub (docs/tasks/M4-fixes2.md): done, committed as `05d1d16`..`1dc2021`;
+   gates and the no-flash re-check re-run on that HEAD by the opencode orchestrator.
+2. No-flash tester verdict (docs/reviews/NOFLASH.md): closed — 12/12 scenarios, 0 visible windows,
+   0 leftovers on the committed build.
+3. STEER-1 review (docs/tasks/STEER-1.md): model defaults + provider model metadata, fresh reviewer
+   (in flight when the orchestrator changed hands).
+4. STEER-2 (two providers, opencode credential read directly).
+5. STEER-3 (markdown in the TUI).
+6. M5-B (hint, memory, attachments, `observe`), M6 MCP, M7 spawn/brief, M8 gates, M9 jobs/sessions,
+   M10 Telegram, M11 attach: each with implementer -> tester -> retro (3 passes).
 
-Per-job loop (user's rule, 2026-11-19): kelir implements (OpenCode Go provider, default model),
-a fresh Claude Code reviewer/tester reviews, then a fresh Claude Code agent reads kelir's
-transcript (events.jsonl) and proposes improvements to the prompt/loop (docs/retros/<job>.md).
-Fresh agent for every pass; the orchestrator carries continuity; delete opencode sessions and
+Per-job loop (the maintainera, 2026-11-19, revised): **kelir implements** and **kelir tests/reviews** (two
+fresh sessions, default model — dogfood), then a fresh **opencode** agent reads kelir's own
+trajectory (`events.jsonl`: every tool call, retry, failure, token and cache number) and proposes
+improvements to the prompt, the loop and the tool surface in `docs/retros/<job>.md`, landing the
+cheap ones behind the gates. Fresh session for every pass; the orchestrator carries continuity;
 retire panes after each pass.
 
 ## State (2026-11-19 11:10) — orchestrator handed over to opencode
