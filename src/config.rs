@@ -42,7 +42,10 @@ pub struct Config {
     /// argv prefix; the command is appended (so `bash -c` or `pwsh -Command`).
     pub shell: Vec<String>,
     pub spill_limit: usize,
-    pub max_steps: u32,
+    /// The cap on one turn's steps: `None` means unlimited, which is the
+    /// default. An explicit positive `max_steps` (or `--max-steps`) caps a
+    /// turn, and reaching it *pauses* the turn rather than failing it.
+    pub max_steps: Option<u32>,
     pub cache_ttl: Option<String>,
     pub system_prompt: String,
     pub providers: BTreeMap<String, ProviderConfig>,
@@ -230,7 +233,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             .unwrap_or_else(|| "deepseek/deepseek-v4.1-flash-1017".into()),
         shell,
         spill_limit: raw.spill_limit.unwrap_or(10_240),
-        max_steps: raw.max_steps.unwrap_or(100),
+        max_steps: step_cap(raw.max_steps),
         cache_ttl: raw.cache_ttl,
         system_prompt,
         providers,
@@ -246,6 +249,15 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         compact_keep: raw.compact_keep.unwrap_or(crate::compact::DEFAULT_KEEP),
         promote_after: promote_after(raw.promote_after)?,
     })
+}
+
+/// `max_steps`: unset or `0` means no cap at all (the default: a fully
+/// autonomous agent is not stopped by a counter), a positive value caps one
+/// turn. `0` is accepted as "unlimited" rather than refused, because a config
+/// that means "no limit" should not be able to break a session. A value that is
+/// not a positive whole number (`-1`, `"lots"`) is refused while parsing.
+fn step_cap(configured: Option<u32>) -> Option<u32> {
+    configured.filter(|steps| *steps > 0)
 }
 
 /// Seconds between `config.toml` and `KELIR_PROMOTE_AFTER`. Zero disables
@@ -511,7 +523,7 @@ extra_headers = { "x-extra" = "yes" }
         assert_eq!(cfg.provider, PROVIDER_GO);
         assert_eq!(cfg.model, "some/model");
         assert_eq!(cfg.spill_limit, 2048);
-        assert_eq!(cfg.max_steps, 7);
+        assert_eq!(cfg.max_steps, Some(7));
         assert_eq!(cfg.shell, vec!["sh", "-c"]);
         let go = cfg.providers.get(PROVIDER_GO).unwrap();
         assert_eq!(go.base_url, "https://example.invalid/v1");
@@ -520,6 +532,38 @@ extra_headers = { "x-extra" = "yes" }
             go.extra_headers.get("x-extra").map(String::as_str),
             Some("yes")
         );
+    }
+
+    /// Unset or `0` is no cap: the default, and what a "no limit" config
+    /// means. Only a positive value caps a turn.
+    #[test]
+    fn max_steps_is_unset_by_default_and_zero_means_unlimited() {
+        let path = temp_config("");
+        assert_eq!(load(Some(&path)).unwrap().max_steps, None);
+
+        let path = temp_config("max_steps = 0\n");
+        assert_eq!(load(Some(&path)).unwrap().max_steps, None);
+
+        let path = temp_config("max_steps = 1\n");
+        assert_eq!(load(Some(&path)).unwrap().max_steps, Some(1));
+
+        let path = temp_config("max_steps = 4294967295\n");
+        assert_eq!(
+            load(Some(&path)).unwrap().max_steps,
+            Some(u32::MAX),
+            "the stopgap value the old default forced on the user config"
+        );
+    }
+
+    /// A `max_steps` that is not a whole number is a config error, not a
+    /// silent default: a negative or non-numeric cap is a typo worth seeing.
+    #[test]
+    fn a_max_steps_that_is_not_a_whole_number_is_refused() {
+        for bad in ["max_steps = -1\n", "max_steps = \"five\"\n"] {
+            let path = temp_config(bad);
+            let error = load(Some(&path)).unwrap_err().to_string();
+            assert!(error.contains("max_steps"), "{bad:?}: {error}");
+        }
     }
 
     #[test]
