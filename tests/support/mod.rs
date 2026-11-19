@@ -24,6 +24,11 @@ pub enum Reply {
     Disconnect(String),
     /// A plain HTTP error.
     Http(u16, String),
+    /// An HTTP error with headers of the test's own: `Retry-After`, a reset
+    /// header, anything a provider sends to say when to come back. A `None`
+    /// value sends a connection-level header without a value, which is not
+    /// needed; every entry is `name: value`.
+    HttpWith(u16, Vec<(String, String)>, String),
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +69,32 @@ struct State {
     /// What `GET /models` answers, and how often it was asked.
     models: ModelsAnswer,
     models_requests: u32,
+    /// Completion requests in flight right now, and the highest that ever was.
+    live: u32,
+    peak: u32,
+}
+
+/// One completion request's lifetime, as the mock sees it: in flight from the
+/// moment the request line was read until its whole answer has been written.
+/// The peak of [`State::live`] is what "never overlap" is about.
+struct InFlight(Arc<Mutex<State>>);
+
+impl InFlight {
+    fn new(state: Arc<Mutex<State>>) -> Self {
+        {
+            let mut state = state.lock().unwrap();
+            state.live += 1;
+            state.peak = state.peak.max(state.live);
+        }
+        Self(state)
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let mut state = self.0.lock().unwrap();
+        state.live = state.live.saturating_sub(1);
+    }
 }
 
 /// The answer the mock gives on `GET /models`. `Default` is the normal list of
@@ -117,6 +148,8 @@ impl Mock {
             requests: Vec::new(),
             models,
             models_requests: 0,
+            live: 0,
+            peak: 0,
         }));
         let shared = state.clone();
         tokio::spawn(async move {
@@ -146,6 +179,41 @@ impl Mock {
     pub fn models_requests(&self) -> u32 {
         self.state.lock().unwrap().models_requests
     }
+
+    /// The most completion requests that were ever in flight at one moment.
+    /// A request is in flight from the moment the mock reads it until its
+    /// (whole) answer has been written, which is what a concurrency limit is
+    /// about.
+    pub fn max_concurrent(&self) -> u32 {
+        self.state.lock().unwrap().peak
+    }
+}
+
+/// The retry knobs every test config starts with: the short 200/400 ms
+/// schedule, three attempts and a five-second budget, so a test that scripts
+/// failures learns the same thing (exhaustion) in about a second instead of
+/// waiting out the production half hour. A test that cares about the schedule
+/// passes its own values in `extra_config`, which is appended after this and
+/// therefore wins.
+pub const TEST_RETRY: &str = r"retry_base_ms = 200
+retry_cap_ms = 400
+retry_max_attempts = 3
+retry_max_wait = 5";
+
+/// The config every test run starts with: the provider and model, the test's
+/// retry knobs (minus any the caller overrides in `extra_config`), then
+/// `extra_config` itself, so a test's own keys win.
+pub fn test_config(extra_config: &str) -> String {
+    let mut out = String::from("provider = \"openrouter\"\nmodel = \"test/model\"\n");
+    for line in TEST_RETRY.lines() {
+        let key = line.split('=').next().unwrap_or("").trim();
+        if !key.is_empty() && !extra_config.contains(key) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str(extra_config);
+    out
 }
 
 /// What the mock answers on `GET /models`: both provider shapes, and the
@@ -241,6 +309,7 @@ async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
         state.script.pop_front()
     };
 
+    let _inflight = InFlight::new(state.clone());
     match reply {
         Some(Reply::Sse(body)) => {
             write_sse(&mut stream, &body).await;
@@ -266,6 +335,19 @@ async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
                 "HTTP/1.1 {status} Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(body.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        }
+        Some(Reply::HttpWith(status, extra, body)) => {
+            let mut head = format!(
+                "HTTP/1.1 {status} Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n",
+                body.len()
+            );
+            for (name, value) in &extra {
+                head.push_str(&format!("{name}: {value}\r\n"));
+            }
+            head.push_str("\r\n");
             let _ = stream.write_all(head.as_bytes()).await;
             let _ = stream.write_all(body.as_bytes()).await;
             let _ = stream.shutdown().await;
@@ -458,11 +540,7 @@ pub async fn run_task(
     let cwd = temp.path().join("work");
     std::fs::create_dir_all(&cwd).unwrap();
     let config = temp.path().join("config.toml");
-    std::fs::write(
-        &config,
-        format!("provider = \"openrouter\"\nmodel = \"test/model\"\n{extra_config}"),
-    )
-    .unwrap();
+    std::fs::write(&config, test_config(extra_config)).unwrap();
 
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_kelir"));
     command
@@ -634,11 +712,7 @@ impl LiveSession {
         let cwd = temp.path().join("work");
         std::fs::create_dir_all(&cwd).unwrap();
         let config = temp.path().join("config.toml");
-        std::fs::write(
-            &config,
-            format!("provider = \"openrouter\"\nmodel = \"test/model\"\n{extra_config}"),
-        )
-        .unwrap();
+        std::fs::write(&config, test_config(extra_config)).unwrap();
         let state = reuse_state.unwrap_or_else(|| temp.path().join("state"));
 
         let mut command = live_command(&cwd, &config, &state, &mock.base_url());
@@ -1029,11 +1103,7 @@ impl Sandbox {
         let cwd = temp.path().join("work");
         std::fs::create_dir_all(&cwd).unwrap();
         let config = temp.path().join("config.toml");
-        std::fs::write(
-            &config,
-            format!("provider = \"openrouter\"\nmodel = \"test/model\"\n{extra_config}"),
-        )
-        .unwrap();
+        std::fs::write(&config, test_config(extra_config)).unwrap();
         let state = temp.path().join("state");
         Sandbox {
             _temp: Some(temp),

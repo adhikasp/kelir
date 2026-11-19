@@ -327,22 +327,42 @@ async fn mid_stream_disconnect_is_retried() {
     assert_eq!(run.result()["outcome"], "done");
 }
 
+/// The retry budget spent on a provider that stays down **pauses** the turn,
+/// it does not fail it (STEER-5): nothing is broken, the fold is intact, and
+/// the next `say` retries from it. A one-shot run exits 0, like every pause.
 #[tokio::test]
-async fn exhausted_retries_end_the_turn_with_exit_1() {
+async fn exhausted_retries_pause_the_turn_with_exit_0() {
     let mock = Mock::start(vec![
+        Reply::Http(500, "down".into()),
         Reply::Http(500, "down".into()),
         Reply::Http(500, "down".into()),
         Reply::Http(500, "down".into()),
     ])
     .await;
     let run = run_task(&mock, &["run", "--json", "try"], &[], None, "").await;
-    assert_eq!(run.code, 1, "stderr: {}", run.stderr);
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    // The test config caps attempts at three, so the fourth scripted reply is
+    // never asked for.
     assert_eq!(mock.request_count(), 3);
     assert_eq!(run.events_of("error").len(), 3);
-    assert_eq!(run.one_event("turn_ended")["outcome"], "error");
-    assert_eq!(run.one_event("session_ended")["reason"], "error");
-    assert_eq!(run.result()["outcome"], "error");
-    assert_eq!(run.result()["exit_code"], 1);
+    let ended = run.one_event("turn_ended");
+    assert_eq!(ended["outcome"], "paused", "{ended}");
+    let message = ended["final_text"].as_str().unwrap();
+    assert!(
+        message.contains("provider unavailable after 3 attempts"),
+        "{message}"
+    );
+    assert!(message.contains("say continue to retry"), "{message}");
+    assert_eq!(run.one_event("session_ended")["reason"], "paused");
+    assert_eq!(run.result()["outcome"], "paused");
+    assert_eq!(run.result()["exit_code"], 0);
+    // Never an `error` outcome: a paused turn's message says how to go on, and
+    // the last failure is in the log as a retryable `error` event.
+    assert!(
+        run.events_of("turn_ended")
+            .iter()
+            .all(|e| e["outcome"] != "error")
+    );
 }
 
 #[tokio::test]
