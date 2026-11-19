@@ -248,3 +248,40 @@ async fn the_flag_overrides_the_config_and_zero_lifts_a_cap() {
     assert_eq!(run.one_event("turn_ended")["outcome"], "paused");
     assert_eq!(run.events_of("step_started").len(), 1);
 }
+
+/// A verb's `state` reports the turn's own step count and the cap (null when
+/// there is none), so a steering human sees a pause coming before it lands.
+#[tokio::test]
+async fn the_verb_state_reports_the_turn_count_and_the_cap() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_1",
+            "bash",
+            &json!({"command": "sleep 1"}),
+        ))),
+        Reply::Sse(sse(&text_turn("done", 0))),
+    ])
+    .await;
+    let mut session = LiveSession::start(
+        &mock,
+        &["run", "--keep", "--json", "task"],
+        "max_steps = 4\n",
+    )
+    .await;
+    session.wait_for("step_started").await;
+    let answer = session.ctl(&["say", "keep going"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let state = &answer.response()["state"];
+    assert_eq!(state["max_steps"], 4, "the cap is reported");
+    assert_eq!(state["turn_steps"], 1, "one step of this turn has started");
+    session.wait_for("turn_ended").await;
+
+    // With no cap, the same fields say so rather than inventing a number.
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("done", 0)))]).await;
+    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "task"], "").await;
+    session.wait_for("turn_ended").await;
+    let answer = session.ctl(&["say", "again"]).await;
+    let state = &answer.response()["state"];
+    assert_eq!(state["max_steps"], Value::Null, "no cap is null");
+    session.end().await;
+}

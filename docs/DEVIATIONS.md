@@ -94,7 +94,10 @@ consuming a scripted reply) so a session can start in a test.
   `--keep` session stays up and its next `say` opens a new turn with a fresh
   count; `resume` of a paused log continues it like a stopped one (see
   `resume::interrupted`). The TUI status line shows `step used/limit` only when a
-  cap is set, and the TUI banner names the cap; the phase word is `paused`.
+  cap is set, and the TUI banner names the cap; the phase word is `paused`. A
+  verb's answer already carries a `state` object; it now also reports
+  `turn_steps` (the turn's own count) and `max_steps` (the cap, `null` when
+  there is none), so a steering human sees a pause coming.
 - **`later` while the session is idle starts a turn at once.** There is no turn
   to end; the message is recorded with `delivery: "later"` and the process runs a
   turn for it. Likewise a `say` still pending when a turn ends opens the next

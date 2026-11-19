@@ -233,6 +233,9 @@ struct Session {
     step: u32,
     /// The turn being run (0 before the first one).
     turn: u32,
+    /// Steps taken in the turn now running, reset at every turn start: an
+    /// explicit `max_steps` cap counts these, not the session-wide `step`.
+    turn_steps: u32,
     /// Tools turned off for the rest of the session. The list sent to the
     /// provider never changes.
     disabled: BTreeSet<String>,
@@ -912,6 +915,7 @@ impl Session {
             final_text: String::new(),
             step: prepared.resume.as_ref().map(|read| read.step).unwrap_or(0),
             turn: prepared.resume.as_ref().map(|read| read.turns).unwrap_or(0),
+            turn_steps: 0,
             disabled: BTreeSet::new(),
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
@@ -1268,6 +1272,11 @@ impl Session {
         json!({
             "turn": self.turn,
             "step": self.step,
+            // The turn's own count and its cap, so a steering human sees a
+            // pause coming (FINDINGS: "a status line with steps used/limit
+            // would have shown it coming"). `max_steps` is null with no cap.
+            "turn_steps": self.turn_steps,
+            "max_steps": self.cfg.max_steps,
             "running": self.live_calls,
             "provider": self.provider_name,
             "model": self.model,
@@ -2163,15 +2172,15 @@ impl Session {
             limit: self.cfg.max_steps,
         });
         self.report(HerdrState::Working);
-        let mut turn_steps = 0u32;
+        self.turn_steps = 0;
         loop {
             // An explicit cap counts the steps of *this* turn: reaching it
             // pauses the turn (the work so far is kept, and the next message
             // opens a new turn with a fresh count). No cap at all, the
             // default, never stops a turn.
-            turn_steps += 1;
+            self.turn_steps += 1;
             if let Some(cap) = self.cfg.max_steps
-                && turn_steps > cap
+                && self.turn_steps > cap
             {
                 self.emit(UiEvent::Paused { steps: cap });
                 return Ok(TurnEnd::Paused(cap));
@@ -2214,7 +2223,7 @@ impl Session {
                 step,
                 provider: self.provider_name.clone(),
                 model: self.model.clone(),
-                turn_steps,
+                turn_steps: self.turn_steps,
                 limit: self.cfg.max_steps,
             });
 
