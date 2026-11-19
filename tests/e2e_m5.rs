@@ -136,9 +136,13 @@ async fn an_edited_instruction_file_is_a_tail_message_and_the_prefix_is_unchange
     )
     .await;
 
-    // While the call runs, the instruction file changes on disk.
-    let settled = live.wait_for("tool_settled").await;
-    assert_eq!(settled["call_id"], "call_wait");
+    // While the call runs, the instruction file changes on disk. The write
+    // happens on `tool_started`, not on `tool_settled`: the watcher runs at the
+    // boundary *after* the call settles, so a file written once `tool_settled`
+    // is seen can race the session's own poll (the same race the review tests
+    // had, M5-A fixes).
+    let started = live.wait_for("tool_started").await;
+    assert_eq!(started["call_id"], "call_wait");
     std::fs::write(project.agents(), "EDITED INSTRUCTIONS").unwrap();
 
     // The edit arrives as a `source` event at the tail, at the boundary
@@ -222,7 +226,9 @@ async fn a_skill_edited_mid_session_is_a_source_too() {
         "",
     )
     .await;
-    live.wait_for("tool_settled").await;
+    // `tool_started`, for the same reason as the test above: the edit has to
+    // land while the call is still running.
+    live.wait_for("tool_started").await;
     let skill = project
         .cwd
         .join(".claude")
