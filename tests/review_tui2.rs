@@ -105,7 +105,6 @@ fn a_cjk_table_has_rows_of_equal_display_width() {
 
 /// No row is ever wider than the layout, at any width, for a nasty corpus.
 #[test]
-#[ignore = "FINDING N2: deeply nested lists overflow at widths below the indent"]
 fn nothing_is_wider_than_the_layout_at_any_width() {
     let corpus = [
         "# Heading with a very long title that wraps around the pane several times over",

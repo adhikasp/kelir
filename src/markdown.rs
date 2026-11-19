@@ -432,7 +432,12 @@ impl Renderer {
             }
             (None, None) => (bar.clone(), bar),
         };
-        (first, cont)
+        // The prefix must leave room for text: at a narrow width a deep list's
+        // indent alone can be wider than the pane, and the ellipsis of a clipped
+        // row then overflowed it (review N2). Both prefixes are cut back so at
+        // least one column is left for the line.
+        let room = self.layout.width.saturating_sub(1).max(1);
+        (fit_prefix(first, room), fit_prefix(cont, room))
     }
 
     /// The hanging indent for a list item's marker: the quote bar, then spaces
@@ -868,6 +873,31 @@ pub fn wrap_runs(first: &[Run], cont: &[Run], runs: &[Run], width: usize) -> Vec
         });
     }
     rows
+}
+
+/// Cut `prefix` back to `room` columns, dropping whole characters from its end.
+/// An indent is decoration; the text it decorates is not.
+fn fit_prefix(prefix: Vec<Run>, room: usize) -> Vec<Run> {
+    let mut out: Vec<Run> = Vec::new();
+    let mut used = 0usize;
+    for run in prefix {
+        let mut text = String::new();
+        for c in run.text.chars() {
+            let width = width_of(c);
+            if used + width > room {
+                break;
+            }
+            used += width;
+            text.push(c);
+        }
+        if !text.is_empty() {
+            out.push(Run::new(text, run.tone));
+        }
+        if used >= room {
+            break;
+        }
+    }
+    out
 }
 
 fn prefix_width(prefix: &[Run]) -> usize {

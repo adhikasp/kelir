@@ -835,12 +835,27 @@ impl App {
     }
 
     /// Close the open tool group, if any: its rows go to the scrollback.
-    fn close_group(&mut self) {
+    /// Returns whether there was one.
+    fn close_group(&mut self) -> bool {
         if self.group.is_empty() {
-            return;
+            return false;
         }
         let lines = self.group.close(self.theme, self.width);
         self.scroll.extend(lines);
+        true
+    }
+
+    /// One blank row between two visual blocks, and never more than one (the
+    /// design note's spacing rule, review N1): a prompt echo starts its own
+    /// block, as does prose after tool lines. Nothing is written at the top of
+    /// an empty scrollback.
+    fn separate(&mut self) {
+        let blank =
+            |line: &Line<'static>| line.spans.iter().all(|span| span.content.trim().is_empty());
+        match self.scroll.last() {
+            Some(last) if !blank(last) => self.scroll.push(Line::from("")),
+            _ => {}
+        }
     }
 
     pub fn apply(&mut self, event: UiEvent) {
@@ -899,8 +914,10 @@ impl App {
                 // of it is queued, so the transcript's order is the order the
                 // events happened in (`B1`). A group of calls settled without
                 // prose between them stays open here, so consecutive calls still
-                // fold.
-                self.close_group();
+                // fold. One blank row separates the two blocks of history.
+                if self.close_group() && !self.scroll.is_empty() {
+                    self.separate();
+                }
                 self.status.phase = Phase::Working;
                 self.activity.text(now, text.chars().count());
                 for block in self.stream.push(&text) {
@@ -923,7 +940,9 @@ impl App {
             UiEvent::Assistant { text } => {
                 // The group closes first: its lines describe calls that ran
                 // before this message (`B1`).
-                self.close_group();
+                if self.close_group() && !self.scroll.is_empty() {
+                    self.separate();
+                }
                 self.commit_live(&text);
             }
             UiEvent::ToolStarted { name, input } => {
@@ -1211,6 +1230,8 @@ impl App {
             Ok(Parsed::Action(action)) => {
                 self.close_group();
                 self.group = Group::default();
+                // The echo starts a block of its own (spacing rule).
+                self.separate();
                 self.push_text(&action.line());
                 self.dispatch(&action);
             }
@@ -2270,6 +2291,77 @@ mod tests {
             .flat_map(|line| line.spans.iter())
             .any(|span| span.style.add_modifier.contains(Modifier::BOLD));
         assert!(styled, "the bold run survives into the scrollback");
+    }
+
+    /// The design note's spacing rule (review N1): one blank row between a
+    /// prompt echo and what follows it, one between tool lines and the prose
+    /// after them, and never two in a row.
+    #[test]
+    fn blocks_of_history_are_separated_by_exactly_one_blank_row() {
+        let mut app = app_of_width(60);
+        app.press(Press::Edit(Key::Char('h')));
+        app.press(Press::Edit(Key::Char('i')));
+        app.press(Press::Edit(Key::Enter));
+        app.apply(UiEvent::ToolSettled {
+            name: "bash".into(),
+            input: json!({"command": "ls"}),
+            outcome: "ok".into(),
+            exit_code: Some(0),
+            elapsed_ms: 10,
+            bytes: 2,
+            lines: 1,
+            spilled: false,
+            out_path: String::new(),
+            tail: String::new(),
+        });
+        app.apply(UiEvent::Delta("all good\n\nThe end.\n".into()));
+        app.apply(UiEvent::Assistant {
+            text: "all good\n\nThe end.\n".into(),
+        });
+        // A second prompt is separated from the block before it.
+        app.press(Press::Edit(Key::Char('y')));
+        app.press(Press::Edit(Key::Enter));
+        let rows: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let echo = rows
+            .iter()
+            .position(|row| row.contains("› hi"))
+            .expect("echo");
+        let tool = rows
+            .iter()
+            .position(|row| row.contains("ls"))
+            .expect("tool");
+        let prose = rows
+            .iter()
+            .position(|row| row.contains("all good"))
+            .expect("prose");
+        // The design note's rules: a blank row before a user echo (not this
+        // one, it opens the scrollback) and before prose after tool lines; none
+        // between the echo and the tool lines of the same block.
+        assert!(
+            rows[echo + 1].contains("$ ls"),
+            "a call follows its echo directly: {rows:?}"
+        );
+        assert_eq!(
+            rows[tool + 1],
+            "",
+            "prose after tools is one row down: {rows:?}"
+        );
+        let second = rows
+            .iter()
+            .position(|row| row.contains("› y"))
+            .expect("the second echo");
+        assert!(
+            rows[second - 1].is_empty(),
+            "a new prompt starts a block: {rows:?}"
+        );
+        assert!(echo < tool && tool < prose && prose < second, "{rows:?}");
+        // Never two blank rows in a row anywhere in the block.
+        for pair in rows.windows(2) {
+            assert!(
+                !(pair[0].is_empty() && pair[1].is_empty()),
+                "two blank rows: {rows:?}"
+            );
+        }
     }
 
     #[test]
