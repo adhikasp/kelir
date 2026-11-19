@@ -182,14 +182,22 @@ impl Activity {
         self.enter(Kind::Error, now);
     }
 
-    /// The turn is over: `done` and `stopped` both go back to idle (the summary
-    /// line already said which).
-    pub fn turn_ended(&mut self, now: Instant) {
+    /// The turn is over: `done` and `stopped` go back to idle (the summary line
+    /// already said which), but a turn that ended **paused** or **in error**
+    /// keeps that state on the row: it is the one thing a human must act on
+    /// (`S5`; STEER-10 req. 1 lists both as states), and the summary line alone
+    /// scrolls away with the next frame.
+    pub fn turn_ended(&mut self, now: Instant, outcome: &str) {
         self.tools = 0;
         self.preview.clear();
         self.written = 0;
-        self.detail.clear();
-        self.enter(Kind::Idle, now);
+        // The detail (the step cap, the provider's error) stays for the state
+        // that keeps it; idle has nothing to say beyond `ready`.
+        let keep = matches!(outcome, "paused" | "error");
+        if !keep {
+            self.detail.clear();
+            self.enter(Kind::Idle, now);
+        }
     }
 
     /// The style of the whole state row.
@@ -406,7 +414,7 @@ mod tests {
         assert!(activity.preview.is_empty());
 
         // The turn ends: idle, and nothing animates.
-        activity.turn_ended(at(10000));
+        activity.turn_ended(at(10000), "done");
         assert_eq!(activity.kind, Kind::Idle);
         assert!(!activity.kind.working());
     }

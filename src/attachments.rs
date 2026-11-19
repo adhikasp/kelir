@@ -184,13 +184,21 @@ fn sanitise(text: &str) -> String {
 
 /// `[image: attachments/1-clipboard.png, 1280x720, 312 KB]`: the pointer the
 /// prompt carries instead of the bytes.
+///
+/// The pointer says how to look at what it names (`kelir view <path>`), because
+/// the model otherwise has no way to learn that it can: the review's live run
+/// spent seven steps guessing a picture that a pointer and a hint would have
+/// given it in two (`S4`).
 pub fn pointer(path_in_session: &str, size: Option<(u32, u32)>, bytes: u64) -> String {
     let mut parts = vec![path_in_session.to_string()];
     if let Some((width, height)) = size {
         parts.push(format!("{width}x{height}"));
     }
     parts.push(bytes_label(bytes));
-    format!("[image: {}]", parts.join(", "))
+    format!(
+        "[image: {} — run: kelir view {path_in_session}]",
+        parts.join(", ")
+    )
 }
 
 /// The menu chip's label: `[image 1]`.
@@ -207,6 +215,49 @@ pub fn bytes_label(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
+
+/// What a file's first bytes say it is: `Ok(Some((format, dimensions)))` for a
+/// format kelir reads, `Ok(None)` when the bytes are not one (an empty file, a
+/// text file with a `.png` name), `Err` when it cannot even be read.
+///
+/// The extension is a claim the file makes; this is the file's own signature.
+/// An image is refused before it reaches the log because a bad one stays in the
+/// conversation: every later request repeats it, and the provider's refusal
+/// repeats with it (`S3`).
+pub fn sniff(path: &Path) -> Result<Option<(&'static str, (u32, u32))>, String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    // Headers live in the first few hundred bytes (a JPEG walks its segments up
+    // to the SOF, so it gets a generous window); never read a whole image just
+    // to identify it.
+    let mut head = vec![0u8; SNIFF_BYTES];
+    let mut filled = 0usize;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+        }
+    }
+    head.truncate(filled);
+    let format = if head.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        "png"
+    } else if head.starts_with(&[0xff, 0xd8]) {
+        "jpg"
+    } else if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        "gif"
+    } else if head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP") {
+        "webp"
+    } else {
+        return Ok(None);
+    };
+    Ok(dimensions(&head).map(|size| (format, size)))
+}
+
+/// How much of a file [`sniff`] reads: enough for a JPEG's SOF segment, nowhere
+/// near enough to cost anything for a 10 MB image.
+pub const SNIFF_BYTES: usize = 64 * 1024;
 
 /// The image's dimensions from its header, never decoding the pixels.
 pub fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
@@ -570,12 +621,12 @@ mod tests {
     fn the_pointer_names_the_relative_path_the_size_and_the_dimensions() {
         assert_eq!(
             pointer("attachments/1-clipboard.png", Some((1280, 720)), 319_488),
-            "[image: attachments/1-clipboard.png, 1280x720, 312 KB]"
+            "[image: attachments/1-clipboard.png, 1280x720, 312 KB — run: kelir view attachments/1-clipboard.png]"
         );
         // No dimensions: the pointer still says where the file is.
         assert_eq!(
             pointer("attachments/2-x.webp", None, 900),
-            "[image: attachments/2-x.webp, 900 B]"
+            "[image: attachments/2-x.webp, 900 B — run: kelir view attachments/2-x.webp]"
         );
         assert_eq!(chip_label(1), "[image 1]");
     }
@@ -600,7 +651,7 @@ mod tests {
         assert_eq!(
             saved.pointer,
             format!(
-                "[image: attachments/1-shot.png, 1280x720, {}]",
+                "[image: attachments/1-shot.png, 1280x720, {} — run: kelir view attachments/1-shot.png]",
                 bytes_label(bytes.len() as u64)
             )
         );

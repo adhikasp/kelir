@@ -1025,7 +1025,7 @@ impl App {
             UiEvent::TurnEnded { outcome, .. } => {
                 self.close_group();
                 self.commit_live("");
-                self.activity.turn_ended(now);
+                self.activity.turn_ended(now, &outcome);
                 self.status.phase = match outcome.as_str() {
                     "done" => Phase::Done,
                     "paused" => Phase::Paused,
@@ -1154,8 +1154,11 @@ impl App {
             }
             Ok(Parsed::Note(note)) => self.push_text(&note),
             Ok(Parsed::View(view)) => match view {
+                commands::View::Full => self.set_policy(Policy::Full),
                 commands::View::Expand(ordinal) => self.expand(ordinal),
-                commands::View::Collapse => self.set_policy(self.policy.toggled()),
+                // A command named `/collapse` collapses; it never expands
+                // (`S6`). Applying it twice changes nothing.
+                commands::View::Collapse => self.set_policy(Policy::Collapsed),
             },
             Err(message) => {
                 if !message.is_empty() {
@@ -2282,7 +2285,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_appends_output_and_collapse_toggles_the_policy_for_future_calls() {
+    fn expand_appends_output_and_the_two_commands_set_the_policy_each_in_one_direction() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out");
         std::fs::write(&out, "line one\nline two\n").unwrap();
@@ -2318,11 +2321,23 @@ mod tests {
             texts.iter().any(|row| row.contains("no call #9")),
             "{texts:?}"
         );
-        // The policy changes what future calls do.
+        // The policy changes what future calls do, and each command has one
+        // direction: `/expand` never collapses and `/collapse` never expands,
+        // however often either is said (S6).
         app.set_policy(Policy::Full);
         assert_eq!(app.policy, Policy::Full);
-        app.set_policy(Policy::Collapsed);
+        app.submit("/expand");
+        assert_eq!(app.policy, Policy::Full);
+        app.submit("/collapse");
         assert_eq!(app.policy, Policy::Collapsed);
+        app.submit("/collapse");
+        assert_eq!(app.policy, Policy::Collapsed, "idempotent");
+        app.submit("/expand");
+        assert_eq!(app.policy, Policy::Full, "and it does expand");
+        app.submit("/expand");
+        assert_eq!(app.policy, Policy::Full, "idempotent the other way");
+        app.submit("/expand last");
+        assert_eq!(app.policy, Policy::Full, "naming a call only appends");
     }
 
     #[test]

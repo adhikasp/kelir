@@ -1829,7 +1829,39 @@ impl Session {
                 crate::attachments::bytes_label(crate::attachments::MAX_BYTES)
             ));
         }
+        // An extension is a claim, not proof: the bytes have to start with a
+        // format's signature and carry a header kelir can read a size from.
+        // Queueing garbage would put it in every later request (the shared
+        // conversation is poisoned by a provider 400 that repeats), so a file
+        // that is not really an image is refused here, before the log (`S3`).
+        match crate::attachments::sniff(&path) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(format!(
+                    "view: {} does not look like an image (empty, or not a png, jpg, gif or webp)",
+                    crate::util::path_string(&path)
+                ));
+            }
+            Err(message) => return Err(format!("view: {message}")),
+        }
+        // `None` (the provider did not state the model's vision support) is a
+        // "try it": refusing on a missing flag would block a model that works.
+        if self.vision_support() == Some(false) {
+            return Err(format!(
+                "view: {} cannot take images: it is a text-only model, so the image would be refused by the provider (pick a vision model with `/model`, or `--model`). The conversation is unchanged.",
+                self.model
+            ));
+        }
         Ok(path)
+    }
+
+    /// Whether the provider says the current model takes images: `Some(true)`
+    /// and `Some(false)` are answers, `None` is "not stated" (the fetched or
+    /// cached model list has no entry, or the entry has no vision field).
+    fn vision_support(&self) -> Option<bool> {
+        self.models
+            .as_ref()
+            .and_then(|models| models.vision_for(&self.model))
     }
 
     /// Copy one image into `<session>/attachments/` and return its relative

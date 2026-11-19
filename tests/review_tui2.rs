@@ -340,7 +340,6 @@ async fn kelir_view_handles_awkward_paths_without_panicking() {
 
 /// STEER-10 req. 3: "Without vision support in the model the CLI says so."
 #[tokio::test]
-#[ignore = "FINDING S2: kelir view never consults the model's vision metadata (models::vision_for is dead code)"]
 async fn kelir_view_refuses_when_the_model_cannot_take_images() {
     let models = r#"{"data":[{"id":"test/model","context_length":262144,"supported_parameters":["tools"],"capabilities":{"vision":false}}]}"#;
     let setup = "printf '\\x89PNG\\r\\n\\x1a\\n\\0\\0\\0\\rIHDR\\0\\0\\0@\\0\\0\\0\\x30\\x08\\x06\\0\\0\\0' > ok.png; ";
@@ -379,7 +378,6 @@ async fn kelir_view_refuses_when_the_model_cannot_take_images() {
 /// would put garbage in the request, and the provider's 400 would repeat on
 /// every later request (the source event stays in the log).
 #[tokio::test]
-#[ignore = "FINDING S4: kelir view queues any file with an image extension (fake.png / empty.png), poisoning the conversation"]
 async fn kelir_view_refuses_a_file_that_is_not_really_an_image() {
     let mock = Mock::start(vec![
         Reply::Sse(sse(&tool_turn(
@@ -434,7 +432,6 @@ fn backspace_removes_a_pasted_image_chip_whole() {
 /// turn ends in either, the row must say so (and what to do), not go back to
 /// `idle · ready` the same instant.
 #[test]
-#[ignore = "FINDING S5: TurnEnded resets the state to idle, so the paused/error state rows are never visible"]
 fn the_state_row_keeps_paused_and_error_after_the_turn_ends() {
     use kelir::activity::Kind;
     let mut a = app(80);

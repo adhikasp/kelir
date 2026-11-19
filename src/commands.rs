@@ -97,12 +97,24 @@ impl Action {
 }
 
 /// A local view command: no verb, no session state, no event.
+///
+/// `/expand` and `/collapse` are the two halves of one policy, each with one
+/// meaning and idempotent (`S6`: a command named `/collapse` never expands
+/// anything, and repeating either one changes nothing):
+///
+/// | line | does |
+/// |---|---|
+/// | `/expand` | from the next call on, print each call's output too |
+/// | `/expand n`, `/expand last` | append that call's output here, now |
+/// | `/collapse` | from the next call on, one line per call |
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum View {
-    /// `/expand [n|last]`: append call `n`'s output to the scrollback (the
+    /// `/expand` alone: the full policy, for calls after this one.
+    Full,
+    /// `/expand n|last`: append call `n`'s output to the scrollback (the
     /// default is the last call). It cannot unfold a committed line.
     Expand(Option<u64>),
-    /// `/collapse` and a bare `/expand` toggle the policy for *future* calls.
+    /// `/collapse`: one line per tool call from the next call on.
     Collapse,
 }
 
@@ -143,7 +155,7 @@ pub fn parse(line: &str) -> Result<Parsed, String> {
     match name {
         "expand" => {
             return Ok(match non_empty(rest) {
-                None => Parsed::View(View::Expand(None)),
+                None => Parsed::View(View::Full),
                 Some(word) if word == "last" => Parsed::View(View::Expand(None)),
                 Some(word) => match word.parse::<u64>() {
                     Ok(ordinal) if ordinal > 0 => Parsed::View(View::Expand(Some(ordinal))),
@@ -226,12 +238,9 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/expand [n|last]",
-        "append a call's output here (a committed line cannot be unfolded)",
+        "show output from now on; `n`/`last` appends that call's output here",
     ),
-    (
-        "/collapse",
-        "one line per tool call for the calls after this one",
-    ),
+    ("/collapse", "one line per tool call from the next call on"),
     ("/quit", "end the session (a second Ctrl-C does the same)"),
     ("/help", "this list"),
 ];

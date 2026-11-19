@@ -121,6 +121,18 @@ struct RawModel {
     supported_parameters: Option<Vec<String>>,
     #[serde(default)]
     capabilities: Option<RawCapabilities>,
+    #[serde(default)]
+    architecture: Option<RawArchitecture>,
+}
+
+/// OpenRouter's `architecture` object. Its `input_modalities` is where that
+/// provider actually says a model takes images (`["text","image"]`); the
+/// `supported_parameters` list does not carry vision at all, so a check wired
+/// to it alone would refuse every vision model on OpenRouter.
+#[derive(Deserialize)]
+struct RawArchitecture {
+    #[serde(default)]
+    input_modalities: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -180,16 +192,34 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
                         .as_ref()
                         .map(|names| names.iter().any(|name| name == "tools"))
                 });
+            // Three shapes say it, in this order: an explicit capability flag
+            // (the Go provider), the input modalities (OpenRouter), and a
+            // capability named in `supported_parameters`. A provider that says
+            // nothing leaves it `None`, which `kelir view` reads as "try it".
+            let modalities = model.architecture.as_ref().and_then(|architecture| {
+                architecture.input_modalities.as_ref().map(|names| {
+                    names.iter().any(|name| {
+                        name.eq_ignore_ascii_case("image") || name.eq_ignore_ascii_case("images")
+                    })
+                })
+            });
             let vision = model
                 .capabilities
                 .as_ref()
                 .and_then(|capabilities| capabilities.vision.as_ref())
                 .map(RawFlag::supported)
+                .or(modalities)
+                // A capability named in `supported_parameters` is a *yes* when
+                // it is there; its absence is not a no. OpenRouter lists the
+                // knobs a model takes (`tools`, `reasoning`, …) and never
+                // mentions images, so reading a missing entry as "no images"
+                // would refuse every vision model on that provider.
                 .or_else(|| {
-                    model.supported_parameters.as_ref().map(|names| {
+                    model.supported_parameters.as_ref().and_then(|names| {
                         names
                             .iter()
                             .any(|name| name == "vision" || name == "image" || name == "images")
+                            .then_some(true)
                     })
                 });
             ModelInfo {
@@ -278,6 +308,17 @@ mod tests {
          "capabilities":{"tools":{"supported":true}}}
     ]}"#;
 
+    /// OpenRouter: images are `architecture.input_modalities`, never a
+    /// `supported_parameters` entry.
+    const OPENROUTER_VISION: &str = r#"{"data":[
+        {"id":"vision/model","context_length":200000,
+         "supported_parameters":["tools"],
+         "architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}},
+        {"id":"text/only","context_length":200000,
+         "supported_parameters":["tools"],
+         "architecture":{"input_modalities":["text"]}}
+    ]}"#;
+
     #[test]
     fn the_openrouter_shape_is_read() {
         let models = parse(OPENROUTER).unwrap();
@@ -285,6 +326,10 @@ mod tests {
         assert_eq!(models[0].context, Some(1_048_576));
         assert_eq!(models[0].tools, Some(true));
         assert_eq!(models[1].tools, Some(false));
+        // Vision is not in `supported_parameters` for either of them, and that
+        // absence says nothing: OpenRouter never lists images there.
+        assert_eq!(models[0].vision, None);
+        assert_eq!(models[1].vision, None);
     }
 
     #[test]
@@ -293,6 +338,31 @@ mod tests {
         assert_eq!(models[0].id, "deepseek-v4.1-flash");
         assert_eq!(models[0].context, Some(1_000_000));
         assert_eq!(models[0].tools, Some(true));
+    }
+
+    #[test]
+    fn vision_is_read_from_whichever_field_the_provider_fills() {
+        // OpenRouter states it as an input modality; the parameters list does
+        // not mention images at all.
+        let models = parse(OPENROUTER_VISION).unwrap();
+        assert_eq!(models[0].vision, Some(true));
+        assert_eq!(models[1].vision, Some(false));
+        // The Go shape's capability object, as a flag and as `supported`.
+        let go = r#"{"data":[
+            {"id":"a/yes","capabilities":{"vision":{"supported":true}}},
+            {"id":"b/no","capabilities":{"vision":false}},
+            {"id":"c/silent","capabilities":{"tools":{"supported":true}}}
+        ]}"#;
+        let models = parse(go).unwrap();
+        assert_eq!(models[0].vision, Some(true));
+        assert_eq!(models[1].vision, Some(false));
+        assert_eq!(models[2].vision, None, "silence is not a refusal");
+        // And the cache answers per model.
+        let cache = Cache::new("p", models, 0);
+        assert_eq!(cache.vision_for("a/yes"), Some(true));
+        assert_eq!(cache.vision_for("b/no"), Some(false));
+        assert_eq!(cache.vision_for("c/silent"), None);
+        assert_eq!(cache.vision_for("d/unknown"), None);
     }
 
     #[test]
