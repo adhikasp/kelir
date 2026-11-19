@@ -47,7 +47,7 @@ instead of failing it.
 Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test` (285 unit + 16 e2e + 11 e2e_m3 + 10 e2e_m4 + 6 e2e_m5 + 6
 e2e_steer4 + 15 e2e_tui + 23 e2e_verbs + the review_m* suites) green on
-Windows; `scripts/remote-check.sh the maintainer kelir-verify-steer4` green on Linux
+Windows; `scripts/remote-check.sh <machine> kelir-verify-steer4` green on Linux
 (290 unit there — the extra `cfg(unix)` tests). No `kelir.exe`/`bg-shim`
 process left behind.
 

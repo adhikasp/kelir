@@ -55,7 +55,7 @@ needs a cache fix. `request_hash` never repeats (no wasted duplicate requests).
   ranged reads. The hint line is the reason; it should stay.
 - Gates and rules: eight small `steer4: ...` commits with explicit `git add <paths>`, no `git add -A`, no
   force, no `taskkill`/`pkill` anywhere, `tasklist` leak checks at seq 863, 868, 978, 1028, Linux gate with the
-  private work dir (`remote-check.sh the maintainer kelir-verify-steer4`) three times, mock providers only, no
+  private work dir (`remote-check.sh <machine> kelir-verify-steer4`) three times, mock providers only, no
   secrets (the only `oc_sk_` hit is the SPEC text `oc_sk_…`). It spawned nothing
   unbounded. It also wrote the impl notes and an honest final summary.
 - Rule it bent: AGENTS.md says read SPEC fully. The spill made that impossible by `cat`; it read about
@@ -183,7 +183,7 @@ spill hint plus ranges already works.
 
 ### 6. Every bash call starts with `cd <cwd> &&`
 
-Evidence. 207 of 211 bash calls begin `cd C:/Users/the maintainer/kelir-wt/steer4 && `. The cwd is the session cwd
+Evidence. 207 of 211 bash calls begin `cd <worktree> && `. The cwd is the session cwd
 and every call starts there. The environment block gives `cwd:` but nothing says it is the start dir, and
 nothing says calls do not share shell state. ~55 chars x 207 = 11 K chars of output tokens, and each one is an
 absolute path that has to be right (a quoting hazard in a Windows path with spaces). The prompt is silent.

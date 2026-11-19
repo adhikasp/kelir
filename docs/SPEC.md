@@ -128,7 +128,8 @@ The knob exists for jobs that want a cap. When an explicit cap is reached the tu
 the log records `turn_ended` with outcome `paused`, `--json`'s `result` says `paused` with exit code 0, and
 the message on stderr and in the TUI says "turn paused after N steps; say `continue` to resume"; the next
 `say` starts a new turn with a fresh count (the session-wide step numbers keep counting) and `resume` of a
-paused log picks it up like a stopped one. The TUI status line shows `step 12/20` only when a cap is set.
+paused log picks it up like a stopped one. The TUI status line shows `step 12/20` only when a cap is set
+(also while idle, before the first turn, and a paused turn reports Herdr `blocked`).
 
 ## Prompt caching (must work)
 
@@ -303,7 +304,9 @@ next boundary so the agent wakes; while it does not, see *Process model*.
   `insert_before`; only the input box and status line repaint. Every TUI action exists as a verb.
 - Herdr status is OSC 7501 (`app=kelir`, root session only, a resume label): `working` at turn
   start, `done` on success, `idle` on stop, `error` with a `msg`; `idle` instead of `done` when
-  `TERM_PROGRAM=herdr-telegram`. kelir never reports `blocked`, since it never waits on a human.
+  `TERM_PROGRAM=herdr-telegram`. A turn paused on an explicit step cap reports `blocked`: it is the
+  one state in which kelir waits on a human (saying `continue`), and the word this Herdr accepts
+  (it drops `paused`; DEVIATIONS).
 
 ## Providers
 

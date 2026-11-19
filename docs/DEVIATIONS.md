@@ -97,7 +97,18 @@ consuming a scripted reply) so a session can start in a test.
   cap is set, and the TUI banner names the cap; the phase word is `paused`. A
   verb's answer already carries a `state` object; it now also reports
   `turn_steps` (the turn's own count) and `max_steps` (the cap, `null` when
-  there is none), so a steering human sees a pause coming.
+  there is none), so a steering human sees a pause coming. Two details the
+  STEER-4 review asked for (S1, N1, N2): the cap is checked *before* a step is
+  counted, so after a pause `state.turn_steps` is the number of steps that ran
+  (never `cap + 1`), and the count is right the moment the pause is reported;
+  with a cap set the TUI's status line says `step 0/N` while idle too, not a
+  bare `step 0` that would hide the limit until a turn started; and a paused
+  turn reports Herdr `blocked`, not `idle`, because a paused turn *is* waiting
+  for a human (saying `continue`) and a pane supervisor cannot otherwise tell
+  it from one that never started. `paused` would be the clearer word but this
+  Herdr does not know it (measured with `scripts/live/m2_osc_probe.py` on `hc`
+  0.1.21: `state=paused` and `state=waiting` leave the pane's status `null`,
+  `state=blocked` shows as `blocked`), so the record keeps a word Herdr shows.
 - **`later` while the session is idle starts a turn at once.** There is no turn
   to end; the message is recorded with `delivery: "later"` and the process runs a
   turn for it. Likewise a `say` still pending when a turn ends opens the next
