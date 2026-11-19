@@ -167,3 +167,13 @@ retries). Decisions (maintainer: "fix that, retry with backoff"):
    asked once at the end of M12, not before.
 Order after the current wave: steer4, steer5, m5afix -> steer6 -> steer7 -> steer8 -> steer1fix -> steer2 -> steer3 ->
 M5-B -> M6 ... M11 -> M12. STEER-5/6 already cover rate-limit, compaction trigger, design thrash, lying-tool exit codes.
+
+## Update (2026-11-19 16:10) — steer4 merged, M5-A review fixes + steer5 running
+
+- **steer4 merged to main** (9dd351f): PASS WITH FIXES, fixed (steer4fix), gates green on Linux (446) and Windows (439
+  with 2 load flakes that also hit main). The user config line `max_steps = 4294967295` can go once the pinned/installed
+  binary is the new one (the installed `.cargo/bin/kelir.exe` is still old: it would fall back to 100).
+- Introspective retros landed: docs/retros/m5a.md, docs/retros/steer4.md (same top findings: design thrash, 8 KB command cut,
+  429 giving up) -> STEER-5 (running), STEER-6 (queued).
+- Flaky e2e under load recorded as **STEER-9** (docs/tasks/STEER-9.md); gates now use `cargo test --no-fail-fast`.
+- Running: steer5 (t114), m5afix (t119). Merge order next: m5afix, steer5, then steer6, steer7, steer8, steer9, steer1fix, steer2, steer3, M5-B ...
