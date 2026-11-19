@@ -252,7 +252,9 @@ consuming a scripted reply) so a session can start in a test.
 - **A resume takes its id, cwd, provider, model and counters from the log, not  from flags.** `--cwd`, `--model` and `--provider` are ignored with `--resume`;
   the config (windows, prompts, keys) is today's machine's. The model/provider
   are the last `step_started`'s, so a `model` verb swap survives the resume.
-  `step` and `turn` continue from the log instead of restarting.
+  `step` and `turn` continue from the log instead of restarting. The turn's own
+  step count restarts at 0 (it is per turn), and today's `max_steps`/`--max-steps`
+  applies to the resumed turn like every other config knob.
 - **`kelir resume <id>` on a finished session with no task does nothing.** It
   appends the `resumed` event and one `session_ended {reason: "resumed"}`, exits
   0 and makes no provider request. With a task (`kelir resume <id> <task>`,
