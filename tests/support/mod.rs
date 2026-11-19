@@ -61,6 +61,40 @@ impl Recorded {
 struct State {
     script: VecDeque<Reply>,
     requests: Vec<Recorded>,
+    /// What `GET /models` answers, and how often it was asked.
+    models: ModelsAnswer,
+    models_requests: u32,
+}
+
+/// The answer the mock gives on `GET /models`. `Default` is the normal list of
+/// [`MODELS_JSON`]; a test can hand it an error, a malformed body, or a list of
+/// its own.
+#[derive(Clone, Debug)]
+pub struct ModelsAnswer {
+    pub status: u16,
+    pub body: String,
+}
+
+impl ModelsAnswer {
+    pub fn ok(body: impl Into<String>) -> ModelsAnswer {
+        ModelsAnswer {
+            status: 200,
+            body: body.into(),
+        }
+    }
+
+    pub fn http(status: u16, body: impl Into<String>) -> ModelsAnswer {
+        ModelsAnswer {
+            status,
+            body: body.into(),
+        }
+    }
+}
+
+impl Default for ModelsAnswer {
+    fn default() -> ModelsAnswer {
+        ModelsAnswer::ok(MODELS_JSON)
+    }
 }
 
 pub struct Mock {
@@ -70,11 +104,19 @@ pub struct Mock {
 
 impl Mock {
     pub async fn start(script: Vec<Reply>) -> Mock {
+        Mock::start_with_models(script, ModelsAnswer::default()).await
+    }
+
+    /// `start`, with `GET /models` answered by `models` instead of the normal
+    /// list.
+    pub async fn start_with_models(script: Vec<Reply>, models: ModelsAnswer) -> Mock {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let state = Arc::new(Mutex::new(State {
             script: script.into(),
             requests: Vec::new(),
+            models,
+            models_requests: 0,
         }));
         let shared = state.clone();
         tokio::spawn(async move {
@@ -98,6 +140,11 @@ impl Mock {
 
     pub fn request_count(&self) -> usize {
         self.state.lock().unwrap().requests.len()
+    }
+
+    /// How many times a session asked `GET /models`.
+    pub fn models_requests(&self) -> u32 {
+        self.state.lock().unwrap().models_requests
     }
 }
 
@@ -163,14 +210,21 @@ async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
 
     // `GET /models` is metadata every provider serves; a session asks once,
     // before its first step. It never consumes a scripted reply and is not
-    // recorded, so a test's request stream is still only completions.
+    // recorded in `requests`, so a test's request stream is still only
+    // completions; `models_requests` counts it.
     if path.ends_with("/models") {
+        let answer = {
+            let mut state = state.lock().unwrap();
+            state.models_requests += 1;
+            state.models.clone()
+        };
         let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            MODELS_JSON.len()
+            "HTTP/1.1 {} Models\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            answer.status,
+            answer.body.len()
         );
         let _ = stream.write_all(head.as_bytes()).await;
-        let _ = stream.write_all(MODELS_JSON.as_bytes()).await;
+        let _ = stream.write_all(answer.body.as_bytes()).await;
         let _ = stream.flush().await;
         let _ = stream.shutdown().await;
         return;
@@ -542,10 +596,31 @@ impl LiveSession {
         Self::start_with_flags(mock, args, extra_config, 0).await
     }
 
+    /// A session on a state directory a previous one already used: the second
+    /// start of a box whose metadata cache is warm (STEER-1 review).
+    pub async fn start_reusing(
+        state: PathBuf,
+        mock: &Mock,
+        args: &[&str],
+        extra_config: &str,
+    ) -> LiveSession {
+        Self::start_in(Some(state), mock, args, extra_config, 0).await
+    }
+
     /// The same, with creation flags of the caller's own: a test that needs a
     /// session without a console (a tool shell, a service) passes
     /// `DETACHED_PROCESS` (M4 review round 2, G3).
     pub async fn start_with_flags(
+        mock: &Mock,
+        args: &[&str],
+        extra_config: &str,
+        extra_flags: u32,
+    ) -> LiveSession {
+        Self::start_in(None, mock, args, extra_config, extra_flags).await
+    }
+
+    async fn start_in(
+        reuse_state: Option<PathBuf>,
         mock: &Mock,
         args: &[&str],
         extra_config: &str,
@@ -560,7 +635,7 @@ impl LiveSession {
             format!("provider = \"openrouter\"\nmodel = \"test/model\"\n{extra_config}"),
         )
         .unwrap();
-        let state = temp.path().join("state");
+        let state = reuse_state.unwrap_or_else(|| temp.path().join("state"));
 
         let mut command = live_command(&cwd, &config, &state, &mock.base_url());
         command

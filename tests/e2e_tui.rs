@@ -492,6 +492,13 @@ async fn the_tui_runs_a_turn_in_a_pty() {
     assert_eq!(run.code, 0, "screen: {:?}", run.screen);
     // The answer was rendered (the scrollback ends up in the pty's output).
     assert!(run.screen.contains("PARROT"), "screen: {:?}", run.screen);
+    // The banner names the window compaction measures against and where it came
+    // from (STEER-1: the provider's list, fetched before the first step).
+    assert!(
+        run.screen.contains("window 262144 tokens (api)"),
+        "the banner must show the window and its source; screen: {:?}",
+        run.screen
+    );
     // Herdr's status: exactly one record per change, in the only form this
     // Herdr accepts (`state=<word>` and nothing else).
     assert_eq!(
