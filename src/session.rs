@@ -1374,6 +1374,14 @@ impl Session {
         } else {
             verbs::parse(&name, &request.args)
         };
+        // `view` is validated when it arrives, not when it applies: the CLI
+        // prints "image queued" from the ack, so a bad path must be refused in
+        // the ack and not a boundary later (where nobody is listening).
+        if let Ok(Verb::View { path }) = &parsed
+            && let Err(message) = self.check_view(path)
+        {
+            parsed = Err(message);
+        }
         // `stop --call` for a call that is not running (`live_calls` holds only
         // the unsettled calls of the batch) is a refusal, not a silent no-op.
         if let Ok(Verb::Stop {
@@ -1736,6 +1744,25 @@ impl Session {
     /// the fold that turns it into a data URL at request time, so the log stays
     /// small and free of base64.
     fn apply_view(&mut self, named: &str) -> Result<(String, u64), String> {
+        let path = self.check_view(named)?;
+        let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        // The image is copied into the session's attachments dir, so the
+        // request does not depend on a path outside the session (and a later
+        // resume still finds it).
+        let rel = self.import_attachment(&path)?;
+        self.record(EventBody::Source {
+            kind: "attachment".to_string(),
+            name: rel.clone(),
+            text: None,
+            path: Some(rel.clone()),
+        })?;
+        self.sync();
+        Ok((rel, bytes))
+    }
+
+    /// Resolve and validate a `view` path without side effects: the same check
+    /// the ack runs, so the CLI's answer is the truth.
+    fn check_view(&self, named: &str) -> Result<std::path::PathBuf, String> {
         let path = crate::attachments::resolve(&self.dir, &self.ctx.cwd, named);
         if !path.is_file() {
             return Err(format!(
@@ -1759,18 +1786,7 @@ impl Session {
                 crate::attachments::bytes_label(crate::attachments::MAX_BYTES)
             ));
         }
-        // The image is copied into the session's attachments dir, so the
-        // request does not depend on a path outside the session (and a later
-        // resume still finds it).
-        let rel = self.import_attachment(&path)?;
-        self.record(EventBody::Source {
-            kind: "attachment".to_string(),
-            name: rel.clone(),
-            text: None,
-            path: Some(rel.clone()),
-        })?;
-        self.sync();
-        Ok((rel, bytes))
+        Ok(path)
     }
 
     /// Copy one image into `<session>/attachments/` and return its relative
