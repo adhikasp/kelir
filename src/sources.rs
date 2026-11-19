@@ -7,10 +7,10 @@
 //!
 //! Two layers, machine then project, and the project wins on a name clash:
 //!
-//! * the base prompt: the embedded default (at most 1 KB), overridden by
-//!   `<config>/prompt.md` and by `<cwd>/.kelir/prompt.md`;
-//! * instruction files: `AGENTS.md` and `CLAUDE.md`, found walking up from the
-//!   session cwd (nearest first), in the machine config dir too;
+//! * the base prompt: the embedded default (at most 1 KB), overridden by an
+//!   explicit `prompt` file, by `<config>/prompt.md` and by `<cwd>/.kelir/prompt.md`;
+//! * instruction files: every `AGENTS.md` and `CLAUDE.md` found walking up from
+//!   the session cwd (nearest first), in the machine config dir too;
 //! * skills directories: the config's `skills_dirs`, `<config>/skills`,
 //!   `~/.claude/skills` for the machine layer, and `.claude/skills`,
 //!   `.kelir/skills` for the project one, read-only.
@@ -19,13 +19,26 @@
 //! A skill is a directory holding a `SKILL.md` with Agent Skills front matter
 //! (`name`, `description`, optional `metadata`); reading it is the model's job
 //! (with `bash`), so its body never costs a token until the task needs it.
+//!
+//! One rule governs every source text, whoever reads it ([`read_source`]): the
+//! BOM is dropped, invalid UTF-8 is decoded lossily and said so, and the text is
+//! capped with a visible truncation notice. The render, the watcher and the
+//! `skills` verb all go through it, so a file hashes the same everywhere and is
+//! never announced twice.
 
 use std::path::{Path, PathBuf};
 
-use crate::event::SourceInfo;
+use crate::event::{LogEvent, SourceInfo};
 
 /// The placeholder in the base prompt where the skills directories go.
 pub const SKILLS_PLACEHOLDER: &str = "{{skills_dirs}}";
+
+/// The most one instruction file contributes to the prompt.
+pub const MAX_INSTRUCTION_BYTES: usize = 64 * 1024;
+/// The most all instruction files together contribute.
+pub const MAX_INSTRUCTIONS_TOTAL: usize = 256 * 1024;
+/// The most one skill's `SKILL.md` contributes to a `source` message.
+pub const MAX_SKILL_BYTES: usize = 64 * 1024;
 
 /// The rendered system prompt: the text, its hash, and everything that went in.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +46,9 @@ pub struct Rendered {
     pub text: String,
     pub hash: String,
     pub sources: Vec<SourceInfo>,
+    /// What a reader should hear about (a non-UTF-8 file, a truncation, a
+    /// malformed skill), recorded as `error` events right after the start.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,11 +81,63 @@ impl SourceKind {
         }
     }
 
-    /// The `source` event's kind, read back.
-    pub fn from_event_kind(kind: &str) -> SourceKind {
+    /// The `source` event's kind, read back, or a `sources[]` entry's `kind`.
+    pub fn parse(kind: &str) -> SourceKind {
         match kind {
+            "prompt" => SourceKind::Base,
             "skill" => SourceKind::Skill,
             _ => SourceKind::Instruction,
+        }
+    }
+}
+
+/// Where a source's text comes from. The embedded default is a *typed* absence
+/// of a path, never a sentinel string the watcher could try to read as a file.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SourcePath {
+    /// The base prompt compiled into the binary (`src/prompt.md`): no file.
+    #[default]
+    Embedded,
+    File(PathBuf),
+}
+
+impl SourcePath {
+    /// The `sources[]` path: empty for the embedded default, a real path
+    /// otherwise.
+    pub fn log_path(&self) -> String {
+        match self {
+            SourcePath::Embedded => String::new(),
+            SourcePath::File(path) => crate::util::path_string(path),
+        }
+    }
+
+    /// The path a `sources[]` entry (or a `source` event) names.
+    ///
+    /// An old log wrote the literal `embedded` for the base prompt; that
+    /// sentinel is read back as [`SourcePath::Embedded`] for the base prompt
+    /// only, so an unrelated file called `embedded` is a file like any other.
+    pub fn from_log(kind: SourceKind, path: &str) -> SourcePath {
+        if path.is_empty() || (kind == SourceKind::Base && path == "embedded") {
+            return SourcePath::Embedded;
+        }
+        SourcePath::File(PathBuf::from(
+            path.replace('/', std::path::MAIN_SEPARATOR_STR),
+        ))
+    }
+
+    pub fn file(&self) -> Option<&Path> {
+        match self {
+            SourcePath::Embedded => None,
+            SourcePath::File(path) => Some(path),
+        }
+    }
+
+    /// What to call it in a note: a reader can open a real path, and cannot
+    /// open a name.
+    pub fn describe(&self) -> String {
+        match self {
+            SourcePath::Embedded => "the embedded base prompt".to_string(),
+            SourcePath::File(path) => crate::util::path_string(path),
         }
     }
 }
@@ -102,16 +170,38 @@ pub struct Places {
     pub skills_dirs: Vec<PathBuf>,
     /// The session cwd: instruction files are found by walking up from here.
     pub cwd: PathBuf,
+    /// Where the walk up stops (the home directory): a file above it is not the
+    /// project's business.
+    pub home: Option<PathBuf>,
+    /// Where the walk up stops (the repository root): a directory holding
+    /// `.git`. Set by the caller that knows the session's cwd.
+    pub repo_root: Option<PathBuf>,
 }
 
 /// The paths this process looks in, built from the config and the environment.
 pub fn places(cwd: &Path, skills_dirs: &[PathBuf], config_dir: Option<PathBuf>) -> Places {
+    let home = crate::paths::home();
     Places {
         config_dir,
-        machine_claude: Some(crate::paths::home().join(".claude")),
+        machine_claude: Some(home.join(".claude")),
         skills_dirs: skills_dirs.to_vec(),
         cwd: cwd.to_path_buf(),
+        home: Some(home),
+        repo_root: repo_root_above(cwd),
     }
+}
+
+/// The nearest ancestor of `cwd` (itself included) that holds a `.git` entry:
+/// the directory the walk up stops at.
+fn repo_root_above(cwd: &Path) -> Option<PathBuf> {
+    let mut dir = Some(cwd);
+    while let Some(current) = dir {
+        if current.join(".git").exists() {
+            return Some(current.to_path_buf());
+        }
+        dir = current.parent();
+    }
+    None
 }
 
 impl Places {
@@ -157,62 +247,101 @@ impl Places {
 /// The instruction file names, in the order they render within one directory.
 const INSTRUCTION_FILES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 
+/// Discover every machine and project source for `places`, dropping the notes.
+pub fn discover(places: &Places) -> Vec<Found> {
+    let mut notes = Vec::new();
+    discover_with_notes(places, &mut notes)
+}
+
 /// Discover every machine and project source for `places`.
 ///
 /// The order is the render order: machine layer, then project layer (nearest
-/// instruction file first). A later source of the same name replaces an earlier
-/// one: the project wins on a name clash.
-pub fn discover(places: &Places) -> Vec<Found> {
+/// instruction file first). A project source of a name replaces a machine one;
+/// within a layer every file is kept, so a monorepo's root rules and a
+/// subdirectory's rules both reach the model (F4).
+pub fn discover_with_notes(places: &Places, notes: &mut Vec<String>) -> Vec<Found> {
     let mut found: Vec<Found> = Vec::new();
+    let mut budget = MAX_INSTRUCTIONS_TOTAL;
     // Machine instruction files: the config dir's own AGENTS.md/CLAUDE.md.
     if let Some(config) = &places.config_dir {
         for name in INSTRUCTION_FILES {
             let path = config.join(name);
-            if let Some(text) = read(&path) {
-                push_source(
-                    &mut found,
-                    SourceKind::Instruction,
-                    name,
-                    path,
-                    text,
-                    Layer::Machine,
-                );
-            }
+            let Some(text) = read_file(&path, MAX_INSTRUCTION_BYTES, &mut budget, notes) else {
+                continue;
+            };
+            push_source(
+                &mut found,
+                SourceKind::Instruction,
+                name,
+                path,
+                text,
+                Layer::Machine,
+            );
         }
     }
-    // Project instruction files: walking up from the cwd, nearest first. A
-    // missing directory contributes nothing, and the walk ends at the root.
-    let mut dir = Some(places.cwd.clone());
-    while let Some(current) = dir {
+    // Project instruction files: every one found walking up from the cwd,
+    // nearest first. The walk stops at the repository root and at the home
+    // directory (N3), so a file planted above them is not picked up.
+    for current in ancestors(places) {
         for name in INSTRUCTION_FILES {
             let path = current.join(name);
-            if let Some(text) = read(&path) {
-                push_source(
-                    &mut found,
-                    SourceKind::Instruction,
-                    name,
-                    path,
-                    text,
-                    Layer::Project,
-                );
-            }
+            let Some(text) = read_file(&path, MAX_INSTRUCTION_BYTES, &mut budget, notes) else {
+                continue;
+            };
+            push_source(
+                &mut found,
+                SourceKind::Instruction,
+                name,
+                path,
+                text,
+                Layer::Project,
+            );
         }
-        dir = current.parent().map(Path::to_path_buf);
     }
     // Skills directories, machine layer then project. A skill's name is its
     // directory's name; a project skill of that name wins.
     for directory in places.skills_directories() {
         let layer = places.skills_layer(&directory);
-        for (name, path, text) in skills_in(&directory) {
-            push_source(&mut found, SourceKind::Skill, &name, path, text, layer);
+        for skill in skills_in(&directory, notes) {
+            push_source(
+                &mut found,
+                SourceKind::Skill,
+                &skill.name,
+                skill.path,
+                skill.text,
+                layer,
+            );
         }
     }
     found
 }
 
+/// The cwd and its ancestors, nearest first, stopping at the repository root
+/// (a directory that holds `.git`) and at the home directory (inclusive: a file
+/// *in* home still belongs to the project, one above it does not).
+fn ancestors(places: &Places) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut dir = Some(places.cwd.clone());
+    while let Some(current) = dir {
+        let stop = places.repo_root.as_deref() == Some(current.as_path())
+            || places
+                .home
+                .as_deref()
+                .filter(|home| !home.as_os_str().is_empty())
+                == Some(current.as_path());
+        out.push(current.clone());
+        if stop {
+            break;
+        }
+        dir = current.parent().map(Path::to_path_buf);
+    }
+    out
+}
+
 /// Add a source, resolving a name clash the way the two layers demand: a
-/// project source wins over a machine one, and within a layer the first found
-/// (the nearest instruction file) wins.
+/// project source wins over a machine one of the same name. Within one layer
+/// nothing is dropped (F4): a monorepo's root `AGENTS.md` and a subdirectory's
+/// `AGENTS.md` are two files, and both are the model's business.
 fn push_source(
     found: &mut Vec<Found>,
     kind: SourceKind,
@@ -228,21 +357,33 @@ fn push_source(
         text,
         layer,
     };
-    match found
-        .iter_mut()
-        .find(|other| other.kind == kind && other.name == item.name)
-    {
-        Some(existing) if layer == Layer::Project && existing.layer == Layer::Machine => {
-            *existing = item;
+    if layer == Layer::Project {
+        // A project file replaces the machine one of its name, wherever the
+        // machine one sits in the list.
+        while let Some(index) = found.iter().position(|other| {
+            other.kind == kind && other.name == item.name && other.layer == Layer::Machine
+        }) {
+            found.remove(index);
         }
-        Some(_) => {}
-        None => found.push(item),
+        found.push(item);
+        return;
     }
+    if found
+        .iter()
+        .any(|other| other.kind == kind && other.name == item.name)
+    {
+        return;
+    }
+    found.push(item);
 }
 
 /// Every skill in one directory, sorted by name so the render is stable.
-fn skills_in(directory: &Path) -> Vec<(String, PathBuf, String)> {
-    let mut out: Vec<(String, PathBuf, String)> = Vec::new();
+///
+/// A directory whose `SKILL.md` is missing, unreadable or not valid Agent
+/// Skills front matter is not a skill: it is skipped with a note, never listed
+/// in `sources[]` (F6).
+fn skills_in(directory: &Path, notes: &mut Vec<String>) -> Vec<SkillFile> {
+    let mut out: Vec<SkillFile> = Vec::new();
     let Ok(entries) = std::fs::read_dir(directory) else {
         return out;
     };
@@ -258,20 +399,151 @@ fn skills_in(directory: &Path) -> Vec<(String, PathBuf, String)> {
             continue;
         }
         let file = path.join("SKILL.md");
-        let Some(text) = read(&file) else {
+        let mut budget = MAX_SKILL_BYTES;
+        let mut inner = Vec::new();
+        let Some(text) = read_file(&file, MAX_SKILL_BYTES, &mut budget, &mut inner) else {
             continue;
         };
-        out.push((name.to_string(), file, text));
+        if let Err(reason) = parse_skill(&text) {
+            notes.push(format!(
+                "source: {} is not a skill ({reason}); it was skipped",
+                crate::util::path_string(&file)
+            ));
+            continue;
+        }
+        notes.append(&mut inner);
+        out.push(SkillFile {
+            name: name.to_string(),
+            path: file,
+            text,
+        });
     }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
-fn read(path: &Path) -> Option<String> {
+/// One skill found in a skills directory.
+#[derive(Debug)]
+struct SkillFile {
+    /// The skill's name: its directory's name.
+    name: String,
+    path: PathBuf,
+    text: String,
+}
+
+/// Read a source file: BOM dropped, invalid UTF-8 decoded lossily, length
+/// capped, and each of those stated in `notes`.
+///
+/// `budget` is the room left in the total cap for this kind of source; it is
+/// reduced by this file's bytes. `None` means the file is missing, is not a
+/// file, could not be read, or had no room left at all.
+fn read_file(
+    path: &Path,
+    limit: usize,
+    budget: &mut usize,
+    notes: &mut Vec<String>,
+) -> Option<String> {
     if !path.is_file() {
         return None;
     }
-    std::fs::read_to_string(path).ok()
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            notes.push(format!(
+                "source: cannot read {}: {error}",
+                crate::util::path_string(path)
+            ));
+            return None;
+        }
+    };
+    if *budget == 0 {
+        notes.push(format!(
+            "source: {} not read: the {MAX_INSTRUCTIONS_TOTAL}-byte instruction budget is spent",
+            crate::util::path_string(path)
+        ));
+        return None;
+    }
+    // The total budget skips a file rather than truncating it, so every file
+    // that does go in is read the same way the watcher re-reads it later (a
+    // truncation here that the watcher could not reproduce would announce the
+    // file again at the first boundary). A single file over its own cap is
+    // truncated by `decode` instead: the user can see why.
+    let room = limit.min(*budget);
+    if bytes.len() > room && room < limit {
+        notes.push(format!(
+            "source: {} not read: {} bytes left of the {MAX_INSTRUCTIONS_TOTAL}-byte \
+             instruction budget, the file is {} bytes",
+            crate::util::path_string(path),
+            *budget,
+            bytes.len()
+        ));
+        return None;
+    }
+    let mut messages = Vec::new();
+    let text = decode(&bytes, room, &mut messages);
+    for message in messages {
+        notes.push(format!(
+            "source: {} {message}",
+            crate::util::path_string(path)
+        ));
+    }
+    *budget = budget.saturating_sub(bytes.len().min(room));
+    Some(text)
+}
+
+/// The one decode rule every source text goes through: a UTF-8 BOM is dropped,
+/// invalid UTF-8 becomes U+FFFD (and is said so), and text over `limit` bytes is
+/// cut on a char boundary with a visible truncation notice (F7, N6).
+fn decode(bytes: &[u8], limit: usize, notes: &mut Vec<String>) -> String {
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    let mut text = match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => {
+            notes.push(format!(
+                "is not valid UTF-8 ({} bytes); invalid bytes read as U+FFFD",
+                bytes.len()
+            ));
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+    };
+    if text.len() > limit {
+        let total = text.len();
+        text = crate::util::truncate_chars(&text, limit);
+        text.push_str(&format!(
+            "\n\n[kelir: truncated; {total} bytes on disk, the first {limit} shown]"
+        ));
+        notes.push(format!(
+            "is {total} bytes; only the first {limit} were read"
+        ));
+    }
+    text
+}
+
+/// Read one source file whole, the way the watcher and the `skills` verb do:
+/// the same decode rule, so the same bytes hash the same everywhere.
+///
+/// `None` when it is missing or unreadable: a deleted source is silent.
+pub fn read_text(path: &Path) -> Option<String> {
+    read_source(path, MAX_INSTRUCTION_BYTES).map(|(text, _)| text)
+}
+
+/// Read one source file: its text and the notes its decoding produced.
+pub fn read_source(path: &Path, limit: usize) -> Option<(String, Vec<String>)> {
+    if !path.is_file() {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let mut notes = Vec::new();
+    let text = decode(&bytes, limit, &mut notes);
+    Some((text, notes))
+}
+
+/// The limit a source of this kind is read with.
+pub fn limit_for(kind: SourceKind) -> usize {
+    match kind {
+        SourceKind::Skill => MAX_SKILL_BYTES,
+        SourceKind::Base | SourceKind::Instruction => MAX_INSTRUCTION_BYTES,
+    }
 }
 
 /// The base prompt with the skills directories named in it.
@@ -418,19 +690,35 @@ pub struct Inputs<'a> {
 /// sources are sorted by the order [`discover`] finds them in, and nothing
 /// depends on a hash map's iteration order.
 pub fn render_system(inputs: &Inputs) -> Rendered {
-    // The base prompt: the project's `.kelir/prompt.md` wins over the machine's
-    // (an explicit `prompt` file, the config dir's `prompt.md`, or the embedded
-    // default).
+    let mut warnings = Vec::new();
+    // The base prompt: the project's `.kelir/prompt.md` wins over whatever the
+    // config named (an explicit `prompt` file, the config dir's `prompt.md`, or
+    // the embedded default), and each case records the path the text really
+    // came from (F2).
     let project_base = inputs.cwd.join(".kelir").join("prompt.md");
-    let (base_text, base_path) = match read(&project_base) {
-        Some(text) => (text, Some(project_base)),
-        None => (
-            inputs.base.to_string(),
-            inputs.base_path.map(Path::to_path_buf),
-        ),
+    let (base_text, base_path) = match read_source(&project_base, MAX_INSTRUCTION_BYTES) {
+        Some((text, notes)) => {
+            warnings.extend(notes);
+            (text, SourcePath::File(project_base))
+        }
+        None => {
+            let (text, notes) = match inputs.base_path {
+                Some(path) => match read_source(path, MAX_INSTRUCTION_BYTES) {
+                    Some((text, notes)) => (text, notes),
+                    None => (strip_bom(inputs.base), Vec::new()),
+                },
+                None => (strip_bom(inputs.base), Vec::new()),
+            };
+            warnings.extend(notes);
+            let path = match inputs.base_path {
+                Some(path) => SourcePath::File(path.to_path_buf()),
+                None => SourcePath::Embedded,
+            };
+            (text, path)
+        }
     };
     let base = render_base(&base_text, inputs.places);
-    let discovered = discover(inputs.places);
+    let discovered = discover_with_notes(inputs.places, &mut warnings);
     let instructions: Vec<&Found> = discovered
         .iter()
         .filter(|found| found.kind == SourceKind::Instruction)
@@ -455,20 +743,14 @@ pub fn render_system(inputs: &Inputs) -> Rendered {
         inputs.date
     ));
 
-    let mut sources = vec![SourceInfo {
-        name: "prompt.md".to_string(),
-        path: match &base_path {
-            Some(path) => crate::util::path_string(path),
-            None => EMBEDDED.to_string(),
-        },
-        hash: crate::util::fnv1a64_hex(base_text.as_bytes()),
-    }];
+    let mut sources = vec![info("prompt.md", &base_path, SourceKind::Base, &base_text)];
     for found in &instructions {
-        sources.push(SourceInfo {
-            name: found.name.clone(),
-            path: crate::util::path_string(&found.path),
-            hash: hash_of(&found.text),
-        });
+        sources.push(info(
+            &found.name,
+            &SourcePath::File(found.path.clone()),
+            found.kind,
+            &found.text,
+        ));
     }
     // Skills are pull: their bodies stay out of the prompt, but they are
     // recorded (and watched) so a skill edited mid-session arrives as a
@@ -479,21 +761,35 @@ pub fn render_system(inputs: &Inputs) -> Rendered {
         .collect();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     for found in skills {
-        sources.push(SourceInfo {
-            name: found.name.clone(),
-            path: crate::util::path_string(&found.path),
-            hash: hash_of(&found.text),
-        });
+        sources.push(info(
+            &found.name,
+            &SourcePath::File(found.path.clone()),
+            found.kind,
+            &found.text,
+        ));
     }
     Rendered {
         hash: hash_of(&text),
         text,
         sources,
+        warnings,
     }
 }
 
-/// The `sources[]` path of the embedded base prompt.
-pub const EMBEDDED: &str = "embedded";
+fn info(name: &str, path: &SourcePath, kind: SourceKind, text: &str) -> SourceInfo {
+    SourceInfo {
+        name: name.to_string(),
+        path: path.log_path(),
+        kind: Some(kind.as_str().to_string()),
+        hash: hash_of(text),
+    }
+}
+
+/// A base prompt read from the config keeps its bytes; only the BOM goes, so an
+/// embedded default is never changes by a stray marker.
+fn strip_bom(text: &str) -> String {
+    text.strip_prefix('\u{feff}').unwrap_or(text).to_string()
+}
 
 pub fn hash_of(text: &str) -> String {
     crate::util::fnv1a64_hex(text.as_bytes())
@@ -507,14 +803,19 @@ pub fn instructions(places: &Places) -> Vec<Found> {
         .collect()
 }
 
-/// The kind a `sources[]` entry stands for, from its name alone: the log keeps
-/// `{name, path, hash}`, and a resume rebuilds the watcher from it.
-pub fn kind_of(name: &str) -> SourceKind {
-    match name {
-        "prompt.md" => SourceKind::Base,
-        "AGENTS.md" | "CLAUDE.md" => SourceKind::Instruction,
-        _ if name.ends_with(".md") => SourceKind::Instruction,
-        _ => SourceKind::Skill,
+/// The kind a `sources[]` entry stands for.
+///
+/// The log records the kind (`prompt`, `instruction`, `skill`) where the source
+/// was found, so a skill directory called `notes.md` stays a skill (F9). An
+/// older log has no kind and is read back from the name.
+pub fn kind_of(source: &SourceInfo) -> SourceKind {
+    match source.kind.as_deref() {
+        Some(kind) => SourceKind::parse(kind),
+        None => match source.name.as_str() {
+            "prompt.md" => SourceKind::Base,
+            "AGENTS.md" | "CLAUDE.md" => SourceKind::Instruction,
+            _ => SourceKind::Skill,
+        },
     }
 }
 
@@ -523,17 +824,28 @@ pub fn kind_of(name: &str) -> SourceKind {
 pub struct Tracked {
     pub kind: SourceKind,
     pub name: String,
-    pub path: PathBuf,
-    /// Every content hash this context already carries for the source: the one
-    /// the system prompt was rendered from, and each one a `source` message
-    /// carried.
-    pub hashes: Vec<String>,
+    pub path: SourcePath,
+    /// The hash of the text this context **currently** carries for the source:
+    /// the frozen system's, or the newest `source` message's. Comparing against
+    /// this one hash (not every hash ever carried) is what makes A→B→A a
+    /// change: the model's latest word on the file is B (F1).
+    pub hash: String,
+    /// A compaction folded the source's message away: the next boundary says
+    /// what the file holds now, even if it holds the same bytes.
+    pub stale: bool,
+    /// The file was already reported as gone, so a missing source is one note,
+    /// not one per boundary (N4).
+    pub gone: bool,
 }
 
-impl Tracked {
-    fn has(&self, hash: &str) -> bool {
-        self.hashes.iter().any(|seen| seen == hash)
-    }
+/// A source whose file was deleted: the context still carries its last text,
+/// which is now nothing on disk. Reported once, so a reader knows why the model
+/// still believes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Removal {
+    pub kind: SourceKind,
+    pub name: String,
+    pub path: PathBuf,
 }
 
 /// A source edited on disk since it went into the context.
@@ -543,6 +855,9 @@ pub struct Change {
     pub name: String,
     pub path: PathBuf,
     pub text: String,
+    /// What the re-read had to say beyond the text (a truncation, invalid
+    /// UTF-8): recorded next to the `source` event, never dropped silently.
+    pub notes: Vec<String>,
 }
 
 /// The per-boundary mtime/hash check of the recorded sources.
@@ -562,64 +877,114 @@ impl Watch {
         Watch::from_sources(&rendered.sources)
     }
 
-    /// Track the sources `session_started` recorded (what a resume reads).
+    /// Track the sources `session_started` recorded.
     pub fn from_sources(sources: &[SourceInfo]) -> Watch {
         let mut watch = Watch::default();
         for source in sources {
+            let kind = kind_of(source);
             watch.add(
-                kind_of(&source.name),
+                kind,
                 &source.name,
-                &source.path,
+                &SourcePath::from_log(kind, &source.path),
                 &source.hash,
             );
         }
         watch
     }
 
-    /// Track one source (the system prompt's, a `skills` verb's).
-    pub fn add(&mut self, kind: SourceKind, name: &str, path: &str, hash: &str) {
+    /// Rebuild the watcher from a log: the frozen `sources[]` first, then every
+    /// `source` event in order, so the context's *current* word on each source
+    /// is the last message it carries (F8).
+    ///
+    /// A resume therefore does not announce an edit its own log already has,
+    /// does keep watching a source the `skills` verb added (its path is only in
+    /// the event), and does announce a source whose message a compaction folded
+    /// away ([`Watch::forget`] is called for those).
+    pub fn rebuild(events: &[LogEvent], dir: &Path) -> Watch {
+        let mut watch = Watch::from_sources(&sources_of(events));
+        for event in events {
+            let crate::event::EventBody::Source {
+                kind,
+                name,
+                text,
+                path,
+            } = &event.body
+            else {
+                continue;
+            };
+            let kind = SourceKind::parse(kind);
+            let Some(text) = text else {
+                continue;
+            };
+            let text = text.resolve_text(dir).unwrap_or_default();
+            let path = match path.as_deref() {
+                Some(path) => SourcePath::from_log(kind, path),
+                None => SourcePath::Embedded,
+            };
+            watch.add(kind, name, &path, &hash_of(&text));
+        }
+        // A `source` event a standing compaction folds into its summary is not
+        // in the context any more: the resume says what the file holds at its
+        // first boundary, exactly as a live session would after the same
+        // compaction.
+        for event in events {
+            if let crate::event::EventBody::Compacted {
+                through_seq,
+                pinned_seqs,
+                ..
+            } = &event.body
+            {
+                watch.forget_folded(events, *through_seq, pinned_seqs);
+            }
+        }
+        watch
+    }
+
+    /// Track one source as the context's current word on it.
+    pub fn add(&mut self, kind: SourceKind, name: &str, path: &SourcePath, hash: &str) {
         if let Some(existing) = self
             .tracked
             .iter_mut()
             .find(|tracked| tracked.kind == kind && tracked.name == name)
         {
-            if !existing.has(hash) {
-                existing.hashes.push(hash.to_string());
-            }
+            existing.path = path.clone();
+            existing.hash = hash.to_string();
+            existing.stale = false;
+            existing.gone = false;
             return;
         }
         self.tracked.push(Tracked {
             kind,
             name: name.to_string(),
-            path: PathBuf::from(path.replace('/', std::path::MAIN_SEPARATOR_STR)),
-            hashes: vec![hash.to_string()],
+            path: path.clone(),
+            hash: hash.to_string(),
+            stale: false,
+            gone: false,
         });
     }
 
-    /// Note that this context now carries `text` for a source (a `source`
-    /// message, or a resumed session reading its own log).
-    pub fn note_text(&mut self, kind: SourceKind, name: &str, text: &str) {
-        let hash = hash_of(text);
-        if let Some(existing) = self
-            .tracked
-            .iter_mut()
-            .find(|tracked| tracked.kind == kind && tracked.name == name)
-            && !existing.has(&hash)
-        {
-            existing.hashes.push(hash);
-            return;
+    /// The context no longer carries this source's text: announce the file as
+    /// it is at the next boundary, even though its bytes did not change.
+    pub fn forget(&mut self, name: &str) {
+        for tracked in &mut self.tracked {
+            if tracked.name == name {
+                tracked.stale = true;
+            }
         }
-        if !self
-            .tracked
-            .iter()
-            .any(|tracked| tracked.kind == kind && tracked.name == name)
-        {
-            self.tracked.push(Tracked {
-                kind,
-                name: name.to_string(),
-                path: PathBuf::new(),
-                hashes: vec![hash],
-            });
+    }
+
+    /// A compaction folded every message up to `through_seq` into a summary, so
+    /// a `source` event at or below it (rendered from a pinned user message
+    /// excepted) is no longer in the context. `pinned` are the seqs the fold
+    /// still renders verbatim.
+    pub fn forget_folded(&mut self, events: &[LogEvent], through_seq: u64, pinned: &[u64]) {
+        for event in events {
+            if event.seq > through_seq || pinned.contains(&event.seq) {
+                continue;
+            }
+            if let crate::event::EventBody::Source { name, .. } = &event.body {
+                self.forget(name);
+            }
         }
     }
 
@@ -627,33 +992,75 @@ impl Watch {
         &self.tracked
     }
 
-    /// Every source whose current content this context does not carry yet. The
-    /// hash is remembered as it is returned, so one edit is one message — and a
-    /// file edited back to text that is already in the context (the system
-    /// prompt's own, or an earlier message's) is not a duplicate.
-    pub fn changes(&mut self) -> Vec<Change> {
+    /// Every tracked source whose file has disappeared since the context last
+    /// heard about it, once per disappearance (N4).
+    ///
+    /// A deleted source is not a `source` event — there is no text to send —
+    /// but it is not silence either: the model still holds the last text of a
+    /// file that no longer exists, so the log says so.
+    pub fn removals(&mut self) -> Vec<Removal> {
         let mut out = Vec::new();
         for tracked in &mut self.tracked {
-            if tracked.path.as_os_str().is_empty() {
+            if tracked.gone {
                 continue;
             }
-            let Some(text) = read(&tracked.path) else {
+            let Some(path) = tracked.path.file() else {
                 continue;
             };
-            let hash = hash_of(&text);
-            if tracked.has(&hash) {
+            if path.is_file() {
                 continue;
             }
-            tracked.hashes.push(hash);
-            out.push(Change {
+            tracked.gone = true;
+            out.push(Removal {
                 kind: tracked.kind,
                 name: tracked.name.clone(),
-                path: tracked.path.clone(),
-                text,
+                path: path.to_path_buf(),
             });
         }
         out
     }
+
+    /// Every source whose current content this context does not carry yet. The
+    /// hash is replaced as it is returned, so one edit is one message — and a
+    /// file edited back to an older body is a message again, because the
+    /// model's latest word on it is the one before.
+    pub fn changes(&mut self) -> Vec<Change> {
+        let mut out = Vec::new();
+        for tracked in &mut self.tracked {
+            let Some(path) = tracked.path.file().map(Path::to_path_buf) else {
+                continue;
+            };
+            let Some((text, notes)) = read_source(&path, limit_for(tracked.kind)) else {
+                continue;
+            };
+            let hash = hash_of(&text);
+            tracked.gone = false;
+            if !tracked.stale && tracked.hash == hash {
+                continue;
+            }
+            tracked.hash = hash;
+            tracked.stale = false;
+            out.push(Change {
+                kind: tracked.kind,
+                name: tracked.name.clone(),
+                path,
+                text,
+                notes,
+            });
+        }
+        out
+    }
+}
+
+/// The `sources[]` of the log's `session_started`.
+pub fn sources_of(events: &[LogEvent]) -> Vec<SourceInfo> {
+    events
+        .iter()
+        .find_map(|event| match &event.body {
+            crate::event::EventBody::SessionStarted { sources, .. } => Some(sources.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -679,6 +1086,8 @@ mod tests {
             machine_claude: Some(root.join("machine-claude")),
             skills_dirs: vec![root.join("extra-skills")],
             cwd: root.join("work").join("deep"),
+            home: None,
+            repo_root: None,
         }
     }
 
@@ -821,7 +1230,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
     }
 
     #[test]
-    fn the_nearest_instruction_file_of_a_name_wins() {
+    fn every_ancestors_instruction_file_is_collected_nearest_first() {
         let dir = temp_dir("nearest");
         let mut places = places_in(&dir);
         places.cwd = dir.join("work").join("deep").join("deeper");
@@ -832,9 +1241,47 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             .iter()
             .filter(|item| item.kind == SourceKind::Instruction)
             .collect();
-        // One entry per name: the nearest one wins over the one further up.
-        assert_eq!(instructions.len(), 1, "{instructions:?}");
+        // Both files are kept (F4), nearest first: a monorepo's root rules and
+        // a subdirectory's rules are both the model's business.
+        assert_eq!(instructions.len(), 2, "{instructions:?}");
         assert_eq!(instructions[0].text, "DEEP");
+        assert_eq!(instructions[1].text, "SHALLOW");
+    }
+
+    #[test]
+    fn the_walk_stops_at_the_repo_root_and_at_home() {
+        let dir = temp_dir("stop");
+        let mut places = places_in(&dir);
+        write(&dir.join("AGENTS.md"), "ABOVE THE REPO");
+        write(&dir.join("repo").join(".git").join("HEAD"), "ref");
+        write(&dir.join("repo").join("AGENTS.md"), "REPO ROOT");
+        write(
+            &dir.join("repo").join("sub").join("AGENTS.md"),
+            "IN THE SUB",
+        );
+        places.cwd = dir.join("repo").join("sub");
+        places.repo_root = Some(dir.join("repo"));
+        let texts: Vec<String> = discover(&places)
+            .into_iter()
+            .filter(|item| item.kind == SourceKind::Instruction)
+            .map(|item| item.text)
+            .collect();
+        assert_eq!(texts, vec!["IN THE SUB", "REPO ROOT"], "{texts:?}");
+
+        // The same walk without a repository stops at home.
+        let mut places = places_in(&dir);
+        places.cwd = dir.join("home").join("work");
+        places.home = Some(dir.join("home"));
+        places.repo_root = None;
+        write(&dir.join("home").join("work").join("AGENTS.md"), "NEAR");
+        write(&dir.join("home").join("AGENTS.md"), "HOME");
+        write(&dir.join("AGENTS.md"), "ABOVE HOME");
+        let texts: Vec<String> = discover(&places)
+            .into_iter()
+            .filter(|item| item.kind == SourceKind::Instruction)
+            .map(|item| item.text)
+            .collect();
+        assert_eq!(texts, vec!["NEAR", "HOME"], "{texts:?}");
     }
 
     #[test]
@@ -845,6 +1292,8 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             machine_claude: Some(dir.join("nope-claude")),
             skills_dirs: vec![dir.join("nope-skills")],
             cwd: dir.join("nope-work"),
+            home: None,
+            repo_root: None,
         };
         assert!(discover(&places).is_empty());
         let rendered = render_system(&Inputs {
@@ -855,6 +1304,83 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             date: "2026-11-19",
         });
         assert!(rendered.text.starts_with("BASE"));
+    }
+
+    #[test]
+    fn the_decode_rule_drops_the_bom_keeps_a_lossy_read_and_truncates_visibly() {
+        let mut notes = Vec::new();
+        // A UTF-8 BOM is dropped (N6), and CRLF is kept as it is.
+        assert_eq!(decode(b"\xef\xbb\xbfA\r\nB", 4096, &mut notes), "A\r\nB");
+        assert!(notes.is_empty(), "{notes:?}");
+        // Invalid UTF-8 is decoded lossily, and said so (F5).
+        notes.clear();
+        let text = decode(b"caf\xe9 rules", 4096, &mut notes);
+        assert!(text.starts_with("caf"), "{text:?}");
+        assert!(text.contains('\u{fffd}'), "{text:?}");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("not valid UTF-8"), "{notes:?}");
+        // Over the cap: cut on a char boundary, with a visible mark (F7), and
+        // the mark says how much there was.
+        notes.clear();
+        let text = decode("ééééé".as_bytes(), 5, &mut notes);
+        assert!(text.starts_with("éé"), "{text:?}");
+        assert!(text.contains("[kelir: truncated"), "{text:?}");
+        assert!(text.contains("10 bytes on disk"), "{text:?}");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+    }
+
+    #[test]
+    fn a_huge_instruction_file_is_capped_and_the_watcher_agrees_with_the_render() {
+        let dir = temp_dir("cap");
+        let places = places_in(&dir);
+        let big = "x".repeat(MAX_INSTRUCTION_BYTES * 3);
+        write(&places.cwd.join("AGENTS.md"), &big);
+        let mut notes = Vec::new();
+        let found = discover_with_notes(&places, &mut notes);
+        let agents = found
+            .iter()
+            .find(|item| item.name == "AGENTS.md")
+            .expect("AGENTS.md");
+        assert!(
+            agents.text.len() < MAX_INSTRUCTION_BYTES + 200,
+            "{} bytes",
+            agents.text.len()
+        );
+        assert!(agents.text.contains("[kelir: truncated"), "{notes:?}");
+        assert!(
+            notes.iter().any(|note| note.contains("AGENTS.md")),
+            "{notes:?}"
+        );
+        // Every file is read the same way the watcher re-reads it, so a source
+        // is not announced again at the first boundary.
+        let rendered = render_system(&Inputs {
+            base: "BASE",
+            base_path: None,
+            places: &places,
+            cwd: &places.cwd,
+            date: "2026-11-19",
+        });
+        let mut watch = Watch::from_rendered(&rendered);
+        assert!(watch.changes().is_empty(), "{:?}", watch.changes());
+    }
+
+    #[test]
+    fn a_malformed_skill_is_skipped_with_a_reason() {
+        let dir = temp_dir("bad-skill");
+        write(&dir.join("good").join("SKILL.md"), SKILL);
+        write(&dir.join("nofm").join("SKILL.md"), "just prose");
+        write(
+            &dir.join("noname").join("SKILL.md"),
+            "---\ndescription: d\n---\nbody",
+        );
+        let mut notes = Vec::new();
+        let found = skills_in(&dir, &mut notes);
+        let names: Vec<&str> = found.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, vec!["good"], "{found:?}");
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        for note in &notes {
+            assert!(note.contains("is not a skill"), "{note}");
+        }
     }
 
     #[test]
@@ -958,8 +1484,12 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         assert!(rendered.text.contains("cwd: "), "{}", rendered.text);
         let names: Vec<&str> = rendered.sources.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["prompt.md", "AGENTS.md"]);
-        assert_eq!(rendered.sources[0].path, EMBEDDED);
+        // The embedded default records an empty path and its kind, never a
+        // sentinel a reader could mistake for a file (F2, F2b).
+        assert_eq!(rendered.sources[0].path, "");
+        assert_eq!(rendered.sources[0].kind.as_deref(), Some("prompt"));
         assert!(rendered.sources[1].path.ends_with("AGENTS.md"));
+        assert_eq!(rendered.sources[1].kind.as_deref(), Some("instruction"));
         assert_eq!(rendered.sources[1].hash.len(), 16);
     }
 
@@ -991,7 +1521,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
     }
 
     #[test]
-    fn an_edit_is_one_change_and_editing_back_is_none() {
+    fn an_edit_is_one_change_and_editing_back_is_a_change_again() {
         let dir = temp_dir("watch");
         let places = places_in(&dir);
         let file = places.cwd.join("AGENTS.md");
@@ -1013,13 +1543,37 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         assert_eq!(changes[0].text, "TWO");
         assert_eq!(changes[0].kind, SourceKind::Instruction);
         assert!(watch.changes().is_empty(), "one edit, one message");
-        // Editing it back to text that is already in the context (here the
-        // system prompt's own) is not a duplicate either.
+        // Editing it back to the text the system prompt rendered is a change
+        // again: the model's latest word on the file is TWO, and the file on
+        // disk says ONE (F1).
         write(&file, "ONE");
-        assert!(watch.changes().is_empty());
-        // A third body is news again.
+        let changes = watch.changes();
+        assert_eq!(changes.len(), 1, "A->B->A is announced as A again");
+        assert_eq!(changes[0].text, "ONE");
+        // A third body is news too.
         write(&file, "THREE");
         assert_eq!(watch.changes().len(), 1);
+    }
+
+    #[test]
+    fn a_compaction_makes_the_next_boundary_say_the_file_again() {
+        let dir = temp_dir("compacted");
+        let places = places_in(&dir);
+        let file = places.cwd.join("AGENTS.md");
+        write(&file, "SAME");
+        let rendered = render_system(&Inputs {
+            base: "BASE",
+            base_path: None,
+            places: &places,
+            cwd: &places.cwd,
+            date: "2026-11-19",
+        });
+        let mut watch = Watch::from_rendered(&rendered);
+        watch.forget("AGENTS.md");
+        let changes = watch.changes();
+        assert_eq!(changes.len(), 1, "the folded source is announced again");
+        assert_eq!(changes[0].text, "SAME");
+        assert!(watch.changes().is_empty(), "and only once");
     }
 
     #[test]
@@ -1031,7 +1585,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         watch.add(
             SourceKind::Instruction,
             "extra.md",
-            &crate::util::path_string(&file),
+            &SourcePath::File(file.clone()),
             &hash_of("VERB BODY"),
         );
         assert!(watch.changes().is_empty());
@@ -1052,9 +1606,11 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         );
         write(&dir.join("two").join("README.md"), "not a skill");
         write(&dir.join(".git").join("SKILL.md"), "---\nname: git\n---\n");
-        let found = skills_in(&dir);
+        let mut notes = Vec::new();
+        let found = skills_in(&dir, &mut notes);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].0, "one");
+        assert_eq!(found[0].name, "one");
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     /// The `skills` verb's two shapes, at the level the session uses them: a
@@ -1073,7 +1629,7 @@ description: d
 READ THE TAIL
 ",
         );
-        let text = read(&dir.join("sift").join("SKILL.md")).unwrap();
+        let text = read_text(&dir.join("sift").join("SKILL.md")).unwrap();
         let skill = parse_skill(&text).unwrap();
         assert_eq!(skill.name, "sift");
         assert_eq!(
@@ -1083,15 +1639,33 @@ READ THE TAIL
         );
         // A directory without a SKILL.md is not a skill source.
         std::fs::create_dir_all(dir.join("empty")).unwrap();
-        assert!(read(&dir.join("empty").join("SKILL.md")).is_none());
+        assert!(read_text(&dir.join("empty").join("SKILL.md")).is_none());
     }
 
     #[test]
-    fn kinds_are_read_back_from_a_source_name() {
-        assert_eq!(kind_of("prompt.md"), SourceKind::Base);
-        assert_eq!(kind_of("AGENTS.md"), SourceKind::Instruction);
-        assert_eq!(kind_of("CLAUDE.md"), SourceKind::Instruction);
-        assert_eq!(kind_of("sift"), SourceKind::Skill);
+    fn a_sources_kind_comes_from_the_log_and_never_from_its_name() {
+        let info = |name: &str, kind: Option<&str>| SourceInfo {
+            name: name.to_string(),
+            path: String::new(),
+            kind: kind.map(str::to_string),
+            hash: "h".into(),
+        };
+        assert_eq!(
+            kind_of(&info("prompt.md", Some("prompt"))),
+            SourceKind::Base
+        );
+        assert_eq!(
+            kind_of(&info("AGENTS.md", Some("instruction"))),
+            SourceKind::Instruction
+        );
+        // A skill directory may legally be called `notes.md`: the recorded kind
+        // wins over the name (F9).
+        assert_eq!(kind_of(&info("notes.md", Some("skill"))), SourceKind::Skill);
+        // An older log has no kind: the name is the fallback.
+        assert_eq!(kind_of(&info("prompt.md", None)), SourceKind::Base);
+        assert_eq!(kind_of(&info("AGENTS.md", None)), SourceKind::Instruction);
+        assert_eq!(kind_of(&info("CLAUDE.md", None)), SourceKind::Instruction);
+        assert_eq!(kind_of(&info("sift", None)), SourceKind::Skill);
         assert_eq!(SourceKind::Instruction.as_str(), "instruction");
     }
 
@@ -1124,5 +1698,38 @@ READ THE TAIL
         assert!(rendered.starts_with(head), "{rendered}");
         assert_eq!(rendered, render_base(prompt, &places), "not deterministic");
         assert!(prompt.len() <= 1024, "{} bytes", prompt.len());
+    }
+
+    #[test]
+    fn the_embedded_base_prompt_has_no_path_to_read() {
+        let dir = temp_dir("embedded");
+        let places = places_in(&dir);
+        let rendered = render_system(&Inputs {
+            base: "BASE",
+            base_path: None,
+            places: &places,
+            cwd: &places.cwd,
+            date: "2026-11-19",
+        });
+        let mut watch = Watch::from_rendered(&rendered);
+        // A file in the process cwd called `embedded` is nobody's source.
+        write(&PathBuf::from("embedded"), "NOT THE BASE PROMPT");
+        assert!(watch.changes().is_empty(), "{:?}", watch.tracked());
+        let _ = std::fs::remove_file("embedded");
+        assert_eq!(rendered.sources[0].path, "");
+        assert_eq!(
+            SourcePath::from_log(SourceKind::Base, ""),
+            SourcePath::Embedded
+        );
+        // A path that happens to be the old sentinel is only the embedded
+        // default for the base prompt itself.
+        assert_eq!(
+            SourcePath::from_log(SourceKind::Base, "embedded"),
+            SourcePath::Embedded
+        );
+        assert_eq!(
+            SourcePath::from_log(SourceKind::Skill, "embedded"),
+            SourcePath::File(PathBuf::from("embedded"))
+        );
     }
 }

@@ -58,6 +58,10 @@ pub struct Config {
     pub max_steps: Option<u32>,
     pub cache_ttl: Option<String>,
     pub system_prompt: String,
+    /// The file `system_prompt` was read from (`prompt` or `prompt.md`), when
+    /// it came from one: `sources[]` records it, so a log reader can tell a
+    /// file's base prompt from the embedded default (F2).
+    pub prompt_path: Option<PathBuf>,
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Context window override for every model (`window`), when set.
     pub window: Option<u64>,
@@ -236,7 +240,9 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         );
     }
 
-    let system_prompt = load_prompt(raw.prompt.as_deref())?;
+    // The base prompt and the file it came from (`None` for the embedded
+    // default), so `sources[]` records the real path (F2).
+    let (system_prompt, prompt_path) = load_prompt(raw.prompt.as_deref())?;
     let compact_prompt = load_compact_prompt(raw.compact_prompt.as_deref())?;
     let auto_compact_at = raw.auto_compact_at.unwrap_or(crate::compact::AUTO_FRACTION);
     if !(0.0..=1.0).contains(&auto_compact_at) || auto_compact_at == 0.0 {
@@ -258,6 +264,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         max_steps: step_cap(raw.max_steps),
         cache_ttl: raw.cache_ttl,
         system_prompt,
+        prompt_path,
         providers,
         window: raw.window,
         model_windows: raw.model_windows,
@@ -453,32 +460,34 @@ fn find_project_config() -> Option<PathBuf> {
     }
 }
 
-fn load_prompt(configured: Option<&str>) -> Result<String, ConfigError> {
+/// The base prompt text and the file it came from (`None` for the embedded
+/// default), so a reader of the log knows where the words came from.
+fn load_prompt(configured: Option<&str>) -> Result<(String, Option<PathBuf>), ConfigError> {
     if let Some(path) = configured {
         let path = PathBuf::from(path);
         if path.exists() {
-            return std::fs::read_to_string(&path)
-                .map_err(|error| ConfigError(format!("cannot read {}: {error}", path.display())));
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| ConfigError(format!("cannot read {}: {error}", path.display())))?;
+            return Ok((text, Some(path)));
         }
         return Err(ConfigError(format!(
             "prompt file not found: {}",
             path.display()
         )));
     }
-    let candidates = [
-        paths::config_dir().join("prompt.md"),
-        std::env::current_dir()
-            .map(|dir| dir.join(".kelir").join("prompt.md"))
-            .unwrap_or_default(),
-    ];
-    for candidate in candidates {
-        if candidate.is_file()
-            && let Ok(text) = std::fs::read_to_string(&candidate)
-        {
-            return Ok(text);
-        }
+    // Only the machine `prompt.md` here. The project's `.kelir/prompt.md` is
+    // *not* looked up from the process cwd: a session's cwd is `--cwd`, which
+    // the config does not know, and the render already reads
+    // `<cwd>/.kelir/prompt.md` first (M5-A fixes F2, second half). Reading it
+    // here would both miss `--cwd` and record a path the text did not come
+    // from.
+    let machine = paths::config_dir().join("prompt.md");
+    if machine.is_file()
+        && let Ok(text) = std::fs::read_to_string(&machine)
+    {
+        return Ok((text, Some(machine)));
     }
-    Ok(DEFAULT_PROMPT.to_string())
+    Ok((DEFAULT_PROMPT.to_string(), None))
 }
 
 /// The compaction prompt: `compact_prompt` (a path), else `compact.md` in the
@@ -795,6 +804,25 @@ reasoning_effort = \"none\"
         assert!(error.to_string().contains("auto_compact_at"), "{error}");
         let path = temp_config("auto_compact_at = 0\n");
         assert!(load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn a_prompt_file_records_the_path_it_came_from() {
+        let dir = std::env::temp_dir().join(format!("kelir-prompt-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prompt = dir.join("my-prompt.txt");
+        std::fs::write(&prompt, "EXPLICIT BASE").unwrap();
+        // A TOML literal string: no escaping, so a Windows path goes in as is.
+        let text = format!("prompt = '{}'\n", prompt.display());
+        let path = temp_config(&text);
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.system_prompt, "EXPLICIT BASE");
+        assert_eq!(cfg.prompt_path.as_deref(), Some(prompt.as_path()));
+        // The embedded default has no path, and no sentinel either (F2, F2b).
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.system_prompt, DEFAULT_PROMPT);
+        assert!(cfg.prompt_path.is_none(), "{:?}", cfg.prompt_path);
     }
 
     #[test]
