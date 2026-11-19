@@ -265,9 +265,20 @@ pub struct BgShimArgs {
     /// The file the command's stdout and stderr go to.
     #[arg(long, value_name = "FILE")]
     pub out: PathBuf,
-    /// The command, as one shell command line.
-    #[arg(long, value_name = "CMD", allow_hyphen_values = true)]
+    /// The command, as one shell command line. Ignored when `cmd_file` is
+    /// given: a command past the Windows command-line limit travels as a file
+    /// and never on this process's own argv.
+    #[arg(
+        long,
+        value_name = "CMD",
+        allow_hyphen_values = true,
+        default_value = ""
+    )]
     pub cmd: String,
+    /// A file holding the command (`--cmd` is then empty). The session writes
+    /// it for a command too long to pass as an argument.
+    #[arg(long, value_name = "FILE")]
+    pub cmd_file: Option<PathBuf>,
     /// The shell program (`bash`).
     #[arg(long, value_name = "PROGRAM")]
     pub shell: String,

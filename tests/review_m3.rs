@@ -388,7 +388,6 @@ async fn r6_stop_is_answered_while_a_compaction_is_summarising() {
     let started = Instant::now();
     let answer = tokio::time::timeout(Duration::from_secs(3), live.ctl(&["stop"])).await;
     let waited = started.elapsed();
-    gate.notify_waiters();
     gate.notify_one();
     assert!(
         answer.is_ok(),
@@ -398,26 +397,32 @@ async fn r6_stop_is_answered_while_a_compaction_is_summarising() {
     live.end().await;
 }
 
-/// R7: a turn that ended in `error` (provider down) is a crashed turn as far as
-/// the user is concerned: `kelir resume <id>` should retry it. M3.md: "A stopped
-/// or crashed turn continues from the log with the model's next step."
+/// R7: a turn cut off by a provider outage continues on `kelir resume`. Since
+/// STEER-5 an outage past the waiting budget *pauses* the turn (outcome
+/// `paused`, exit 0) rather than failing it; a resume (and a later `say`)
+/// retries it from the same fold. M3.md: "A stopped or crashed turn continues
+/// from the log with the model's next step."
 #[tokio::test]
 async fn r7_resume_retries_a_turn_that_ended_in_a_provider_error() {
     let mut script = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..3 {
         script.push(Reply::Http(500, "{\"error\":\"boom\"}".into()));
     }
     script.push(Reply::Sse(sse(&text_turn("recovered", 0))));
     let mock = Mock::start(script).await;
-    let sandbox = Sandbox::new(
-        "retries = 0
-",
-    );
+    // The test harness's own short retry config: three attempts, then a pause.
+    let sandbox = Sandbox::new("");
     let first = sandbox
         .kelir(&mock.base_url(), &["run", "--json", "the task"], &[])
         .await;
-    assert_eq!(first.code, 1, "{}", first.stderr);
+    assert_eq!(first.code, 0, "{}", first.stderr);
     let id = sandbox.only_session();
+    let ended = sandbox
+        .log(&id)
+        .into_iter()
+        .find(|event| event["type"] == "turn_ended")
+        .expect("a finished turn");
+    assert_eq!(ended["outcome"], "paused", "{ended}");
     let before = mock.request_count();
     let second = sandbox
         .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
@@ -426,13 +431,19 @@ async fn r7_resume_retries_a_turn_that_ended_in_a_provider_error() {
     let after = mock.request_count();
     assert!(
         after > before,
-        "resume of an errored turn made no provider request (no-op); log: {:?}",
+        "resume of a paused turn made no provider request (no-op); log: {:?}",
         sandbox
             .log(&id)
             .iter()
             .map(|e| e["type"].as_str().unwrap_or("").to_string())
             .collect::<Vec<_>>()
     );
+    let resumed_turn = sandbox
+        .log(&id)
+        .into_iter()
+        .rfind(|event| event["type"] == "turn_ended")
+        .expect("the resumed turn");
+    assert_eq!(resumed_turn["outcome"], "done", "{resumed_turn}");
 }
 
 /// R8: a turn stopped by the user (`stop` verb) is "a stopped turn" in the spec

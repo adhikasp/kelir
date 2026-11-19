@@ -103,12 +103,22 @@ async fn stop_during_the_stream_leaves_a_clean_log_and_next_request() {
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     session.wait_for("step_started").await;
+    // `step_started` is logged before the request goes out, so wait until the
+    // mock really has it: a `stop` that wins the race leaves the first request
+    // unsent, and the assertion on two requests would be about the race.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while mock.request_count() == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(mock.request_count(), 1, "the first request never arrived");
     let answer = session.ctl(&["stop", "enough"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     let ended = session.wait_for("turn_ended").await;
     assert_eq!(ended["outcome"], "stopped");
-    // The held request is still open on the mock side; let it go.
-    gate.notify_waiters();
+    // The held request is still open on the mock side; let it go. `notify_one`
+    // stores a permit when the mock has not reached its `notified()` poll yet,
+    // where `notify_waiters` would be lost.
+    gate.notify_one();
     let answer = session.ctl(&["say", "carry on"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     session.wait_for("turn_ended").await;
@@ -183,7 +193,7 @@ async fn say_now_during_the_stream_is_delivered() {
     let answer = session.ctl(&["say", "--now", "urgent"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    gate.notify_waiters();
+    gate.notify_one();
     session.wait_for("turn_ended").await;
     let requests = mock.requests();
     assert_eq!(requests.len(), 2, "the urgent message got no step");

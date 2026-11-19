@@ -166,6 +166,18 @@ impl Activity {
         }
     }
 
+    /// The wait is over and the retry is being sent (or a slot came free): the
+    /// row goes back to waiting for the provider. Idle stays idle, and a turn
+    /// that already ended keeps the state its outcome chose.
+    pub fn retry_done(&mut self, now: Instant) {
+        if self.kind == Kind::RateLimited {
+            self.retry_in = None;
+            self.attempt = 0;
+            self.detail.clear();
+            self.enter(Kind::Thinking, now);
+        }
+    }
+
     /// An explicit step cap: the turn is paused, waiting for `continue`.
     pub fn paused(&mut self, now: Instant, detail: &str) {
         self.tools = 0;
@@ -187,16 +199,30 @@ impl Activity {
     /// keeps that state on the row: it is the one thing a human must act on
     /// (`S5`; STEER-10 req. 1 lists both as states), and the summary line alone
     /// scrolls away with the next frame.
+    ///
+    /// The wait's own countdown never outlives its turn: a provider pause ends
+    /// a retry wait, so without this the row stayed `thinking` with a frozen
+    /// countdown instead of saying `paused`.
     pub fn turn_ended(&mut self, now: Instant, outcome: &str) {
         self.tools = 0;
         self.preview.clear();
         self.written = 0;
-        // The detail (the step cap, the provider's error) stays for the state
-        // that keeps it; idle has nothing to say beyond `ready`.
-        let keep = matches!(outcome, "paused" | "error");
-        if !keep {
+        self.retry_in = None;
+        self.attempt = 0;
+        if self.kind == Kind::RateLimited {
+            // The wait's reason (`429`) belongs to the wait: the pause that
+            // ended it has its own line in the scrollback.
             self.detail.clear();
-            self.enter(Kind::Idle, now);
+        }
+        match outcome {
+            // The detail is what the pause or the failure put there (the step
+            // cap, the provider's message): it is the hint the human needs.
+            "paused" => self.enter(Kind::Paused, now),
+            "error" => self.enter(Kind::Error, now),
+            _ => {
+                self.detail.clear();
+                self.enter(Kind::Idle, now);
+            }
         }
     }
 
@@ -442,6 +468,57 @@ mod tests {
         assert_eq!(activity.kind, Kind::Thinking);
         assert_eq!(activity.retry_in, None);
         assert_eq!(activity.attempt, 0);
+    }
+
+    /// STEER-5's provider pause ends a retry wait: the pause must win the row,
+    /// with no countdown left behind and no spinner.
+    #[test]
+    fn a_retry_that_ends_in_a_pause_reads_paused() {
+        let mut activity = Activity::idle(at(0));
+        activity.step_started(at(0));
+        activity.retry(at(10), Duration::from_secs(4), 3, "503");
+        assert_eq!(activity.kind, Kind::RateLimited);
+        activity.turn_ended(at(1000), "paused");
+        assert_eq!(activity.kind, Kind::Paused);
+        assert!(!activity.kind.working(), "a pause does not spin");
+        assert_eq!(activity.retry_in, None);
+        assert_eq!(activity.attempt, 0);
+        let row = text(activity.line(Theme::plain(), 0, at(2000), 100));
+        assert!(row.contains("paused"), "{row}");
+        assert!(row.contains("say continue"), "{row}");
+        // The wait's own reason does not survive as the pause's detail.
+        assert!(!row.contains("503"), "{row}");
+    }
+
+    /// The same for an error: a wait that ends in a failure says so, with no
+    /// countdown and no spinner left over.
+    #[test]
+    fn a_retry_that_ends_in_an_error_reads_error() {
+        let mut activity = Activity::idle(at(0));
+        activity.step_started(at(0));
+        activity.retry(at(10), Duration::from_secs(2), 2, "429");
+        activity.turn_ended(at(1000), "error");
+        assert_eq!(activity.kind, Kind::Error);
+        assert!(!activity.kind.working());
+        assert_eq!(activity.retry_in, None);
+        // A step cap's detail is kept by the pause that follows it.
+        let mut capped = Activity::idle(at(0));
+        capped.paused(at(0), "step cap 3 reached");
+        capped.turn_ended(at(1000), "paused");
+        assert_eq!(capped.kind, Kind::Paused);
+        assert_eq!(capped.detail, "step cap 3 reached");
+    }
+
+    /// A slot wait is not a retry: when it ends the row keeps the work it was
+    /// doing, and an idle session stays idle.
+    #[test]
+    fn a_wait_that_is_not_a_retry_leaves_the_row_alone() {
+        let mut activity = Activity::idle(at(0));
+        activity.retry_done(at(10));
+        assert_eq!(activity.kind, Kind::Idle);
+        activity.step_started(at(20));
+        activity.retry_done(at(30));
+        assert_eq!(activity.kind, Kind::Thinking);
     }
 
     #[test]

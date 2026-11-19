@@ -333,7 +333,10 @@ async fn resume_refuses_a_session_that_is_still_running() {
         attempt.stderr
     );
 
-    gate.notify_waiters();
+    // `notify_one` stores a permit when the mock has not yet reached its
+    // `notified()` poll: under a loaded runner the request can still be in
+    // flight here, and `notify_waiters` would be lost.
+    gate.notify_one();
     live.wait_for("turn_ended").await;
     live.end().await;
 }

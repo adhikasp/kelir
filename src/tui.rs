@@ -55,6 +55,10 @@ use crate::tools_view::{self, CallLine, Group, Policy};
 pub const VIEWPORT_HEIGHT: u16 = 8;
 /// A second Ctrl-C within this window quits instead of stopping.
 pub const DOUBLE_CTRL_C: Duration = Duration::from_millis(1000);
+/// How far ahead a countdown is still a countdown. A slot wait is armed far in
+/// the future on purpose (it ends when another process frees the slot), so the
+/// status line shows its words without a number that means nothing.
+pub const RETRY_COUNTDOWN_MAX: Duration = Duration::from_secs(6 * 60 * 60);
 /// How much of a call's output the tail view shows.
 pub const TAIL_BYTES: usize = 2048;
 /// The spinner changes this often while working; the elapsed text once a
@@ -119,14 +123,6 @@ pub enum UiEvent {
         /// The last non-empty line of the call's output (a failed call's tail).
         tail: String,
     },
-    /// A retryable provider error is being waited out (STEER-5's countdown).
-    Retry {
-        /// How long the wait is.
-        retry_in_ms: u64,
-        attempt: u32,
-        /// `429`, `503`, `network`: a short reason, never a body.
-        detail: String,
-    },
     /// An image landed at the tail (a `kelir view` from a tool call).
     Attachment {
         /// `attachments/1-x.png`.
@@ -136,6 +132,22 @@ pub enum UiEvent {
     /// Something the session wants said but which is not an error.
     Info(String),
     Error(String),
+    /// The session is waiting before it tries the provider again: the facts row
+    /// carries this line and a countdown to `until`, and a provider retry (not
+    /// a governor slot wait) also feeds the state row's `rate limited` state.
+    /// Every wait is also a line via [`UiEvent::Info`] and an `error` event in
+    /// the log.
+    Retrying {
+        line: String,
+        until: Instant,
+        /// `429`, `503`, `None` for a network error or a slot wait: never a
+        /// response body.
+        status: Option<u16>,
+        /// The attempt number; `0` for a wait that is not a provider retry.
+        attempt: u32,
+    },
+    /// The wait is over (the retry is being sent, or a slot came free).
+    RetryingDone,
     /// The answer to a verb the TUI sent.
     Reply(Response),
     /// Herdr's pane status. The session sends it here instead of writing it to
@@ -158,7 +170,9 @@ pub enum Phase {
     Idle,
     Working,
     Done,
-    /// An explicit `max_steps` cap ended the turn; the session is still up.
+    /// The turn paused somewhere the user can pick it up again: an explicit
+    /// `max_steps` cap, or a provider that stayed unavailable past the waiting
+    /// budget. The session is still up.
     Paused,
     Error,
 }
@@ -204,6 +218,9 @@ pub struct Status {
     pub turn_steps: u32,
     pub limit: Option<u32>,
     pub phase: Phase,
+    /// The retry countdown: the line and when the wait ends. `None` when
+    /// nothing is waiting.
+    pub retrying: Option<(String, Instant)>,
 }
 
 impl Default for Status {
@@ -221,6 +238,7 @@ impl Default for Status {
             turn_steps: 0,
             limit: None,
             phase: Phase::Idle,
+            retrying: None,
         }
     }
 }
@@ -235,16 +253,41 @@ pub fn tokens(count: u64) -> String {
 }
 
 /// The facts row, as one string (the renderer clips it to the width).
+///
+/// A wait replaces the usual summary: "kelir working · rate limited (429):
+/// retrying in 34 s, attempt 5" is what a person needs to see while nothing
+/// else happens (STEER-5's countdown, shown in the row that is always there).
 pub fn status_text(status: &Status) -> String {
-    // One state, one word: `done` reads as `idle` here (the state row's kind for
-    // it is idle too, so the two rows cannot disagree), while `paused` and
-    // `error` keep their own word because they are not idle (S5). The summary
-    // line above the row already carries the outcome.
-    let word = match status.phase {
+    let word = status_word(status);
+    if let Some((line, until)) = &status.retrying {
+        let left = until.saturating_duration_since(Instant::now());
+        // A slot wait has no deadline a person should read as a number; only a
+        // real countdown is shown.
+        if left < RETRY_COUNTDOWN_MAX {
+            return format!(
+                "kelir {word} · {line} · {} left",
+                crate::retry::seconds_text(left)
+            );
+        }
+        return format!("kelir {word} · {line}");
+    }
+    facts_text(status)
+}
+
+/// One state, one word: `done` reads as `idle` here (the state row's kind for
+/// it is idle too, so the two rows cannot disagree), while `paused` and `error`
+/// keep their own word because they are not idle (S5). The summary line above
+/// the row already carries the outcome.
+fn status_word(status: &Status) -> &'static str {
+    match status.phase {
         Phase::Done => Phase::Idle.word(),
         other => other.word(),
-    };
-    let mut parts = vec![format!("kelir {word}")];
+    }
+}
+
+/// The facts row when nothing is waiting.
+fn facts_text(status: &Status) -> String {
+    let mut parts = vec![format!("kelir {}", status_word(status))];
     if !status.model.is_empty() {
         parts.push(status.model.clone());
     }
@@ -355,6 +398,24 @@ pub fn call_head(name: &str, input: &Value) -> String {
             None => "edit".to_string(),
         },
         other => format!("{other} {}", one_line(&input.to_string())),
+    }
+}
+
+/// The reason out of a pause message: "provider unavailable after 2 attempts,
+/// 92 ms: provider error (503); say continue to retry" is a scrollback line,
+/// and the state row already says how to go on, so only the reason is kept.
+fn pause_reason(message: &str) -> Option<String> {
+    let reason = message.split("; say continue").next().unwrap_or("");
+    let reason = reason.trim();
+    (!reason.is_empty()).then(|| reason.to_string())
+}
+
+/// `1 step`, `2 steps`: the count and its noun, never `1 steps`.
+fn plural(count: u32, noun: &str) -> String {
+    if count == 1 {
+        noun.to_string()
+    } else {
+        format!("{noun}s")
     }
 }
 
@@ -940,7 +1001,9 @@ impl App {
                 self.activity
                     .paused(now, &format!("step cap {steps} reached"));
                 self.push_text(&format!(
-                    "turn paused after {steps} steps; say continue to resume"
+                    "turn paused after {} {}; say continue to resume",
+                    steps,
+                    plural(steps, "step")
                 ));
             }
             UiEvent::Delta(text) => {
@@ -1048,20 +1111,9 @@ impl App {
                     }
                 }
             }
-            UiEvent::Retry {
-                retry_in_ms,
-                attempt,
-                detail,
-            } => {
-                let wait = Duration::from_millis(retry_in_ms);
-                if self.activity.kind == Kind::RateLimited {
-                    self.activity.tick_retry(wait);
-                } else {
-                    self.activity.retry(now, wait, attempt, &detail);
-                }
-                self.retry_deadline = Some(now + wait);
-            }
             UiEvent::Attachment { rel, bytes } => {
+                // An image that arrived at the tail is its own block: the row
+                // says where it went and how big it is, dimmed.
                 self.close_group();
                 self.push_lines(vec![Line::from(Span::styled(
                     format!("  view {rel} · {}", attachments::bytes_label(bytes)),
@@ -1069,9 +1121,43 @@ impl App {
                 ))]);
             }
             UiEvent::Info(text) => {
+                // A notice is prose: what settled before it goes out first, or
+                // it lands between two tool lines of the older group (`B1`).
                 self.close_group();
                 self.push_text(&text);
+            }
+            UiEvent::Retrying {
+                line,
+                until,
+                status,
+                attempt,
+            } => {
+                // STEER-5's wait, in both rows: the state row becomes `rate
+                // limited` with a live countdown (tui2's activity machine), and
+                // the facts row carries the whole line (main's status line).
+                let wait = until.saturating_duration_since(now);
+                if self.activity.kind == Kind::RateLimited {
+                    self.activity.tick_retry(wait);
+                } else if status.is_some() || attempt > 0 {
+                    let detail = status.map(|code| code.to_string()).unwrap_or_default();
+                    self.activity.retry(now, wait, attempt, &detail);
+                }
+                if status.is_some() || attempt > 0 {
+                    self.retry_deadline = Some(until);
+                }
+                self.status.retrying = Some((line.clone(), until));
+                // The facts row carries the line and the state row carries the
+                // countdown, so the transient note stays out of the way (it
+                // would repeat the line over the state row's own detail).
                 self.note.clear();
+            }
+            UiEvent::RetryingDone => {
+                self.status.retrying = None;
+                self.retry_deadline = None;
+                self.note.clear();
+                // The retry is being sent: the row goes back to waiting for the
+                // provider rather than freezing on the last countdown.
+                self.activity.retry_done(now);
             }
             UiEvent::Error(text) => {
                 // Same rule: what settled before the failure is written first,
@@ -1102,10 +1188,22 @@ impl App {
                     self.note = one_line(&message);
                 }
             }
-            UiEvent::TurnEnded { outcome, .. } => {
+            UiEvent::TurnEnded {
+                outcome,
+                final_text,
+            } => {
                 self.close_group();
                 self.commit_live("");
                 self.activity.turn_ended(now, &outcome);
+                // A provider pause ends a retry wait, and the wait's own reason
+                // is gone: what the human needs is why the turn paused. The
+                // session's message carries it ahead of the "say continue"
+                // tail, which the row adds itself.
+                if outcome == "paused"
+                    && let Some(reason) = pause_reason(&final_text)
+                {
+                    self.activity.paused(now, &reason);
+                }
                 self.status.phase = match outcome.as_str() {
                     "done" => Phase::Done,
                     "paused" => Phase::Paused,
@@ -1113,6 +1211,7 @@ impl App {
                     _ => Phase::Idle,
                 };
                 self.status.running = 0;
+                self.status.retrying = None;
                 self.note.clear();
                 self.turn_summary(&outcome);
             }
@@ -2183,6 +2282,8 @@ mod tests {
             .collect::<String>()
     }
 
+    /// The facts row as tui2 named it: model, step, tokens, cache and cost, in
+    /// that order, with no running-calls count (the state row carries it).
     #[test]
     fn the_facts_row_names_model_step_tokens_cost_and_ignores_calls() {
         let status = Status {
@@ -2198,6 +2299,166 @@ mod tests {
             turn_steps: 3,
             limit: None,
             phase: Phase::Working,
+            retrying: None,
+        };
+        assert_eq!(
+            status_text(&status),
+            "kelir working · deepseek/deepseek-chat · step 3 · 1.5k tok · 75% cache · $0.0004"
+        );
+        assert!(!status_text(&status).contains("running"));
+        // `done` reads as `idle`, so the two rows cannot disagree (S5).
+        let done = Status {
+            phase: Phase::Done,
+            ..Status::default()
+        };
+        assert!(
+            status_text(&done).starts_with("kelir idle"),
+            "{}",
+            status_text(&done)
+        );
+    }
+
+    #[test]
+    fn a_wait_replaces_the_status_line_and_counts_down() {
+        let mut status = Status {
+            model: "test/model".into(),
+            step: 3,
+            prompt_tokens: 1200,
+            completion_tokens: 340,
+            phase: Phase::Working,
+            ..Status::default()
+        };
+        status.retrying = Some((
+            "rate limited (429): retrying in 34 s, attempt 5, say stop to cancel".into(),
+            Instant::now() + Duration::from_secs(34),
+        ));
+        let text = status_text(&status);
+        assert!(
+            text.starts_with("kelir working · rate limited (429)"),
+            "{text}"
+        );
+        assert!(text.contains("say stop to cancel"), "{text}");
+        assert!(
+            text.ends_with("33 s left") || text.ends_with("34 s left"),
+            "{text}"
+        );
+        // The countdown is a person's clock: sub-second waits read as `ms`.
+        // The usual summary comes back when the wait ends.
+        status.retrying = None;
+        assert!(
+            status_text(&status).contains("step 3"),
+            "{}",
+            status_text(&status)
+        );
+    }
+
+    #[test]
+    fn a_slot_wait_shows_its_words_without_a_meaningless_countdown() {
+        let mut status = Status {
+            phase: Phase::Working,
+            ..Status::default()
+        };
+        status.retrying = Some((
+            "waiting for a provider slot (1)".into(),
+            Instant::now() + Duration::from_secs(86_400),
+        ));
+        assert_eq!(
+            status_text(&status),
+            "kelir working · waiting for a provider slot (1)"
+        );
+    }
+
+    #[test]
+    fn a_retry_is_a_line_and_a_countdown_until_the_turn_ends() {
+        let mut app = app();
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "openrouter".into(),
+            model: "test/model".into(),
+            limit: None,
+        });
+        app.apply(UiEvent::Retrying {
+            line: "rate limited (429): retrying in 34 s, attempt 5, say stop to cancel".into(),
+            until: Instant::now() + Duration::from_secs(34),
+            status: Some(429),
+            attempt: 5,
+        });
+        // The countdown feeds both rows and neither repeats the other: the
+        // facts row carries the line, the state row its own `rate limited`
+        // state with the remaining seconds, so the transient note stays empty.
+        assert!(app.note().is_empty(), "{}", app.note());
+        let facts = status_text(&app.status);
+        assert!(facts.contains("retrying in 34 s"), "{facts}");
+        assert_eq!(app.activity.kind, Kind::RateLimited);
+        let state = line_text(&app.activity.line(app.theme, 0, Instant::now(), 100));
+        assert!(state.contains("rate limited"), "{state}");
+        assert!(state.contains("retrying in 34 s"), "{state}");
+        assert!(state.contains("attempt 5"), "{state}");
+        snap(&mut app);
+        app.apply(UiEvent::RetryingDone);
+        assert!(app.note().is_empty());
+        // A paused turn is its own phase: not an error, not idle in the sense
+        // of "nothing to see".
+        app.apply(UiEvent::TurnEnded {
+            outcome: "paused".into(),
+            final_text: "provider unavailable after 3 attempts, 30 min: rate limited (429); say continue to retry".into(),
+        });
+        assert_eq!(app.status.phase, Phase::Paused);
+        // The row says why, without repeating the scrollback's instruction.
+        assert_eq!(app.activity.kind, Kind::Paused);
+        let row = line_text(&app.activity.line(app.theme, 0, Instant::now(), 100));
+        assert!(
+            row.contains("provider unavailable after 3 attempts"),
+            "{row}"
+        );
+        assert!(row.contains("say continue"), "{row}");
+        assert!(!row.contains("say continue to retry"), "{row}");
+        assert!(status_text(&app.status).starts_with("kelir paused"));
+    }
+
+    /// The countdown draws: it is one row, clipped to the width, and never
+    /// wraps the viewport.
+    fn snap(app: &mut App) -> String {
+        let backend = ratatui::backend::TestBackend::new(60, VIEWPORT_HEIGHT);
+        let mut terminal = ratatui::Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Inline(VIEWPORT_HEIGHT),
+            },
+        )
+        .unwrap();
+        terminal.draw(|frame| render(app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if let Some(cell) = buffer.cell(Rect::new(x, y, 1, 1).as_position()) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The same row under the name main's side gave it: after the merge there
+    /// is one facts row, so both names assert it.
+    #[test]
+    fn the_status_line_names_model_step_tokens_cost_and_calls() {
+        let status = Status {
+            provider: "openrouter".into(),
+            model: "deepseek/deepseek-chat".into(),
+            turn: 1,
+            step: 3,
+            prompt_tokens: 1200,
+            completion_tokens: 340,
+            cached_tokens: 900,
+            cost: 0.00042,
+            running: 2,
+            turn_steps: 3,
+            limit: None,
+            phase: Phase::Working,
+            retrying: None,
         };
         assert_eq!(
             status_text(&status),
@@ -2267,6 +2528,31 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    /// One step is one step: the pause line never says `1 steps` (the same
+    /// rule the summary line follows, review N4).
+    #[test]
+    fn a_one_step_pause_reads_one_step() {
+        let mut app = app_of_width(80);
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: Some(1),
+        });
+        app.apply(UiEvent::Paused { steps: 1 });
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|row| row.contains("turn paused after 1 step;")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|row| row.contains("1 steps")),
+            "{texts:?}"
+        );
     }
 
     /// A paused turn says so in the state row and in one line of text, and it
@@ -2949,6 +3235,9 @@ mod tests {
         assert!(texts.iter().any(|row| row.contains("stop")), "{texts:?}");
     }
 
+    /// STEER-5's wait feeds tui2's state row: a provider retry turns the row
+    /// into `rate limited` with the countdown and the attempt, and the following
+    /// step leaves it behind.
     #[test]
     fn a_retry_event_puts_the_countdown_in_the_state_row() {
         let mut app = app_of_width(100);
@@ -2958,16 +3247,21 @@ mod tests {
             model: "m".into(),
             limit: None,
         });
-        app.apply(UiEvent::Retry {
-            retry_in_ms: 34_000,
+        app.apply(UiEvent::Retrying {
+            line: "rate limited (429): retrying in 34 s, attempt 5, say stop to cancel".into(),
+            until: Instant::now() + Duration::from_secs(34),
+            status: Some(429),
             attempt: 5,
-            detail: "429".into(),
         });
         assert_eq!(app.activity.kind, Kind::RateLimited);
         let row = line_text(&app.activity.line(app.theme, 0, Instant::now(), 100));
         assert!(row.contains("rate limited"), "{row:?}");
         assert!(row.contains("retrying in 34 s"), "{row:?}");
         assert!(row.contains("attempt 5"), "{row:?}");
+        // The countdown is read from the wall clock as it ticks, not frozen.
+        app.tick(Instant::now() + Duration::from_secs(10));
+        let row = line_text(&app.activity.line(app.theme, 0, Instant::now(), 100));
+        assert!(row.contains("retrying in 24 s"), "{row:?}");
         // A following step leaves the countdown behind.
         app.apply(UiEvent::Step {
             step: 2,
@@ -2977,6 +3271,59 @@ mod tests {
             limit: None,
         });
         assert_eq!(app.activity.kind, Kind::Thinking);
+    }
+
+    /// A governor slot wait is not a provider retry: the facts row says what
+    /// the session is waiting for, and the state row keeps the work it was
+    /// doing rather than claiming the provider rate-limited us.
+    #[test]
+    fn a_slot_wait_does_not_become_a_rate_limited_state() {
+        let mut app = app_of_width(100);
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: None,
+        });
+        app.apply(UiEvent::Retrying {
+            line: "waiting for a provider slot (1)".into(),
+            until: Instant::now() + Duration::from_secs(86_400),
+            status: None,
+            attempt: 0,
+        });
+        assert_eq!(app.activity.kind, Kind::Thinking);
+        assert!(
+            status_text(&app.status).contains("waiting for a provider slot (1)"),
+            "{}",
+            status_text(&app.status)
+        );
+        // And when the slot comes free, the wait is gone from both rows.
+        app.apply(UiEvent::RetryingDone);
+        assert!(app.status.retrying.is_none());
+        assert!(app.note().is_empty());
+    }
+
+    /// A retry that ends puts the state row back to waiting for the provider
+    /// (not stuck on the last countdown), and a paused turn keeps `paused`.
+    #[test]
+    fn a_finished_retry_returns_the_row_to_thinking() {
+        let mut app = app_of_width(100);
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: None,
+        });
+        app.apply(UiEvent::Retrying {
+            line: "rate limited (429): retrying in 5 s, attempt 2, say stop to cancel".into(),
+            until: Instant::now() + Duration::from_secs(5),
+            status: Some(429),
+            attempt: 2,
+        });
+        assert_eq!(app.activity.kind, Kind::RateLimited);
+        app.apply(UiEvent::RetryingDone);
+        assert_eq!(app.activity.kind, Kind::Thinking);
+        assert!(app.activity.retry_in.is_none());
     }
 
     #[test]

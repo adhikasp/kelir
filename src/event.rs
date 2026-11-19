@@ -238,6 +238,7 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             system,
             sources,
             tools,
+            reasoning_effort,
         } => EventBody::SessionStarted {
             id,
             parent,
@@ -253,6 +254,7 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             },
             sources,
             tools,
+            reasoning_effort,
         },
         EventBody::User {
             text,
@@ -366,9 +368,11 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
         },
         EventBody::TurnEnded {
             outcome,
+            reason,
             final_text,
         } => EventBody::TurnEnded {
             outcome,
+            reason,
             final_text: spill_payload(blobs, seq, "final_text", final_text)?,
         },
         EventBody::Compacted {
@@ -467,6 +471,12 @@ pub enum EventBody {
         sources: Vec<SourceInfo>,
         #[serde(default)]
         tools: Vec<String>,
+        /// The `reasoning_effort` sent with every request of this session, when
+        /// one is set. Recorded so the log and the request agree: the value is
+        /// part of what the provider was asked for, and a reader of a session
+        /// should not have to guess it (STEER-6).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<String>,
     },
     User {
         text: Payload,
@@ -549,6 +559,11 @@ pub enum EventBody {
     },
     TurnEnded {
         outcome: String,
+        /// Why the turn paused (`steps`: an explicit `max_steps` cap,
+        /// `provider`: the retry budget ran out). Absent for every other
+        /// outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
         final_text: Payload,
     },
     /// A background job exists: an explicit `kelir bg run` (which reports
@@ -607,6 +622,16 @@ pub enum EventBody {
         location: String,
         message: String,
         retryable: bool,
+        /// The HTTP status, when there was a response (`provider` errors).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+        /// Which provider request failed, counting from 1 for this request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        /// How long kelir will wait before the next attempt. Absent when it
+        /// will not retry, so a reader can tell "waited 34 s" from "gave up".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_in_ms: Option<u64>,
     },
     SessionEnded {
         reason: String,
@@ -840,6 +865,7 @@ mod tests {
             },
             sources: vec![],
             tools: vec!["bash".into(), "edit".into()],
+            reasoning_effort: None,
         }
     }
 
@@ -907,6 +933,7 @@ mod tests {
             },
             EventBody::TurnEnded {
                 outcome: "done".into(),
+                reason: None,
                 final_text: "done".into(),
             },
             EventBody::BgStarted {
@@ -941,6 +968,9 @@ mod tests {
                 location: "provider".into(),
                 message: "boom".into(),
                 retryable: true,
+                status: Some(500),
+                attempt: Some(2),
+                retry_in_ms: Some(1_500),
             },
             EventBody::SessionEnded {
                 reason: "done".into(),

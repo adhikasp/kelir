@@ -106,8 +106,8 @@ are never inline: the event holds the path.
 | `verb` | `name`, `args`, `from` | every verb received, applied or not |
 | `gate` | `gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?` | every gate run, including fail-open ones |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by` (`user`, `agent`, `auto`), `tokens_before`, `tokens_after` | the fold replaces everything up to `through_seq` except the pins |
-| `turn_ended` | `outcome` (`done`, `stopped`, `paused`, `error`), `final_text` | `paused` is an explicit `max_steps` cap, not a failure: `--keep` stays alive and the next message opens a new turn |
-| `error` | `where`, `message`, `retryable` | provider errors, broken gates, torn lines |
+| `turn_ended` | `outcome` (`done`, `stopped`, `paused`, `error`), `final_text`, `reason?` | `paused` covers two cases, distinguished by `reason`: `steps` (an explicit `max_steps` cap) and `provider` (the retry budget was exhausted). Neither is a failure: `--keep` stays alive and the next message opens a new turn |
+| `error` | `where`, `message`, `retryable`, `status?`, `attempt?`, `retry_in_ms?` | provider errors, broken gates, torn lines. A retryable provider error's `message` is the status and its class (`http 429: rate limited`), never a response body |
 | `resumed` | `from_seq`, `unsettled[]` | `unsettled` lists started-but-unsettled calls |
 | `session_ended` | `reason` | |
 
@@ -177,7 +177,7 @@ Per provider (OpenRouter's caching page read 2026-11-18):
 
 | | Linux / macOS | Windows |
 |---|---|---|
-| shell (`shell` in config) | `bash -c` (falls back to `$SHELL`) | Git for Windows `bash.exe`; `agshell` or `pwsh` by config |
+| shell (`shell` in config) | `bash -c` (falls back to `$SHELL`); a command over 6 KB runs from a file | Git for Windows `bash.exe`; `agshell` or `pwsh` by config. Every command runs from a file (switch kept: `/C`, `-File`) — see DEVIATIONS |
 | process tree | own process group (`setsid`), `killpg` on stop | Job Object per call (kill-on-close), `CREATE_NEW_PROCESS_GROUP` |
 | session socket | Unix socket | named pipe (both via the `interprocess` crate) |
 | detached bg job | `setsid`, outside the session's group | `DETACHED_PROCESS`, outside the session's Job Object |
@@ -326,6 +326,33 @@ User-Agent. Cost (and Go's `allowance`) come from the final usage chunk
 (`stream_options.include_usage`). Keys from the environment (`OPENROUTER_API_KEY`, the Go
 `oc_sk_…` key); never printed. The default model is `deepseek/deepseek-v4.1-flash-1017` on
 OpenRouter (the maintainer's call, 2026-11-19); the Go equivalent is `deepseek-v4.1-flash`.
+
+**Transient provider errors are ridden out, not fatal.** 429, 408, every 5xx
+(incl. 529/loaded) and a request that dies before any tool call of the step began
+are retried: `Retry-After` (seconds or HTTP-date) and the reset headers
+(`x-ratelimit-reset*`, `anthropic-ratelimit-*-reset`) are honoured when present,
+otherwise exponential with full jitter (base 2 s, factor 2, cap 120 s). The whole
+request works inside one waiting budget (`retry_max_wait`, default 30 min, `0` =
+unlimited); when it runs out the turn is **paused** (`turn_ended` outcome
+`paused` with `reason: "provider"`, "provider unavailable …; say `continue` to
+retry"), never failed, and the next `say` retries from the same fold. A hint
+never shortens a wait below a quarter second, so a provider that says
+`Retry-After: 0` for ever cannot turn "backoff" into a hot loop. Every wait
+writes an `error` event
+(`where: "provider"`, `retryable`, status, attempt, `retry_in_ms`) and a visible
+line ("rate limited (429): retrying in 34 s, attempt 5, say stop to cancel"), and
+it is interruptible: `stop`, `end` and a signal end the turn at once, `say
+--now` and `model` apply at once and the request is re-sent immediately (with
+the message in the fold, or on the new model and its provider's governor, and
+with a fresh budget); `later`, `tools`, `skills` and `compact` keep their
+boundary. A stopped or interrupted wait ends the turn `stopped`. 400/401/403/404
+are never retried, and a retryable failure's `error` message is the status and
+its class only — never a response body, which can echo a credential.
+`[providers.<name>] max_concurrent_requests = N` is an opt-in client-side
+governor: N advisory OS file locks under `<state root>/locks/`, so several local
+kelir processes never overlap more than N requests on one account, and a crashed
+holder leaks nothing. It follows the provider a request goes to, so a `model`
+swap takes the new provider's slots (a compaction's summary request included).
 
 kelir keeps no table of model facts. It reads the provider's own `GET {base}/models` —
 `context_length` and `supported_parameters` on OpenRouter, `limit.context` and a `capabilities`

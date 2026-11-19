@@ -38,83 +38,203 @@ pub fn run(args: &Value, ctx: &Ctx, dir: &str) -> ToolOutcome {
 }
 
 /// The edit itself; the caller adds the command file bookkeeping.
+///
+/// One hunk (`old`/`new`/`replace_all`) or several (`edits: [{old, new,
+/// replace_all?}, …]`). Several hunks are **atomic**: they apply in order
+/// against the evolving text, every one of them is checked before anything is
+/// written, and the file is written once. A hunk that does not match therefore
+/// leaves the file exactly as it was, which is what a multi-hunk patch tool has
+/// to do — a half-applied patch is the failure the model used `python -` for.
 fn edit(args: &Value, ctx: &Ctx) -> Result<String, String> {
     let raw_path = args
         .get("path")
         .and_then(|v| v.as_str())
         .filter(|p| !p.is_empty())
         .ok_or_else(|| "edit: missing `path`".to_string())?;
-    let old = args
-        .get("old")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "edit: missing `old` (send \"\" to create a file)".to_string())?;
-    let new = args
-        .get("new")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "edit: missing `new`".to_string())?;
-    let replace_all = args
-        .get("replace_all")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
+    let hunks = parse_hunks(args)?;
     let path = resolve(&ctx.cwd, raw_path);
     let display = raw_path.to_string();
 
     if !path.exists() {
-        if !old.is_empty() {
-            return Err(format!("edit: file not found: {display}"));
-        }
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("edit: cannot create {}: {error}", parent.display()))?;
-        }
-        std::fs::write(&path, new.as_bytes())
-            .map_err(|error| format!("edit: cannot write {display}: {error}"))?;
-        return Ok(format!("created {display} ({} bytes)", new.len()));
+        return create(&path, &display, &hunks);
     }
-
     let bytes =
         std::fs::read(&path).map_err(|error| format!("edit: cannot read {display}: {error}"))?;
     let content = String::from_utf8(bytes)
         .map_err(|_| format!("edit: {display} is not valid UTF-8; use bash for binary files"))?;
-
-    if old.is_empty() {
-        return Err(format!(
-            "edit: `old` is empty but {display} already exists; pass the exact text to replace"
+    let mut text = content.clone();
+    let mut reported: Vec<String> = Vec::new();
+    for (index, hunk) in hunks.iter().enumerate() {
+        let line = apply(&mut text, hunk, &display, index, hunks.len())?;
+        reported.push(line);
+    }
+    if text == content {
+        // Nothing changed the bytes (a hunk replaced text with itself). Writing
+        // would touch the mtime for no reason; say what happened instead.
+        return Ok(format!(
+            "edited {display}: {}",
+            if hunks.len() == 1 {
+                "no change (the replacement equals the text it replaces)".to_string()
+            } else {
+                format!("{} changes, none of which altered the file", hunks.len())
+            }
         ));
     }
+    std::fs::write(&path, text.as_bytes())
+        .map_err(|error| format!("edit: cannot write {display}: {error}"))?;
+    Ok(join_report(&display, &reported))
+}
 
-    let (needle, replacement) = match_line_endings(&content, old, new);
-    let matches = find_matches(&content, &needle);
-    if matches.is_empty() {
-        return Err(format!("edit: `old` not found in {display}"));
+/// One replacement.
+struct Hunk {
+    old: String,
+    new: String,
+    replace_all: bool,
+}
+
+/// Read the arguments into hunks: `old`/`new`/`replace_all`, or `edits`.
+fn parse_hunks(args: &Value) -> Result<Vec<Hunk>, String> {
+    let single = args.get("old").is_some() || args.get("new").is_some();
+    let list = args.get("edits");
+    match (single, list) {
+        (true, Some(_)) => Err(
+            "edit: send either `old`/`new` or `edits`, not both (one call, one form)".to_string(),
+        ),
+        (true, None) => Ok(vec![Hunk {
+            old: args
+                .get("old")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "edit: missing `old` (send \"\" to create a file)".to_string())?
+                .to_string(),
+            new: args
+                .get("new")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "edit: missing `new`".to_string())?
+                .to_string(),
+            replace_all: args
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        }]),
+        (false, Some(list)) => {
+            let items = list
+                .as_array()
+                .ok_or_else(|| "edit: `edits` must be an array".to_string())?;
+            if items.is_empty() {
+                return Err("edit: `edits` is empty: send at least one {old, new}".to_string());
+            }
+            let mut hunks = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                let at = index + 1;
+                let old = item
+                    .get("old")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| format!("edit: edits[{at}] is missing `old`"))?;
+                let new = item
+                    .get("new")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| format!("edit: edits[{at}] is missing `new`"))?;
+                hunks.push(Hunk {
+                    old: old.to_string(),
+                    new: new.to_string(),
+                    replace_all: item
+                        .get("replace_all")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                });
+            }
+            Ok(hunks)
+        }
+        (false, None) => Err(
+            "edit: missing `old` and `new` (send \"\" as `old` to create a file, or `edits`)"
+                .to_string(),
+        ),
     }
-    if matches.len() > 1 && !replace_all {
+}
+/// The file does not exist: only an empty `old` can create it, and the hunks
+/// after that apply to what the first one wrote.
+fn create(path: &Path, display: &str, hunks: &[Hunk]) -> Result<String, String> {
+    let Some(first) = hunks.first() else {
+        return Err("edit: no changes".to_string());
+    };
+    if !first.old.is_empty() {
+        return Err(format!("edit: file not found: {display}"));
+    }
+    for (index, hunk) in hunks.iter().enumerate().skip(1) {
+        if hunk.old.is_empty() {
+            return Err(format!(
+                "edit: edits[{}] has an empty `old`, but {display} does not exist yet (only the \
+                 first hunk can create it: put the whole content there)",
+                index + 1
+            ));
+        }
+    }
+    // The later hunks edit what the first one created, so one call can create
+    // and refine a file atomically.
+    let mut text = first.new.clone();
+    let mut reported = vec![format!("created {display} ({} bytes)", text.len())];
+    for (index, hunk) in hunks.iter().enumerate().skip(1) {
+        let line = apply(&mut text, hunk, display, index, hunks.len())?;
+        reported.push(line);
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("edit: cannot create {}: {error}", parent.display()))?;
+    }
+    std::fs::write(path, text.as_bytes())
+        .map_err(|error| format!("edit: cannot write {display}: {error}"))?;
+    Ok(join_report(display, &reported))
+}
+
+/// Apply one hunk to `text`, returning the one result line for it. Every check
+/// happens before the caller writes anything, so a failure here leaves the file
+/// untouched on disk.
+fn apply(
+    text: &mut String,
+    hunk: &Hunk,
+    display: &str,
+    index: usize,
+    total: usize,
+) -> Result<String, String> {
+    let prefix = if total > 1 {
+        format!("change {} of {total}: ", index + 1)
+    } else {
+        String::new()
+    };
+    if hunk.old.is_empty() {
         return Err(format!(
-            "edit: `old` matches {} times in {display}; pass replace_all or include more context",
+            "edit: {prefix}`old` is empty but {display} already exists; pass the exact text to \
+             replace"
+        ));
+    }
+    let (needle, replacement) = match_line_endings(text, &hunk.old, &hunk.new);
+    let matches = find_matches(text, &needle);
+    if matches.is_empty() {
+        return Err(format!(
+            "edit: {prefix}`old` not found in {display}. Nothing was written ({total} hunk{} in \
+             this call, {index} applied)",
+            if total == 1 { "" } else { "s" }
+        ));
+    }
+    if matches.len() > 1 && !hunk.replace_all {
+        return Err(format!(
+            "edit: {prefix}`old` matches {} times in {display}; pass replace_all or include more \
+             context. Nothing was written",
             matches.len()
         ));
     }
-
-    let line_numbers = line_numbers(&content, &matches);
-    let updated = if replace_all {
-        content.replace(&needle, &replacement)
+    let line_numbers = line_numbers(text, &matches);
+    let count = if hunk.replace_all { matches.len() } else { 1 };
+    if hunk.replace_all {
+        *text = text.replace(&needle, &replacement);
     } else {
         let at = matches[0];
-        let mut out = String::with_capacity(content.len() - needle.len() + replacement.len());
-        out.push_str(&content[..at]);
-        out.push_str(&replacement);
-        out.push_str(&content[at + needle.len()..]);
-        out
-    };
-    std::fs::write(&path, updated.as_bytes())
-        .map_err(|error| format!("edit: cannot write {display}: {error}"))?;
-
-    let count = if replace_all { matches.len() } else { 1 };
+        text.replace_range(at..at + needle.len(), &replacement);
+    }
     Ok(format!(
-        "edited {display}: replaced {count} {} at line{} {}",
+        "{prefix}replaced {count} {} at line{} {}",
         if count == 1 {
             "occurrence"
         } else {
@@ -123,6 +243,24 @@ fn edit(args: &Value, ctx: &Ctx) -> Result<String, String> {
         if line_numbers.len() == 1 { "" } else { "s" },
         render_lines(&line_numbers)
     ))
+}
+
+/// The result text: one line per change under a headline, so a multi-edit reads
+/// as a list while a single edit keeps its old, one-line shape.
+fn join_report(display: &str, reported: &[String]) -> String {
+    match reported {
+        [] => format!("edited {display}: nothing to do"),
+        [one] if one.starts_with("edited ") => one.clone(),
+        [one] => format!("edited {display}: {one}"),
+        many => {
+            let mut out = format!("edited {display}: {} changes, all applied", many.len());
+            for line in many {
+                out.push_str("\n  ");
+                out.push_str(line);
+            }
+            out
+        }
+    }
 }
 
 /// The pattern to use: the literal text if it occurs, else the same text with
@@ -421,5 +559,176 @@ mod tests {
     fn find_matches_is_non_overlapping() {
         assert_eq!(find_matches("aaaa", "aa"), vec![0, 2]);
         assert_eq!(find_matches("abc", "z"), Vec::<usize>::new());
+    }
+
+    // ---------------------------------------------------------- multi-hunk
+
+    fn edits(path: &str, pairs: &[(&str, &str)]) -> Value {
+        let items: Vec<Value> = pairs
+            .iter()
+            .map(|(old, new)| serde_json::json!({"old": old, "new": new}))
+            .collect();
+        serde_json::json!({"path": path, "edits": items})
+    }
+
+    #[test]
+    fn several_hunks_apply_in_order_to_one_file() {
+        let f = fixture();
+        std::fs::write(f.ctx.cwd.join("a.rs"), "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+        let args = edits(
+            "a.rs",
+            &[("fn a()", "fn alpha()"), ("fn c()", "fn gamma()")],
+        );
+        let outcome = run(&args, &f.ctx, "m1");
+        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
+        assert_eq!(
+            std::fs::read_to_string(f.ctx.cwd.join("a.rs")).unwrap(),
+            "fn alpha() {}\nfn b() {}\nfn gamma() {}\n"
+        );
+        // One result line per change, and the headline says all of them landed.
+        assert!(
+            outcome.result.contains("2 changes, all applied"),
+            "{}",
+            outcome.result
+        );
+        assert!(
+            outcome.result.contains("change 1 of 2"),
+            "{}",
+            outcome.result
+        );
+        assert!(
+            outcome.result.contains("change 2 of 2"),
+            "{}",
+            outcome.result
+        );
+        assert!(outcome.result.contains("line 1"), "{}", outcome.result);
+        assert!(outcome.result.contains("line 3"), "{}", outcome.result);
+    }
+
+    #[test]
+    fn a_later_hunk_that_does_not_match_leaves_the_file_untouched() {
+        let f = fixture();
+        let original = "one\ntwo\n";
+        std::fs::write(f.ctx.cwd.join("a.txt"), original).unwrap();
+        let args = edits("a.txt", &[("one", "ONE"), ("nope", "x")]);
+        let outcome = run(&args, &f.ctx, "m2");
+        assert_eq!(outcome.outcome, "error");
+        assert!(outcome.result.contains("not found"), "{}", outcome.result);
+        assert!(
+            outcome.result.contains("Nothing was written"),
+            "{}",
+            outcome.result
+        );
+        assert_eq!(
+            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
+            original,
+            "an all-or-none edit must not half-apply"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_hunk_refuses_the_whole_call() {
+        let f = fixture();
+        std::fs::write(f.ctx.cwd.join("a.txt"), "x\ny\nx\n").unwrap();
+        let args = edits("a.txt", &[("y", "Y"), ("x", "z")]);
+        let outcome = run(&args, &f.ctx, "m3");
+        assert_eq!(outcome.outcome, "error");
+        assert!(
+            outcome.result.contains("matches 2 times"),
+            "{}",
+            outcome.result
+        );
+        assert_eq!(
+            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
+            "x\ny\nx\n"
+        );
+
+        // `replace_all` per hunk fixes it without changing the other hunks.
+        let args = serde_json::json!({"path": "a.txt", "edits": [
+            {"old": "y", "new": "Y"},
+            {"old": "x", "new": "z", "replace_all": true}
+        ]});
+        let outcome = run(&args, &f.ctx, "m4");
+        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
+        assert_eq!(
+            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
+            "z\nY\nz\n"
+        );
+    }
+
+    #[test]
+    fn hunks_see_what_earlier_hunks_wrote() {
+        let f = fixture();
+        std::fs::write(f.ctx.cwd.join("a.txt"), "start\n").unwrap();
+        // The second `old` only exists after the first replacement.
+        let args = edits("a.txt", &[("start", "mid"), ("mid", "end")]);
+        let outcome = run(&args, &f.ctx, "m5");
+        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
+        assert_eq!(
+            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
+            "end\n"
+        );
+    }
+
+    #[test]
+    fn the_first_hunk_creates_the_file_and_the_rest_refine_it() {
+        let f = fixture();
+        let args = edits("new/deep/a.txt", &[("", "alpha\nbeta\n"), ("beta", "BETA")]);
+        let outcome = run(&args, &f.ctx, "m6");
+        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
+        assert_eq!(
+            std::fs::read_to_string(f.ctx.cwd.join("new/deep/a.txt")).unwrap(),
+            "alpha\nBETA\n"
+        );
+        assert!(outcome.result.contains("created"), "{}", outcome.result);
+    }
+
+    #[test]
+    fn an_empty_old_on_a_later_hunk_is_refused_for_a_missing_file() {
+        let f = fixture();
+        let args = edits("new.txt", &[("", "content\n"), ("", "more\n")]);
+        let outcome = run(&args, &f.ctx, "m7");
+        assert_eq!(outcome.outcome, "error");
+        assert!(
+            outcome.result.contains("only the first hunk"),
+            "{}",
+            outcome.result
+        );
+        assert!(!f.ctx.cwd.join("new.txt").exists());
+    }
+
+    #[test]
+    fn one_call_cannot_mix_old_new_and_edits() {
+        let f = fixture();
+        std::fs::write(f.ctx.cwd.join("a.txt"), "one\n").unwrap();
+        let args = serde_json::json!({
+            "path": "a.txt",
+            "old": "one",
+            "new": "two",
+            "edits": [{"old": "one", "new": "three"}]
+        });
+        let outcome = run(&args, &f.ctx, "m8");
+        assert_eq!(outcome.outcome, "error");
+        assert!(outcome.result.contains("not both"), "{}", outcome.result);
+    }
+
+    #[test]
+    fn an_empty_edits_list_is_refused() {
+        let f = fixture();
+        let args = serde_json::json!({"path": "a.txt", "edits": []});
+        let outcome = run(&args, &f.ctx, "m9");
+        assert_eq!(outcome.outcome, "error");
+        assert!(outcome.result.contains("empty"), "{}", outcome.result);
+    }
+
+    #[test]
+    fn a_multi_hunk_result_stays_one_line_per_change() {
+        let f = fixture();
+        std::fs::write(f.ctx.cwd.join("a.txt"), "a\nb\n").unwrap();
+        let args = edits("a.txt", &[("a", "A"), ("b", "B")]);
+        let outcome = run(&args, &f.ctx, "m10");
+        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
+        // Headline + two lines, no more: a multi-edit must stay cheap to read.
+        assert_eq!(outcome.result.lines().count(), 3, "{}", outcome.result);
     }
 }

@@ -25,6 +25,16 @@ image chips).
 A shorter terminal gives rows up in this order: the facts row, live rows, the
 editor down to one row; the state row is the last to go.
 
+While the session waits before trying the provider again (a retryable HTTP
+status) or for a concurrency-governor slot, the facts row shows the wait
+instead of the usual summary: `kelir working · rate limited (429): retrying in
+34 s, attempt 5, say stop to cancel · 33 s left`. The countdown is read from the
+wall clock on each tick, so it moves; a slot wait has no deadline worth reading
+and shows its words only. A provider retry also turns the state row `rate
+limited` (see below); a slot wait leaves the state row on the work it was doing.
+The same wait is one dim line in the scrollback (`» rate limited (429): …`) and
+an `error` event in the log, so NDJSON, the pane and the transcript agree.
+
 ## States (the state row)
 
 | state | glyph | looks like |

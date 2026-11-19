@@ -31,8 +31,21 @@ pub struct ProviderConfig {
     pub key: Option<String>,
     pub extra_headers: BTreeMap<String, String>,
     pub reasoning_field: Option<String>,
+    /// How much hidden reasoning the model should spend on this session's
+    /// requests (`low`, `medium`, `high`), sent as `reasoning_effort`. `None`
+    /// sends no field at all, which is the provider's own default.
+    pub reasoning_effort: Option<String>,
+    /// Whether [`ProviderConfig::reasoning_effort`] came from the config file
+    /// rather than from kelir's own default (`medium`). An explicit choice is
+    /// what lets the field reach a model the provider's list says nothing
+    /// about; the default only goes where the list says it is supported
+    /// (STEER-6 review S3).
+    pub reasoning_effort_explicit: bool,
     /// Header carrying the session id for providers that require one.
     pub session_header: Option<String>,
+    /// Client-side concurrency governor: at most this many requests in flight
+    /// per provider across every local kelir process (`0`/unset = off).
+    pub max_concurrent_requests: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +72,10 @@ pub struct Config {
     pub model_windows: BTreeMap<String, u64>,
     /// Fraction of the window at which compaction triggers automatically.
     pub auto_compact_at: f64,
+    /// An absolute soft target in tokens: compaction triggers at
+    /// `min(window * auto_compact_at, compact_at_tokens)`, so a huge window does
+    /// not carry a 400K-token context. `0` disables the cap.
+    pub compact_at_tokens: u64,
     /// The summary prompt (`compact_prompt`/`compact.md`, else embedded).
     pub compact_prompt: String,
     /// Extra skills directories (`skills_dirs`), machine layer: they are named
@@ -70,6 +87,9 @@ pub struct Config {
     /// job instead of being killed (`config.toml` `promote_after`, seconds;
     /// `KELIR_PROMOTE_AFTER` overrides it; zero disables promotion).
     pub promote_after: std::time::Duration,
+    /// What to retry and how long to wait (`retry_base_ms`, `retry_cap_ms`,
+    /// `retry_max_wait`).
+    pub retry: crate::retry::Policy,
 }
 
 #[derive(Debug)]
@@ -97,10 +117,18 @@ struct RawConfig {
     window: Option<u64>,
     model_windows: BTreeMap<String, u64>,
     auto_compact_at: Option<f64>,
+    compact_at_tokens: Option<u64>,
     compact_prompt: Option<String>,
     compact_keep: Option<usize>,
     skills_dirs: Vec<PathBuf>,
     promote_after: Option<u64>,
+    retry_base_ms: Option<u64>,
+    retry_cap_ms: Option<u64>,
+    /// Total waiting per request in seconds; `0` waits as long as it takes.
+    retry_max_wait: Option<u64>,
+    /// A count cap inside the budget (`retry_max_attempts`), for a job that
+    /// wants "three tries and out".
+    retry_max_attempts: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,7 +146,9 @@ struct RawProvider {
     key_env: Option<String>,
     extra_headers: BTreeMap<String, String>,
     reasoning_field: Option<String>,
+    reasoning_effort: Option<String>,
     session_header: Option<String>,
+    max_concurrent_requests: Option<u32>,
 }
 
 pub const PROVIDER_OPENROUTER: &str = "openrouter";
@@ -170,6 +200,9 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     let raw: RawConfig = merged
         .try_into()
         .map_err(|error| ConfigError(format!("invalid config.toml: {error}")))?;
+    // Read the knobs that are plain numbers before anything is moved out of
+    // `raw`.
+    let retry = retry_policy(&raw)?;
 
     let shell = match raw.shell {
         Some(ShellSpec::One(shell)) => vec![shell, "-c".into()],
@@ -207,6 +240,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             .filter(|url| !url.is_empty())
             .ok_or_else(|| ConfigError(format!("provider `{name}`: base_url is required")))?;
         let key = entry.key_env.as_deref().and_then(secret_from_env);
+        let (effort, effort_explicit) = reasoning_effort(entry.reasoning_effort, &name)?;
         providers.insert(
             name,
             ProviderConfig {
@@ -216,7 +250,10 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
                 key,
                 extra_headers: entry.extra_headers,
                 reasoning_field: entry.reasoning_field,
+                reasoning_effort: effort,
+                reasoning_effort_explicit: effort_explicit,
                 session_header: entry.session_header,
+                max_concurrent_requests: entry.max_concurrent_requests.filter(|slots| *slots > 0),
             },
         );
     }
@@ -233,6 +270,9 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     }
 
     Ok(Config {
+        compact_at_tokens: raw
+            .compact_at_tokens
+            .unwrap_or(crate::compact::DEFAULT_SOFT_TARGET),
         provider: raw.provider.unwrap_or_else(|| PROVIDER_OPENROUTER.into()),
         model: raw
             .model
@@ -255,7 +295,74 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             .collect(),
         compact_keep: raw.compact_keep.unwrap_or(crate::compact::DEFAULT_KEEP),
         promote_after: promote_after(raw.promote_after)?,
+        retry,
     })
+}
+
+/// The retry schedule and budget. A wrong value is a config error rather than a
+/// silent fallback: a person who writes `retry_max_wait` means it.
+fn retry_policy(raw: &RawConfig) -> Result<crate::retry::Policy, ConfigError> {
+    let base_ms = raw.retry_base_ms.unwrap_or(crate::retry::DEFAULT_BASE_MS);
+    let cap_ms = raw.retry_cap_ms.unwrap_or(crate::retry::DEFAULT_CAP_MS);
+    if cap_ms < base_ms {
+        return Err(ConfigError(format!(
+            "retry_cap_ms ({cap_ms}) must be at least retry_base_ms ({base_ms})"
+        )));
+    }
+    let max_wait = match raw.retry_max_wait {
+        // `0` is the documented "wait as long as the provider needs".
+        Some(0) => None,
+        Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
+        None => Some(std::time::Duration::from_secs(
+            crate::retry::DEFAULT_WAIT_SECS,
+        )),
+    };
+    Ok(crate::retry::Policy {
+        base_ms,
+        cap_ms,
+        max_wait,
+        max_attempts: raw.retry_max_attempts.filter(|attempts| *attempts > 0),
+    })
+}
+
+/// The effort kelir asks for when the config says nothing: enough thinking to
+/// plan, not enough to re-derive the plan every step (STEER-6, F1).
+pub const DEFAULT_REASONING_EFFORT: &str = "medium";
+
+/// The values `reasoning_effort` accepts. The providers document `low`,
+/// `medium` and `high`; a value outside that set is a typo, and a typo sent as
+/// a request field is a 400 at the first step, so it is refused here instead.
+pub const REASONING_EFFORTS: [&str; 3] = ["low", "medium", "high"];
+
+/// Resolve one provider's `reasoning_effort`:
+///
+/// * unset (or empty) -> [`DEFAULT_REASONING_EFFORT`], the loop's own choice;
+/// * `none` -> `None`: send no field at all, i.e. the provider's default;
+/// * `low`/`medium`/`high` -> that, verbatim (lower-cased).
+///
+/// A value outside the set is refused at load: it would be a 400 on the first
+/// request, which is a worse way to find out.
+fn reasoning_effort(
+    configured: Option<String>,
+    provider: &str,
+) -> Result<(Option<String>, bool), ConfigError> {
+    let Some(value) = configured else {
+        return Ok((Some(DEFAULT_REASONING_EFFORT.to_string()), false));
+    };
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return Ok((Some(DEFAULT_REASONING_EFFORT.to_string()), false));
+    }
+    if value == "none" {
+        return Ok((None, true));
+    }
+    if !REASONING_EFFORTS.contains(&value.as_str()) {
+        return Err(ConfigError(format!(
+            "provider `{provider}`: reasoning_effort must be one of {}, `none` or unset (got `{value}`)",
+            REASONING_EFFORTS.join(", ")
+        )));
+    }
+    Ok((Some(value), true))
 }
 
 /// `max_steps`: unset or `0` means no cap at all (the default: a fully
@@ -299,6 +406,15 @@ impl Config {
             provider.base_url = url;
         }
         Ok(provider)
+    }
+
+    /// How much hidden reasoning to ask the current provider/model for: the
+    /// configured `reasoning_effort`, else [`crate::compact`]'s own default for
+    /// the loop (`medium`), else nothing.
+    pub fn reasoning_effort(&self, provider: &str) -> Option<String> {
+        self.providers
+            .get(provider)
+            .and_then(|entry| entry.reasoning_effort.clone())
     }
 
     /// The window a configuration override names, if any: `[model_windows]`
@@ -346,7 +462,11 @@ fn overlay(base: RawProvider, user: RawProvider) -> RawProvider {
             headers
         },
         reasoning_field: user.reasoning_field.or(base.reasoning_field),
+        reasoning_effort: user.reasoning_effort.or(base.reasoning_effort),
         session_header: user.session_header.or(base.session_header),
+        max_concurrent_requests: user
+            .max_concurrent_requests
+            .or(base.max_concurrent_requests),
     }
 }
 
@@ -636,6 +756,85 @@ compact_keep = 0
     }
 
     #[test]
+    fn the_soft_target_is_a_hundred_and_fifty_thousand_by_default() {
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.compact_at_tokens, crate::compact::DEFAULT_SOFT_TARGET);
+        let path = temp_config("compact_at_tokens = 120000\n");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.compact_at_tokens, 120_000);
+        // Zero is "no absolute cap": the window fraction alone decides.
+        let path = temp_config("compact_at_tokens = 0\n");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.compact_at_tokens, 0);
+    }
+
+    #[test]
+    fn reasoning_effort_defaults_to_medium_and_can_be_tuned_or_turned_off() {
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        for name in [PROVIDER_OPENROUTER, PROVIDER_GO] {
+            assert_eq!(
+                cfg.reasoning_effort(name).as_deref(),
+                Some(crate::config::DEFAULT_REASONING_EFFORT),
+                "{name}"
+            );
+        }
+
+        let path = temp_config(
+            "[providers.openrouter]\nreasoning_effort = \"low\"\n\
+             [providers.opencode-go]\nreasoning_effort = \"none\"\n",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.reasoning_effort("openrouter").as_deref(), Some("low"));
+        // `none` sends no field at all: the provider's own default.
+        assert_eq!(cfg.reasoning_effort("opencode-go"), None);
+        // Case is not the user's problem.
+        let path = temp_config("[providers.openrouter]\nreasoning_effort = \" HIGH \"\n");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.reasoning_effort("openrouter").as_deref(), Some("high"));
+    }
+
+    /// The default `medium` and an explicit choice are not the same fact: only
+    /// the explicit one may reach a model the provider's list says nothing
+    /// about (STEER-6 review S3).
+    #[test]
+    fn an_explicit_effort_is_told_apart_from_the_default() {
+        let cfg = load(Some(&temp_config(""))).unwrap();
+        for name in [PROVIDER_OPENROUTER, PROVIDER_GO] {
+            let provider = cfg.provider(name).unwrap();
+            assert_eq!(
+                provider.reasoning_effort.as_deref(),
+                Some(crate::config::DEFAULT_REASONING_EFFORT)
+            );
+            assert!(!provider.reasoning_effort_explicit, "{name}: a default");
+        }
+        let path = temp_config(
+            "[providers.openrouter]
+reasoning_effort = \"low\"
+             [providers.opencode-go]
+reasoning_effort = \"none\"
+",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        let provider = cfg.provider("openrouter").unwrap();
+        assert_eq!(provider.reasoning_effort.as_deref(), Some("low"));
+        assert!(provider.reasoning_effort_explicit);
+        // `none` is an explicit choice too: it is never "the default applies".
+        let provider = cfg.provider(PROVIDER_GO).unwrap();
+        assert_eq!(provider.reasoning_effort, None);
+        assert!(provider.reasoning_effort_explicit);
+    }
+
+    #[test]
+    fn an_unknown_reasoning_effort_is_refused_at_load() {
+        let path = temp_config("[providers.openrouter]\nreasoning_effort = \"maximum\"\n");
+        let error = load(Some(&path)).unwrap_err().to_string();
+        assert!(error.contains("reasoning_effort"), "{error}");
+        assert!(error.contains("low, medium, high"), "{error}");
+    }
+
+    #[test]
     fn promotion_after_is_ten_minutes_by_default_and_configurable() {
         // The environment override is the test hook; it wins over the file.
         let path = temp_config("promote_after = 30\n");
@@ -644,6 +843,108 @@ compact_keep = 0
         let path = temp_config("");
         let cfg = load(Some(&path)).unwrap();
         assert_eq!(cfg.promote_after, std::time::Duration::from_secs(600));
+    }
+
+    #[test]
+    fn the_retry_schedule_defaults_and_reads_every_knob() {
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.retry.base_ms, crate::retry::DEFAULT_BASE_MS);
+        assert_eq!(cfg.retry.cap_ms, crate::retry::DEFAULT_CAP_MS);
+        assert_eq!(
+            cfg.retry.max_wait,
+            Some(std::time::Duration::from_secs(
+                crate::retry::DEFAULT_WAIT_SECS
+            ))
+        );
+        assert_eq!(cfg.retry.max_attempts, None);
+
+        let path = temp_config(
+            "retry_base_ms = 500
+retry_cap_ms = 4000
+retry_max_wait = 60
+retry_max_attempts = 5
+",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.retry.base_ms, 500);
+        assert_eq!(cfg.retry.cap_ms, 4_000);
+        assert_eq!(cfg.retry.max_wait, Some(std::time::Duration::from_secs(60)));
+        assert_eq!(cfg.retry.max_attempts, Some(5));
+
+        // `retry_max_wait = 0` is "wait as long as the provider needs".
+        let path = temp_config(
+            "retry_max_wait = 0
+",
+        );
+        assert_eq!(load(Some(&path)).unwrap().retry.max_wait, None);
+        // A count cap of zero would mean "never retry", which `retry_max_wait
+        // = 0` cannot express; it is refused as an attempt cap and falls back
+        // to the budget.
+        let path = temp_config(
+            "retry_max_attempts = 0
+",
+        );
+        assert_eq!(load(Some(&path)).unwrap().retry.max_attempts, None);
+    }
+
+    #[test]
+    fn a_cap_below_the_base_is_refused() {
+        let path = temp_config(
+            "retry_base_ms = 5000
+retry_cap_ms = 1000
+",
+        );
+        let error = load(Some(&path)).unwrap_err();
+        assert!(error.to_string().contains("retry_cap_ms"), "{error}");
+    }
+
+    #[test]
+    fn max_concurrent_requests_is_per_provider_and_off_by_default() {
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.providers
+                .get(PROVIDER_OPENROUTER)
+                .unwrap()
+                .max_concurrent_requests,
+            None
+        );
+        let path = temp_config(
+            "[providers.opencode-go]
+max_concurrent_requests = 3
+",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.providers
+                .get(PROVIDER_GO)
+                .unwrap()
+                .max_concurrent_requests,
+            Some(3)
+        );
+        assert_eq!(
+            cfg.providers
+                .get(PROVIDER_OPENROUTER)
+                .unwrap()
+                .max_concurrent_requests,
+            None,
+            "one provider's limit is not another's"
+        );
+        // Zero means "no limit", exactly like leaving it out.
+        let path = temp_config(
+            "[providers.opencode-go]
+max_concurrent_requests = 0
+",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.providers
+                .get(PROVIDER_GO)
+                .unwrap()
+                .max_concurrent_requests,
+            None
+        );
     }
 
     #[test]

@@ -2,6 +2,265 @@
 
 Small, deliberate differences, with the reason. Everything else tracks the spec.
 
+## Retrying provider errors (STEER-5, 2026-11-19)
+
+The brief is `docs/tasks/STEER-5.md`; the policy lives in `src/retry.rs` and the
+wait itself in `session::stream`. Where this differs from the brief:
+
+- **Attempts are bounded by a waiting budget, plus a finite stand-in for
+  "unlimited".** The brief says attempts are unlimited inside `retry_max_wait`.
+  A provider that answers instantly with 429 would then spin: the budget is
+  spent in time, and a zero-wait loop never spends any. So `retry::MAX_ATTEMPTS`
+  (60) caps the count regardless, `retry_max_attempts` in `config.toml` caps it
+  further, and `retry_max_wait = 0` (unlimited waiting) does **not** mean
+  unlimited attempts. `retry_max_attempts = 0` is read as unset, not as "never
+  retry" (a person who wants no retries sets `retry_max_attempts = 1`). With the
+  default schedule the waits reach the 120 s cap after seven attempts, so the
+  budget — not the count — is what ends a normal outage.
+- **A provider hint can never shorten a retry below a floor.** `Retry-After: 0`,
+  a reset header of `0s` and a date already past are all well-formed answers that
+  mean "now"; taken literally, a gateway that answers that way for ever got a
+  request every few milliseconds (the review measured 309/s). The floor is
+  `min(250 ms, retry_base_ms)`, so a person who configured a fast test schedule
+  keeps it and the default schedule never waits less than a quarter second
+  (STEER-5 review S2). An absurd *large* hint is still honoured, and still
+  pauses the turn when it does not fit the budget.
+- **A `Retry-After` longer than what the budget has left pauses at once.** The
+  brief says to honour the header; waiting 4 s of a 1 s budget and *then* failing
+  would honour neither. The provider's hint is clamped to the budget, and a hint
+  that does not fit pauses the turn immediately.
+- **There is one `paused` outcome with a `reason`.** STEER-4's step cap and
+  STEER-5's exhausted retry budget are the same event with two causes: the
+  event carries the shared `final_text` payload with the message "provider
+  unavailable after N attempts / M: <reason>; say `continue` to retry" and a
+  `reason` of `provider`; the step cap's `reason` is `steps` and its message is
+  "turn paused after N steps; say continue to resume". A one-shot `run` exits 0
+  for either, a `--keep` session stays up with a fresh step count and a fresh
+  budget, Herdr gets `blocked` for both (the one word this Herdr shows for
+  "waiting for a human" — the STEER-4 rule, now the rule for every pause), and
+  the TUI's status word is `paused`. `resume::interrupted` treats `paused` like
+  `stopped`, so a resume (or a later `say`) retries from the same fold.
+- **A queued `before_step` verb applies between two attempts; a `now` verb cuts
+  the wait short.** The brief asks that `model` during a wait "uses the new
+  model", and a retry is a fresh request: so an ordinary wait that runs out
+  applies the `before_step` boundary before re-sending, which also lets a queued
+  `say` join the fold and `end` take effect. A verb whose answer is `applies:
+  "now"` (`say --now`, `model`) does not wait for that boundary: it is applied
+  the moment it arrives, the wait ends, and the request goes out at once —
+  rebuilt from the new fold or the new model, with a fresh budget and the new
+  provider's governor. A person's correction must not sit out a `Retry-After`
+  that can be a week long (STEER-5 review B2). The `verb` event still records
+  which boundary it applied at. The ack is answered *after* the verb lands, so
+  `say --now` and `model` during a wait answer `applies: "now"` with the state
+  the next request really carries — for `model`, `state.model` is the new one
+  (STEER-5 review N1).
+- **`later` keeps its boundary even during a wait.** The brief lists `later`
+  among the verbs that "take effect immediately", and it does — as a *delivery*:
+  it is accepted, logged and queued the moment it arrives. What it does not do
+  is cut the wait: `later` asks for the turn end, its ack says `applies:
+  "turn_end"`, and the text joins the next turn from the fold, which is what
+  SPEC and the `verb` boundary have said since M1. Cutting a `Retry-After` for
+  a message that must not be sent mid-turn would put the message into a request
+  the sender asked it to stay out of (STEER-5 review N3).
+- **A signal is a `stop`, but only while a wait is running.** Ctrl-C (and
+  SIGTERM on Unix, Ctrl-Break on Windows) during a retry or slot wait ends the
+  turn `stopped` with the reason `interrupted (Ctrl-C)` and leaves a `--keep`
+  session up, instead of killing a process whose log says nothing. The listener
+  is installed **once per process**, before the session is announced
+  (`signals::install` at the top of `session::drive`), because Tokio never
+  restores a signal's default disposition once a `Signal` exists; a Ctrl-C
+  during a request in flight or while a tool runs therefore also reaches the
+  listener, which keeps it pending rather than killing the process. A **second**
+  interrupt within two seconds exits (`exit 130`), which is the way out of a
+  wedged session — the rule the TUI states. The pending state is a
+  **level-triggered flag**, not an edge-triggered wakeup: it stays set until a
+  wait acts on it and is cleared there, so a signal that arrives before the wait
+  begins is not lost (STEER-5 fixes round 2; the first version compared a
+  `watch` baseline, and `watch::Sender::send` drops its value when nothing is
+  subscribed — the interrupt vanished in the gap between the `error` event and
+  the wait's first poll, which failed about two runs in six under load).
+  Test coverage: `src/signals.rs` has unit tests of the state machine, including
+  200 rounds of "signal, then wait"; the Unix half is driven end to end by real
+  `SIGINT`s to real sessions
+  (`tests/e2e_steer5.rs::an_interrupt_during_a_wait_ends_the_turn_stopped`,
+  which signals a running wait, and `::an_interrupt_before_the_wait_begins_is_not_lost`,
+  which signals *before* the wait exists — it fails on the old mechanism with
+  "the interrupt was lost; the turn never ended"). The Windows half is those
+  unit tests only: no test may *send* a console event, because
+  `GenerateConsoleCtrlEvent` addresses a whole console and not one process
+  (AGENTS.md hard rule). This is the one remaining honest gap: no automated test
+  presses Ctrl-C on a Windows console.
+- **A retryable provider error's message is the status and its class, never the
+  body.** For an outage the `error` event's `message` is `http 503: provider
+  error` or `http 429: rate limited`: it is a wait, nothing in the body helps a
+  person or a script decide anything, and a gateway that quotes the request (or
+  a 4xx that prints the key) would otherwise write a credential into
+  `events.jsonl` and into NDJSON stdout (STEER-5 review S3; this file used to
+  accept the body because it "never leaves the machine", which is not true of
+  stdout). A *refusal* (400/401/403/404/422) still carries its body — "unknown
+  model" is the answer that lets a human fix the invocation — bounded to 500
+  characters and with the session's own key replaced by `[redacted]`.
+- **NDJSON carries the wait as the `error` event, not as a separate line.** The
+  visible line ("rate limited (429): retrying in 34 s, attempt 5, say stop to
+  cancel") goes to the TUI's scrollback and status line and to stderr in human
+  mode; under `--json` stdout stays one event per line, and the wait *is* the
+  `error` event with `retryable`, `status`, `attempt` and `retry_in_ms`.
+- **The concurrency governor counts what is in flight, not what is configured.**
+  A slot is held for exactly one request: `[providers.<name>]
+  max_concurrent_requests = N` takes an advisory OS lock on
+  `<state root>/locks/<base-url-host>-<slot>` for the duration of one
+  `POST /chat/completions`, polling every 100 ms, with the status line saying
+  "waiting for a provider slot (N)". Two config names pointing at one endpoint
+  share the endpoint's slots, because that is what the provider's limit is per.
+  `0`/unset is off. Linux and macOS use `flock`, Windows `LockFileEx` (not
+  `File::try_lock`, which needs Rust 1.89 and the MSRV is 1.88); both are
+  released by the kernel when the holder dies, which is the property a pid file
+  does not have.
+- **The governor's slot wait is not an `error` event.** It is kelir waiting for
+  its own sibling, not a provider failure, so it is a visible line and a status
+  line only. It is interruptible like a retry wait: `stop`, `end` and a signal
+  end the turn, `say --now` and `model` apply at once and simply look for the
+  slot again.
+- **The governor follows the provider a request goes to.**
+  `max_concurrent_requests` is read from the config entry the `model` verb
+  resolved to, every time, so a swap to a governed provider starts taking its
+  slots and a swap away stops being held to the old limit (STEER-5 review S1).
+  A compaction's summary is a provider request on the same account and takes a
+  slot like any step.
+- **A retry hint prefers the `Date` header and the tightest reset window.**
+  Absolute hints (an HTTP-date, an epoch, an RFC 3339 stamp) are measured from
+  the response's own `Date` when it has one, so a skewed local clock cannot turn
+  a 90 s hint into none at all (review N1). When a response carries several
+  reset headers (`x-ratelimit-reset-requests` and friends) the *shortest* still
+  closed window wins: a provider reports every window it counts, and the one
+  that fired is the tight one, not the daily one (review N2).
+- **A compaction summary is tried once, never retried.** A 429 on the
+  summarising request skips that compaction — the context stays as it was and
+  the next step runs, with a `where: "compact"` error in the log — rather than
+  spending the turn's waiting budget on a summary nobody asked for. A step
+  always gets the budget (review N3; M3 review N4 made the same call).
+
+## STEER-6: the retro's loop changes (2026-11-19)
+
+- **On Windows a command always runs from a file; on Unix a long one does.** The spec's shell
+  row is `bash -c` (or `cmd.exe /C`), i.e. the command as the last argument. Two things break
+  that on Windows:
+  - a command line past ~8,191 characters is silently **cut** by Git for Windows' `bash.exe`,
+    and a cut heredoc usually exits 0 (three M5-A calls, one STEER-4 call, each with a
+    half-written file);
+  - every run of backslashes is **halved** on the way to the shell (the Win32 command line, then
+    msys' argv rewriting), at any length: `printf 'a\nb'` prints a newline, a regex or a Windows
+    path means something else by the time the shell sees it (STEER-6 review S1, reproduced on the
+    baseline binary). A length threshold cannot fix that one, because the mangling happens below
+    it.
+
+  So the rule is one route per platform: on Windows every command is written to
+  `<call dir>/cmd.sh` (`cmd.bat` for `cmd.exe`, `cmd.ps1` for PowerShell) and the shell is handed
+  the path; on Unix a short command keeps `-c` (no msys layer, one fewer write) and a command
+  over `SHELL_CMD_MAX = 6000` bytes goes through the same file route. The Windows route is not a
+  length threshold, so a command's meaning cannot change at a boundary; the file lives in the
+  call's own directory, not a temp dir, so the exact bytes that ran stay readable, which is what
+  makes a cut diagnosable. `kelir bg run` writes `bg/<id>.sh` for the same reason (one directory
+  holds every job, so the name carries the id).
+- **The shell keeps the switch that makes it read a file.** `cmd.exe` gets `/C <path>` and
+  PowerShell `-File <path>`, because `cmd.exe <path>` starts an interactive shell on a null stdin
+  that runs nothing and exits 0 (STEER-6 review B1: a long command reported success and never
+  ran), and `-Command <path>` would run the path as PowerShell source. A POSIX shell reads the
+  script from its own argv, so its `-c` goes — and a login-shell spelling (`bash -lc`, `-ic`,
+  `-ec`) keeps the flags before the `c` and drops the `c` (`bash -l cmd.sh`), so that common config
+  takes the file route instead of silently keeping the halving argument route (STEER-6 review N5).
+  Any argument before the switch (`cmd.exe /D /C`) is kept. A shell kelir does not know (`--eval`)
+  is left exactly as configured on Unix; on Windows a command for such a shell is an **error**
+  naming the argv and the spellings that work, because the only route left there is the one that
+  halves backslashes.
+  Verified with the inbox `powershell.exe` in an e2e test (`-File cmd.ps1`, output written by the
+  script). A Store-installed `pwsh` cannot be used as a call shell at all on Windows: it is an
+  AppX execution alias, and Windows refuses to put the process an alias starts into a Job Object
+  (`cannot assign it to the job: Access is denied`, os error 5). That is the app-packaging model,
+  not a kelir bug (the STEER-6 reviewer hit the same wall probing `pwsh`); use the inbox
+  `powershell.exe`, or `bash`, as `shell`.
+- **A script's line endings are normalised, and only those.** A POSIX shell gets LF: a CRLF
+  `cmd.sh` puts a `\r` at the end of every line and breaks a heredoc terminator outright.
+  `cmd.exe` and PowerShell get CRLF. The normalisation follows the **shell family, not the route**:
+  a short POSIX command on the argument route is normalised the same way, because otherwise the
+  same text would mean two things at the 6,000-byte boundary (`echo a > f<CR>` created `f<CR>`
+  below it and `f` above it — STEER-6 review N10). A lone `\r` inside a payload (how a heredoc
+  writes a literal CR to a file) is untouched. `KELIR_SHELL_RAW=cr` sends the bytes exactly as
+  written on both POSIX routes, for a caller that needs the raw bytes. A `.bat` also starts with
+  `@echo off`: without it `cmd.exe` echoes the prompt and the command line into the result, so a
+  20 KB command came back as 20 KB of echo (STEER-6 review N6).
+- **A long command also stays off the shim's own command line.** `kelir bg-shim` used to take
+  the command as `--cmd <text>`, and Windows refuses to *start* a process whose command line is
+  past ~32 KB (`os error 206`) — so a 40 KB heredoc failed before the shim existed. It travels
+  as `--cmd-file <path>` instead. `kelir bg run <cmd>` still takes the command as an argument,
+  so a job command past ~32 KB cannot be started through the CLI at all; the model writes the
+  script with `edit` and runs that. This is a process-argv ceiling, not a kelir choice.
+- **`edit` takes `edits: [{old, new, replace_all?}, …]` as well as `old`/`new`.** The spec's
+  tool row names `{path, old, new, replace_all?}`. `edits` is the same operation repeated: it is
+  atomic (all hunks checked before anything is written, one write at the end) and applied in
+  order against the evolving text, because the dogfood model used `python -` patch scripts for
+  multi-hunk changes and those fail with exit 0. `old`/`new` are unchanged and the tool list is
+  the same, so the frozen request prefix only moves at a release.
+- **`session_started.reasoning_effort` is a field the spec's table does not list.** The spec's
+  provider section leaves the effort field unverified and has no way to record it. The value
+  kelir sends is recorded (and absent when the config says `none`) so the log and the request
+  agree and a cache-key question can be answered from the log alone. Measured on the OpenCode Go
+  gateway: the flat `reasoning_effort` field is honoured (the reasoning tokens move with it, ×2
+  between `low` and `high` on a reasoning-heavy prompt); the OpenRouter-style
+  `{"reasoning": {"effort": …}}` object is accepted but added latency with no reason-token
+  effect, so kelir sends the flat field on both providers. A model with a long thinking phase
+  may still spend its budget before the answer (one probe returned an empty `content` with
+  `finish_reason: length`); the knob is a request, not a guarantee.
+- **`compact_at_tokens` is a third auto-compaction input.** The spec says 80 % of the window
+  (configurable). A 1M-token window at 80 % is 800K, and a real session passes 150K with 76 % of
+  the context being old file reads. Compaction now fires at
+  `min(window * auto_compact_at, compact_at_tokens)`; the default target is 150,000 and `0`
+  disables the cap, so the window fraction alone decides, exactly as before.
+- **`parallel_tool_calls` is asked for when the model is known to take it — and the answer does
+  not depend on a warm cache.** The spec says parallel calls are allowed; the request said
+  nothing. OpenRouter's `supported_parameters` states the capability per model, and that wins when
+  the list has an entry. But the list is metadata fetched with a bound, so it can be missing
+  (first session on a machine, an unreachable endpoint) or stale; the loop then fell back to *not*
+  asking, which made F4's benefit silently depend on machine state (STEER-6 review S2: live, a
+  480-model list through a proxy took > 1.5 s, the cache was stored empty, and the request had no
+  field although the model advertises it). The rule now:
+  - the provider's list entry, when there is one (both directions: `false` is believed);
+  - else a conservative built-in family table (`deepseek/`, `anthropic/`, `openai/`, `gpt-4`,
+    `gpt-5`, `google/`, `gemini-`, `qwen/`, `kimi`, …);
+  - else `false`: an unknown model on an unknown gateway is not asked.
+  A slow `/models` fetch is also no longer recorded as a failure (only a real error is), so a
+  proxy that answers in 2 s does not leave the cache empty for an hour. `parallel_tool_calls` is
+  still only sent to OpenRouter: Go's list states no such capability, and a family name is not
+  evidence about *that* gateway's acceptance.
+- **`reasoning_effort` is gated on what the provider advertises, with one retry on a 400.** The
+  field used to go to every model on every provider; a model or gateway that refuses it turned
+  every step into a hard error until the person found the config key (STEER-6 review S3). Now:
+  - listed and advertising `reasoning_effort` (or the `reasoning` object form it is shorthand
+    for) -> sent;
+  - listed without it -> not sent, even when the config names one: the provider said no;
+  - the list has the model but no capability list at all (OpenCode Go) -> unknown, so the
+    default still goes (measured as honoured on Go, see above);
+  - the list has no entry for the model -> only when the person set `reasoning_effort`
+    explicitly. The default `medium` is kelir's own choice and does not go to a model nobody
+    vouched for.
+  An HTTP 400 whose body names the field is retried **once** without it, logged as an `error`
+  note, and remembered: no later request in the session carries it. The retry does not spend the
+  provider-attempt budget (a 400 is not transient). `session_started.reasoning_effort` records
+  what is actually sent, so the log and the request agree.
+- **The "your command may have been cut" notice needs evidence.** The spill notice fired on any
+  output that contained one of the shell's truncation markers, including a command that merely
+  printed them: `git grep "unexpected EOF" src` matched `spill.rs` itself, and the model was told
+  a command that ran fine may have been cut (STEER-6 review N1). It now fires when a marker is in
+  a shell's own diagnostic line (`bash: warning: here-document at line 1 delimited by
+  end-of-file …`, printed *before* the body it did read), or the command failed, or (for a
+  successful command) the marker is in the last three lines. A successful search that quotes the
+  markers in its middle stays quiet.
+- **The base prompt is pinned byte-for-byte.** It is embedded at build time and is the head of
+  every request's frozen prefix, so a changed byte moves the cache for every session.
+  `tests/fixtures/prompt.md.snapshot` holds the released bytes and a unit test compares them;
+  rewording the prompt means updating the snapshot deliberately in the same commit (the rule
+  list in `sources.rs` still pins the lines a retro put there).
+
 ## Sources and skills (M5-A, 2026-11-19)
 
 - **A source edited mid-session is found by a per-boundary content hash, not a watcher.**
