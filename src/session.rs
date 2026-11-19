@@ -346,6 +346,9 @@ fn crash_at(point: &str) {
 enum TurnEnd {
     Done,
     Stopped(String),
+    /// An explicit `max_steps` cap was reached. Not a failure: the session
+    /// stays alive (`--keep`) and the next message opens a new turn.
+    Paused(u32),
     /// The `end` verb arrived.
     End,
 }
@@ -479,6 +482,13 @@ async fn drive(opts: Options) -> u8 {
             ),
             "Enter sends · Alt-Enter adds a line · /help shows the commands".to_string(),
         ];
+        // The cap is worth a banner line only when one is set: the status line
+        // carries the count ("step 3/5") while a turn runs.
+        if let Some(cap) = session.cfg.max_steps {
+            banner.push(format!(
+                "step cap {cap} per turn · reaching it pauses the turn (say continue)"
+            ));
+        }
         if session.resumed {
             banner.push(format!(
                 "resumed from the event log · {} turn(s) recorded{}",
@@ -593,8 +603,14 @@ async fn load_models(client: &Client, provider: &str) -> (Option<crate::models::
 
 async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let common = &opts.common;
-    let cfg = config::load(common.config.as_deref())
+    let mut cfg = config::load(common.config.as_deref())
         .map_err(|error| Failure::Usage(error.to_string()))?;
+    // `--max-steps N` overrides the file, and `0` there means "no cap" as it
+    // does in `config.toml`: a stopgap config must never be able to cap a turn
+    // at zero steps.
+    if let Some(steps) = common.max_steps {
+        cfg.max_steps = (steps > 0).then_some(steps);
+    }
 
     // A resume takes its id, cwd, model and tool list from the log; only the
     // config (windows, prompts, provider keys) comes from today's machine.
@@ -1092,7 +1108,7 @@ impl Session {
         let continuing = !closed
             || matches!(
                 resume::last_turn_outcome(&self.events).as_deref(),
-                Some("stopped") | Some("error")
+                Some("stopped") | Some("paused") | Some("error")
             );
         if !continuing {
             return Ok(());
@@ -2001,6 +2017,24 @@ impl Session {
                     reason = "stopped".into();
                     false
                 }
+                Ok(TurnEnd::Paused(steps)) => {
+                    // The hint is the whole point of `paused` over `error`: it
+                    // goes to stderr even under `--json` (stdout stays NDJSON)
+                    // and into the TUI's scrollback, never only into the log.
+                    let message =
+                        format!("turn paused after {steps} steps; say continue to resume");
+                    if !self.tui {
+                        eprintln!("→ {message}");
+                    }
+                    let _ = self.record(EventBody::TurnEnded {
+                        outcome: "paused".into(),
+                        final_text: self.final_text.clone().into(),
+                    });
+                    self.finish_turn("paused");
+                    code = 0;
+                    reason = "paused".into();
+                    false
+                }
                 Ok(TurnEnd::End) => {
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "stopped".into(),
@@ -2126,13 +2160,21 @@ impl Session {
             turn: self.turn,
             provider: self.provider_name.clone(),
             model: self.model.clone(),
+            limit: self.cfg.max_steps,
         });
         self.report(HerdrState::Working);
         let mut turn_steps = 0u32;
         loop {
+            // An explicit cap counts the steps of *this* turn: reaching it
+            // pauses the turn (the work so far is kept, and the next message
+            // opens a new turn with a fresh count). No cap at all, the
+            // default, never stops a turn.
             turn_steps += 1;
-            if turn_steps > self.cfg.max_steps {
-                return Err(format!("step limit {} reached", self.cfg.max_steps));
+            if let Some(cap) = self.cfg.max_steps
+                && turn_steps > cap
+            {
+                self.emit(UiEvent::Paused { steps: cap });
+                return Ok(TurnEnd::Paused(cap));
             }
 
             // ---------------------------------------------------- before_step
@@ -2172,6 +2214,8 @@ impl Session {
                 step,
                 provider: self.provider_name.clone(),
                 model: self.model.clone(),
+                turn_steps,
+                limit: self.cfg.max_steps,
             });
 
             let assembler = match self.stream(rx, &request, false).await? {
@@ -2904,7 +2948,7 @@ mod tests {
             model: String::new(),
             shell: vec![],
             spill_limit: 0,
-            max_steps: 0,
+            max_steps: None,
             cache_ttl: None,
             system_prompt: crate::config::DEFAULT_PROMPT.to_string(),
             providers: Default::default(),
