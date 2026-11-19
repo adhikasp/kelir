@@ -50,9 +50,11 @@ root="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)" || exit 2
 cd "$root" || exit 2
 
 if [ -z "$out" ]; then
+  # The re-exec into the lock must reuse the outer run's directory, or one gate
+  # leaves two: go through --out and KELIR_GATE_OUT for that.
   scratch="${KELIR_SCRATCH:-$HOME/kelir-scratch}"
   job="$(git rev-parse --abbrev-ref HEAD | tr '/' '-')"
-  out="$scratch/gate-$job-$(date -u +%Y%m%dT%H%M%SZ)"
+  out="${KELIR_GATE_OUT:-$scratch/gate-$job-$(date -u +%Y%m%dT%H%M%SZ)}"
 fi
 mkdir -p "$out"
 log="$out/gate.log"
@@ -100,9 +102,9 @@ gate_body() {
       cargo nextest run --no-fail-fast --retries 2 -j "$jobs" "${extra[@]+"${extra[@]}"}"; then
       # A retried test is a flake: name it even when the run is green.
       local retried
-      retried="$(grep -E '^\s+(TRY [2-9]|FLAKY)' "$out/nextest.log" | sed -E 's/^\s+//' | sort -u)"
+      retried="$(grep -E '^[[:space:]]+(TRY [2-9]|FLAKY)' "$out/nextest.log" | sed -E 's/^[[:space:]]+//' | sort -u)"
       local summary
-      summary="$(grep -E '^\s+Summary:' "$out/nextest.log" | tail -1 | sed -E 's/^\s+//')"
+      summary="$(grep -E '^[[:space:]]+Summary:' "$out/nextest.log" | tail -1 | sed -E 's/^[[:space:]]+//')"
       say "  result: ${summary:-no summary line}"
       if [ -n "$retried" ]; then
         say "  RETRIED (a flake to fix, STEER-9):"
@@ -142,9 +144,7 @@ gate_body() {
 if [ "$use_lock" = 1 ] && [ -z "${KELIR_GATE_INNER:-}" ]; then
   # Re-run the same command line inside the lock (with --no-lock so it does not
   # try to take the lock twice).
-  inner=("${orig_args[@]}")
-  inner=(--no-lock "${inner[@]}")
-  KELIR_GATE_INNER=1 exec bash "$root/scripts/gate-lock.sh" -- bash "$0" "${inner[@]}"
+  KELIR_GATE_INNER=1 KELIR_GATE_OUT="$out"     exec bash "$root/scripts/gate-lock.sh" -- bash "$0" --no-lock "${orig_args[@]}"
 fi
 
 gate_body

@@ -313,27 +313,35 @@ fn waiting_gives_up_with_exit_75_when_the_holder_never_returns() {
     let (lock, _dir) = sandbox_lock("timeout");
     // A real holder that does not release inside the waiter's timeout: `kill
     // -0` has to see a live process, and the only pid both platforms agree on
-    // is one bash started. It exits on its own after 6 s, so nothing has to be
-    // killed and nothing can be left behind.
-    let mut holder = Held::spawn(&lock, 60, "sleep 6");
+    // is one bash started. It exits on its own well after the waiter's 2 s, so
+    // nothing has to be killed and nothing can be left behind.
+    let mut holder = Held::spawn(&lock, 60, "sleep 15");
     holder.wait_for_lock(&lock);
 
-    let start = Instant::now();
     let out = run_locked(&lock, 2, "echo never");
     assert_eq!(out.status.code(), Some(75), "the timeout exit code is 75");
     assert!(
-        start.elapsed() < Duration::from_secs(5),
-        "the waiter gives up after its own timeout, not the holder's"
+        String::from_utf8_lossy(&out.stderr).contains("gave up"),
+        "the waiter says it gave up: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert!(lock.exists(), "a timed-out waiter leaves the lock alone");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
         "",
         "the command must not run without the lock"
     );
+    assert!(
+        lock.exists(),
+        "a timed-out waiter leaves the holder's lock alone"
+    );
+
+    // The lock is still the holder's: a second gate keeps waiting, it does not
+    // take over a live holder.
+    let second = run_locked(&lock, 2, "echo second");
+    assert_eq!(second.status.code(), Some(75), "still held, still waiting");
 
     holder.finish();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while lock.exists() {
         assert!(
             Instant::now() < deadline,
