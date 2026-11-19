@@ -78,3 +78,8 @@ kelir-verify-<job>`). The rule is *one writer per worktree*, and **only the orch
 main**, one branch at a time: gates on the branch (Windows + Linux), a fresh reviewer on the branch, then
 merge, then the gates again on main. Workers keep changes localized (new modules, surgical edits to shared
 files) because several jobs edit `session.rs`/`config.rs`. Never kill processes by image name.
+
+## Docs are part of done
+
+Every job that adds or changes a config key, CLI flag, env var, verb, event, file location or TUI key updates
+`docs/reference/` (see docs/tasks/STEER-11.md) in the same commit series; the drift test enforces it once it exists.

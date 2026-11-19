@@ -177,3 +177,26 @@ M5-B -> M6 ... M11 -> M12. STEER-5/6 already cover rate-limit, compaction trigge
   429 giving up) -> STEER-5 (running), STEER-6 (queued).
 - Flaky e2e under load recorded as **STEER-9** (docs/tasks/STEER-9.md); gates now use `cargo test --no-fail-fast`.
 - Running: steer5 (t114), m5afix (t119). Merge order next: m5afix, steer5, then steer6, steer7, steer8, steer9, steer1fix, steer2, steer3, M5-B ...
+
+- 16:25 Parked workers closed (they had only read files: no commits, clean worktrees): steer1fix (t110), steer2 (t111),
+  steer3 (t112). Their Herdr "needs attention" flags cleared by closing the panes. Worktrees kelir-wt/steer1fix,
+  steer2, steer3 kept (clean, branches at the old base): **relaunch fresh** from a rebased/new worktree off current main
+  when a slot frees (do not resume; their transcripts are in kelir-wt/state/<job>/ if the retro wants them).
+  Running now: steer5 (t114), m5afix (t119), steer6 (t11s).
+
+## Update (2026-11-19 16:40) — TUI polish (maintainer)
+
+New requirement: polish the TUI: clear idle-vs-working, collapsed/de-emphasised tool calls, image paste stored as a file
+in the session state dir with a pointer in the prompt (model reads it on demand via `kelir view`), full markdown.
+- **STEER-10** (docs/tasks/STEER-10.md) + STEER-3 = one job **tui2**.
+- Step 1 (running): fresh Claude design analyst compares opencode and Claude Code runs (screenshots) and writes
+  docs/design/TUI-v2.md. Step 2: kelir implements tui2 in kelir-wt/tui2 from that note. Step 3: reviewer with screenshots,
+  introspective retro, merge. Parks STEER-3 as a separate job (superseded by tui2).
+
+## Update (2026-11-19 17:00) — self-documentation (maintainer)
+
+**STEER-11** (docs/tasks/STEER-11.md): organised `docs/reference/` of everything configurable (config/CLI/env/verbs/files/
+events/providers/troubleshooting + source map), generated where possible and guarded by a drift test, embedded and readable
+via `kelir docs`, shipped as a builtin skill `kelir` that the hint (M5-B) and steering rules (M8) can inject. SPEC.md has a
+Self-documentation section; AGENTS.md says docs are part of done. Run it right after STEER-5/6 (it needs the env-var registry
+and the final config surface), before M5-B.
