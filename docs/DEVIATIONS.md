@@ -677,3 +677,52 @@ consuming a scripted reply) so a session can start in a test.
   still kills its tree (a `Drop` guard in the tool). A leftover `cmd &` child
   keeps running, as documented for M0: the group/job is held by the session and
   by a lingering shim, so it dies when the session does.
+
+### TUI v2 (STEER-10 + STEER-3): deviations from `docs/design/TUI-v2.md`
+
+- **The viewport stays a fixed 8 rows; the inline view's height is not changed
+  at runtime.** Design note §10 asks for confirmation of ratatui 0.30's inline
+  viewport mutability. In 0.30 an inline viewport's height is fixed at
+  `try_init_with_options`; changing it means dropping and recreating the
+  terminal, which is `clear` + redraw (exactly the flicker the note forbids).
+  The eight rows are re-allocated instead (3 live / state / 3 editor / facts),
+  and a short screen gives rows up in the documented order. The idle gap is
+  therefore 3 blank live rows, not 5.
+- **Frame coalescing is structural, not a timer.** Design note §7 asks for a
+  ~33 ms frame cap. The loop paints once per iteration and drains every queued
+  event first, so a burst of deltas is one paint; a timer would only add
+  latency (and sleeps the tests). `FRAME_MIN` exists and is documented as the
+  intent, but nothing waits on it.
+- **The writing state's token count is an estimate** (`~N tok`, characters / 4)
+  because a real count needs a tokenizer and the binary budget is a feature.
+  The tilde says so. A provider-reported count would need a streaming
+  `completion_tokens` delta, which the OpenAI shape does not send.
+- **`Retry` is a `UiEvent` the session will send when STEER-5 lands.** This
+  branch (STEER-5 is a parallel job) carries the whole rendering path — state,
+  countdown, `say stop` hint, 1 Hz tick that stops with the state — and the
+  session's existing exponential backoff does *not* emit it yet. Merging
+  STEER-5's `error` event with `retry_in_ms` is a one-line `emit` when it
+  exists. The alternative (duplicating the retry loop here) would conflict with
+  that job for no gain.
+- **The clipboard image on Ctrl-V is not implemented; pasted and dropped
+  *paths* are.** Design note §10 asks whether `windows-sys`'s clipboard
+  features add under 50 KB. They add the DataExchange and Memory features plus
+  a PNG encoder with stored deflate blocks (~200 lines, ~30 KB measured on a
+  scaffold) — affordable, but it is a second, untestable-in-CI path (a test
+  cannot own the user's clipboard), and the requirement's own priority order is
+  "path first, clipboard second". The code path is a stub
+  (`attachments::clipboard_image` returns `None`) with the message the design
+  note specifies, so the feature is visible and honest rather than silently
+  missing.
+- **`/expand` appends, and a bare `/expand` toggles the policy.** The design
+  note says `/expand` with no argument toggles the policy while `/expand [n]`
+  appends. Two different meanings for one command is a trap (`/expand` after
+  `/expand 3` would silently change the policy instead of showing the next
+  call). Here: `/expand [n|last]` always appends (default: the last call), and
+  `/collapse` is the one that toggles the policy. The help text says so.
+- **A message that carries images is serialised through `ChatMessage::to_wire`**
+  (content becomes the list of parts). Every message without images serialises
+  through the same function and produces exactly the previous JSON, so the
+  prefix of an existing conversation is unchanged: `to_wire` is the identity
+  when `images` is empty (`src/chat.rs` tests, and the e2e asserts the second
+  request's messages begin with the first request's byte-for-byte).
