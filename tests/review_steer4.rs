@@ -307,10 +307,9 @@ async fn a_paused_keep_session_reports_its_state_and_ignores_a_stray_stop() {
     session.end().await;
 }
 
-/// FINDING S1: after a pause `state.turn_steps` is cap + 1 (3 of 2), because the
-/// counter is bumped before the cap check and never rolled back. Two steps ran.
+/// FINDING S1 (fixed): after a pause `state.turn_steps` is the number of steps
+/// that ran, not cap + 1 (3 of 2). The cap test is now before the increment.
 #[tokio::test]
-#[ignore = "FINDING S1: state.turn_steps reads cap+1 after a pause"]
 async fn state_after_a_pause_counts_the_steps_that_ran() {
     let mock = Mock::start(vec![
         Reply::Sse(sse(&edit_step(1))),

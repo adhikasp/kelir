@@ -504,7 +504,13 @@ async fn drive(opts: Options) -> u8 {
             ));
         }
         banner.push(String::new());
-        match tui::start(from_session, to_tui.clone(), tx.clone(), &banner) {
+        match tui::start(
+            from_session,
+            to_tui.clone(),
+            tx.clone(),
+            &banner,
+            session.cfg.max_steps,
+        ) {
             Ok(handle) => {
                 session.ui = Some(to_tui.clone());
                 let task = tokio::spawn(handle.run());
@@ -1227,6 +1233,9 @@ impl Session {
         let state = match outcome {
             "done" => HerdrState::Done,
             "error" => HerdrState::Error,
+            // A paused turn waits for a human to say `continue`; that is the
+            // one Herdr word a supervisor can see as waiting (review N2).
+            "paused" => HerdrState::Blocked,
             _ => HerdrState::Idle,
         };
         self.report(state);
@@ -2177,14 +2186,17 @@ impl Session {
             // An explicit cap counts the steps of *this* turn: reaching it
             // pauses the turn (the work so far is kept, and the next message
             // opens a new turn with a fresh count). No cap at all, the
-            // default, never stops a turn.
-            self.turn_steps += 1;
+            // default, never stops a turn. The test comes *before* the
+            // increment, so a paused turn's count is the number of steps that
+            // ran, not one more: `state` says `2` of `2`, never `3` of `2`
+            // (review S1).
             if let Some(cap) = self.cfg.max_steps
-                && self.turn_steps > cap
+                && self.turn_steps >= cap
             {
                 self.emit(UiEvent::Paused { steps: cap });
                 return Ok(TurnEnd::Paused(cap));
             }
+            self.turn_steps += 1;
 
             // ---------------------------------------------------- before_step
             let applied = self.apply(Boundary::BeforeStep)?;

@@ -841,6 +841,7 @@ pub fn start(
     to_tui: mpsc::UnboundedSender<UiEvent>,
     verbs: mpsc::UnboundedSender<Incoming>,
     banner: &[String],
+    cap: Option<u32>,
 ) -> std::io::Result<Tui> {
     let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, VIEWPORT_HEIGHT));
     let terminal = ratatui::try_init_with_options(ratatui::TerminalOptions {
@@ -863,6 +864,10 @@ pub fn start(
     for line in banner {
         app.push_text(line);
     }
+    // The cap is known before the first turn (it comes from config or the
+    // flag), so the idle status line can already say `step 0/N` instead of a
+    // bare `step 0` that would hide the limit until a turn started (review N1).
+    app.status.limit = cap;
     let (key_tx, keys) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
         loop {
@@ -1400,6 +1405,7 @@ mod tests {
             (HerdrState::Working, "working"),
             (HerdrState::Done, "done"),
             (HerdrState::Idle, "idle"),
+            (HerdrState::Blocked, "blocked"),
             (HerdrState::Error, "error"),
         ] {
             app.apply(UiEvent::Herdr { state });
