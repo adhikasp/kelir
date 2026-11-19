@@ -88,6 +88,21 @@ suite: nextest took it from a serial run to `-j 4`.
 behaviour (serializes, takes over a dead holder, gives up with 75, never removes a holder's lock), and the
 rules the scripts must keep (nextest not `cargo test`, `--no-fail-fast`, doctests, kill by pid only).
 
+## Knobs these scripts read
+
+None of these is read by the `kelir` binary; they only tune the gate. They are environment variables, not
+config keys, so they do not appear in `docs/reference/config.md` (STEER-11) when it lands.
+
+| variable | default | effect |
+|---|---|---|
+| `KELIR_GATE_JOBS` | `4` | `CARGO_BUILD_JOBS` and nextest test threads |
+| `KELIR_GATE_ALLOW_RETRIES` | unset | `1` accepts a run where a test needed a retry (it is still named) |
+| `KELIR_GATE_LOCK` | `<git-common-dir>/kelir-gate.lock` | the lock path, for a driver outside the repo |
+| `KELIR_GATE_TIMEOUT` | `1800` | seconds a gate waits for the lock before exiting 75 |
+| `KELIR_SCRATCH` | `$HOME/kelir-scratch` | where the gate's log directories go |
+| `KELIR_LINUX` | `the maintainer` | the machine `--linux` sends `remote-check.sh` to |
+| `KELIR_GATE_INNER` / `KELIR_GATE_OUT` | set by `gate.sh` | internal: marks the run inside the lock and reuses its log dir |
+
 ## The rules, and why
 
 1. **One gate at a time, machine-wide.** `scripts/gate.sh` takes `scripts/gate-lock.sh` itself, so two
