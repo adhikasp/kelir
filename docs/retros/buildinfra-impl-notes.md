@@ -64,6 +64,18 @@ check but to let the holder end on a signal (`Held::finish`, and a `go` file it 
 kill-by-exact-pid kept only for the panic path. A `sleep <n>` in a test is a hazard in both directions: too
 short under load, wasted time when idle.
 
+**The flakes came in waves, one per run, until I stopped treating them one at a time.** Four full runs with
+retries off gave four red runs, each a *different* test (`e2e_m4::a_client_cannot_fabricate...`,
+`e2e_tui::a_ctrl_c...`, `review_m4::r13...`, `review_m4b::b2...`/`b7...`). Chasing them individually was the
+wrong move: each is STEER-9's, and each fix would land in a file another job owns. What they have in common is
+that they kill a session, wait for process trees to die and scan for surviving pids — and `cargo test` never
+ran them beside the other suites because it runs one test *binary* at a time, while nextest `-j 4` runs four.
+So the fix is a scheduling one: `.config/nextest.toml` caps the PTY suite and the three process-heavy suites at
+2 each. Measured: no groups 66-70 s and 1 red per ~4 runs; both groups at 2, 87-92 s and 0 red in 6 runs;
+`process-heavy` at 3, 2 of 5 red; everything at 2, 122-126 s. The 22 s is cheaper than the re-runs, which is
+exactly the brief's "load flakes cost more than the compiles". Three consecutive full gates (Windows and
+Linux) on the final HEAD: 0 retries.
+
 **"end was refused" is not nextest's fault.** The load stress run hit `e2e_m4::a_client_cannot_fabricate_a_
 background_job` once in three. I reproduced it with the *old* runner (5 runs of `cargo test --test e2e_m4`
 under six busy loops: 1 failure) and the test passes 8/8 in isolation and 5/5 under `cargo test`, so it is the
