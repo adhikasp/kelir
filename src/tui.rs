@@ -478,12 +478,11 @@ impl Message {
             && last.joins
             && continues_item(text)
         {
-            last.text = format!(
-                "{}
+            // The two texts, separated by the blank line the splitter cut.
+            last.text.push_str("
 
-{text}",
-                last.text
-            );
+");
+            last.text.push_str(text);
             last.joins = markdown::ends_in_item(&last.text);
             return;
         }
