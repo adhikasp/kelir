@@ -1546,10 +1546,12 @@ impl Session {
                 } if event_name == name
                     && crate::sources::SourceKind::parse(event_kind) == kind =>
                 {
+                    // A big body is spilled to a blob: read it back, or a
+                    // repeat of the current text would slip through.
                     Some(
                         text.as_ref()
-                            .and_then(|text| text.inline_str())
-                            .map(crate::sources::hash_of),
+                            .and_then(|text| text.resolve_text(&self.dir).ok())
+                            .map(|text| crate::sources::hash_of(&text)),
                     )
                 }
                 _ => None,
