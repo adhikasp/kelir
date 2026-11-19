@@ -817,10 +817,16 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
         .unwrap_or_else(|| dir.clone());
     // A caller that already wrote the script (the bash call, which had to keep
     // the shim's own argv short) decided it; otherwise the shim decides from
-    // the command's length.
+    // the command and the shell.
     let shell_input = match &script {
-        Some(path) => crate::shellcmd::ShellInput::Script(path.clone()),
-        None => match crate::shellcmd::input(&args.cmd, &args.shell_args, &script_dir) {
+        Some(path) => match crate::shellcmd::script_input(path, &args.shell_args) {
+            Ok(input) => input,
+            Err(error) => {
+                fail(&dir, &status, &error);
+                return 1;
+            }
+        },
+        None => match crate::shellcmd::input(&args.cmd, &args.shell_args, &script_dir, "") {
             Ok(input) => input,
             Err(error) => {
                 fail(&dir, &status, &error);
@@ -833,12 +839,14 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
         crate::shellcmd::ShellInput::Argument(cmd) => {
             command.args(&argv[1..]).arg(cmd);
         }
-        crate::shellcmd::ShellInput::Script(path) => {
-            // No `-c`: the shell reads the file as a script, which has no
-            // length limit and keeps cwd and env exactly as before.
-            command
-                .args(&argv[1..argv.len().saturating_sub(1)])
-                .arg(path);
+        crate::shellcmd::ShellInput::Script { path, keep_switch } => {
+            // The switch is kept for a shell that needs one even with a file
+            // (`cmd.exe /C <script>`, `pwsh -File <script>`): dropping `/C`
+            // starts an interactive cmd.exe, which runs nothing and exits 0
+            // (STEER-6 review B1). A POSIX shell reads the file from its own
+            // argv, so its `-c` goes.
+            let rest = crate::shellcmd::script_args(&args.shell_args, keep_switch.as_deref(), path);
+            command.args(&rest);
             // A reader of the status file (and the model, in a `bg` report)
             // gets a reference, never a 40 KB command; `cmd.sh` has the bytes.
             status.cmd = crate::util::truncate_chars(args.cmd.trim(), 300);
@@ -1161,13 +1169,14 @@ async fn run(args: BgRunArgs) -> u8 {
         .ok()
         .map(|call| call.trim().to_string())
         .filter(|call| !call.is_empty());
-    // A long job command takes the same route as a long bash call: it goes in
-    // a file beside the job's output, so neither the shim's spawn nor the
-    // shell's gets a command line past the Windows limit (`shellcmd`).
+    // A job command takes the same route as a bash call: a file beside the
+    // job's output (always on Windows), so neither the shim's spawn nor the
+    // shell's gets a command line past the Windows limit, and no backslash
+    // crosses msys' argv rewriting (`shellcmd`).
     let shell_args: Vec<String> = shell.iter().skip(1).cloned().collect();
-    let cmd_file = match crate::shellcmd::input(&command, &shell_args, &dir) {
+    let cmd_file = match crate::shellcmd::input(&command, &shell_args, &dir, &id) {
         Ok(crate::shellcmd::ShellInput::Argument(_)) => None,
-        Ok(crate::shellcmd::ShellInput::Script(path)) => Some(path),
+        Ok(crate::shellcmd::ShellInput::Script { path, .. }) => Some(path),
         Err(error) => {
             eprintln!("kelir: bg run: {error}");
             return 1;

@@ -42,14 +42,16 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
     }
 
     let bg_dir = ctx.session_dir.join("bg");
-    // A long command goes to a file *here*, before the shim exists: the command
-    // is what the shell runs (`cmd.sh`), and it also keeps a 40 KB command off
-    // the shim's own command line, where Windows refuses to start it at all
-    // (`os error 206`). The shell's argv then drops the `-c`: `bash cmd.sh`.
+    // The command goes to a file *here*, before the shim exists (on Windows
+    // always, on Unix when it is long): the file is what the shell runs
+    // (`cmd.sh`), it keeps a 40 KB command off the shim's own command line,
+    // where Windows refuses to start it at all (`os error 206`), and it keeps
+    // backslashes off msys' argv rewriting. A POSIX shell's argv then drops the
+    // `-c` (`bash cmd.sh`); `cmd.exe` keeps its `/C` (`cmd.exe /C cmd.bat`).
     let shell_args: Vec<String> = ctx.shell.iter().skip(1).cloned().collect();
-    let cmd_file = match shellcmd::input(command, &shell_args, &call_dir) {
+    let cmd_file = match shellcmd::input(command, &shell_args, &call_dir, "") {
         Ok(shellcmd::ShellInput::Argument(_)) => None,
-        Ok(shellcmd::ShellInput::Script(path)) => Some(path),
+        Ok(shellcmd::ShellInput::Script { path, .. }) => Some(path),
         Err(error) => return ToolOutcome::error(error),
     };
     let launch = bg::Launch {
