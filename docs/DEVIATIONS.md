@@ -718,7 +718,92 @@ consuming a scripted reply) so a session can start in a test.
   keeps running, as documented for M0: the group/job is held by the session and
   by a lingering shim, so it dies when the session does.
 
-### TUI v2 (STEER-10 + STEER-3): deviations from `docs/design/TUI-v2.md`
+### tui2 fixes (docs/reviews/tui2-review.md): deviations
+
+- **A message is committed block by block while it streams, not only when the
+  message ends.** The design note (§6) says a finished block is "committed
+  through `insert_before` and forgotten", which is what this now does: the
+  reviewer's S1 (a long fence becoming a three-row ticker, the previous block's
+  rows vanishing) and B1 (tool lines written after the prose that followed them)
+  were both symptoms of holding everything until `Assistant`. The one thing that
+  is still held is a block that CommonMark may read as a loose list item's
+  parent (`markdown::ends_in_item` + `continues_item`): its rows are committed
+  with its continuation, so a continuation paragraph keeps its hanging indent
+  (`S7`). That is one block of latency for a list item, and nothing else.
+- **Backspace is `Key::RemoveChip` first, then `Key::Backspace`.** The review's
+  B2 was that no key ever produced `RemoveChip`. One Backspace removes a chip
+  whole and deletes its file; with no chip at the cursor the same key is an
+  ordinary Backspace, so typed text never loses a keystroke (the design note's
+  "one Backspace removes the whole chip" is a rule about chips, not about text).
+- **The Windows keystroke burst is caught at input time, not only at submit.**
+  The earlier deviation ("Windows bracketed paste arrives as keystrokes") said
+  the chip was made at submit on Windows. The review's S8 showed what that
+  costs: the raw path stayed visible and editable, and "Backspace removes the
+  chip" was Unix-only on the maintainer's own platform. Now every typed
+  character is followed by one cheap check of the text that ends at the cursor
+  (`attachments::path_tail`, no file system until the extension matches): when
+  it is a real image file the path is replaced by the same chip a paste makes.
+  The submit-time scan remains as the fallback for a path pasted into a
+  terminal that neither delivers `Event::Paste` nor types it (an image editor's
+  file list dropped as text, say).
+- **`/expand` and `/collapse` are two commands with one direction each.** The
+  design note (§4, "expand") had `/expand` toggle the policy and `/expand n`
+  append. The earlier branch made `/collapse` the toggle, which the review's S6
+  rightly called a trap: a command named `/collapse` expanded a fresh session.
+  Final shape: `/expand` = full output from now on, `/expand n|last` = append
+  that call's output, `/collapse` = one line per call from now on; all three
+  idempotent.
+- **`paused` and `error` outlive the turn.** The design note's viewport mock
+  shows `● idle · ready` for the idle viewport, and the state machine's
+  `TurnEnded` went to idle for every outcome. A turn that ended in a step-cap
+  pause or a provider error keeps its row (with the reason and the next action)
+  until the next turn starts: it is the one state a human must act on, and
+  STEER-10 req. 1 lists both (review S5). `done` and `stopped` still go idle;
+  the summary line above says which it was.
+- **The vision check reads three shapes and treats silence as "try it".** The
+  model list can state images as a Go `capabilities.vision` flag/object, as
+  OpenRouter's `architecture.input_modalities`, or as a `supported_parameters`
+  entry. OpenRouter never lists images in `supported_parameters`, so reading a
+  missing entry as "no images" would have refused every vision model on that
+  provider (the review's S2 noted exactly this trap). A model the list does not
+  name, or names without saying, is tried: the provider's own refusal is
+  clearer than a wrong guess here.
+- **`kelir view` validates bytes, not extensions.** S3: a `.png` that is text
+  or empty used to be queued and then refused by the provider on *every* later
+  request (the `source` event stays in the log). The first 64 KB are checked for
+  a signature and a readable header (`attachments::sniff`); a file that fails is
+  refused before anything is recorded.
+- **The base prompt gains one line, the pointer gains a how-to.** S4: the model
+  could not learn that `kelir view` exists, and a live run spent seven steps
+  guessing a picture. `src/prompt.md` is now 909 bytes (budget 1 KB, the byte
+  snapshot test enforces it) and a pointer reads
+  `[image: attachments/1-x.png, 1280x720, 312 KB — run: kelir view attachments/1-x.png]`,
+  which is also where the model reads it at the moment it needs it.
+- **Spacing follows the design note's rules now (N1).** One blank row between a
+  prompt echo, a tool group, prose and the turn summary; never two.
+- **A prefix is clipped to the pane (N2).** At widths below a deep list's indent
+  the hanging indent (and a quote bar) is cut back so one column is left for the
+  text: no row is ever wider than the layout at 2..120 columns.
+- **`KELIR_ASCII` covers the design note's glyph list, not every byte (N3).**
+  The banner, `›`, `»` and the ` · ` separators stay Unicode in both sets: the
+  set exists to keep *state* readable, and those are decoration. Documented in
+  `docs/reference/tui.md`.
+- **The facts row and the state row share one word per state (N4).** A finished
+  turn reads `kelir idle` (not `kelir done`) under `● idle · ready`; the summary
+  line carries the outcome. `1 step` is singular.
+- **A `user` event lists its image paths (N5).** `attachments[]` holds the paths
+  the pointers name (`attachments::paths_in`), and the text keeps the pointers.
+- **`kelir view` copy numbers count (N6).** `<session>/attachments/` files are
+  numbered by the highest number already there instead of always `1-`.
+- **The table that streams as a bordered partial table stays (unchanged
+  deviation).** Cosmetic; the committed table is the boxed one the design note
+  asks for.
+- **No machine names in PROGRESS or notes (pre-existing class, N7).** The rows
+  that named a Linux host are scrubbed in this job's row; the older ones are the
+  wave's pre-existing class, listed here rather than rewritten in someone else's
+  row.
+
+
 
 - **The viewport stays a fixed 8 rows; the inline view's height is not changed
   at runtime.** Design note §10 asks for confirmation of ratatui 0.30's inline

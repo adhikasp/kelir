@@ -41,9 +41,22 @@ inside a kelir session; outside one it says so and exits 1.
   `source` event with `kind: "attachment"` and the relative path. The request
   that follows carries it as one `image_url` part of the **last** message, so
   every earlier message (and the provider's cached prefix) is unchanged.
-- It prints `image queued: appears in your next message` and exits 0; a missing
-  file, an unknown image type or one over 10 MB is refused with a message and
-  exit 1. The model does not have to look: that is the point of the pointer.
+- It prints `image queued: appears in your next message` and exits 0. These are
+  refused with a message and exit 1, and a refusal changes nothing (no `source`
+  event, no request):
+  - a missing file, or a directory;
+  - a file over 10 MB;
+  - an unknown image type;
+  - **bytes that are not an image**: the extension is only a claim, so the
+    signature and header are read (`png`, `jpg`, `gif`, `webp`). A text file
+    named `fake.png` and an empty `empty.png` are refused here rather than
+    poisoning the conversation with a provider 400 that repeats on every later
+    request;
+  - **a model the provider marks as text-only** (`capabilities.vision: false`,
+    or OpenRouter's `architecture.input_modalities` without `image`). A model
+    the provider says nothing about is tried: a missing flag is not a refusal.
+
+The model does not have to look: that is the point of the pointer.
 
 ## `kelir bg run|ls|out|wait|cancel`
 
