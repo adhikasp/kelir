@@ -11,3 +11,13 @@
   `0` = unlimited; the knob stays for jobs that want a cap; the 400 in the user config goes once the code change
   (STEER-4) lands. Item (b) still applies to an explicit cap: report "turn paused, say continue" (outcome
   `paused`), not a failure.
+
+- 2026-11-19 concurrency: five kelir sessions at once on the OpenCode Go provider -> every new worker hit
+  `http 429 rate_limit_error` after 14-17 steps; kelir retried (retryable) but gave up and the turn ended in `error`.
+  M5-A's own requests carry ~200K prompt tokens per step (never compacts: window 1M, trigger at 80%), a big share
+  of any token-rate limit. Findings: (a) 429 handling should honour `Retry-After` and back off for minutes, then
+  *pause* the turn (not fail it); (b) compaction trigger at 80% of a 1M window is far too late for cost/rate: add a
+  configurable soft target (e.g. compact_at_tokens = 150000); (c) workers re-read big docs (DEVIATIONS.md 44 KB,
+  SPEC 26 KB) in full: skills/AGENTS.md should point to the relevant section, and `cat` of big files should be
+  discouraged in the prompt (use sed -n ranges / rg); (d) concurrency limit of the provider unknown: measure and
+  record (currently 3 concurrent workers is the working number).
