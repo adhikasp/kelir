@@ -54,16 +54,30 @@ wait itself in `session::stream`. Where this differs from the brief:
 - **A signal is a `stop`, but only while a wait is running.** Ctrl-C (and
   SIGTERM on Unix, Ctrl-Break on Windows) during a retry or slot wait ends the
   turn `stopped` with the reason `interrupted (Ctrl-C)` and leaves a `--keep`
-  session up, instead of killing a process whose log says nothing. The handler
-  is registered only while the wait is polled and removed when it ends, so a
-  Ctrl-C during a request in flight or while a tool runs still kills the process
-  — the case `kelir resume` is written for. Test coverage: the Unix half is
-  driven end to end by a real `SIGINT` to a real session
-  (`tests/e2e_steer5.rs::an_interrupt_during_a_wait_ends_the_turn_stopped`);
-  the Windows half (the handler registration, which no test may exercise by
-  *sending* a console event, because `GenerateConsoleCtrlEvent` addresses a
-  whole console and not one process) is a unit test of the registration in
-  `src/signals.rs`. This is the one remaining honest gap: no automated test
+  session up, instead of killing a process whose log says nothing. The listener
+  is installed **once per process**, before the session is announced
+  (`signals::install` at the top of `session::drive`), because Tokio never
+  restores a signal's default disposition once a `Signal` exists; a Ctrl-C
+  during a request in flight or while a tool runs therefore also reaches the
+  listener, which keeps it pending rather than killing the process. A **second**
+  interrupt within two seconds exits (`exit 130`), which is the way out of a
+  wedged session — the rule the TUI states. The pending state is a
+  **level-triggered flag**, not an edge-triggered wakeup: it stays set until a
+  wait acts on it and is cleared there, so a signal that arrives before the wait
+  begins is not lost (STEER-5 fixes round 2; the first version compared a
+  `watch` baseline, and `watch::Sender::send` drops its value when nothing is
+  subscribed — the interrupt vanished in the gap between the `error` event and
+  the wait's first poll, which failed about two runs in six under load).
+  Test coverage: `src/signals.rs` has unit tests of the state machine, including
+  200 rounds of "signal, then wait"; the Unix half is driven end to end by real
+  `SIGINT`s to real sessions
+  (`tests/e2e_steer5.rs::an_interrupt_during_a_wait_ends_the_turn_stopped`,
+  which signals a running wait, and `::an_interrupt_before_the_wait_begins_is_not_lost`,
+  which signals *before* the wait exists — it fails on the old mechanism with
+  "the interrupt was lost; the turn never ended"). The Windows half is those
+  unit tests only: no test may *send* a console event, because
+  `GenerateConsoleCtrlEvent` addresses a whole console and not one process
+  (AGENTS.md hard rule). This is the one remaining honest gap: no automated test
   presses Ctrl-C on a Windows console.
 - **A retryable provider error's message is the status and its class, never the
   body.** For an outage the `error` event's `message` is `http 503: provider
