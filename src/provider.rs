@@ -57,6 +57,16 @@ pub fn names_field(message: &str, field: &str) -> bool {
 pub struct ProviderError {
     pub message: String,
     pub retryable: bool,
+    /// The HTTP status, when the failure was a response rather than the
+    /// transport (a socket that died has none).
+    pub status: Option<u16>,
+    /// What the response's own headers asked for (`Retry-After`, a reset
+    /// header), when they said anything kelir could read.
+    pub retry_after: Option<Duration>,
+    /// The stream had already begun a tool call: that step may have work ahead
+    /// of it, so it is not re-sent (an assistant message with a half-read call
+    /// is not a request any provider would take twice).
+    pub tool_call_started: bool,
 }
 
 impl ProviderError {
@@ -64,6 +74,36 @@ impl ProviderError {
         Self {
             message: message.into(),
             retryable,
+            status: None,
+            retry_after: None,
+            tool_call_started: false,
+        }
+    }
+
+    /// A response kelir must not act on: the status decides whether another
+    /// request is worth making.
+    pub fn http(status: u16, message: impl Into<String>, retry_after: Option<Duration>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: crate::retry::status_is_retryable(status),
+            status: Some(status),
+            retry_after,
+            tool_call_started: false,
+        }
+    }
+
+    /// A failure of the request itself (DNS, TLS, connect, a socket that died
+    /// mid-stream). Always worth another request — unless a tool call of the
+    /// step had already begun.
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self::new(message, true)
+    }
+
+    /// The short reason for a wait's visible line.
+    pub fn reason(&self) -> String {
+        match self.status {
+            Some(code) => format!("{} ({code})", crate::retry::status_reason(code)),
+            None => self.message.clone(),
         }
     }
 }
@@ -76,9 +116,17 @@ impl std::fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
-pub const MAX_ATTEMPTS: u32 = 3;
+/// How many times a *resumed turn* is tried again after a retryable failure:
+/// surviving an outage is what `resume` is for. A step's own retries are bounded
+/// by [`crate::retry::Budget`], which is a waiting budget rather than a count.
+pub const TURN_ATTEMPTS: u32 = 3;
 
 /// Backoff before attempt `attempt + 1`: 200 ms, 400 ms, 800 ms…
+///
+/// Kept for the parts that still want a short, fixed schedule (a resumed
+/// *turn* is tried again while this lasts). A step's own retries use
+/// [`crate::retry`], which honours the provider's hints and fills the waiting
+/// budget.
 pub fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(200u64.saturating_mul(1u64 << attempt.min(5)))
 }
@@ -211,6 +259,27 @@ impl Client {
         self.cfg.kind
     }
 
+    /// What the `error` event and the screen say about a refused request.
+    ///
+    /// An outage (a retryable status) gets the status and its class and nothing
+    /// else: it is a wait, and no part of the body helps a person or a script
+    /// decide anything. A refusal (400/401/403/404/422) keeps its (bounded,
+    /// secret-redacted) body, because "unknown model" is the answer that lets a
+    /// human fix the invocation.
+    fn message_for(&self, code: u16, body: &str) -> String {
+        let reason = crate::retry::status_reason(code);
+        if crate::retry::status_is_retryable(code) {
+            return format!("http {code}: {reason}");
+        }
+        let body = crate::util::redact(body.trim(), self.cfg.key.as_deref());
+        let body = crate::util::truncate_chars(&body, 500);
+        if body.is_empty() {
+            format!("http {code}: {reason}")
+        } else {
+            format!("http {code}: {reason}: {body}")
+        }
+    }
+
     /// The provider's own model list, for the metadata kelir does not hardcode
     /// (context window, tool support). Both providers serve `GET /models`;
     /// OpenRouter's is public, Go's wants the same key as a completion.
@@ -278,6 +347,12 @@ impl Client {
 
     /// The same, handing each new piece of text to `on_delta` as it arrives.
     /// The callback must return quickly: it runs on the stream's own task.
+    ///
+    /// A failure carries what the retry policy needs: the HTTP status (when
+    /// there was a response), what the response's headers asked for, and
+    /// whether a tool call of that step had already begun — a step whose tool
+    /// call is in flight is not re-sent, because it may already have had an
+    /// effect.
     pub async fn stream_with(
         &self,
         request: &BuiltRequest,
@@ -291,18 +366,29 @@ impl Client {
             .json(&request.body)
             .send()
             .await
-            .map_err(|error| ProviderError::new(format!("request failed: {error}"), true))?;
+            .map_err(|error| ProviderError::transport(format!("request failed: {error}")))?;
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
             let code = status.as_u16();
-            return Err(ProviderError::new(
-                format!(
-                    "http {code}: {}",
-                    crate::util::truncate_chars(body.trim(), 500)
-                ),
-                code >= 500 || code == 408 || code == 429,
+            // Read the headers before the body: they are gone with it, and they
+            // are what says how long the provider wants kelir to wait.
+            let retry_after = crate::retry::header_hint(
+                response
+                    .headers()
+                    .iter()
+                    .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?))),
+                std::time::SystemTime::now(),
+            );
+            // The body is read to drain the connection, and it is *not* put on
+            // the event: a gateway that quotes the request (or a 4xx that
+            // prints the key) would write a credential into `events.jsonl` and
+            // into NDJSON stdout (STEER-5 review S3).
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::http(
+                code,
+                self.message_for(code, &body),
+                retry_after,
             ));
         }
 
@@ -320,7 +406,7 @@ impl Client {
                     while let Some(event) = parser.next_event() {
                         assembler
                             .feed_event(&event)
-                            .map_err(|message| ProviderError::new(message, true))?;
+                            .map_err(|message| partial_error(message, &assembler))?;
                         for delta in assembler.take_pending() {
                             on_delta(delta);
                         }
@@ -331,22 +417,36 @@ impl Client {
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    return Err(ProviderError::new(
+                    return Err(partial_error(
                         format!("stream interrupted: {error}"),
-                        true,
+                        &assembler,
                     ));
                 }
             }
         }
 
         if !assembler.done && assembler.finish_reason.is_none() {
-            return Err(ProviderError::new(
-                "stream ended before the model finished",
-                true,
+            return Err(partial_error(
+                "stream ended before the model finished".to_string(),
+                &assembler,
             ));
         }
         Ok(assembler)
     }
+}
+
+/// A failure part-way through a response. Retryable — the request can simply
+/// be re-sent — unless a tool call of the step had already been streamed, in
+/// which case the step may have work ahead of it and is not re-run (the tool
+/// layer settles the call as `unknown`).
+fn partial_error(message: impl Into<String>, assembler: &Assembler) -> ProviderError {
+    let tool_call_started = !assembler.tool_calls().is_empty();
+    let mut error = ProviderError::transport(message);
+    error.tool_call_started = tool_call_started;
+    if tool_call_started {
+        error.retryable = false;
+    }
+    error
 }
 
 #[cfg(test)]
@@ -368,6 +468,7 @@ mod tests {
             reasoning_effort: None,
             reasoning_effort_explicit: false,
             session_header: None,
+            max_concurrent_requests: None,
         }
     }
 
@@ -382,6 +483,7 @@ mod tests {
             reasoning_effort: None,
             reasoning_effort_explicit: false,
             session_header: Some("x-opencode-session".into()),
+            max_concurrent_requests: None,
         }
     }
 
@@ -568,6 +670,31 @@ mod tests {
             chat_completions_url("http://127.0.0.1:8080/v1/"),
             "http://127.0.0.1:8080/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn a_refusal_keeps_a_redacted_body_and_an_outage_keeps_none() {
+        let mut cfg = openrouter();
+        cfg.key = Some("fixture-key-not-a-credential".into());
+        let client = Client::new(cfg, "ses_1", None).unwrap();
+        // An outage: the status and its class, never the body.
+        assert_eq!(
+            client.message_for(
+                503,
+                "upstream said: Bearer fixture-key-not-a-credential refused"
+            ),
+            "http 503: provider error"
+        );
+        assert_eq!(
+            client.message_for(429, "slow down"),
+            "http 429: rate limited"
+        );
+        // A refusal: the body is the answer, minus any credential.
+        assert_eq!(
+            client.message_for(400, "unknown model; key fixture-key-not-a-credential"),
+            "http 400: provider refused: unknown model; key [redacted]"
+        );
+        assert_eq!(client.message_for(404, "  "), "http 404: provider refused");
     }
 
     #[test]

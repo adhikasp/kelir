@@ -2,6 +2,144 @@
 
 Small, deliberate differences, with the reason. Everything else tracks the spec.
 
+## Retrying provider errors (STEER-5, 2026-11-19)
+
+The brief is `docs/tasks/STEER-5.md`; the policy lives in `src/retry.rs` and the
+wait itself in `session::stream`. Where this differs from the brief:
+
+- **Attempts are bounded by a waiting budget, plus a finite stand-in for
+  "unlimited".** The brief says attempts are unlimited inside `retry_max_wait`.
+  A provider that answers instantly with 429 would then spin: the budget is
+  spent in time, and a zero-wait loop never spends any. So `retry::MAX_ATTEMPTS`
+  (60) caps the count regardless, `retry_max_attempts` in `config.toml` caps it
+  further, and `retry_max_wait = 0` (unlimited waiting) does **not** mean
+  unlimited attempts. `retry_max_attempts = 0` is read as unset, not as "never
+  retry" (a person who wants no retries sets `retry_max_attempts = 1`). With the
+  default schedule the waits reach the 120 s cap after seven attempts, so the
+  budget — not the count — is what ends a normal outage.
+- **A provider hint can never shorten a retry below a floor.** `Retry-After: 0`,
+  a reset header of `0s` and a date already past are all well-formed answers that
+  mean "now"; taken literally, a gateway that answers that way for ever got a
+  request every few milliseconds (the review measured 309/s). The floor is
+  `min(250 ms, retry_base_ms)`, so a person who configured a fast test schedule
+  keeps it and the default schedule never waits less than a quarter second
+  (STEER-5 review S2). An absurd *large* hint is still honoured, and still
+  pauses the turn when it does not fit the budget.
+- **A `Retry-After` longer than what the budget has left pauses at once.** The
+  brief says to honour the header; waiting 4 s of a 1 s budget and *then* failing
+  would honour neither. The provider's hint is clamped to the budget, and a hint
+  that does not fit pauses the turn immediately.
+- **There is one `paused` outcome with a `reason`.** STEER-4's step cap and
+  STEER-5's exhausted retry budget are the same event with two causes: the
+  event carries the shared `final_text` payload with the message "provider
+  unavailable after N attempts / M: <reason>; say `continue` to retry" and a
+  `reason` of `provider`; the step cap's `reason` is `steps` and its message is
+  "turn paused after N steps; say continue to resume". A one-shot `run` exits 0
+  for either, a `--keep` session stays up with a fresh step count and a fresh
+  budget, Herdr gets `blocked` for both (the one word this Herdr shows for
+  "waiting for a human" — the STEER-4 rule, now the rule for every pause), and
+  the TUI's status word is `paused`. `resume::interrupted` treats `paused` like
+  `stopped`, so a resume (or a later `say`) retries from the same fold.
+- **A queued `before_step` verb applies between two attempts; a `now` verb cuts
+  the wait short.** The brief asks that `model` during a wait "uses the new
+  model", and a retry is a fresh request: so an ordinary wait that runs out
+  applies the `before_step` boundary before re-sending, which also lets a queued
+  `say` join the fold and `end` take effect. A verb whose answer is `applies:
+  "now"` (`say --now`, `model`) does not wait for that boundary: it is applied
+  the moment it arrives, the wait ends, and the request goes out at once —
+  rebuilt from the new fold or the new model, with a fresh budget and the new
+  provider's governor. A person's correction must not sit out a `Retry-After`
+  that can be a week long (STEER-5 review B2). The `verb` event still records
+  which boundary it applied at. The ack is answered *after* the verb lands, so
+  `say --now` and `model` during a wait answer `applies: "now"` with the state
+  the next request really carries — for `model`, `state.model` is the new one
+  (STEER-5 review N1).
+- **`later` keeps its boundary even during a wait.** The brief lists `later`
+  among the verbs that "take effect immediately", and it does — as a *delivery*:
+  it is accepted, logged and queued the moment it arrives. What it does not do
+  is cut the wait: `later` asks for the turn end, its ack says `applies:
+  "turn_end"`, and the text joins the next turn from the fold, which is what
+  SPEC and the `verb` boundary have said since M1. Cutting a `Retry-After` for
+  a message that must not be sent mid-turn would put the message into a request
+  the sender asked it to stay out of (STEER-5 review N3).
+- **A signal is a `stop`, but only while a wait is running.** Ctrl-C (and
+  SIGTERM on Unix, Ctrl-Break on Windows) during a retry or slot wait ends the
+  turn `stopped` with the reason `interrupted (Ctrl-C)` and leaves a `--keep`
+  session up, instead of killing a process whose log says nothing. The listener
+  is installed **once per process**, before the session is announced
+  (`signals::install` at the top of `session::drive`), because Tokio never
+  restores a signal's default disposition once a `Signal` exists; a Ctrl-C
+  during a request in flight or while a tool runs therefore also reaches the
+  listener, which keeps it pending rather than killing the process. A **second**
+  interrupt within two seconds exits (`exit 130`), which is the way out of a
+  wedged session — the rule the TUI states. The pending state is a
+  **level-triggered flag**, not an edge-triggered wakeup: it stays set until a
+  wait acts on it and is cleared there, so a signal that arrives before the wait
+  begins is not lost (STEER-5 fixes round 2; the first version compared a
+  `watch` baseline, and `watch::Sender::send` drops its value when nothing is
+  subscribed — the interrupt vanished in the gap between the `error` event and
+  the wait's first poll, which failed about two runs in six under load).
+  Test coverage: `src/signals.rs` has unit tests of the state machine, including
+  200 rounds of "signal, then wait"; the Unix half is driven end to end by real
+  `SIGINT`s to real sessions
+  (`tests/e2e_steer5.rs::an_interrupt_during_a_wait_ends_the_turn_stopped`,
+  which signals a running wait, and `::an_interrupt_before_the_wait_begins_is_not_lost`,
+  which signals *before* the wait exists — it fails on the old mechanism with
+  "the interrupt was lost; the turn never ended"). The Windows half is those
+  unit tests only: no test may *send* a console event, because
+  `GenerateConsoleCtrlEvent` addresses a whole console and not one process
+  (AGENTS.md hard rule). This is the one remaining honest gap: no automated test
+  presses Ctrl-C on a Windows console.
+- **A retryable provider error's message is the status and its class, never the
+  body.** For an outage the `error` event's `message` is `http 503: provider
+  error` or `http 429: rate limited`: it is a wait, nothing in the body helps a
+  person or a script decide anything, and a gateway that quotes the request (or
+  a 4xx that prints the key) would otherwise write a credential into
+  `events.jsonl` and into NDJSON stdout (STEER-5 review S3; this file used to
+  accept the body because it "never leaves the machine", which is not true of
+  stdout). A *refusal* (400/401/403/404/422) still carries its body — "unknown
+  model" is the answer that lets a human fix the invocation — bounded to 500
+  characters and with the session's own key replaced by `[redacted]`.
+- **NDJSON carries the wait as the `error` event, not as a separate line.** The
+  visible line ("rate limited (429): retrying in 34 s, attempt 5, say stop to
+  cancel") goes to the TUI's scrollback and status line and to stderr in human
+  mode; under `--json` stdout stays one event per line, and the wait *is* the
+  `error` event with `retryable`, `status`, `attempt` and `retry_in_ms`.
+- **The concurrency governor counts what is in flight, not what is configured.**
+  A slot is held for exactly one request: `[providers.<name>]
+  max_concurrent_requests = N` takes an advisory OS lock on
+  `<state root>/locks/<base-url-host>-<slot>` for the duration of one
+  `POST /chat/completions`, polling every 100 ms, with the status line saying
+  "waiting for a provider slot (N)". Two config names pointing at one endpoint
+  share the endpoint's slots, because that is what the provider's limit is per.
+  `0`/unset is off. Linux and macOS use `flock`, Windows `LockFileEx` (not
+  `File::try_lock`, which needs Rust 1.89 and the MSRV is 1.88); both are
+  released by the kernel when the holder dies, which is the property a pid file
+  does not have.
+- **The governor's slot wait is not an `error` event.** It is kelir waiting for
+  its own sibling, not a provider failure, so it is a visible line and a status
+  line only. It is interruptible like a retry wait: `stop`, `end` and a signal
+  end the turn, `say --now` and `model` apply at once and simply look for the
+  slot again.
+- **The governor follows the provider a request goes to.**
+  `max_concurrent_requests` is read from the config entry the `model` verb
+  resolved to, every time, so a swap to a governed provider starts taking its
+  slots and a swap away stops being held to the old limit (STEER-5 review S1).
+  A compaction's summary is a provider request on the same account and takes a
+  slot like any step.
+- **A retry hint prefers the `Date` header and the tightest reset window.**
+  Absolute hints (an HTTP-date, an epoch, an RFC 3339 stamp) are measured from
+  the response's own `Date` when it has one, so a skewed local clock cannot turn
+  a 90 s hint into none at all (review N1). When a response carries several
+  reset headers (`x-ratelimit-reset-requests` and friends) the *shortest* still
+  closed window wins: a provider reports every window it counts, and the one
+  that fired is the tight one, not the daily one (review N2).
+- **A compaction summary is tried once, never retried.** A 429 on the
+  summarising request skips that compaction — the context stays as it was and
+  the next step runs, with a `where: "compact"` error in the log — rather than
+  spending the turn's waiting budget on a summary nobody asked for. A step
+  always gets the budget (review N3; M3 review N4 made the same call).
+
 ## STEER-6: the retro's loop changes (2026-11-19)
 
 - **On Windows a command always runs from a file; on Unix a long one does.** The spec's shell

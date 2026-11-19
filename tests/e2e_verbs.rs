@@ -868,8 +868,17 @@ async fn a_rejected_model_fails_the_turn_but_not_a_keep_session() {
     assert_eq!(code, 0, "{stderr}");
 }
 
-/// A `stop` sent during the provider retry backoff is obeyed at once instead of
-/// waiting the backoff out (M1 review N5).
+/// A `stop` sent during the provider retry wait is obeyed at once instead of
+/// waiting it out (M1 review N5).
+///
+/// Event-driven, not timing-driven (STEER-5 review F1): the wait the session
+/// enters is five seconds long (`retry_base_ms = retry_cap_ms = 5000`, a budget
+/// that affords it), and the test only sends `stop` after reading the `error`
+/// event that announces it. So the `ctl` process has seconds to start even on a
+/// loaded box, where the suite's default 200/400 ms schedule could finish all
+/// three attempts before `ctl` was scheduled — the turn then ended `paused`
+/// (the truthful outcome) and the assertion below failed on a test race, not on
+/// a product bug. The ceiling stays generous for the same reason.
 #[tokio::test]
 async fn stop_during_a_provider_backoff_is_obeyed_at_once() {
     let mock = Mock::start(vec![
@@ -878,24 +887,33 @@ async fn stop_during_a_provider_backoff_is_obeyed_at_once() {
         Reply::Http(500, "boom".to_string()),
     ])
     .await;
-    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+    let config = "retry_base_ms = 5000\nretry_cap_ms = 5000\nretry_max_attempts = 3\n\
+                  retry_max_wait = 60\n";
+    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], config).await;
     let error = session.wait_for("error").await;
     assert_eq!(error["retryable"], true, "{error}");
+    // The wait is announced before it is entered, so this is the marker that
+    // says the session is (about to be) waiting rather than retrying.
+    assert!(
+        error["retry_in_ms"].as_u64().is_some(),
+        "the failure announced no wait to stop: {error}"
+    );
 
     let started = Instant::now();
     let answer = session.ctl(&["stop", "no point retrying"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     let ended = session.wait_for("turn_ended").await;
     let waited = started.elapsed();
-    assert_eq!(ended["outcome"], "stopped");
+    assert_eq!(ended["outcome"], "stopped", "{ended}");
     assert!(
-        waited < Duration::from_millis(1500),
+        waited < Duration::from_secs(15),
         "the stop waited {waited:?} for the retries"
     );
-    assert!(
-        mock.request_count() <= 2,
-        "the stop was only read after the retries: {} requests",
-        mock.request_count()
+    // The wait was cut, not sat out: nothing was re-sent after the 500.
+    assert_eq!(
+        mock.request_count(),
+        1,
+        "the stop was only read after a retry went out"
     );
 
     session.end().await;

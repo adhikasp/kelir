@@ -564,12 +564,15 @@ async fn the_tui_runs_a_turn_in_a_pty() {
 
 /// The failure word: `error` goes out over the same OSC record — and a failed
 /// turn does not end the session.
+///
+/// A provider that is *down* is a pause, not a failure (STEER-5), so the
+/// failure here is a provider that refuses the model: 400 is an answer, not an
+/// outage, and it is never retried.
 #[tokio::test]
 async fn the_tui_reports_an_error_to_herdr() {
     let mock = Mock::start(vec![
-        Reply::Http(500, "boom".into()),
-        Reply::Http(500, "boom".into()),
-        Reply::Http(500, "boom".into()),
+        Reply::Http(400, "unknown model".into()),
+        Reply::Http(400, "unknown model".into()),
     ])
     .await;
     let temp = tempfile::tempdir().unwrap();
@@ -578,7 +581,7 @@ async fn the_tui_reports_an_error_to_herdr() {
     let config = temp.path().join("config.toml");
     std::fs::write(
         &config,
-        "provider = \"openrouter\"\nmodel = \"test/model\"\nmax_steps = 3\n",
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
     )
     .unwrap();
     let state = temp.path().join("state");
@@ -609,6 +612,59 @@ async fn the_tui_reports_an_error_to_herdr() {
     let text = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
     assert!(text.contains("\"type\":\"error\""), "{text}");
     assert!(text.contains("\"outcome\":\"error\""), "{text}");
+}
+
+/// A provider that stays down past the waiting budget pauses the turn: the
+/// status line says "paused", Herdr gets `blocked` (the one word this Herdr
+/// shows for "waiting for a human", the same rule as a step-cap pause), and
+/// the log's `reason` says `provider` with a message saying how to go on.
+#[tokio::test]
+async fn the_tui_reports_a_paused_turn_to_herdr() {
+    let mock = Mock::start(vec![
+        Reply::Http(503, "busy".into()),
+        Reply::Http(503, "busy".into()),
+        Reply::Http(503, "busy".into()),
+        Reply::Http(503, "busy".into()),
+    ])
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\nretry_base_ms = 50\nretry_cap_ms = 100\nretry_max_attempts = 2\nretry_max_wait = 5\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            b"",
+            vec!["provider unavailable".into(), "say continue".into()],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    assert_eq!(
+        herdr_records(&run.screen),
+        vec![
+            "\u{1b}]7501;state=working\u{1b}\\".to_string(),
+            "\u{1b}]7501;state=blocked\u{1b}\\".to_string(),
+        ],
+        "a provider pause waits for a human too: screen {:?}",
+        run.screen
+    );
+    let text = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
+    assert!(text.contains("\"outcome\":\"paused\""), "{text}");
+    assert!(text.contains("\"reason\":\"provider\""), "{text}");
+    assert!(!text.contains("\"outcome\":\"error\""), "{text}");
 }
 
 /// Ctrl-C with nothing running is a no-op: it must not stop the next turn at

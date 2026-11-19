@@ -644,6 +644,7 @@ mod tests {
             reasoning_effort: None,
             reasoning_effort_explicit: false,
             session_header: None,
+            max_concurrent_requests: None,
         };
         Client::new(cfg, "ses_1", None).unwrap()
     }

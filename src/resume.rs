@@ -242,6 +242,7 @@ mod tests {
             seq,
             EventBody::TurnEnded {
                 outcome: "done".into(),
+                reason: None,
                 final_text: "done".into(),
             },
         )

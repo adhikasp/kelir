@@ -27,6 +27,23 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
     out
 }
 
+/// Replace every occurrence of a secret with `[redacted]`.
+///
+/// A provider (or the gateway in front of it) can echo the request, and a 4xx
+/// that quotes the `Authorization` header would otherwise write a credential
+/// into `events.jsonl` and into NDJSON stdout. Only the live key value is
+/// known, so that is what is replaced; a key shorter than eight characters is
+/// left alone because a two-letter "secret" would redact the whole message.
+pub fn redact(text: &str, secret: Option<&str>) -> String {
+    let Some(secret) = secret.filter(|secret| secret.len() >= 8) else {
+        return text.to_string();
+    };
+    if !text.contains(secret) {
+        return text.to_string();
+    }
+    text.replace(secret, "[redacted]")
+}
+
 /// A path as one string with forward slashes everywhere, so logs, notices and
 /// `sed`/`rg` hints read the same on every platform.
 pub fn path_string(path: &std::path::Path) -> String {
@@ -51,6 +68,24 @@ mod tests {
         assert_eq!(truncate_chars("abcdef", 3), "abc…");
         // "é" is two bytes: cutting at 1 must not split it.
         assert_eq!(truncate_chars("ééé", 5), "éé…");
+    }
+
+    #[test]
+    fn a_secret_is_redacted_and_short_strings_are_left_alone() {
+        assert_eq!(
+            redact(
+                "Bearer fixture-key-abc into the void",
+                Some("fixture-key-abc")
+            ),
+            "Bearer [redacted] into the void"
+        );
+        assert_eq!(
+            redact("nothing to do", Some("fixture-key-abc")),
+            "nothing to do"
+        );
+        assert_eq!(redact("nothing to do", None), "nothing to do");
+        // Too short to be a credential: redacting it would mangle the message.
+        assert_eq!(redact("a low bar", Some("a low")), "a low bar");
     }
 
     #[test]
