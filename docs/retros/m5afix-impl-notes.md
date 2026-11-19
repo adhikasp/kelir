@@ -54,7 +54,7 @@ covers the pty spawns and the two commands `e2e_m4`/`review_m4` build by hand.
 ## Gates
 
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`
-(all suites green) at `eeda947`; Linux via
+(all suites green) at `01289db`; Linux via
 `bash scripts/remote-check.sh the maintainer kelir-verify-m5afix` — fmt clean, clippy clean,
 **292 unit + every integration suite green**. Test counts (Windows single-threaded / Linux):
 unit 287 / 292, `e2e` 16 / 16, `e2e_m3` 11 / 13, `e2e_m4` 10 / 8, `e2e_m5` 10 / 10,
@@ -92,6 +92,10 @@ file after `tool_settled`) were fixed rather than excused: they now write on
   budget: truncating to the remaining room at render time produces text the watcher cannot
   reproduce (it reads each file with its own limit), which would announce the file again at
   the first boundary. Skipping a file that does not fit is the only rule that stays stable.
+- **A spilled body in `latest_source_is`.** The "is this the same text as last time" check
+  first read the log payload with `inline_str`, which is `None` once a body is big enough to
+  spill to a blob — so a repeat of a large body slipped through. It resolves the payload
+  now.
 - **The `skills` verb never hashed the file.** It hashed the front-matter-stripped body;
   the watcher hashed the whole file. Making the verb send the whole file fixes F3, N5 and
   the `description` gap in one change, and drops `skill_body` entirely.
