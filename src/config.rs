@@ -223,7 +223,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         provider: raw.provider.unwrap_or_else(|| PROVIDER_OPENROUTER.into()),
         model: raw
             .model
-            .unwrap_or_else(|| "anthropic/claude-sonnet-4.5".into()),
+            .unwrap_or_else(|| "deepseek/deepseek-v4.1-flash".into()),
         shell,
         spill_limit: raw.spill_limit.unwrap_or(10_240),
         max_steps: raw.max_steps.unwrap_or(100),

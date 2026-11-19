@@ -292,7 +292,8 @@ One OpenAI Chat Completions client; OpenRouter and OpenCode Go
 `reasoning_field` and a fallback list. Go needs `x-opencode-session` and a `kelir/<version>`
 User-Agent. Cost (and Go's `allowance`) come from the final usage chunk
 (`stream_options.include_usage`). Keys from the environment (`OPENROUTER_API_KEY`, the Go
-`oc_sk_…` key); never printed. Details:  §11.
+`oc_sk_…` key); never printed. The default model is `deepseek/deepseek-v4.1-flash` on
+OpenRouter (the maintainera's call, 2026-11-19); the Go equivalent is `deepseek-v4.1-flash`. Details:  §11.
 
 ## Footprint and dependencies
 

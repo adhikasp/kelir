@@ -50,6 +50,7 @@ const BUILTIN_WINDOWS: &[(&str, u64)] = &[
     ("gpt-5", 400_000),
     ("gpt-4", 128_000),
     ("openai", 128_000),
+    ("deepseek-v4.1", 1_048_576),
     ("deepseek", 128_000),
     ("glm", 200_000),
     ("grok", 256_000),
@@ -392,6 +393,10 @@ mod tests {
             200_000
         );
         assert_eq!(window_for("deepseek/deepseek-chat", &none, None), 128_000);
+        assert_eq!(
+            window_for("deepseek/deepseek-v4.1-flash", &none, None),
+            1_048_576
+        );
         assert_eq!(window_for("moonshotai/kimi-k2", &none, None), 128_000);
         assert_eq!(window_for("google/gemini-2.5-pro", &none, None), 1_000_000);
         assert_eq!(
