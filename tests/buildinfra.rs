@@ -381,6 +381,41 @@ fn the_gate_script_keeps_the_measured_wins() {
     );
 }
 
+/// The gate reports nextest's own summary line, and the pattern it greps with
+/// matches the line nextest actually prints. The first version searched for
+/// `Summary:`; nextest prints `Summary [  82.4s] ...` with no colon, so the
+/// gate said "no summary line" on a green run and nobody noticed.
+#[test]
+fn the_gate_reports_the_summary_line_nextest_prints() {
+    let gate = read("scripts/gate.sh");
+    let pattern = gate
+        .lines()
+        .find(|line| line.contains("summary="))
+        .expect("the gate reads a summary line");
+    // The real line, as nextest 0.9 prints it (ANSI stripped, two leading
+    // spaces before the word).
+    let sample = "     Summary [  82.446s] 485 tests run: 485 passed, 2 skipped
+";
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let log = dir.path().join("nextest.log");
+    std::fs::write(&log, sample).expect("write the sample log");
+    // Run the same grep the gate runs, from the gate's own text.
+    let out = Command::new(bash())
+        .args([
+            "-c",
+            &format!(
+                "grep -E '^[[:space:]]+Summary ' \"{}\" | tail -1",
+                log.display()
+            ),
+        ])
+        .output()
+        .expect("grep runs");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "the gate's summary pattern must match nextest's line; it reads: {pattern}"
+    );
+}
+
 /// Every gate stage writes its own log, so a failure is diagnosable without
 /// scrolling a combined transcript.
 #[test]

@@ -104,7 +104,7 @@ gate_body() {
       local retried
       retried="$(grep -E '^[[:space:]]+(TRY [2-9]|FLAKY)' "$out/nextest.log" | sed -E 's/^[[:space:]]+//' | sort -u)"
       local summary
-      summary="$(grep -E '^[[:space:]]+Summary:' "$out/nextest.log" | tail -1 | sed -E 's/^[[:space:]]+//')"
+      summary="$(grep -E '^[[:space:]]+Summary ' "$out/nextest.log" | tail -1 | sed -E 's/^[[:space:]]+//')"
       say "  result: ${summary:-no summary line}"
       if [ -n "$retried" ]; then
         say "  RETRIED (a flake to fix, STEER-9):"
