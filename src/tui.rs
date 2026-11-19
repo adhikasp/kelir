@@ -532,7 +532,7 @@ impl App {
     }
 
     fn layout(&self) -> Layout {
-        Layout::new(self.width)
+        Layout::with_glyphs(self.width, self.theme.glyphs)
     }
 
     fn live_height(&self) -> usize {

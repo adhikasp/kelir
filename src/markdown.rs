@@ -153,12 +153,22 @@ impl Highlighter for NoHighlight {
 #[derive(Debug, Clone, Copy)]
 pub struct Layout {
     pub width: usize,
+    /// The glyph set: quotes, bullets, the code gutter, the ellipsis and the
+    /// table borders come from here, so `KELIR_ASCII`/`TERM=dumb` reaches the
+    /// rendered text too (a Unicode table would be mojibake on a legacy
+    /// console).
+    pub glyphs: crate::theme::Glyphs,
 }
 
 impl Layout {
     pub fn new(width: usize) -> Self {
+        Self::with_glyphs(width, crate::theme::Glyphs::unicode())
+    }
+
+    pub fn with_glyphs(width: usize, glyphs: crate::theme::Glyphs) -> Self {
         Self {
             width: width.max(1),
+            glyphs,
         }
     }
 }
@@ -265,7 +275,7 @@ struct TableState {
 
 impl Renderer {
     fn new(layout: Layout) -> Self {
-        let glyphs = crate::theme::Glyphs::unicode();
+        let glyphs = layout.glyphs;
         Self {
             layout,
             theme_glyphs: glyphs,
