@@ -132,3 +132,15 @@ agent on the transcript (docs/retros/<job>.md) -> orchestrator merges to main ->
 order by smallest first, so conflicts stay small: steer4, steer1fix, steer2, steer3. M5-A merges first (it is
 already on main). Next wave when slots free: M5-B (Herdr line, hint, memory, attachments, observe), M6 (MCP).
 CPU is 6C/12T: at most ~4 concurrent cargo-building workers.
+
+## Update (2026-11-19 13:50) — rate limit (429) wave and STEER-5
+
+Five concurrent kelir sessions exceeded the OpenCode Go rate limit (HTTP 429, kelir gave up after short
+retries). Decisions (maintainer: "fix that, retry with backoff"):
+- **STEER-5** (docs/tasks/STEER-5.md): retry with Retry-After / exponential full-jitter backoff, interruptible,
+  visible, pause-not-fail on exhaustion, optional client-side concurrency governor. Worktree kelir-wt/steer5, pane
+  next to steer4.
+- Concurrency capped at **three** kelir workers until STEER-5 lands: M5-A (t10z), steer4 (t113), steer5. **steer3
+  parked** (stopped, resumes after STEER-5); steer1fix and steer2 parked (errored on 429, resume later with
+  `ctl <session> say continue`, state dirs under kelir-wt/state/<job>).
+- Merge order: M5-A, steer4, steer5, steer1fix, steer2, steer3.
