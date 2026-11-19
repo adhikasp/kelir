@@ -1157,6 +1157,9 @@ impl Session {
                 location: "source".into(),
                 message: warning.clone(),
                 retryable: false,
+                status: None,
+                attempt: None,
+                retry_in_ms: None,
             })?;
         }
         if session.has_task {
@@ -1739,6 +1742,9 @@ impl Session {
                 location: "source".into(),
                 message: note,
                 retryable: false,
+                status: None,
+                attempt: None,
+                retry_in_ms: None,
             })?;
         }
         let logged = match &resolved {
@@ -1947,6 +1953,9 @@ impl Session {
                     removed.name
                 ),
                 retryable: false,
+                status: None,
+                attempt: None,
+                retry_in_ms: None,
             })?;
             self.emit(UiEvent::Info(format!(
                 "» source deleted on disk: {}",
@@ -1961,6 +1970,9 @@ impl Session {
                     location: "source".into(),
                     message: note,
                     retryable: false,
+                    status: None,
+                    attempt: None,
+                    retry_in_ms: None,
                 })?;
             }
             let path = change.path.clone();
@@ -3565,6 +3577,7 @@ mod tests {
                 max_steps: None,
                 cache_ttl: None,
                 system_prompt: crate::config::DEFAULT_PROMPT.to_string(),
+                prompt_path: None,
                 providers: Default::default(),
                 window: None,
                 model_windows: Default::default(),
