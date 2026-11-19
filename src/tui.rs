@@ -932,6 +932,10 @@ impl App {
                 self.retry_deadline = None;
             }
             UiEvent::Paused { steps } => {
+                // A notice is prose: the calls that ran before it are finished
+                // history and go out first, or the notice lands between two
+                // tool lines of the group that came before it (`B1` again).
+                self.close_group();
                 self.status.phase = Phase::Paused;
                 self.status.running = 0;
                 self.status.turn_steps = steps;
@@ -1061,16 +1065,21 @@ impl App {
                 self.retry_deadline = Some(now + wait);
             }
             UiEvent::Attachment { rel, bytes } => {
+                self.close_group();
                 self.push_lines(vec![Line::from(Span::styled(
                     format!("  view {rel} · {}", attachments::bytes_label(bytes)),
                     self.theme.dim(),
                 ))]);
             }
             UiEvent::Info(text) => {
+                self.close_group();
                 self.push_text(&text);
                 self.note.clear();
             }
             UiEvent::Error(text) => {
+                // Same rule: what settled before the failure is written first,
+                // so the notice reads after the last tool line.
+                self.close_group();
                 self.status.phase = Phase::Error;
                 self.activity.failed(now, &one_line(&text));
                 self.push_text(&format!("kelir: {text}"));
@@ -2440,6 +2449,42 @@ mod tests {
             .unwrap();
         let prose = rows.iter().position(|r| r.contains("Done.")).unwrap();
         assert!(fold < prose, "{rows:?}");
+    }
+
+    /// A notice (a pause, a provider error, a verb reply) is prose too: the
+    /// calls that settled before it are history and must be written first, or
+    /// the notice lands between two tool lines of the group it followed (`B1`
+    /// in the paused drive).
+    #[test]
+    fn a_notice_lands_after_the_tool_lines_that_came_before_it() {
+        let mut app = app_of_width(100);
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: Some(2),
+        });
+        for c in ["echo one", "echo two"] {
+            app.apply(tool_settled(c));
+        }
+        app.apply(UiEvent::Paused { steps: 2 });
+        let rows: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let one = rows.iter().position(|r| r.contains("echo one")).unwrap();
+        let two = rows.iter().position(|r| r.contains("echo two")).unwrap();
+        let notice = rows
+            .iter()
+            .position(|r| r.contains("turn paused after 2 steps"))
+            .unwrap();
+        assert!(one < two && two < notice, "{rows:?}");
+
+        // And the same for a failure.
+        let mut app = app_of_width(100);
+        app.apply(tool_settled("echo one"));
+        app.apply(UiEvent::Error("http 401: no key".into()));
+        let rows: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let call = rows.iter().position(|r| r.contains("echo one")).unwrap();
+        let error = rows.iter().position(|r| r.contains("http 401")).unwrap();
+        assert!(call < error, "{rows:?}");
     }
 
     /// The design note's spacing rule (review N1): one blank row between a
