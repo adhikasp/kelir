@@ -117,6 +117,41 @@ pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
     .await
 }
 
+/// `kelir view <path>`: queue an image for the model's next message.
+///
+/// The model reaches this through `bash` (so it costs no tool-schema text). It
+/// sends the `view` verb to the live session over the socket the bash call
+/// already carries (`KELIR_SOCK`); the session checks the model's vision
+/// metadata and records a `source` event (kind `attachment`) at the tail. That
+/// is what keeps the provider cache prefix byte-stable: earlier messages are
+/// never edited.
+pub async fn view(args: crate::cli::ViewArgs) -> u8 {
+    let Some(address) =
+        std::env::var_os("KELIR_SOCK").map(|value| value.to_string_lossy().into_owned())
+    else {
+        eprintln!("kelir: view: no session: run it from a kelir tool call (KELIR_SOCK is not set)");
+        return 1;
+    };
+    let request = Request::new("view", json!({"path": args.path}), "tool");
+    let response = match ipc::request_value(&address, &request).await {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("kelir: view: cannot reach the session: {error}");
+            return 1;
+        }
+    };
+    if response.ok {
+        println!("image queued: appears in your next message");
+        0
+    } else {
+        let message = response
+            .error
+            .unwrap_or_else(|| "the session refused the image".into());
+        eprintln!("kelir: {message}");
+        1
+    }
+}
+
 struct Options {
     json: bool,
     ask: bool,
@@ -1430,6 +1465,28 @@ impl Session {
                         self.disabled.remove(&name);
                     }
                 }
+                Verb::View { path } => {
+                    // An image queued by `kelir view` from inside a call: it
+                    // becomes a `source` event at the tail, so the next request
+                    // carries an image part and every earlier message (and the
+                    // cached prefix) stays byte-identical.
+                    match self.apply_view(&path) {
+                        Ok((rel, bytes)) => {
+                            applied.messages += 1;
+                            self.emit(UiEvent::Attachment { rel, bytes });
+                            self.sync();
+                        }
+                        Err(message) => {
+                            self.emit(UiEvent::Error(message.clone()));
+                            self.record(EventBody::Error {
+                                location: "view".into(),
+                                message,
+                                retryable: false,
+                            })?;
+                            self.sync();
+                        }
+                    }
+                }
                 Verb::End => applied.end = true,
                 Verb::Compact { focus } => {
                     // Applies at `before_step`: the compaction needs a provider
@@ -1614,7 +1671,8 @@ impl Session {
                 | Verb::Model { .. }
                 | Verb::Tools { .. }
                 | Verb::Compact { .. }
-                | Verb::Skills { .. } => {}
+                | Verb::Skills { .. }
+                | Verb::View { .. } => {}
             }
         }
         if end {
@@ -1669,6 +1727,67 @@ impl Session {
         self.emit(UiEvent::Info(format!("» {}", one_line(&text))));
         self.sync();
         Ok(true)
+    }
+
+    /// One image queued by `kelir view`: resolve the path, record the `source`
+    /// event (kind `attachment`), and return what the TUI shows.
+    ///
+    /// The event carries the relative path (`attachments/1-x.png`) and it is
+    /// the fold that turns it into a data URL at request time, so the log stays
+    /// small and free of base64.
+    fn apply_view(&mut self, named: &str) -> Result<(String, u64), String> {
+        let path = crate::attachments::resolve(&self.dir, &self.ctx.cwd, named);
+        if !path.is_file() {
+            return Err(format!(
+                "view: no such image: {}",
+                crate::util::path_string(&path)
+            ));
+        }
+        let mime = crate::attachments::mime_of(&path);
+        if mime == "application/octet-stream" {
+            return Err(format!(
+                "view: {} is not an image kelir knows (png, jpg, gif, webp)",
+                crate::util::path_string(&path)
+            ));
+        }
+        let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        if bytes > crate::attachments::MAX_BYTES {
+            return Err(format!(
+                "view: {} is {} (the limit is {})",
+                crate::util::path_string(&path),
+                crate::attachments::bytes_label(bytes),
+                crate::attachments::bytes_label(crate::attachments::MAX_BYTES)
+            ));
+        }
+        // The image is copied into the session's attachments dir, so the
+        // request does not depend on a path outside the session (and a later
+        // resume still finds it).
+        let rel = self.import_attachment(&path)?;
+        self.record(EventBody::Source {
+            kind: "attachment".to_string(),
+            name: rel.clone(),
+            text: None,
+            path: Some(rel.clone()),
+        })?;
+        self.sync();
+        Ok((rel, bytes))
+    }
+
+    /// Copy one image into `<session>/attachments/` and return its relative
+    /// path. Content that is already there is not copied twice.
+    fn import_attachment(&self, path: &Path) -> Result<String, String> {
+        let dir = crate::attachments::dir(&self.dir);
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("view: cannot create {}: {error}", dir.display()))?;
+        // Keep the file where it is when it already lives in the session's
+        // attachments (a prompt pointer names exactly that).
+        if let Ok(rest) = path.strip_prefix(&self.dir) {
+            return Ok(crate::util::path_string(rest));
+        }
+        let mut seen = std::collections::HashMap::new();
+        let saved = crate::attachments::save(&self.dir, 1, path, &mut seen)
+            .map_err(|error| format!("view: {error}"))?;
+        Ok(saved.rel)
     }
 
     /// Record one `source` event: context that arrived after the start. It

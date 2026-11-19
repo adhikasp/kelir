@@ -33,6 +33,9 @@ pub struct ModelInfo {
     /// Whether the model accepts tool calls, when the provider states it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<bool>,
+    /// Whether the model accepts images, when the provider states it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
 }
 
 /// The cached answer for one provider.
@@ -69,6 +72,14 @@ impl Cache {
 
     pub fn context_for(&self, model: &str) -> Option<u64> {
         lookup(&self.models, model).and_then(|info| info.context)
+    }
+
+    /// Whether the model takes images, when the provider says. `None` means
+    /// "not stated", which `kelir view` treats as "try it": a provider that
+    /// rejects the request says so plainly, and refusing on a missing flag
+    /// would block a model that works.
+    pub fn vision_for(&self, model: &str) -> Option<bool> {
+        lookup(&self.models, model).and_then(|info| info.vision)
     }
 }
 
@@ -122,6 +133,25 @@ struct RawLimit {
 struct RawCapabilities {
     #[serde(default)]
     tools: Option<RawTools>,
+    #[serde(default)]
+    vision: Option<RawFlag>,
+}
+
+/// A capability gate that is either a flag or an object with `supported`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawFlag {
+    Flag(bool),
+    Object(RawTools),
+}
+
+impl RawFlag {
+    fn supported(&self) -> bool {
+        match self {
+            RawFlag::Flag(flag) => *flag,
+            RawFlag::Object(object) => object.supported,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -150,8 +180,21 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
                         .as_ref()
                         .map(|names| names.iter().any(|name| name == "tools"))
                 });
+            let vision = model
+                .capabilities
+                .as_ref()
+                .and_then(|capabilities| capabilities.vision.as_ref())
+                .map(RawFlag::supported)
+                .or_else(|| {
+                    model.supported_parameters.as_ref().map(|names| {
+                        names
+                            .iter()
+                            .any(|name| name == "vision" || name == "image" || name == "images")
+                    })
+                });
             ModelInfo {
                 id: model.id,
+                vision,
                 context: model
                     .context_length
                     .or(model.limit.and_then(|limit| limit.context))

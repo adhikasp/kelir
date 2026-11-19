@@ -97,9 +97,14 @@ pub fn build_request(
         headers.push((name.to_ascii_lowercase(), value.clone()));
     }
 
+    // A message that carries images puts them in `content` as a list of
+    // parts; every other message serialises exactly as before, so a request
+    // without images is byte-identical to what it was (`to_wire` keeps the
+    // plain shape when `images` is empty).
+    let wire: Vec<Value> = messages.iter().map(|message| message.to_wire()).collect();
     let mut body = json!({
         "model": model,
-        "messages": messages,
+        "messages": wire,
         "stream": true,
         "stream_options": {"include_usage": true},
     });

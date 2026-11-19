@@ -196,6 +196,29 @@ fn render(folded: &mut Folded, event: &LogEvent, session_dir: &Path) -> Result<(
             text,
             path,
         } => {
+            if kind == "attachment" {
+                // An image queued by `kelir view`: a user message holding one
+                // image part, at the tail. The log stores the relative path,
+                // never the bytes, so the data URL is built here, at request
+                // time, from the file the session still has.
+                let rel = path.clone().unwrap_or_else(|| name.clone());
+                let file = session_dir.join(&rel);
+                let bytes = std::fs::read(&file).map_err(|error| {
+                    format!(
+                        "[source: attachment {rel}] cannot read {}: {error}",
+                        crate::util::path_string(&file)
+                    )
+                })?;
+                let mime = crate::attachments::mime_of(&file);
+                folded.messages.push(ChatMessage::user_with_images(
+                    "",
+                    vec![crate::chat::ImagePart {
+                        mime: mime.to_string(),
+                        data_url: crate::attachments::data_url(mime, &bytes),
+                    }],
+                ));
+                return Ok(());
+            }
             let body = match text {
                 Some(text) => text.resolve_text(session_dir)?,
                 None => path.clone().unwrap_or_default(),
@@ -381,6 +404,83 @@ mod tests {
         let content = last.content.as_deref().unwrap();
         assert!(content.contains("[source: hint hint.md]"));
         assert!(content.contains("consider rg"));
+    }
+
+    /// An attachment is a user message holding an image part, built from the
+    /// file at request time: the log never holds the bytes.
+    #[test]
+    fn an_attachment_source_renders_as_one_image_part_at_the_tail() {
+        let dir = temp_dir("attachment");
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        // A minimal PNG header (signature, IHDR, 1x1): the fold does not
+        // decode it, it only base64-encodes it.
+        let mut png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0]);
+        std::fs::write(dir.join("attachments/1-x.png"), png).unwrap();
+        let events = vec![
+            started(),
+            user("what is in this?"),
+            LogEvent::new(
+                3,
+                EventBody::Source {
+                    kind: "attachment".into(),
+                    name: "attachments/1-x.png".into(),
+                    text: None,
+                    path: Some("attachments/1-x.png".into()),
+                },
+            ),
+        ];
+        let folded = fold(&events, &dir).unwrap();
+        let last = folded.messages.last().unwrap();
+        assert_eq!(last.role, "user");
+        assert!(last.content.is_none(), "an attachment carries no text");
+        assert_eq!(last.images.len(), 1);
+        assert_eq!(last.images[0].mime, "image/png");
+        assert!(
+            last.images[0]
+                .data_url
+                .starts_with("data:image/png;base64,")
+        );
+        // The wire form is the list of parts, and it has no `images` field.
+        let wire = last.to_wire();
+        assert!(wire["content"].is_array(), "{wire}");
+        assert_eq!(wire["content"][0]["type"], "image_url");
+        assert!(wire.get("images").is_none(), "{wire}");
+        // Every earlier message keeps its plain string content: the cached
+        // prefix is untouched.
+        let earlier = folded
+            .messages
+            .iter()
+            .find(|message| message.content.as_deref() == Some("what is in this?"))
+            .expect("the earlier user message");
+        assert!(
+            earlier.to_wire()["content"].is_string(),
+            "an earlier message stays a plain string"
+        );
+        assert!(earlier.images.is_empty());
+    }
+
+    #[test]
+    fn an_attachment_with_a_missing_file_is_an_error_not_a_silent_skip() {
+        let dir = temp_dir("attachment-missing");
+        let events = vec![
+            started(),
+            LogEvent::new(
+                2,
+                EventBody::Source {
+                    kind: "attachment".into(),
+                    name: "attachments/gone.png".into(),
+                    text: None,
+                    path: Some("attachments/gone.png".into()),
+                },
+            ),
+        ];
+        let error = fold(&events, &dir).unwrap_err();
+        assert!(error.contains("gone.png"), "{error}");
     }
 
     #[test]
