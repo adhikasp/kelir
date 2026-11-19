@@ -21,6 +21,7 @@ that appends an event; the loop applies verbs at named boundaries.
   commands/<call-id>/out  # full tool output, never truncated; also the >10 KB spill file
   bg/<bg-id>.status       # written by the bg shim; survives kelir exiting
   sock                    # the session socket (a named pipe on Windows)
+  token                   # this session's secret, owner-only (0600); `kelir ctl` reads it
 ```
 
 - **Session id:** `ses_<ulid>`. It is also the provider cache/session key (see *Prompt caching*).
@@ -46,6 +47,32 @@ that appends an event; the loop applies verbs at named boundaries.
   `kelir brief`; there is no spawn tool), each owning its own session dir. They live inside the parent's process group (Unix) or Job Object (Windows), so
   killing the parent leaves no orphans.
 
+### Who may drive a session
+
+Reaching the socket is **not** authorisation. Two things gate every request:
+
+- **A per-session token.** At start the session makes 32 random bytes (hex), keeps them in
+  memory, writes them to `<session dir>/token` with owner-only permissions (`0600` on Unix; on
+  Windows a protected DACL with one ACE for this user) and exports them to its own tool children
+  as `KELIR_TOKEN`. Every request that arrives on the socket must carry the token; the listener
+  answers and closes a request that does not, **before** the session sees it, so an unauthenticated
+  caller cannot even write a `verb` event. The token never appears in a log line, an event or an
+  argv (a bg shim gets it in its environment, not on its command line). `kelir ctl` from a human
+  terminal reads `<session dir>/token` itself, so it keeps working; a bare socket client reads
+  `$KELIR_TOKEN` from the environment it inherited. **A process that can read the session's
+  environment or its token file already runs as the user, in the session, and is trusted** — the
+  token stops a *different* session's child, a stray process and a script that found the pipe by
+  name, not the user or the model's own tools.
+- **A registry of the jobs this session created.** `bg` reports, `cancel` and `bg-spawn` name a
+  job id; the session answers only for ids it started or registered (in memory, a status file in
+  its own `bg/`, or an output dir in its own `commands/`). Every job directory and status/out
+  path in a request must resolve **inside the session's own `bg/`**, canonicalised: `..`, a
+  symlink out of it and, on Windows, a UNC or another drive's path are all refused. A refusal is
+  a clear error to the caller and a `verb` event with boundary `rejected` in the log.
+- **The socket and the pipe are owner-only too.** The Unix socket is `0600` in a directory only
+  the user can enter; the Windows pipe's DACL grants this user and no one else. Both are read
+  back at start: a session that cannot prove its socket is private says so and refuses to serve.
+
 ## What the model gets
 
 ### Native tools (the whole tool list; fixed for the life of a session)
@@ -65,13 +92,15 @@ deterministic.
 
 ### Verbs (what a human, a script or a gate can do to a session)
 
-Every verb works the same from the TUI, `kelir ctl <session> <verb> [json]` and the socket.
+Every verb works the same from the TUI, `kelir ctl <session> <verb> [json]` and the socket, and every one of them needs the session's token
+(*Who may drive a session*, above).
 
 | verb | what it does | applies |
 |---|---|---|
 | `say` | inject a user message; `--now` = stop the running calls first | next boundary / now |
 | `later` | queue a message for the end of the turn | turn end |
 | `stop` | stop the turn: signal the tool process trees, keep partial work, `[Skipped]` results for unrun calls. `stop --call <id>` stops one running call; it returns `stopped by user: <reason>` and the turn continues | now |
+| `cancel` | `<id>`: kill one of this session's background jobs with its process tree and record it settled `cancelled`; applies at once, even in an idle `--keep` session. A job id this session did not create is refused (a `verb` event with boundary `rejected`) | now |
 | `resume` | continue a stopped, paused or crashed session from its log | now |
 | `model` | swap provider/model for the rest of the session | next step |
 | `tools` | disable/enable a native tool or an MCP server; the tool list sent to the provider never changes, a disabled tool's call returns `disabled by user` | next step |
@@ -103,7 +132,7 @@ are never inline: the event holds the path.
 | `mcp_started` / `mcp_settled` | `mcp_id`, `server`, `tool`, `args`, `outcome`, `out_path`, `parent_call_id` | a `kelir mcp` call made from inside a bash call |
 | `bg_started` / `bg_settled` | `bg_id`, `call_id`, `cmd`, `pid`, `exit_code?`, `out_path` | `promoted` tool calls and explicit `kelir bg` jobs |
 | `child_started` / `child_settled` | `child_id`, `depth`, `task`, `background`, `outcome`, `result` | the child's own log is in its own dir |
-| `verb` | `name`, `args`, `from` | every verb received, applied or not |
+| `verb` | `name`, `args`, `from`, `boundary`, `error?` | every verb received, applied or not; `boundary: "rejected"` is a refusal (a foreign job id, a path outside the session's own `bg/`, an unparsable verb), with `error` saying why |
 | `gate` | `gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?` | every gate run, including fail-open ones |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by` (`user`, `agent`, `auto`), `tokens_before`, `tokens_after` | the fold replaces everything up to `through_seq` except the pins |
 | `turn_ended` | `outcome` (`done`, `stopped`, `paused`, `error`), `final_text`, `reason?` | `paused` covers two cases, distinguished by `reason`: `steps` (an explicit `max_steps` cap) and `provider` (the retry budget was exhausted). Neither is a failure: `--keep` stays alive and the next message opens a new turn |
@@ -180,6 +209,7 @@ Per provider (OpenRouter's caching page read 2026-11-18):
 | shell (`shell` in config) | `bash -c` (falls back to `$SHELL`); a command over 6 KB runs from a file | Git for Windows `bash.exe`; `agshell` or `pwsh` by config. Every command runs from a file (switch kept: `/C`, `-File`) — see DEVIATIONS |
 | process tree | own process group (`setsid`), `killpg` on stop | Job Object per call (kill-on-close), `CREATE_NEW_PROCESS_GROUP` |
 | session socket | Unix socket | named pipe (both via the `interprocess` crate) |
+| socket permissions | `0600`, re-read at start | owner-only DACL, re-read from the handle at start |
 | detached bg job | `setsid`, outside the session's group | `DETACHED_PROCESS`, outside the session's Job Object |
 
 No shell reimplementation. **A call running past 10 minutes is promoted to the background, not
@@ -285,7 +315,7 @@ answers ("do 1,4") resolved at `prompt_submit` against the last numbered list in
 
 A child is a kelir process the model starts from `bash`: `kelir run --child "<task>" [--background]`
 or `kelir brief "<question>"`. There is **no `spawn` tool**; the native tool list is `bash`, `edit`,
-`compact`. `KELIR_ROOT`, `KELIR_PARENT` and `KELIR_DEPTH` ride along with `KELIR_SOCK` (exported to
+`compact`. `KELIR_ROOT`, `KELIR_PARENT` and `KELIR_DEPTH` ride along with `KELIR_SOCK` and `KELIR_TOKEN` (exported to
 every bash child), so the CLI registers `child_started`/`child_settled` with the **root session's
 socket** (the root stays the only writer of the registry and of its own log; each child still owns
 its own session dir with `parent`/`depth` in `session_started`). A foreground child's result is the
@@ -304,6 +334,10 @@ snapshot of the parent's context, `edit`/`compact` refused, history untouched. D
 binary) that waits for the command, tees its output and writes `bg/<id>.status`, so it outlives
 the session. Completion while the session runs appends `bg_settled` and admits a message at the
 next boundary so the agent wakes; while it does not, see *Process model*.
+
+A job's shim inherits `KELIR_SOCK` and `KELIR_TOKEN` from the session that started it (its
+command line carries neither), so its report is accepted; a shim from a *different* session, or a
+`cancel` for an id this session did not create, is refused (see *Who may drive a session*).
 
 ## Scriptable, TUI and Herdr status
 

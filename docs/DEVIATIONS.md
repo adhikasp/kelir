@@ -2,6 +2,49 @@
 
 Small, deliberate differences, with the reason. Everything else tracks the spec.
 
+## Session-socket hardening (STEER-7, 2026-11-19)
+
+The brief is `docs/tasks/STEER-7.md`; the trust boundary lives in `src/trust.rs`, the
+permissions in `src/perm.rs`, and the two are wired in `src/ipc.rs` (the socket) and
+`src/session.rs` (where a refusal becomes an event). Where the code had to choose:
+
+- **The token is checked at the listener, and a refusal is not logged.** An unauthenticated
+  request is answered with a clear error and its connection closed *before* it reaches the
+  session's channel, so it cannot write a `verb` event (the brief asks for a `verb` event on a
+  refusal, which is the right record for a caller that *is* this session's — a foreign or
+  missing job id — and the wrong thing to give a stranger: it would be a log-write primitive for
+  anyone who finds the pipe). Both kinds of refusal look the same to the caller: an error, no
+  state change.
+- **The token rides in an environment variable, never in an argv.** The brief suggests
+  `KELIR_TOKEN` for tool children, which is what happens; the bg shim also needs it to report
+  itself, and an argv is world-readable (`ps`, `wmic process`) while an environment is not, so
+  the shim is started with `Command::env` and the `--token` flag was removed rather than kept for
+  symmetry. The Windows pipe and the Unix socket are also the client's route to `KELIR_TOKEN`
+  for a process that only inherited `KELIR_SOCK`: `ipc::request_value` fills it in.
+- **`<session dir>/token` is owner-only, and the session checks it again at start.** On Unix
+  that is `0600`; on Windows a *protected* DACL with one `FILE_ALL_ACCESS` ACE for this user,
+  written with `SetNamedSecurityInfoW` **by name** (opening the file with `WRITE_DAC` and passing
+  the handle gave `ERROR_ACCESS_DENIED` for a file this process had just created — the handle has
+  to be opened with `WRITE_DAC`, which is not what a plain create returns). `trust::owner_only`
+  reads the result back (`stat` mode on Unix, `GetNamedSecurityInfoW` on Windows) and the session
+  refuses to start on a token file others can read; `perm.rs` has a Windows test that an
+  inherited-ACL file reads as too wide and a restricted one as owner-only.
+- **`cancel` is a verb with its own row, not a `bg` report.** `kelir ctl <session> cancel <id>`
+  sent `{"id": id}` before it parsed (there was no `cancel` arm in `verbs::cli_args`, so the
+  positional id was dropped and the request refused) — it is now a first-class verb, applied at
+  once, and it is an *action*: `Scheduler::take_where` leaves actions in the queue where
+  `take_turn_messages` used to take everything, and the idle loop applies a pending `cancel`
+  itself, so a `cancel` against an idle `--keep` session kills the job instead of waiting for a
+  boundary that never comes.
+- **A job id is `owns`-checked against three things**: the in-memory registry (what this process
+  started), `bg/<id>.status` in this session's own `bg/`, and `commands/<id>/` (a promoted
+  call's id is its output dir name). The `bg/` directory is created at session start, so an
+  empty session has an empty registry rather than a missing directory.
+- **Reachability, not identity, is what the token proves.** Documented rather than defended
+  against (see `docs/SPEC.md`, *Who may drive a session*): a process that can read this session's
+  environment or token file runs as the user, in the session, and is trusted. The token stops a
+  different session's child, a stray script and a pipe found by name.
+
 ## Retrying provider errors (STEER-5, 2026-11-19)
 
 The brief is `docs/tasks/STEER-5.md`; the policy lives in `src/retry.rs` and the
