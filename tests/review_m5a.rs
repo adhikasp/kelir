@@ -1,8 +1,13 @@
 //! M5-A review (reviewer's adversarial tests): sources and skills.
 //!
-//! Tests that pass pin behaviour the milestone promises. Tests marked
-//! `#[ignore = "FINDING Fn: ..."]` each prove one defect in docs/reviews/m5a-review.md;
-//! run them with `cargo test --test review_m5a -- --ignored` to see them fail.
+//! Tests that pass pin behaviour the milestone promises. The ones that once
+//! carried `#[ignore = "FINDING Fn: ..."]` each proved one defect in
+//! docs/reviews/m5a-review.md; the M5-A fixes job un-ignored them and they now
+//! pass. Where a fix made the old assertion wrong rather than the code, the
+//! assertion was corrected and says so in place (the 3 MB file is now capped,
+//! F7; an edit back is now announced, F1); nothing was loosened. Two tests also
+//! wait for `tool_started` instead of `tool_settled`, because the watcher runs at
+//! the boundary after the call and writing the file afterwards raced it.
 //! Every directory is a tempdir: nothing here reads or writes a real home.
 
 mod support;
@@ -173,7 +178,6 @@ async fn project_wins_over_machine_and_the_nearest_file_wins() {
 }
 
 #[tokio::test]
-#[ignore = "FINDING F4: only the nearest AGENTS.md is kept; an ancestor's AGENTS.md is dropped"]
 async fn an_ancestors_instruction_file_is_collected_too() {
     let tree = Tree::new();
     write(&tree.repo().join("AGENTS.md"), "ROOT-AGENTS");
@@ -294,7 +298,6 @@ async fn awkward_files_are_tolerated() {
 }
 
 #[tokio::test]
-#[ignore = "FINDING F5: a non-UTF-8 AGENTS.md/CLAUDE.md is silently dropped (no source, no warning)"]
 async fn a_non_utf8_instruction_file_is_not_silently_dropped() {
     let tree = Tree::new();
     write(
@@ -311,7 +314,6 @@ async fn a_non_utf8_instruction_file_is_not_silently_dropped() {
 }
 
 #[tokio::test]
-#[ignore = "FINDING F6: a SKILL.md with no/broken front matter is listed in sources[] as a skill"]
 async fn a_malformed_skill_is_not_recorded_as_a_source() {
     let tree = Tree::new();
     let skills = tree.repo().join(".claude/skills");
@@ -336,12 +338,28 @@ async fn a_malformed_skill_is_not_recorded_as_a_source() {
             "{bad} is not a valid Agent Skill but is in sources[]: {names:?}"
         );
     }
+    // And the skip is explained, once per file, with the reason.
+    let notes: Vec<String> = run
+        .events_of("error")
+        .iter()
+        .map(|event| event["message"].as_str().unwrap_or("").to_string())
+        .collect();
+    for bad in ["nofm", "unclosed", "noname"] {
+        assert!(
+            notes
+                .iter()
+                .any(|message| message.contains(&format!("{bad}/SKILL.md"))
+                    && message.contains("is not a skill")),
+            "{bad} was skipped without a reason: {notes:?}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn a_huge_instruction_file_still_starts_and_is_recorded() {
-    // Characterisation (see F7): there is no cap. 3 MB goes into the system
-    // prompt whole; the run still works.
+    // Characterisation (see F7): a 3 MB instruction file is capped, not inlined
+    // whole, and the truncation is visible in the prompt and in the log. Before
+    // the fix the system prompt was 3.1 MB.
     let tree = Tree::new();
     let big = "rule: keep steps small and verified\n".repeat(3 * 1024 * 1024 / 36);
     write(&tree.repo().join("AGENTS.md"), &big);
@@ -353,13 +371,33 @@ async fn a_huge_instruction_file_still_starts_and_is_recorded() {
         system.len(),
         started.elapsed()
     );
-    assert!(system.len() > 3 * 1024 * 1024 - 1024);
+    assert!(
+        system.len() < 512 * 1024,
+        "the system prompt is {} bytes: the cap (F7) did not hold",
+        system.len()
+    );
+    assert!(
+        system.contains("[kelir: truncated"),
+        "the truncation is not visible in the prompt"
+    );
     assert_eq!(
         run.one_event("session_started")["system"]["hash"]
             .as_str()
             .unwrap()
             .len(),
         16
+    );
+    // And the log says why the file is short.
+    let warnings: Vec<String> = run
+        .events_of("error")
+        .iter()
+        .map(|event| event["message"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        warnings
+            .iter()
+            .any(|message| message.contains("AGENTS.md") && message.contains("only the first")),
+        "no truncation note: {warnings:?}"
     );
 }
 
@@ -426,7 +464,6 @@ async fn base_prompt_layers_and_the_skills_placeholder() {
 }
 
 #[tokio::test]
-#[ignore = "FINDING F2: a base prompt from config `prompt = file` is recorded with path \"embedded\""]
 async fn an_explicit_prompt_file_is_recorded_with_its_path() {
     let tree = Tree::new();
     let prompt = tree.root.join("my-prompt.txt");
@@ -503,12 +540,27 @@ async fn a_deleted_source_is_quiet_and_a_recreated_one_is_reported() {
         &[],
     )
     .await;
-    t.live.wait_for("tool_settled").await;
+    // `tool_started`, not `tool_settled`: the watcher runs at the boundary
+    // *after* the call settles, so the file has to change while the call is
+    // still running (the scripted call sleeps a second) or the edit races it.
+    t.live.wait_for("tool_started").await;
     std::fs::remove_file(t.repo.join("AGENTS.md")).unwrap();
     t.live.wait_for("turn_ended").await;
-    assert!(
-        of_type(&t.live.log(), "source").is_empty(),
-        "deleting is reported"
+    // There is no text to send, so no `source` event — but the deletion is one
+    // `error`, not silence (N4).
+    let log = t.live.log();
+    assert!(of_type(&log, "source").is_empty(), "deleting sent a source");
+    let notes: Vec<String> = of_type(&log, "error")
+        .iter()
+        .map(|event| event["message"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|message| message.contains("was deleted"))
+            .count(),
+        1,
+        "{notes:?}"
     );
     // Re-created with the same text: still nothing (the context carries it).
     write(&t.repo.join("AGENTS.md"), "ORIGINAL");
@@ -547,7 +599,7 @@ async fn cache_prefix_only_grows_across_two_source_changes() {
         &[],
     )
     .await;
-    t.live.wait_for("tool_settled").await;
+    t.live.wait_for("tool_started").await;
     write(&t.repo.join("AGENTS.md"), "V2");
     t.live.wait_for("turn_ended").await;
     write(
@@ -572,7 +624,6 @@ async fn cache_prefix_only_grows_across_two_source_changes() {
 }
 
 #[tokio::test]
-#[ignore = "FINDING F1: edit A->B->A leaves B as the model's latest word on the file (stale)"]
 async fn editing_a_file_back_leaves_the_model_with_the_current_text() {
     let tree = Tree::new();
     write(&tree.repo().join("AGENTS.md"), "ORIGINAL-RULE");
@@ -587,7 +638,7 @@ async fn editing_a_file_back_leaves_the_model_with_the_current_text() {
         &[],
     )
     .await;
-    t.live.wait_for("tool_settled").await;
+    t.live.wait_for("tool_started").await;
     write(&t.repo.join("AGENTS.md"), "TEMPORARY-RULE");
     t.live.wait_for("turn_ended").await;
     write(&t.repo.join("AGENTS.md"), "ORIGINAL-RULE");
@@ -609,7 +660,6 @@ async fn editing_a_file_back_leaves_the_model_with_the_current_text() {
 }
 
 #[tokio::test]
-#[ignore = "FINDING F1b: skills verb A,B,A: the second A is refused as 'already carries', B stays current"]
 async fn the_skills_verb_can_restore_an_earlier_body() {
     let tree = Tree::new();
     let repo = tree.repo();
@@ -646,7 +696,6 @@ async fn the_skills_verb_can_restore_an_earlier_body() {
 }
 
 #[tokio::test]
-#[ignore = "FINDING F3: a skill added by `skills --path <dir>` is announced again at the next boundary"]
 async fn a_skill_added_by_path_is_announced_once() {
     let tree = Tree::new();
     let repo = tree.repo();
@@ -683,7 +732,6 @@ async fn a_skill_added_by_path_is_announced_once() {
 }
 
 #[tokio::test]
-#[ignore = "FINDING F8: a resumed session re-announces an edit its log already carries"]
 async fn a_resume_does_not_repeat_a_source_the_log_already_has() {
     let tree = Tree::new();
     write(&tree.repo().join("AGENTS.md"), "ORIGINAL");
@@ -695,7 +743,7 @@ async fn a_resume_does_not_repeat_a_source_the_log_already_has() {
         &[],
     )
     .await;
-    first.live.wait_for("tool_settled").await;
+    first.live.wait_for("tool_started").await;
     write(&repo.join("AGENTS.md"), "EDITED");
     first.live.wait_for("turn_ended").await;
     assert_eq!(of_type(&first.live.log(), "source").len(), 1);
@@ -723,7 +771,6 @@ async fn a_resume_does_not_repeat_a_source_the_log_already_has() {
 }
 
 #[tokio::test]
-#[ignore = "FINDING F2b: the embedded base prompt's path is the literal \"embedded\", re-read as a file relative to the process cwd"]
 async fn a_file_named_embedded_is_not_mistaken_for_the_base_prompt() {
     let tree = Tree::new();
     write(&tree.repo().join("AGENTS.md"), "RULES");
@@ -752,7 +799,6 @@ async fn a_file_named_embedded_is_not_mistaken_for_the_base_prompt() {
 }
 
 #[tokio::test]
-#[ignore = "FINDING F9: a skill dir whose name ends in .md is tracked as an instruction"]
 async fn a_skill_named_like_a_markdown_file_stays_a_skill() {
     let tree = Tree::new();
     let repo = tree.repo();
@@ -767,7 +813,7 @@ async fn a_skill_named_like_a_markdown_file_stays_a_skill() {
         &[],
     )
     .await;
-    t.live.wait_for("tool_settled").await;
+    t.live.wait_for("tool_started").await;
     write(
         &repo.join(".claude/skills/notes.md/SKILL.md"),
         skill("notes.md").replace("body of", "EDITED body of"),
