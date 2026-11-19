@@ -688,11 +688,12 @@ consuming a scripted reply) so a session can start in a test.
   The eight rows are re-allocated instead (3 live / state / 3 editor / facts),
   and a short screen gives rows up in the documented order. The idle gap is
   therefore 3 blank live rows, not 5.
-- **Frame coalescing is structural, not a timer.** Design note §7 asks for a
-  ~33 ms frame cap. The loop paints once per iteration and drains every queued
-  event first, so a burst of deltas is one paint; a timer would only add
-  latency (and sleeps the tests). `FRAME_MIN` exists and is documented as the
-  intent, but nothing waits on it.
+- **The frame cap applies to bursts only.** Design note §7 asks for a ~33 ms
+  frame cap. The loop drains every queued event before painting, so a burst is
+  one frame; when two bursts (more than one event each) land closer together
+  than `FRAME_MIN` the second waits for the remainder. A single key press is
+  never delayed: a UI that lags a keystroke by 33 ms to honour an animation cap
+  is worse than one that repaints twice.
 - **The writing state's token count is an estimate** (`~N tok`, characters / 4)
   because a real count needs a tokenizer and the binary budget is a feature.
   The tilde says so. A provider-reported count would need a streaming
