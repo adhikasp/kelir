@@ -21,3 +21,7 @@
   SPEC 26 KB) in full: skills/AGENTS.md should point to the relevant section, and `cat` of big files should be
   discouraged in the prompt (use sed -n ranges / rg); (d) concurrency limit of the provider unknown: measure and
   record (currently 3 concurrent workers is the working number).
+
+- 2026-11-19 steer5fix: kelir's own session died with exit 0xC000013A (console Ctrl-C) while it was writing an e2e test for
+  signals during a retry wait. Same class as the M5-A "who killed me" hunt. Rule added to AGENTS.md ("Never broadcast console
+  signals"); worth a prompt line and a harness guard (a test-support helper that refuses group 0).
