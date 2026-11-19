@@ -66,8 +66,6 @@ export NEXTEST_TEST_THREADS="$jobs"
 
 say() { echo "$*" | tee -a "$log"; }
 failed=0
-stage_ok() { say "  $1: ok"; }
-stage_fail() { say "  $1: FAILED ($2)"; failed=1; }
 
 run_stage() { # run_stage <name> <logfile> <command...>
   local name="$1" file="$2"
@@ -144,7 +142,8 @@ gate_body() {
 if [ "$use_lock" = 1 ] && [ -z "${KELIR_GATE_INNER:-}" ]; then
   # Re-run the same command line inside the lock (with --no-lock so it does not
   # try to take the lock twice).
-  KELIR_GATE_INNER=1 KELIR_GATE_OUT="$out"     exec bash "$root/scripts/gate-lock.sh" -- bash "$0" --no-lock "${orig_args[@]}"
+  KELIR_GATE_INNER=1 KELIR_GATE_OUT="$out" \
+    exec bash "$root/scripts/gate-lock.sh" -- bash "$0" --no-lock "${orig_args[@]}"
 fi
 
 gate_body
