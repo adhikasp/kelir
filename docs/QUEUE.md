@@ -90,3 +90,12 @@ STEER-3 implement, M5-M11. The repo is still local only: no remote, nothing push
 Every milestone/job ends with, in order: (1) gates on Windows and Linux, (2) a fresh reviewer's verdict
 in `docs/reviews/` (fixes re-verified), (3) the retro pass, (4) the PROGRESS row; only then does the
 next item start. Failing gate or FAIL verdict = fix first. (Also in AGENTS.md.)
+
+## Update (2026-11-19 12:45) — no step limit by default (maintainer)
+
+`max_steps` unset or 0 = unlimited; knob kept for jobs that want a cap; an explicit cap pauses the turn
+("turn paused, say continue"), it does not fail it. SPEC.md, docs/retros/FINDINGS.md and the new brief
+docs/tasks/STEER-4.md carry it. Code change touches src/config.rs + src/session.rs, which M5-A is writing
+now (one writer rule), so STEER-4 runs **right after M5-A is reviewed**, before STEER-1-fixes. The 400 in
+%APPDATA%kelirconfig.toml stays until STEER-4 lands (else M5-A would hit the old 100 cap again).
+Order now: M5-A -> review -> retro -> STEER-4 -> STEER-1-fixes -> STEER-2 -> STEER-3 -> M5-B -> M6 ... M11.

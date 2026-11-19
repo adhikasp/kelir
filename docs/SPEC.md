@@ -122,6 +122,12 @@ Boundaries are an enum (`before_step`, `after_tools`, `after_step`) applied in o
 and **never between a tool call and its result**: a `say --now` mid-batch stops the running calls,
 gives each a `stopped`/`skipped` result, and only then injects the message.
 
+**No step limit by default.** `max_steps` in `config.toml` (and `--max-steps`) caps the steps of one turn;
+unset or `0` means unlimited, because a fully autonomous agent is not stopped by a clock or a counter.
+The knob exists for jobs that want a cap. When an explicit cap is reached the turn is *paused*, not failed:
+the log records `turn_ended` with outcome `paused` and the message says "turn paused after N steps; say
+`continue` to resume"; the next `say` starts a new turn with a fresh count.
+
 ## Prompt caching (must work)
 
 The request is built so its prefix only ever grows:

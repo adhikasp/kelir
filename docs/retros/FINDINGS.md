@@ -6,3 +6,8 @@
   say "turn paused, say 'continue'" rather than read as a failure; (c) `kelir ctl latest` picks the newest
   session dir even when it is dead/unrelated (use the id); (d) a status line with steps used/limit would
   have shown it coming.
+
+- 2026-11-19 (maintainer decision, supersedes item (a) above): **no step limit by default**: `max_steps` unset or
+  `0` = unlimited; the knob stays for jobs that want a cap; the 400 in the user config goes once the code change
+  (STEER-4) lands. Item (b) still applies to an explicit cap: report "turn paused, say continue" (outcome
+  `paused`), not a failure.
