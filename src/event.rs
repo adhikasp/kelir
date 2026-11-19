@@ -600,6 +600,16 @@ pub enum EventBody {
         location: String,
         message: String,
         retryable: bool,
+        /// The HTTP status, when there was a response (`provider` errors).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+        /// Which provider request failed, counting from 1 for this request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        /// How long kelir will wait before the next attempt. Absent when it
+        /// will not retry, so a reader can tell "waited 34 s" from "gave up".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_in_ms: Option<u64>,
     },
     SessionEnded {
         reason: String,
@@ -934,6 +944,9 @@ mod tests {
                 location: "provider".into(),
                 message: "boom".into(),
                 retryable: true,
+                status: Some(500),
+                attempt: Some(2),
+                retry_in_ms: Some(1_500),
             },
             EventBody::SessionEnded {
                 reason: "done".into(),

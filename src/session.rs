@@ -1101,6 +1101,9 @@ impl Session {
                 location: "log".into(),
                 message: damage.clone(),
                 retryable: false,
+                status: None,
+                attempt: None,
+                retry_in_ms: None,
             })?;
         }
         let from_seq = resume::last_seq(&read.events);
@@ -1498,6 +1501,9 @@ impl Session {
                             location: "verb".into(),
                             message,
                             retryable: false,
+                            status: None,
+                            attempt: None,
+                            retry_in_ms: None,
                         })?;
                     }
                 }
@@ -1547,6 +1553,9 @@ impl Session {
                                 location: "verb".into(),
                                 message,
                                 retryable: false,
+                                status: None,
+                                attempt: None,
+                                retry_in_ms: None,
                             })?;
                         }
                     }
@@ -1911,6 +1920,9 @@ impl Session {
                         location: "compact".into(),
                         message,
                         retryable: false,
+                        status: None,
+                        attempt: None,
+                        retry_in_ms: None,
                     })?;
                     self.sync();
                 }
@@ -1924,6 +1936,9 @@ impl Session {
                     location: "compact".into(),
                     message,
                     retryable: true,
+                    status: None,
+                    attempt: None,
+                    retry_in_ms: None,
                 })?;
                 self.sync();
             }
@@ -2448,6 +2463,9 @@ impl Session {
         let mut attempt = 1u32;
         let mut rng = crate::retry::Xorshift::from_clock();
         let mut inbox_open = true;
+        // The first request is the one `drive_turn` built (and hashed into
+        // `step_started`); a retry is a new request and is built again.
+        let mut built = request.build(self);
         loop {
             // The governor (opt-in) can make this request wait for a slot that
             // another local kelir holds. That wait is visible and interruptible
@@ -2459,12 +2477,15 @@ impl Session {
                     SlotWait::Interrupted(end) => return Ok(end),
                 }
             }
-            // A retry is a new request, so this is a `before_step` boundary: a
-            // `model` verb that arrived during the wait changes the model, a
-            // queued `say` joins the fold, and `end`/`stop` take effect here.
-            // The brief asks for exactly that ("`model` (the retry uses the new
-            // model)"), and the `verb` event already records the swap.
-            if !summary {
+            // A *retry* is a new request, so a wait is a `before_step`
+            // boundary: a `model` verb that arrived during the wait changes the
+            // model, a queued `say` joins the fold, and `end`/`stop` take
+            // effect here. The brief asks for exactly that ("`model` (the retry
+            // uses the new model)"), and the `verb` event already records the
+            // swap. The first attempt is not one: `drive_turn` applied that
+            // boundary before it built the request, and applying it again here
+            // would swallow a verb the caller has already accounted for.
+            if !summary && attempt > 1 {
                 let applied = self.apply(Boundary::BeforeStep)?;
                 if applied.end {
                     return Ok(StreamEnd::End);
@@ -2472,8 +2493,8 @@ impl Session {
                 if let Some(reason) = applied.stopped {
                     return Ok(StreamEnd::Stopped(reason));
                 }
+                built = request.build(self);
             }
-            let built = request.build(self);
             budget.record_attempt();
             let outcome = self.attempt(rx, &built, summary, &mut inbox_open).await;
             // The slot is held for exactly one request: another local kelir can
@@ -2486,10 +2507,18 @@ impl Session {
             };
             // A summary is tried once; a step within its budget.
             let will_retry = error.retryable && !summary && budget.fits(Duration::ZERO);
+            // The wait, decided before it is recorded so the event can say how
+            // long it is (and the screen can count it down).
+            let wait = will_retry
+                .then(|| crate::retry::delay(&policy, attempt - 1, error.retry_after, &mut rng))
+                .filter(|wait| budget.fits(*wait));
             self.record(EventBody::Error {
                 location: "provider".into(),
                 message: error.message.clone(),
                 retryable: error.retryable,
+                status: error.status,
+                attempt: Some(attempt),
+                retry_in_ms: wait.map(|wait| wait.as_millis() as u64),
             })?;
             if !will_retry {
                 if !summary {
@@ -2509,23 +2538,23 @@ impl Session {
                 return Err(error.message);
             }
             self.sync();
-            let wait = crate::retry::delay(&policy, attempt - 1, error.retry_after, &mut rng);
-            if !budget.fits(wait) {
-                // The provider asked to wait longer than what is left of the
-                // budget (or the count cap is reached): pausing now is honest,
-                // waiting a little and failing is not.
+            // A wait the budget cannot afford (or the count cap reached) means
+            // the provider asked for longer than what is left: pausing now is
+            // honest, waiting a little and failing is not.
+            let Some(wait) = wait else {
                 self.sync();
                 return Ok(StreamEnd::Paused(PauseReport {
                     attempts: budget.attempts(),
                     waited: budget.spent(),
                     reason: error.reason(),
                 }));
-            }
+            };
             budget.charge(wait);
             self.show_wait(error.status, wait, attempt);
             if let Some(end) = self.wait_for(rx, wait, &mut inbox_open).await? {
                 return Ok(end);
             }
+            self.emit(UiEvent::RetryingDone);
             attempt = attempt.saturating_add(1);
         }
     }
