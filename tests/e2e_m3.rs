@@ -103,6 +103,18 @@ async fn crash_point(point: &str) {
         "{point}: the log says the turn ended cleanly"
     );
 
+    // How many times the command had run when the session died. Since M4 an
+    // unpromoted call is `kelir bg-shim` -> shell -> command, and its tree dies
+    // with the session, so a crash 150 ms after dispatch can land before the
+    // command's first write on a loaded box: the outcome really is unknown, and
+    // 0 and 1 are both honest at `mid_tool`. The tree is given time to be gone
+    // first (a Unix shim notices its dead owner within one 25 ms poll), so the
+    // number cannot move while the resume runs.
+    if point == "mid_tool" {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+    }
+    let at_crash = sandbox.lines_in("side_effect.log");
+
     let second = sandbox
         .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
         .await;
@@ -170,15 +182,38 @@ async fn crash_point(point: &str) {
         assert_eq!(settled["outcome"], "ok", "{point}: {settled}");
     }
 
-    // The counter proves the command was not run again.
+    // The counter proves the command was not run again: a completed command is
+    // never re-run, and a resume never adds a run of its own, whether the crash
+    // landed before the command's first write or after it.
     let runs = sandbox.lines_in("side_effect.log");
-    let expect_runs = match point {
-        "mid_tool" | "tool_settled" => 1,
-        _ => 0,
+    assert_eq!(
+        runs, at_crash,
+        "{point}: the resume ran the command again ({at_crash} run(s) at the crash, {runs} after)"
+    );
+    match point {
+        // The command was in flight: it ran at most once, and whether that was
+        // 0 or 1 depends on how far its tree got before the crash.
+        "mid_tool" => assert!(
+            at_crash <= 1,
+            "{point}: the command ran {at_crash} time(s), expected at most 1"
+        ),
+        // The call had completed and was settled in the log: it ran, once.
+        "tool_settled" => assert_eq!(at_crash, 1, "{point}: the command ran {at_crash} time(s)"),
+        // The crash came before the command could start.
+        _ => assert_eq!(at_crash, 0, "{point}: the command ran {at_crash} time(s)"),
+    }
+    // The log agrees: the call was started once if the session got that far
+    // (`usage` and `mid_stream` die before any `tool_started`) and a resume never
+    // dispatches it again, not even to settle an unknown outcome.
+    let expected_starts = if matches!(point, "usage" | "mid_stream") {
+        0
+    } else {
+        1
     };
     assert_eq!(
-        runs, expect_runs,
-        "{point}: the command ran {runs} time(s), expected {expect_runs}"
+        events_of(&log, "tool_started").len(),
+        expected_starts,
+        "{point}: the call was started again on resume: {log:?}"
     );
 
     assert_eq!(log.last().unwrap()["type"], "session_ended", "{point}");
