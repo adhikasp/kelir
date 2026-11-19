@@ -105,7 +105,7 @@ pub fn interrupted(events: &[LogEvent]) -> bool {
     }
     if matches!(
         last_turn_outcome(events).as_deref(),
-        Some("stopped") | Some("error")
+        Some("stopped") | Some("error") | Some("paused")
     ) {
         return true;
     }

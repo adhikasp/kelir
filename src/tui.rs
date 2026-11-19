@@ -36,6 +36,10 @@ use crate::scrollback::{self, Live};
 pub const VIEWPORT_HEIGHT: u16 = 8;
 /// A second Ctrl-C within this window quits instead of stopping.
 pub const DOUBLE_CTRL_C: Duration = Duration::from_millis(1000);
+/// How far ahead a countdown is still a countdown. A slot wait is armed far in
+/// the future on purpose (it ends when another process frees the slot), so the
+/// status line shows its words without a number that means nothing.
+pub const RETRY_COUNTDOWN_MAX: Duration = Duration::from_secs(6 * 60 * 60);
 /// How much of a call's output the tail view shows.
 pub const TAIL_BYTES: usize = 2048;
 
@@ -84,6 +88,15 @@ pub enum UiEvent {
     /// Something the session wants said but which is not an error.
     Info(String),
     Error(String),
+    /// The session is waiting before it tries the provider again: the status
+    /// line carries this line and a countdown to `until`. Every wait is also a
+    /// line via [`UiEvent::Info`] and an `error` event in the log.
+    Retrying {
+        line: String,
+        until: Instant,
+    },
+    /// The wait is over (the retry is being sent, or a slot came free).
+    RetryingDone,
     /// The answer to a verb the TUI sent.
     Reply(Response),
     /// Herdr's pane status. The session sends it here instead of writing it to
@@ -107,6 +120,9 @@ pub enum Phase {
     Working,
     Done,
     Error,
+    /// The turn stopped somewhere the user can pick it up again (a step cap, or
+    /// a provider that stayed unavailable past the waiting budget).
+    Paused,
 }
 
 impl Phase {
@@ -116,6 +132,7 @@ impl Phase {
             Phase::Working => "working",
             Phase::Done => "done",
             Phase::Error => "error",
+            Phase::Paused => "paused",
         }
     }
 }
@@ -133,6 +150,9 @@ pub struct Status {
     pub cost: f64,
     pub running: usize,
     pub phase: Phase,
+    /// The retry countdown: the line and when the wait ends. `None` when
+    /// nothing is waiting.
+    pub retrying: Option<(String, Instant)>,
 }
 
 impl Default for Status {
@@ -148,6 +168,7 @@ impl Default for Status {
             cost: 0.0,
             running: 0,
             phase: Phase::Idle,
+            retrying: None,
         }
     }
 }
@@ -161,7 +182,38 @@ fn tokens(count: u64) -> String {
 }
 
 /// The whole status line, as one string (the renderer clips it to the width).
+///
+/// A wait replaces the usual summary: "kelir working · retrying in 34 s
+/// (attempt 5)" is what a person needs to see while nothing else happens.
 pub fn status_text(status: &Status) -> String {
+    if let Some((line, until)) = &status.retrying {
+        let left = until.saturating_duration_since(Instant::now());
+        // A slot wait has no deadline a person should read as a number; only a
+        // real countdown is shown.
+        if left < RETRY_COUNTDOWN_MAX {
+            return format!(
+                "kelir {} · {line} · {} left",
+                status.phase.word(),
+                fit_seconds(left)
+            );
+        }
+        return format!("kelir {} · {line}", status.phase.word());
+    }
+    status_text_plain(status)
+}
+
+/// A countdown for the status line: "34 s", "1.5 min", "0 s".
+pub fn fit_seconds(wait: Duration) -> String {
+    let secs = wait.as_secs();
+    if secs >= 60 {
+        format!("{:.1} min", wait.as_secs_f64() / 60.0)
+    } else {
+        format!("{secs} s")
+    }
+}
+
+/// The status line when nothing is waiting.
+fn status_text_plain(status: &Status) -> String {
     let mut parts = vec![format!("kelir {}", status.phase.word())];
     if !status.model.is_empty() {
         parts.push(status.model.clone());
@@ -442,6 +494,14 @@ impl App {
                 }
             }
             UiEvent::Info(text) => self.push_text(&text),
+            UiEvent::Retrying { line, until } => {
+                self.status.retrying = Some((line, until));
+                self.note = one_line(&self.status.retrying.clone().unwrap().0);
+            }
+            UiEvent::RetryingDone => {
+                self.status.retrying = None;
+                self.note.clear();
+            }
             UiEvent::Error(text) => {
                 self.status.phase = Phase::Error;
                 self.note = one_line(&text);
@@ -472,9 +532,11 @@ impl App {
                 self.status.phase = match outcome.as_str() {
                     "done" => Phase::Done,
                     "error" => Phase::Error,
+                    "paused" => Phase::Paused,
                     _ => Phase::Idle,
                 };
                 self.status.running = 0;
+                self.status.retrying = None;
                 self.note.clear();
             }
             UiEvent::Herdr { state } => self.status_records.push(herdr::record(state)),
@@ -748,6 +810,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         Phase::Working => Style::default().fg(Color::Cyan),
         Phase::Error => Style::default().fg(Color::Red),
         Phase::Done => Style::default().fg(Color::Green),
+        Phase::Paused => Style::default().fg(Color::Yellow),
         Phase::Idle => Style::default().fg(Color::DarkGray),
     };
     let mut text = status_text(&app.status);
@@ -1039,6 +1102,106 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_replaces_the_status_line_and_counts_down() {
+        let mut status = Status {
+            model: "test/model".into(),
+            step: 3,
+            prompt_tokens: 1200,
+            completion_tokens: 340,
+            phase: Phase::Working,
+            ..Status::default()
+        };
+        status.retrying = Some((
+            "rate limited (429): retrying in 34 s, attempt 5, say stop to cancel".into(),
+            Instant::now() + Duration::from_secs(34),
+        ));
+        let text = status_text(&status);
+        assert!(
+            text.starts_with("kelir working · rate limited (429)"),
+            "{text}"
+        );
+        assert!(text.contains("say stop to cancel"), "{text}");
+        assert!(
+            text.ends_with("33 s left") || text.ends_with("34 s left"),
+            "{text}"
+        );
+        // The usual summary comes back when the wait ends.
+        status.retrying = None;
+        assert!(
+            status_text(&status).contains("step 3"),
+            "{}",
+            status_text(&status)
+        );
+    }
+
+    #[test]
+    fn a_slot_wait_shows_its_words_without_a_meaningless_countdown() {
+        let mut status = Status {
+            phase: Phase::Working,
+            ..Status::default()
+        };
+        status.retrying = Some((
+            "waiting for a provider slot (1)".into(),
+            Instant::now() + Duration::from_secs(86_400),
+        ));
+        assert_eq!(
+            status_text(&status),
+            "kelir working · waiting for a provider slot (1)"
+        );
+    }
+
+    #[test]
+    fn a_retry_is_a_line_and_a_countdown_until_the_turn_ends() {
+        let mut app = app();
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "openrouter".into(),
+            model: "test/model".into(),
+        });
+        app.apply(UiEvent::Retrying {
+            line: "rate limited (429): retrying in 34 s, attempt 5, say stop to cancel".into(),
+            until: Instant::now() + Duration::from_secs(34),
+        });
+        assert!(app.note().contains("rate limited (429)"), "{}", app.note());
+        snap(&mut app);
+        app.apply(UiEvent::RetryingDone);
+        assert!(app.note().is_empty());
+        // A paused turn is its own phase: not an error, not idle in the sense
+        // of "nothing to see".
+        app.apply(UiEvent::TurnEnded {
+            outcome: "paused".into(),
+            final_text: "provider unavailable after 3 attempts".into(),
+        });
+        assert_eq!(app.status.phase, Phase::Paused);
+        assert!(status_text(&app.status).starts_with("kelir paused"));
+    }
+
+    /// The countdown draws: it is one row, clipped to the width, and never
+    /// wraps the viewport.
+    fn snap(app: &mut App) -> String {
+        let backend = ratatui::backend::TestBackend::new(60, VIEWPORT_HEIGHT);
+        let mut terminal = ratatui::Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Inline(VIEWPORT_HEIGHT),
+            },
+        )
+        .unwrap();
+        terminal.draw(|frame| render(app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if let Some(cell) = buffer.cell(Rect::new(x, y, 1, 1).as_position()) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
     fn the_status_line_names_model_step_tokens_cost_and_calls() {
         let status = Status {
             provider: "openrouter".into(),
@@ -1051,6 +1214,7 @@ mod tests {
             cost: 0.00042,
             running: 2,
             phase: Phase::Working,
+            retrying: None,
         };
         assert_eq!(
             status_text(&status),

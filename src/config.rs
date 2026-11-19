@@ -33,6 +33,9 @@ pub struct ProviderConfig {
     pub reasoning_field: Option<String>,
     /// Header carrying the session id for providers that require one.
     pub session_header: Option<String>,
+    /// Client-side concurrency governor: at most this many requests in flight
+    /// per provider across every local kelir process (`0`/unset = off).
+    pub max_concurrent_requests: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +66,9 @@ pub struct Config {
     /// job instead of being killed (`config.toml` `promote_after`, seconds;
     /// `KELIR_PROMOTE_AFTER` overrides it; zero disables promotion).
     pub promote_after: std::time::Duration,
+    /// What to retry and how long to wait (`retry_base_ms`, `retry_cap_ms`,
+    /// `retry_max_wait`).
+    pub retry: crate::retry::Policy,
 }
 
 #[derive(Debug)]
@@ -94,6 +100,13 @@ struct RawConfig {
     compact_keep: Option<usize>,
     skills_dirs: Vec<PathBuf>,
     promote_after: Option<u64>,
+    retry_base_ms: Option<u64>,
+    retry_cap_ms: Option<u64>,
+    /// Total waiting per request in seconds; `0` waits as long as it takes.
+    retry_max_wait: Option<u64>,
+    /// A count cap inside the budget (`retry_max_attempts`), for a job that
+    /// wants "three tries and out".
+    retry_max_attempts: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +125,7 @@ struct RawProvider {
     extra_headers: BTreeMap<String, String>,
     reasoning_field: Option<String>,
     session_header: Option<String>,
+    max_concurrent_requests: Option<u32>,
 }
 
 pub const PROVIDER_OPENROUTER: &str = "openrouter";
@@ -163,6 +177,9 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     let raw: RawConfig = merged
         .try_into()
         .map_err(|error| ConfigError(format!("invalid config.toml: {error}")))?;
+    // Read the knobs that are plain numbers before anything is moved out of
+    // `raw`.
+    let retry = retry_policy(&raw)?;
 
     let shell = match raw.shell {
         Some(ShellSpec::One(shell)) => vec![shell, "-c".into()],
@@ -210,6 +227,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
                 extra_headers: entry.extra_headers,
                 reasoning_field: entry.reasoning_field,
                 session_header: entry.session_header,
+                max_concurrent_requests: entry.max_concurrent_requests.filter(|slots| *slots > 0),
             },
         );
     }
@@ -245,6 +263,33 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             .collect(),
         compact_keep: raw.compact_keep.unwrap_or(crate::compact::DEFAULT_KEEP),
         promote_after: promote_after(raw.promote_after)?,
+        retry,
+    })
+}
+
+/// The retry schedule and budget. A wrong value is a config error rather than a
+/// silent fallback: a person who writes `retry_max_wait` means it.
+fn retry_policy(raw: &RawConfig) -> Result<crate::retry::Policy, ConfigError> {
+    let base_ms = raw.retry_base_ms.unwrap_or(crate::retry::DEFAULT_BASE_MS);
+    let cap_ms = raw.retry_cap_ms.unwrap_or(crate::retry::DEFAULT_CAP_MS);
+    if cap_ms < base_ms {
+        return Err(ConfigError(format!(
+            "retry_cap_ms ({cap_ms}) must be at least retry_base_ms ({base_ms})"
+        )));
+    }
+    let max_wait = match raw.retry_max_wait {
+        // `0` is the documented "wait as long as the provider needs".
+        Some(0) => None,
+        Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
+        None => Some(std::time::Duration::from_secs(
+            crate::retry::DEFAULT_WAIT_SECS,
+        )),
+    };
+    Ok(crate::retry::Policy {
+        base_ms,
+        cap_ms,
+        max_wait,
+        max_attempts: raw.retry_max_attempts.filter(|attempts| *attempts > 0),
     })
 }
 
@@ -328,6 +373,9 @@ fn overlay(base: RawProvider, user: RawProvider) -> RawProvider {
         },
         reasoning_field: user.reasoning_field.or(base.reasoning_field),
         session_header: user.session_header.or(base.session_header),
+        max_concurrent_requests: user
+            .max_concurrent_requests
+            .or(base.max_concurrent_requests),
     }
 }
 
@@ -591,6 +639,108 @@ compact_keep = 0
         let path = temp_config("");
         let cfg = load(Some(&path)).unwrap();
         assert_eq!(cfg.promote_after, std::time::Duration::from_secs(600));
+    }
+
+    #[test]
+    fn the_retry_schedule_defaults_and_reads_every_knob() {
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.retry.base_ms, crate::retry::DEFAULT_BASE_MS);
+        assert_eq!(cfg.retry.cap_ms, crate::retry::DEFAULT_CAP_MS);
+        assert_eq!(
+            cfg.retry.max_wait,
+            Some(std::time::Duration::from_secs(
+                crate::retry::DEFAULT_WAIT_SECS
+            ))
+        );
+        assert_eq!(cfg.retry.max_attempts, None);
+
+        let path = temp_config(
+            "retry_base_ms = 500
+retry_cap_ms = 4000
+retry_max_wait = 60
+retry_max_attempts = 5
+",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.retry.base_ms, 500);
+        assert_eq!(cfg.retry.cap_ms, 4_000);
+        assert_eq!(cfg.retry.max_wait, Some(std::time::Duration::from_secs(60)));
+        assert_eq!(cfg.retry.max_attempts, Some(5));
+
+        // `retry_max_wait = 0` is "wait as long as the provider needs".
+        let path = temp_config(
+            "retry_max_wait = 0
+",
+        );
+        assert_eq!(load(Some(&path)).unwrap().retry.max_wait, None);
+        // A count cap of zero would mean "never retry", which `retry_max_wait
+        // = 0` cannot express; it is refused as an attempt cap and falls back
+        // to the budget.
+        let path = temp_config(
+            "retry_max_attempts = 0
+",
+        );
+        assert_eq!(load(Some(&path)).unwrap().retry.max_attempts, None);
+    }
+
+    #[test]
+    fn a_cap_below_the_base_is_refused() {
+        let path = temp_config(
+            "retry_base_ms = 5000
+retry_cap_ms = 1000
+",
+        );
+        let error = load(Some(&path)).unwrap_err();
+        assert!(error.to_string().contains("retry_cap_ms"), "{error}");
+    }
+
+    #[test]
+    fn max_concurrent_requests_is_per_provider_and_off_by_default() {
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.providers
+                .get(PROVIDER_OPENROUTER)
+                .unwrap()
+                .max_concurrent_requests,
+            None
+        );
+        let path = temp_config(
+            "[providers.opencode-go]
+max_concurrent_requests = 3
+",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.providers
+                .get(PROVIDER_GO)
+                .unwrap()
+                .max_concurrent_requests,
+            Some(3)
+        );
+        assert_eq!(
+            cfg.providers
+                .get(PROVIDER_OPENROUTER)
+                .unwrap()
+                .max_concurrent_requests,
+            None,
+            "one provider's limit is not another's"
+        );
+        // Zero means "no limit", exactly like leaving it out.
+        let path = temp_config(
+            "[providers.opencode-go]
+max_concurrent_requests = 0
+",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.providers
+                .get(PROVIDER_GO)
+                .unwrap()
+                .max_concurrent_requests,
+            None
+        );
     }
 
     #[test]

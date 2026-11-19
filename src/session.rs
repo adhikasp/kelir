@@ -43,6 +43,10 @@ const STOP_GRACE: Duration = Duration::from_millis(1500);
 /// While a stop is settling, look for calls that started just after the kill
 /// and take them down too.
 const STOP_POLL: Duration = Duration::from_millis(25);
+/// How often a request waiting for a concurrency slot looks again. The slot
+/// appears when another process closes its handle; there is nothing to be told
+/// about, and a person watching sees a shorter delay rather than a poll rate.
+const SLOT_POLL: Duration = Duration::from_millis(100);
 
 /// What a resume says to a log whose last turn ended cleanly but was never
 /// closed: the model's last message is its own answer, and a request may not
@@ -179,6 +183,10 @@ struct Prepared {
     /// The provider's model list as this process learned it, so a `model` swap
     /// resolves without the network.
     models: Option<crate::models::Cache>,
+    /// The opt-in concurrency governor for the provider this session starts
+    /// with (`max_concurrent_requests`); `None` when the provider config has no
+    /// limit.
+    governor: Option<crate::governor::Governor>,
 }
 
 /// What a resume reads out of the log before the session continues it.
@@ -273,6 +281,9 @@ struct Session {
     /// The sources in this context, re-checked at every boundary: an edit on
     /// disk becomes a `source` message, never a system rewrite.
     watch: crate::sources::Watch,
+    /// The client-side concurrency governor, when the provider config asks for
+    /// one (`max_concurrent_requests`). `None` is off, the default.
+    governor: Option<crate::governor::Governor>,
 }
 
 /// A compaction asked for by someone; it applies at the next `before_step`.
@@ -348,6 +359,10 @@ enum TurnEnd {
     Stopped(String),
     /// The `end` verb arrived.
     End,
+    /// The provider stayed unavailable past the waiting budget. The log says
+    /// `turn_ended` outcome `paused` (never `error`: nothing is broken and the
+    /// fold is intact) and the message says how to go on.
+    Paused(PauseReport),
 }
 
 /// What the next turn should be.
@@ -384,6 +399,80 @@ enum StreamEnd {
     Assembled(crate::stream::Assembler),
     Stopped(String),
     End,
+    /// The provider stayed unavailable past the request's waiting budget: the
+    /// turn pauses (it does not fail) and the next `say` retries from the same
+    /// fold.
+    Paused(PauseReport),
+}
+
+/// What a pause says happened, for `turn_ended.final_text`.
+struct PauseReport {
+    /// Provider requests made inside the budget.
+    attempts: u32,
+    /// How long the waits inside the budget took.
+    waited: Duration,
+    /// The last failure's short reason ("rate limited (429)").
+    reason: String,
+}
+
+impl PauseReport {
+    /// "provider unavailable after 7 attempts / 30 min: rate limited (429);
+    /// say continue to retry".
+    fn message(&self) -> String {
+        let mut text = format!(
+            "provider unavailable after {} attempt{}, {}: ",
+            self.attempts,
+            if self.attempts == 1 { "" } else { "s" },
+            crate::retry::seconds_text(self.waited)
+        );
+        text.push_str(&self.reason);
+        text.push_str("; say continue to retry");
+        text
+    }
+}
+
+/// Where a request comes from, so it can be rebuilt after a wait: a `model`
+/// verb during the wait changes the model (and the provider), and the next
+/// attempt has to use it.
+enum RequestFor<'a> {
+    /// A step: the fold, built from the session's current model.
+    Step,
+    /// The compaction's own request: it is built once, from the model it was
+    /// made with.
+    Built(&'a provider::BuiltRequest),
+}
+
+impl RequestFor<'_> {
+    fn build(&self, session: &Session) -> provider::BuiltRequest {
+        match self {
+            RequestFor::Built(request) => (*request).clone(),
+            RequestFor::Step => {
+                // The fold cannot fail here for a reason a rebuild would fix;
+                // an unreadable blob is the parser's error to report.
+                let messages = crate::fold::fold(&session.events, &session.dir)
+                    .map(|folded| folded.request_messages())
+                    .unwrap_or_default();
+                session
+                    .client
+                    .build(&session.model, &messages, &session.tool_specs())
+            }
+        }
+    }
+}
+
+/// What one provider attempt did.
+enum Attempt {
+    Ok(crate::stream::Assembler),
+    Failed(provider::ProviderError),
+    /// A verb ended the turn while the request was in flight.
+    End(StreamEnd),
+}
+
+/// What waiting for a governor slot ended as: a slot (or none, when the
+/// governor is off), or a verb ending the turn.
+enum SlotWait {
+    Taken(Option<crate::governor::Slot>),
+    Interrupted(StreamEnd),
 }
 
 /// What a tool batch ended as.
@@ -640,6 +729,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             window,
             window_source,
             models: models_cache,
+            governor: governor_for(&reopened.cfg_provider),
         });
     }
 
@@ -674,7 +764,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         task_text(&opts.task).await.map_err(Failure::Usage)?
     };
     let id = new_session_id();
-    let client = Client::new(provider_cfg, &id, cfg.cache_ttl.clone())
+    let client = Client::new(provider_cfg.clone(), &id, cfg.cache_ttl.clone())
         .map_err(|error| Failure::Usage(error.message))?;
     // Model metadata from the provider, cached beside the session state; a
     // `[model_windows]`/`window` setting still wins over it.
@@ -718,7 +808,30 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         window,
         window_source,
         models: models_cache,
+        governor: governor_for(&provider_cfg),
     })
+}
+
+/// The opt-in governor for one provider config: `max_concurrent_requests`
+/// slots, advisory file locks under the state root. `None` (the default) is no
+/// limit at all.
+fn governor_for(provider: &crate::config::ProviderConfig) -> Option<crate::governor::Governor> {
+    provider
+        .max_concurrent_requests
+        .map(|slots| crate::governor::Governor::new(&provider_base(provider), slots))
+}
+
+/// The governor's identity for a provider: its base URL, which is what "one
+/// provider" means on the wire (two config names pointing at one endpoint share
+/// the endpoint's limit).
+fn provider_base(provider: &crate::config::ProviderConfig) -> String {
+    provider
+        .base_url
+        .split("://")
+        .nth(1)
+        .unwrap_or(&provider.base_url)
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// What [`reopen`] hands back: the session's identity, provider and log state.
@@ -728,6 +841,8 @@ struct ReopenedSession {
     provider_name: String,
     model: String,
     client: Client,
+    /// The config of the provider the log is on: the governor is built from it.
+    cfg_provider: crate::config::ProviderConfig,
     reopened: Reopened,
 }
 
@@ -808,7 +923,7 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
     let provider_cfg = cfg
         .provider(&provider_name)
         .map_err(|error| Failure::Usage(error.to_string()))?;
-    let client = Client::new(provider_cfg, &id, cfg.cache_ttl.clone())
+    let client = Client::new(provider_cfg.clone(), &id, cfg.cache_ttl.clone())
         .map_err(|error| Failure::Usage(error.message))?;
     let system_text = events
         .iter()
@@ -834,6 +949,7 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
         provider_name,
         model,
         client,
+        cfg_provider: provider_cfg,
         reopened: Reopened {
             in_flight: resume::interrupted(&events),
             unsettled: resume::unsettled(&events),
@@ -919,6 +1035,7 @@ impl Session {
             window_source: prepared.window_source,
             models: prepared.models,
             watch: crate::sources::Watch::default(),
+            governor: prepared.governor,
         };
         // The watcher re-checks exactly what the frozen system was rendered
         // from: a resume reads that list back from the log, so it reports the
@@ -1879,10 +1996,17 @@ impl Session {
             &transcript,
             request.focus.as_deref(),
         );
-        let assembler = match self.stream(rx, &summarising, true).await? {
+        let assembler = match self
+            .stream(rx, RequestFor::Built(&summarising), true)
+            .await?
+        {
             StreamEnd::Assembled(assembler) => assembler,
             StreamEnd::Stopped(reason) => return Ok(CompactRun::Stopped(reason)),
             StreamEnd::End => return Ok(CompactRun::End),
+            // A summary is tried once and has no budget to spend, so it can
+            // never pause; if that ever changes, a paused summary is a summary
+            // that did not happen.
+            StreamEnd::Paused(_) => return Ok(CompactRun::End),
         };
         // The summary's spend belongs in the log like any step's, marked so a
         // reader (and `kelir ls`) can tell it is not a step of the turn
@@ -2010,6 +2134,26 @@ impl Session {
                     reason = "end".into();
                     false
                 }
+                // The provider stayed unavailable past the waiting budget. The
+                // turn is *paused*, never failed: nothing is broken, the fold is
+                // intact, and a later `say` retries from it with a fresh budget.
+                // A one-shot run exits 0, like every other pause.
+                Ok(TurnEnd::Paused(report)) => {
+                    let message = report.message();
+                    if !self.tui {
+                        eprintln!("kelir: {message}");
+                    }
+                    self.emit(UiEvent::Info(format!("» {message}")));
+                    self.final_text = message.clone();
+                    let _ = self.record(EventBody::TurnEnded {
+                        outcome: "paused".into(),
+                        final_text: message.into(),
+                    });
+                    self.finish_turn("paused");
+                    code = 0;
+                    reason = "paused".into();
+                    false
+                }
                 Err(message) => {
                     if !self.tui {
                         eprintln!("kelir: {message}");
@@ -2040,7 +2184,7 @@ impl Session {
                 && !self.keep
                 && self.resumed
                 && self.retryable_failure
-                && turn_retries + 1 < provider::MAX_ATTEMPTS;
+                && turn_retries + 1 < provider::TURN_ATTEMPTS;
             if matches!(end, Ok(TurnEnd::End)) || (failed && !self.keep && !retry_the_turn) {
                 break;
             }
@@ -2174,10 +2318,11 @@ impl Session {
                 model: self.model.clone(),
             });
 
-            let assembler = match self.stream(rx, &request, false).await? {
+            let assembler = match self.stream(rx, RequestFor::Step, false).await? {
                 StreamEnd::Assembled(assembler) => assembler,
                 StreamEnd::Stopped(reason) => return Ok(TurnEnd::Stopped(reason)),
                 StreamEnd::End => return Ok(TurnEnd::End),
+                StreamEnd::Paused(report) => return Ok(TurnEnd::Paused(report)),
             };
             let calls = assembler.tool_calls();
             let text = assembler.text.clone();
@@ -2274,94 +2419,238 @@ impl Session {
     /// the turn without committing the half-response; anything else waits for
     /// the next boundary.
     ///
+    /// A retryable failure — 429, 408, 5xx, a dead socket, a stream that ended
+    /// early **before any tool call of the step began** — is waited out and the
+    /// same request re-sent from the same fold. Every wait is an `error` event
+    /// (`where: "provider"`, `retryable: true`, the status, the attempt and the
+    /// wait) plus a line on the screen, and it is interruptible: `stop`,
+    /// `say --now`, `later`, `model`, `end` and a signal take effect at once.
+    /// When the request's waiting budget is spent the turn **pauses** instead of
+    /// failing: the fold is intact, so the next `say` retries from it.
+    ///
     /// `summary` is the compaction's own request: its text is not rendered as
-    /// the answer being streamed, and the crash hook stays where a *step*
-    /// would land.
+    /// the answer being streamed, the crash hook stays where a *step* would
+    /// land, and it is tried exactly once (a summary that failed the first time
+    /// buys nothing the second; M3 review N4).
     async fn stream(
+        &mut self,
+        rx: &mut Inbox,
+        request: RequestFor<'_>,
+        summary: bool,
+    ) -> Result<StreamEnd, String> {
+        let policy = self.cfg.retry;
+        let budget_wait = if summary {
+            Some(Duration::ZERO)
+        } else {
+            policy.max_wait
+        };
+        let mut budget = crate::retry::Budget::new(budget_wait, policy.max_attempts);
+        let mut attempt = 1u32;
+        let mut rng = crate::retry::Xorshift::from_clock();
+        let mut inbox_open = true;
+        loop {
+            // The governor (opt-in) can make this request wait for a slot that
+            // another local kelir holds. That wait is visible and interruptible
+            // like any other.
+            let mut slot: Option<crate::governor::Slot> = None;
+            if !summary && let Some(governor) = self.governor.clone() {
+                match self.await_slot(rx, &governor, &mut inbox_open).await? {
+                    SlotWait::Taken(taken) => slot = taken,
+                    SlotWait::Interrupted(end) => return Ok(end),
+                }
+            }
+            // A retry is a new request, so this is a `before_step` boundary: a
+            // `model` verb that arrived during the wait changes the model, a
+            // queued `say` joins the fold, and `end`/`stop` take effect here.
+            // The brief asks for exactly that ("`model` (the retry uses the new
+            // model)"), and the `verb` event already records the swap.
+            if !summary {
+                let applied = self.apply(Boundary::BeforeStep)?;
+                if applied.end {
+                    return Ok(StreamEnd::End);
+                }
+                if let Some(reason) = applied.stopped {
+                    return Ok(StreamEnd::Stopped(reason));
+                }
+            }
+            let built = request.build(self);
+            budget.record_attempt();
+            let outcome = self.attempt(rx, &built, summary, &mut inbox_open).await;
+            // The slot is held for exactly one request: another local kelir can
+            // start as soon as this one's answer is in.
+            drop(slot);
+            let error = match outcome {
+                Attempt::End(end) => return Ok(end),
+                Attempt::Ok(assembler) => return Ok(StreamEnd::Assembled(assembler)),
+                Attempt::Failed(error) => error,
+            };
+            // A summary is tried once; a step within its budget.
+            let will_retry = error.retryable && !summary && budget.fits(Duration::ZERO);
+            self.record(EventBody::Error {
+                location: "provider".into(),
+                message: error.message.clone(),
+                retryable: error.retryable,
+            })?;
+            if !will_retry {
+                if !summary {
+                    self.retryable_failure = error.retryable;
+                }
+                // A retryable failure whose budget is spent is an outage, not a
+                // bug: the turn pauses and a later `say` starts the next
+                // attempt from the same fold.
+                if error.retryable && !summary {
+                    self.sync();
+                    return Ok(StreamEnd::Paused(PauseReport {
+                        attempts: budget.attempts(),
+                        waited: budget.spent(),
+                        reason: error.reason(),
+                    }));
+                }
+                return Err(error.message);
+            }
+            self.sync();
+            let wait = crate::retry::delay(&policy, attempt - 1, error.retry_after, &mut rng);
+            if !budget.fits(wait) {
+                // The provider asked to wait longer than what is left of the
+                // budget (or the count cap is reached): pausing now is honest,
+                // waiting a little and failing is not.
+                self.sync();
+                return Ok(StreamEnd::Paused(PauseReport {
+                    attempts: budget.attempts(),
+                    waited: budget.spent(),
+                    reason: error.reason(),
+                }));
+            }
+            budget.charge(wait);
+            self.show_wait(error.status, wait, attempt);
+            if let Some(end) = self.wait_for(rx, wait, &mut inbox_open).await? {
+                return Ok(end);
+            }
+            attempt = attempt.saturating_add(1);
+        }
+    }
+
+    /// One provider request, with verbs taken while it is in flight.
+    async fn attempt(
         &mut self,
         rx: &mut Inbox,
         request: &provider::BuiltRequest,
         summary: bool,
-    ) -> Result<StreamEnd, String> {
-        let mut attempt = 0u32;
-        let mut inbox_open = true;
-        // A summary is one request: retrying it buys nothing the second time
-        // (the provider is down or the prompt is too large) and it is spend the
-        // turn does not need. A step keeps the provider attempt budget.
-        let max_attempts = if summary { 1 } else { provider::MAX_ATTEMPTS };
+        inbox_open: &mut bool,
+    ) -> Attempt {
+        let client = self.client.clone();
+        // Live text goes to the UI as it arrives; the callback is a send to an
+        // unbounded channel, so it can never stall the stream.
+        let ui = if summary { None } else { self.ui.clone() };
+        // Documented test hook: die with half a response streamed and nothing
+        // committed, which is where a crash in the stream lands.
+        let crash_mid_stream = !summary && crash_armed("mid_stream");
+        let mut on_delta = move |delta: crate::stream::Delta| {
+            if let crate::stream::Delta::Text(text) = &delta {
+                if crash_mid_stream {
+                    crash_now("mid_stream");
+                }
+                if let Some(ui) = &ui {
+                    let _ = ui.send(UiEvent::Delta(text.clone()));
+                }
+            }
+        };
+        let future = client.stream_with(request, &mut on_delta);
+        tokio::pin!(future);
+        let mut outcome: Option<Result<crate::stream::Assembler, provider::ProviderError>> = None;
+        let mut interrupt: Option<StreamEnd> = None;
+        while outcome.is_none() && interrupt.is_none() {
+            tokio::select! {
+                result = &mut future => outcome = Some(result),
+                incoming = rx.recv(), if *inbox_open => {
+                    match incoming {
+                        Some(incoming) => self.take_interrupt(incoming, &mut interrupt),
+                        None => *inbox_open = false,
+                    }
+                }
+            }
+        }
+        if let Some(end) = interrupt {
+            return Attempt::End(end);
+        }
+        match outcome.expect("the stream ended without a result") {
+            Ok(assembler) => Attempt::Ok(assembler),
+            Err(error) => Attempt::Failed(error),
+        }
+    }
+
+    /// Say what is happening and start the status line's countdown. The `error`
+    /// event was already recorded, so NDJSON carries it; this is the human line.
+    fn show_wait(&mut self, status: Option<u16>, wait: Duration, attempt: u32) {
+        let line = crate::retry::wait_line(status, wait, attempt);
+        self.emit(UiEvent::Info(format!("» {line}")));
+        if !self.json && !self.tui {
+            eprintln!("kelir: {line}");
+        }
+        self.emit(UiEvent::Retrying {
+            line,
+            until: Instant::now() + wait,
+        });
+    }
+
+    /// Wait `wait`, taking verbs. `stop`, `say --now` and `end` interrupt it;
+    /// anything else waits for its boundary. `Some(end)` when the turn ends
+    /// here.
+    async fn wait_for(
+        &mut self,
+        rx: &mut Inbox,
+        wait: Duration,
+        inbox_open: &mut bool,
+    ) -> Result<Option<StreamEnd>, String> {
+        if wait.is_zero() {
+            return Ok(None);
+        }
+        let deadline = tokio::time::sleep(wait);
+        tokio::pin!(deadline);
+        let mut interrupt: Option<StreamEnd> = None;
+        while interrupt.is_none() {
+            tokio::select! {
+                _ = &mut deadline => break,
+                incoming = rx.recv(), if *inbox_open => {
+                    match incoming {
+                        Some(incoming) => self.take_interrupt(incoming, &mut interrupt),
+                        None => *inbox_open = false,
+                    }
+                }
+            }
+        }
+        Ok(interrupt)
+    }
+
+    /// Wait for a governor slot, polling (there is nothing to be told about: the
+    /// slot appears when another process closes its handle). The status line
+    /// says so while it lasts.
+    async fn await_slot(
+        &mut self,
+        rx: &mut Inbox,
+        governor: &crate::governor::Governor,
+        inbox_open: &mut bool,
+    ) -> Result<SlotWait, String> {
+        let mut announced = false;
         loop {
-            let client = self.client.clone();
-            // Live text goes to the UI as it arrives; the callback is a send to
-            // an unbounded channel, so it can never stall the stream.
-            let ui = if summary { None } else { self.ui.clone() };
-            // Documented test hook: die with half a response streamed and
-            // nothing committed, which is where a crash in the stream lands.
-            let crash_mid_stream = !summary && crash_armed("mid_stream");
-            let mut on_delta = move |delta: crate::stream::Delta| {
-                if let crate::stream::Delta::Text(text) = &delta {
-                    if crash_mid_stream {
-                        crash_now("mid_stream");
-                    }
-                    if let Some(ui) = &ui {
-                        let _ = ui.send(UiEvent::Delta(text.clone()));
-                    }
+            if let Some(slot) = governor.try_acquire() {
+                if announced {
+                    self.emit(UiEvent::RetryingDone);
                 }
-            };
-            let future = client.stream_with(request, &mut on_delta);
-            tokio::pin!(future);
-            let mut outcome: Option<Result<crate::stream::Assembler, provider::ProviderError>> =
-                None;
-            let mut interrupt: Option<StreamEnd> = None;
-            while outcome.is_none() && interrupt.is_none() {
-                tokio::select! {
-                    result = &mut future => outcome = Some(result),
-                    incoming = rx.recv(), if inbox_open => {
-                        match incoming {
-                            Some(incoming) => self.take_interrupt(incoming, &mut interrupt),
-                            None => inbox_open = false,
-                        }
-                    }
-                }
+                return Ok(SlotWait::Taken(Some(slot)));
             }
-            if let Some(end) = interrupt {
-                return Ok(end);
+            if !announced {
+                announced = true;
+                let line = format!("waiting for a provider slot ({})", governor.slots());
+                self.emit(UiEvent::Info(format!("» {line} …")));
+                self.emit(UiEvent::Retrying {
+                    line,
+                    until: Instant::now() + Duration::from_secs(86_400),
+                });
             }
-            match outcome.expect("the stream ended without a result") {
-                Ok(assembler) => return Ok(StreamEnd::Assembled(assembler)),
-                Err(error) => {
-                    let will_retry = error.retryable && attempt + 1 < max_attempts;
-                    self.record(EventBody::Error {
-                        location: "provider".into(),
-                        message: error.message.clone(),
-                        retryable: error.retryable,
-                    })?;
-                    if !will_retry {
-                        if !summary {
-                            self.retryable_failure = error.retryable;
-                        }
-                        return Err(error.message);
-                    }
-                    self.sync();
-                    // The backoff is not dead time: a `stop` or an `end` must
-                    // not wait it out (M1 review N5).
-                    let backoff = tokio::time::sleep(provider::backoff(attempt));
-                    tokio::pin!(backoff);
-                    while interrupt.is_none() {
-                        tokio::select! {
-                            _ = &mut backoff => break,
-                            incoming = rx.recv(), if inbox_open => {
-                                match incoming {
-                                    Some(incoming) => self.take_interrupt(incoming, &mut interrupt),
-                                    None => inbox_open = false,
-                                }
-                            }
-                        }
-                    }
-                    if let Some(end) = interrupt {
-                        return Ok(end);
-                    }
-                    attempt += 1;
-                }
+            if let Some(end) = self.wait_for(rx, SLOT_POLL, inbox_open).await? {
+                self.emit(UiEvent::RetryingDone);
+                return Ok(SlotWait::Interrupted(end));
             }
         }
     }
@@ -2880,6 +3169,121 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_says_what_happened_and_how_to_go_on() {
+        let report = PauseReport {
+            attempts: 7,
+            waited: Duration::from_secs(30 * 60),
+            reason: "rate limited (429)".into(),
+        };
+        assert_eq!(
+            report.message(),
+            "provider unavailable after 7 attempts, 30 min: rate limited (429); say continue to retry"
+        );
+        let one = PauseReport {
+            attempts: 1,
+            waited: Duration::from_millis(400),
+            reason: "provider error (500)".into(),
+        };
+        assert_eq!(
+            one.message(),
+            "provider unavailable after 1 attempt, 400 ms: provider error (500); say continue to retry"
+        );
+    }
+
+    #[test]
+    fn a_step_request_is_rebuilt_after_a_wait() {
+        // `RequestFor::Step` builds from the session's *current* model: that is
+        // what makes a `model` verb during a wait apply to the retry.
+        let request = RequestFor::Step.build(&test_session("first/model"));
+        assert_eq!(request.body["model"], "first/model");
+        let fixed =
+            provider::build_request(&test_provider(), "ses_1", "pinned/model", &[], &[], None);
+        assert_eq!(
+            RequestFor::Built(&fixed)
+                .build(&test_session("second/model"))
+                .body["model"],
+            "pinned/model",
+            "a compaction request is built once, from the model it was made with"
+        );
+    }
+
+    fn test_provider() -> crate::config::ProviderConfig {
+        crate::config::ProviderConfig {
+            kind: crate::config::ProviderKind::OpenRouter,
+            base_url: "https://example.invalid/v1".into(),
+            key_env: None,
+            key: Some("test".into()),
+            extra_headers: Default::default(),
+            reasoning_field: None,
+            session_header: None,
+            max_concurrent_requests: None,
+        }
+    }
+
+    /// A session with nothing but a model set: enough for a request to be built
+    /// from the empty fold.
+    fn test_session(model: &str) -> Session {
+        let dir = std::env::temp_dir().join(format!("kelir-session-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writer = EventLog::open(&dir.join("events.jsonl")).unwrap();
+        Session {
+            id: "ses_1".into(),
+            dir: dir.clone(),
+            writer,
+            blobs: Blobs::new(&dir),
+            events: Vec::new(),
+            cfg: Config {
+                provider: String::new(),
+                model: String::new(),
+                shell: vec![],
+                spill_limit: 0,
+                max_steps: 0,
+                cache_ttl: None,
+                system_prompt: crate::config::DEFAULT_PROMPT.to_string(),
+                providers: Default::default(),
+                window: None,
+                model_windows: Default::default(),
+                auto_compact_at: 0.8,
+                compact_prompt: String::new(),
+                skills_dirs: vec![],
+                compact_keep: 0,
+                promote_after: std::time::Duration::from_secs(0),
+                retry: crate::retry::Policy::default(),
+            },
+            provider_name: "openrouter".into(),
+            model: model.into(),
+            client: Client::new(test_provider(), "ses_1", None).unwrap(),
+            ctx: Ctx::new(dir, std::env::temp_dir(), vec![], 0, String::new()),
+            json: true,
+            echo_assistant: false,
+            keep: false,
+            tui: false,
+            ui: None,
+            herdr: None,
+            has_task: false,
+            final_text: String::new(),
+            step: 0,
+            turn: 0,
+            disabled: BTreeSet::new(),
+            live_calls: Vec::new(),
+            scheduler: Scheduler::default(),
+            compact_request: None,
+            last_prompt_tokens: None,
+            compact_floor: None,
+            tool_names: tools::names(),
+            resumed: false,
+            in_flight: false,
+            retryable_failure: false,
+            pending_task: String::new(),
+            window: 1_000,
+            window_source: "default",
+            models: None,
+            watch: crate::sources::Watch::default(),
+            governor: None,
+        }
+    }
+
+    #[test]
     fn system_prompt_has_a_date_and_no_time() {
         let system = crate::sources::render_system(&crate::sources::Inputs {
             base: "base",
@@ -2915,6 +3319,7 @@ mod tests {
             skills_dirs: vec![],
             compact_keep: 0,
             promote_after: std::time::Duration::from_secs(0),
+            retry: crate::retry::Policy::default(),
         };
         let a = render_system(&cfg, Path::new("tmp"));
         let b = render_system(&cfg, Path::new("tmp"));
@@ -2942,6 +3347,7 @@ mod tests {
                     extra_headers: Default::default(),
                     reasoning_field: None,
                     session_header: None,
+                    max_concurrent_requests: None,
                 },
             );
         }
