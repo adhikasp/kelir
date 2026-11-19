@@ -537,6 +537,14 @@ struct Batch {
 }
 
 async fn drive(opts: Options) -> u8 {
+    // One interrupt listener for the process, installed before *anything*
+    // observable: before `prepare` (which records `session_started`) and so
+    // before any client can see the session and signal it. Tokio's `signal`
+    // keeps Ctrl-C captured for the whole process once it exists, so this is
+    // also the last safe moment to install it; the flag it sets is
+    // level-triggered, so a signal that lands before the first wait is still
+    // there when the wait begins (STEER-5 fixes round 2).
+    crate::signals::install();
     let mut prepared = match prepare(&opts).await {
         Ok(prepared) => prepared,
         Err(failure) => {
@@ -673,12 +681,6 @@ async fn drive(opts: Options) -> u8 {
             }
         }
     }
-
-    // One interrupt listener for the process, installed before the first turn:
-    // a Ctrl-C during a retry or slot wait ends the turn `stopped` instead of
-    // killing a session whose log says nothing (STEER-5 review B2). A second
-    // one within two seconds exits, which is the way out of a wedged session.
-    crate::signals::install();
 
     let code = session.run(&mut rx).await;
     if let Some((watchdog, to_tui)) = tui {
