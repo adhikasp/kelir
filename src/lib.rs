@@ -5,6 +5,7 @@
 //! and on resume.
 
 pub mod activity;
+pub mod attachments;
 pub mod bg;
 pub mod chat;
 pub mod cli;

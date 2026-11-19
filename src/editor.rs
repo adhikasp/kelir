@@ -26,6 +26,16 @@ pub enum Key {
     Clear,
     /// A bracketed paste, newlines and all.
     Paste(String),
+    /// Insert a chip (a saved image) at the cursor, as one atomic element.
+    Chip(Chip),
+    /// Remove the chip whose label is at the cursor (or just before it), as one
+    /// element: Backspace on a chip removes the whole thing, never one
+    /// character of its label.
+    RemoveChip,
+    /// Drop every chip from the buffer (a submitted or cleared prompt): the
+    /// chip decision belongs to the text, so this is what a caller after
+    /// `Submitted` uses to forget them.
+    DropChips,
     HistoryPrev,
     HistoryNext,
 }
@@ -36,14 +46,56 @@ pub enum Outcome {
     /// The buffer changed (or the cursor moved).
     Edited,
     /// Enter on a non-empty buffer: the text, and the buffer is empty again.
+    /// The caller reads [`Editor::take_chips`] for the images the text named.
     Submitted(String),
     /// The key means nothing here (or the buffer was empty on Enter).
     Ignored,
+    /// A chip was removed: the caller deletes its file (nothing else referred to
+    /// it yet).
+    ChipRemoved(Chip),
+}
+
+/// A saved image in the input, as one atomic element.
+///
+/// The buffer holds the chip's *label* (`[image 1]`) as ordinary characters, so
+/// every cursor rule stays simple; the label is deliberately unlikely to occur
+/// in typed text. When the chip is on the row, the renderer paints the label
+/// reversed; on submit the caller replaces it with the pointer text the model
+/// sees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chip {
+    /// The per-prompt number: also the number in the label and the saved file.
+    pub seq: u32,
+    /// `attachments/1-clipboard.png`, relative to the session dir.
+    pub rel: String,
+    /// The pointer the prompt carries: `[image: attachments/1-…, 1280x720, …]`.
+    pub pointer: String,
+    /// The label in the buffer: `[image 1]`.
+    pub label: String,
+}
+
+impl Chip {
+    /// The chip for a saved attachment.
+    pub fn new(seq: u32, rel: &str, pointer: &str) -> Self {
+        Self {
+            seq,
+            rel: rel.to_string(),
+            pointer: pointer.to_string(),
+            label: crate::attachments::chip_label(seq),
+        }
+    }
+
+    /// The label inside a line, if it is there.
+    pub fn find(&self, line: &str) -> Option<usize> {
+        line.find(&self.label)
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Editor {
     lines: Vec<String>,
+    /// The images this buffer names, in insertion order.
+    chips: Vec<Chip>,
     /// Cursor line, always a valid index.
     row: usize,
     /// Cursor column, in `char`s, never past the end of the line.
@@ -59,6 +111,7 @@ impl Default for Editor {
     fn default() -> Self {
         Self {
             lines: vec![String::new()],
+            chips: Vec::new(),
             row: 0,
             col: 0,
             history: Vec::new(),
@@ -87,6 +140,78 @@ impl Editor {
 
     pub fn history(&self) -> &[String] {
         &self.history
+    }
+
+    /// The images the buffer names.
+    pub fn chips(&self) -> &[Chip] {
+        &self.chips
+    }
+
+    /// Take the chips (after a submit: the caller decides what happens to
+    /// them).
+    pub fn take_chips(&mut self) -> Vec<Chip> {
+        std::mem::take(&mut self.chips)
+    }
+
+    /// Insert a chip at the cursor as one atomic element: a space before it when
+    /// the cursor is mid-word, the label, and a space after it.
+    pub fn insert_chip(&mut self, chip: Chip) {
+        self.stop_browsing();
+        let label = chip.label.clone();
+        self.chips.push(chip);
+        let row = self.row;
+        let col = self.char_to_byte(row, self.col);
+        let before_space = self.lines[row][..col]
+            .chars()
+            .last()
+            .is_some_and(|c| c != ' ');
+        let mut text = String::new();
+        if before_space {
+            text.push(' ');
+        }
+        text.push_str(&label);
+        text.push(' ');
+        let added = text.chars().count();
+        self.lines[row].insert_str(col, &text);
+        self.col += added;
+    }
+
+    /// Remove the chip the cursor belongs to (just before it, or starting at
+    /// it). Returns it so the caller can delete the file.
+    pub fn remove_chip_at_cursor(&mut self) -> Option<Chip> {
+        let row = self.row;
+        let col = self.char_to_byte(row, self.col);
+        let line = self.lines[row].clone();
+        // The chip the cursor belongs to: the label that starts at the cursor,
+        // or the one the cursor is inside or immediately after (a chip is one
+        // element, so anywhere on its label means the whole chip).
+        let mut hit: Option<(usize, usize, usize)> = None;
+        for (index, chip) in self.chips.iter().enumerate() {
+            let mut from = 0usize;
+            while let Some(found) = line[from..].find(&chip.label) {
+                let start = from + found;
+                let end = start + chip.label.len();
+                if start <= col && col <= end + 1 {
+                    hit = Some((index, start, end));
+                    break;
+                }
+                from = end;
+            }
+            if hit.is_some() {
+                break;
+            }
+        }
+        let (index, start, end) = hit?;
+        let chip = self.chips.remove(index);
+        // Take one trailing space with the label, so the sentence stays even.
+        let end = if line[end..].starts_with(' ') {
+            end + 1
+        } else {
+            end
+        };
+        self.lines[row].replace_range(start..end, "");
+        self.col = line[..start].chars().count();
+        Some(chip)
     }
 
     /// The window of buffer rows to draw when only `rows` fit: the buffer is
@@ -155,7 +280,21 @@ impl Editor {
                     self.history.push(text.clone());
                 }
                 self.reset();
+                // The chips stay for the caller: they are what the submitted
+                // text now points at.
                 Outcome::Submitted(text)
+            }
+            Key::Chip(chip) => {
+                self.insert_chip(chip);
+                Outcome::Edited
+            }
+            Key::RemoveChip => match self.remove_chip_at_cursor() {
+                Some(chip) => Outcome::ChipRemoved(chip),
+                None => Outcome::Ignored,
+            },
+            Key::DropChips => {
+                self.chips.clear();
+                Outcome::Edited
             }
             Key::Backspace => {
                 self.stop_browsing();
@@ -504,5 +643,89 @@ mod tests {
         let mut short = Editor::default();
         type_text(&mut short, "x");
         assert_eq!(short.window(3), (0, 1));
+    }
+
+    #[test]
+    fn a_chip_is_one_atomic_element_in_the_buffer() {
+        let mut editor = Editor::default();
+        for key in [
+            Key::Char('l'),
+            Key::Char('o'),
+            Key::Char('o'),
+            Key::Char('k'),
+        ] {
+            editor.handle(key);
+        }
+        editor.insert_chip(Chip::new(1, "attachments/1-a.png", "[image: x]"));
+        assert_eq!(editor.text(), "look [image 1] ");
+        assert_eq!(editor.chips().len(), 1);
+        assert_eq!(
+            editor.cursor(),
+            (0, 15),
+            "the cursor sits after the chip and its space"
+        );
+        // Typing continues after it.
+        editor.handle(Key::Char('!'));
+        assert_eq!(editor.text(), "look [image 1] !");
+        // Past the '!' there is no chip to take; back over it and one
+        // RemoveChip takes the whole label, not one character.
+        assert_eq!(editor.handle(Key::RemoveChip), Outcome::Ignored);
+        editor.handle(Key::Left);
+        let outcome = editor.handle(Key::RemoveChip);
+        match outcome {
+            Outcome::ChipRemoved(chip) => assert_eq!(chip.seq, 1),
+            other => panic!("{other:?} at {:?} in {:?}", editor.cursor(), editor.text()),
+        }
+        assert_eq!(editor.text(), "look !");
+        assert!(editor.chips().is_empty());
+        // A second RemoveChip finds nothing.
+        assert_eq!(editor.handle(Key::RemoveChip), Outcome::Ignored);
+    }
+
+    #[test]
+    fn a_chip_at_the_start_gets_no_leading_space_and_two_chips_are_numbered() {
+        let mut editor = Editor::default();
+        editor.insert_chip(Chip::new(1, "attachments/1-a.png", "[image: x]"));
+        editor.handle(Key::Char(' '));
+        editor.insert_chip(Chip::new(2, "attachments/2-b.png", "[image: y]"));
+        assert_eq!(editor.text(), "[image 1]  [image 2] ");
+        assert_eq!(editor.chips().len(), 2);
+        // The second chip is the one the cursor is in: remove it by label.
+        let chip = editor.remove_chip_at_cursor().expect("the cursor's chip");
+        assert_eq!(chip.seq, 2);
+        assert_eq!(editor.text(), "[image 1]  ");
+    }
+
+    #[test]
+    fn a_submit_keeps_the_chip_list_for_the_caller_and_clears_the_buffer() {
+        let mut editor = Editor::default();
+        editor.insert_chip(Chip::new(1, "attachments/1-a.png", "[image: x]"));
+        let outcome = editor.handle(Key::Enter);
+        assert!(matches!(outcome, Outcome::Submitted(_)));
+        assert!(editor.is_empty());
+        assert_eq!(
+            editor.chips().len(),
+            1,
+            "the caller needs the chip it just submitted"
+        );
+        assert_eq!(editor.take_chips().len(), 1);
+        assert!(editor.chips().is_empty());
+    }
+
+    #[test]
+    fn a_chip_cursor_math_counts_the_label_its_whole_width() {
+        let mut editor = Editor::default();
+        editor.insert_chip(Chip::new(3, "attachments/3-c.png", "[image: z]"));
+        // Home, then Right five times, lands inside the label; RemoveChip from
+        // there still takes the whole chip (it is one element).
+        editor.handle(Key::Home);
+        for _ in 0..5 {
+            editor.handle(Key::Right);
+        }
+        let chip = editor
+            .remove_chip_at_cursor()
+            .expect("a chip at the cursor");
+        assert_eq!(chip.seq, 3);
+        assert_eq!(editor.text().trim(), "");
     }
 }
