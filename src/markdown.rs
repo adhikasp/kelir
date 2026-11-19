@@ -200,7 +200,7 @@ pub fn render(text: &str, layout: Layout) -> Vec<Row> {
     let mut blocks = stream.push(text);
     blocks.extend(stream.finish());
     let mut rows = Vec::new();
-    for block in blocks {
+    for block in join_blocks(blocks) {
         if !rows.is_empty() {
             rows.push(Row::default());
         }
@@ -209,12 +209,41 @@ pub fn render(text: &str, layout: Layout) -> Vec<Row> {
     rows
 }
 
+/// The blocks a splitter cut, with a loose list item's continuation joined back
+/// on. The splitter cuts at a blank line; CommonMark keeps a list item open
+/// across that line when the following block is indented to the item's content,
+/// so the two must be parsed as one text (the whole message render and the
+/// streamed one agree row for row because both call this).
+pub fn join_blocks(blocks: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for block in blocks {
+        let previous_open = out.last().is_some_and(|last| ends_in_item(last));
+        match out.last_mut() {
+            Some(last) if previous_open && continues_item(&block) => {
+                last.push_str("\n\n");
+                last.push_str(&block);
+            }
+            _ => out.push(block),
+        }
+    }
+    out
+}
+
+/// Does this block start indented? A list item's continuation paragraph must be
+/// indented to the item's content (CommonMark), so an indented block after a
+/// block that ended inside an item is that item's continuation.
+fn continues_item(block: &str) -> bool {
+    let first = block
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    first.starts_with("  ") || first.starts_with('\t')
+}
+
 /// Render one block (a paragraph, a fence, a table…) as the streaming path
 /// does: same function, same rules.
 pub fn render_block(text: &str, layout: Layout) -> Vec<Row> {
-    let mut renderer = Renderer::new(layout);
-    renderer.document(text);
-    renderer.finish()
+    Renderer::render_with_open(text, layout).0
 }
 
 enum ListKind {
@@ -253,6 +282,13 @@ struct Renderer {
     /// Just after a paragraph/heading inside a list item: the next line is that
     /// item's continuation, not a new item.
     in_item: bool,
+    /// The prefix a not-yet-flushed line inherits: a list item's first marker or
+    /// its hanging indent. It survives a flush so a continuation paragraph
+    /// after a blank line (CommonMark: still inside the item) keeps its indent,
+    /// and so a fence inside an item carries it too.
+    pending_prefix: Option<(Vec<Run>, Vec<Run>)>,
+    /// The quote bar and indent a fenced block inside a list item carries.
+    code_prefix: Option<(Vec<Run>, Vec<Run>)>,
 }
 
 struct Code {
@@ -291,6 +327,8 @@ impl Renderer {
             link: None,
             image_alt: None,
             in_item: false,
+            pending_prefix: None,
+            code_prefix: None,
         }
     }
 
@@ -298,6 +336,27 @@ impl Renderer {
         for event in Parser::new_ext(text, parser()) {
             self.event(event);
         }
+    }
+
+    /// Whether the next container-level line belongs to a list item that is
+    /// still open *and* outside an open fence: that one thing the block
+    /// splitter cannot see, because it cuts at blank lines and the CommonMark
+    /// parser (not the splitter) decides that a blank line does not end the
+    /// item.
+    fn wants_more(&self) -> bool {
+        !self.lists.is_empty() && self.code.is_none()
+    }
+
+    /// Render `block`, and say whether a following block may continue it: the
+    /// block ended inside a list item (a loose item's blank line is a
+    /// separator, not the end of the item, and CommonMark keeps the
+    /// continuation inside it). The TUI joins such a block with the next one
+    /// before rendering, so the indent survives.
+    pub fn render_with_open(text: &str, layout: Layout) -> (Vec<Row>, bool) {
+        let mut renderer = Renderer::new(layout);
+        renderer.document(text);
+        let open = renderer.wants_more();
+        (renderer.finish(), open)
     }
 
     fn finish(mut self) -> Vec<Row> {
@@ -336,32 +395,57 @@ impl Renderer {
             // A quote bar is two columns: at three columns or fewer it would
             // eat the text it is meant to decorate.
             self.item_prefix = None;
+            self.pending_prefix = None;
             return (Vec::new(), Vec::new());
         }
         let mut bar = Vec::new();
         for _ in 0..self.quote {
             bar.push(Run::new(self.theme_glyphs.quote_bar(), Tone::Dim));
         }
-        let first = match &self.item_prefix {
-            Some(prefix) => {
-                let mut runs = bar.clone();
-                runs.extend(prefix.clone());
-                runs
-            }
-            None => bar.clone(),
+        // The line being flushed is either the item's first (marker) or one of
+        // its continuations (the indent the previous flush remembered).
+        let with = |bar: &[Run], prefix: &[Run]| {
+            let mut runs = bar.to_vec();
+            runs.extend(prefix.to_vec());
+            runs
         };
-        // Continuation rows: the bar, then a hanging indent as wide as the
-        // item's marker.
-        let cont = match &self.item_prefix {
-            Some(prefix) => {
-                let mut runs = bar;
-                let width: usize = prefix.iter().map(|run| text_width(&run.text)).sum();
-                runs.push(Run::new(" ".repeat(width), Tone::Dim));
-                runs
+        let hang = |bar: &[Run], prefix: &[Run]| {
+            let mut runs = bar.to_vec();
+            let width: usize = prefix.iter().map(|run| text_width(&run.text)).sum();
+            runs.push(Run::new(" ".repeat(width), Tone::Dim));
+            runs
+        };
+        let (first, cont) = match (&self.item_prefix, &self.pending_prefix) {
+            (Some(marker), _) => (with(&bar, marker), hang(&bar, marker)),
+            (None, Some((first, cont))) => {
+                let first = if first.is_empty() {
+                    bar.clone()
+                } else {
+                    first.clone()
+                };
+                let cont = if cont.is_empty() {
+                    bar.clone()
+                } else {
+                    cont.clone()
+                };
+                (first, cont)
             }
-            None => bar,
+            (None, None) => (bar.clone(), bar),
         };
         (first, cont)
+    }
+
+    /// The hanging indent for a list item's marker: the quote bar, then spaces
+    /// as wide as the marker, so a continuation paragraph sits under the item's
+    /// text and not under a second bullet.
+    fn hang(&self, marker: &[Run]) -> Vec<Run> {
+        let mut runs = Vec::new();
+        for _ in 0..self.quote {
+            runs.push(Run::new(self.theme_glyphs.quote_bar(), Tone::Dim));
+        }
+        let width: usize = marker.iter().map(|run| text_width(&run.text)).sum();
+        runs.push(Run::new(" ".repeat(width), Tone::Dim));
+        runs
     }
 
     /// A block starts: nothing to do, the caller puts the blank rows between
@@ -373,15 +457,28 @@ impl Renderer {
     }
 
     /// Emit the current logical line, wrapped.
+    ///
+    /// A list item's prefix is kept for the *next* line of the item (a
+    /// continuation paragraph after a blank line, or a fence inside the item):
+    /// CommonMark keeps both inside the item, so the hanging indent must stay.
+    /// The first line of the item keeps the marker, everything after it the
+    /// continuation indent.
     fn flush_line(&mut self) {
         if self.line.is_empty() {
-            self.item_prefix = None;
             return;
         }
         let runs = std::mem::take(&mut self.line);
         let (first, cont) = self.prefixes();
-        self.item_prefix = None;
         let rows = wrap_runs(&first, &cont, &runs, self.layout.width);
+        // A following line of the same item (its second paragraph) hangs under
+        // the item's marker, never under a bullet of its own.
+        let hanging = match &self.item_prefix {
+            Some(prefix) => self.hang(prefix),
+            None => cont.clone(),
+        };
+        // The item's marker is spent; the hang stays for its continuation.
+        self.item_prefix = None;
+        self.pending_prefix = Some((hanging.clone(), hanging));
         self.rows.extend(rows);
     }
 
@@ -482,6 +579,8 @@ impl Renderer {
             }
             Tag::Item => {
                 self.flush_line();
+                // A new item starts its own prefix; nothing carries over.
+                self.pending_prefix = None;
                 let level = self.lists.last().map(ListKind::level).unwrap_or(0);
                 let indent = "  ".repeat(level);
                 let marker = match self.lists.last_mut() {
@@ -504,6 +603,8 @@ impl Renderer {
                     CodeBlockKind::Fenced(language) => language.to_string(),
                     CodeBlockKind::Indented => String::new(),
                 };
+                // A fence inside a list item keeps the item's indent.
+                self.code_prefix = self.pending_prefix.clone();
                 self.code = Some(Code {
                     language,
                     lines: Vec::new(),
@@ -568,11 +669,13 @@ impl Renderer {
                 self.lists.pop();
                 if self.lists.is_empty() {
                     self.in_item = false;
+                    self.pending_prefix = None;
                 }
             }
             TagEnd::Item => {
                 self.flush_line();
                 self.in_item = false;
+                self.pending_prefix = None;
             }
             TagEnd::CodeBlock => self.finish_code(),
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
@@ -638,7 +741,17 @@ impl Renderer {
         for _ in 0..self.quote {
             bar.push_str(self.theme_glyphs.quote_bar());
         }
-        let mut prefix = format!("{bar}{gutter}");
+        // A fence inside a list item sits at the item's indent (the hanging
+        // indent its own paragraph rows use).
+        let indent = self
+            .code_prefix
+            .take()
+            .map(|(_, cont)| {
+                let width: usize = cont.iter().map(|run| text_width(&run.text)).sum();
+                " ".repeat(width)
+            })
+            .unwrap_or_default();
+        let mut prefix = format!("{bar}{indent}{gutter}");
         if text_width(&prefix) + 2 > self.layout.width {
             // At two or three columns a gutter would leave no room for code.
             prefix.clear();
@@ -1137,6 +1250,45 @@ fn opens_or_closes(line: &str, open: &str) -> bool {
     match trimmed.strip_prefix(marker) {
         Some(rest) => rest.trim().is_empty(),
         None => false,
+    }
+}
+
+/// Does this block end inside a list item that a following, indented block
+/// continues? (The renderer knows: the item's container is still open at the
+/// end of the block — a loose item's blank line does not close it.)
+pub fn ends_in_item(text: &str) -> bool {
+    // The splitter's cut is a blank line: the one place where CommonMark's
+    // *loose* list rule matters. A block whose last content line is still
+    // indented to its item continues inside it; one that ends with the item's
+    // own text may be continued by an indented block after the cut.
+    let last = text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    opens_item(text) || last.starts_with("  ") || last.starts_with("	")
+}
+
+/// Does this block open with a list item (`- x`, `* x`, `1. x`, an ordered
+/// item)? Two of those in a row are two lists, never one item's continuation.
+pub fn opens_item(block: &str) -> bool {
+    let line = block
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let trimmed = line.trim_start();
+    let mut chars = trimmed.chars().peekable();
+    match chars.peek() {
+        Some('-') | Some('*') | Some('+') => {
+            chars.next();
+            chars.next().is_some_and(char::is_whitespace)
+        }
+        Some(c) if c.is_ascii_digit() => {
+            let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
+            let rest = &trimmed[digits.len()..];
+            rest.starts_with(". ") || rest.starts_with(") ")
+        }
+        _ => false,
     }
 }
 

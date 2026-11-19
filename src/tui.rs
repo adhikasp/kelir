@@ -412,6 +412,154 @@ pub fn last_line(text: &str) -> String {
 
 // --------------------------------------------------------------------- app
 
+/// One block of a streamed message: its text and how much of it is already in
+/// the scrollback.
+#[derive(Debug, Clone)]
+struct Block {
+    text: String,
+    /// How many of the block's rendered rows are out.
+    committed: usize,
+    /// The blank row that separates this block from the one before it is out.
+    separated: bool,
+    /// The next block may continue this one: the block ends inside a list item
+    /// that CommonMark keeps open across the blank line.
+    joins: bool,
+}
+
+/// The message being streamed, committed a block at a time.
+///
+/// Two invariants this type exists for:
+///
+/// - **Every rendered row reaches the scrollback exactly once, in the order the
+///   model produced it.** Only the last block can still change (the open tail is
+///   re-rendered while it grows); every block before it is final and its rows go
+///   out at once. That is why a long fence streams into the scrollback instead
+///   of becoming a three-row ticker, why the previous block's rows cannot vanish
+///   while a later one streams (`S1`), and why prose can never be written before
+///   the tool lines that preceded it (`B1`: the group closes first).
+/// - **A loose list item keeps its continuation inside it** (`S7`): a block that
+///   a following, indented block continues is joined to it and rendered as one,
+///   exactly as the one-shot render reads the same text.
+#[derive(Debug, Default)]
+struct Message {
+    blocks: Vec<Block>,
+}
+
+/// Does this block start indented, so a list item open before it continues into
+/// it? (CommonMark: a continuation must be indented to the item's content.)
+fn continues_item(block: &str) -> bool {
+    let first = block
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    first.starts_with("  ") || first.as_bytes().first() == Some(&9u8)
+}
+
+impl Message {
+    fn is_empty(&self) -> bool {
+        self.blocks.iter().all(|block| block.text.trim().is_empty())
+    }
+
+    /// A closed block arrived. It is joined to the previous block when CommonMark
+    /// reads it as that block's continuation, and kept as its own block
+    /// otherwise.
+    fn push_block(&mut self, text: &str) {
+        if let Some(last) = self.blocks.last_mut()
+            && last.committed == 0
+            && !last.separated
+            && last.joins
+            && continues_item(text)
+        {
+            last.text = format!(
+                "{}
+
+{text}",
+                last.text
+            );
+            last.joins = markdown::ends_in_item(&last.text);
+            return;
+        }
+        self.blocks.push(Block {
+            text: text.to_string(),
+            committed: 0,
+            separated: false,
+            joins: markdown::ends_in_item(text),
+        });
+    }
+
+    /// The rows of block `index` that are not out yet: the separator, then the
+    /// text. `None` renders the open tail instead of the block's own text.
+    fn rows_after(&self, index: usize, text: &str, layout: Layout) -> Vec<Row> {
+        let block = &self.blocks[index];
+        let rows = markdown::render_block(text, layout);
+        let mut out = Vec::new();
+        if !block.separated && index > 0 && !rows.is_empty() {
+            out.push(Row::default());
+        }
+        out.extend(rows[block.committed.min(rows.len())..].to_vec());
+        out
+    }
+
+    /// Mark block `index` delivered, including its separator.
+    fn mark(&mut self, index: usize, count: usize) {
+        let block = &mut self.blocks[index];
+        block.separated = true;
+        block.committed = count;
+    }
+
+    /// The rows of every final block: all but the last, plus the last one when
+    /// nothing is streaming any more. Handed out once each.
+    fn settled_rows(&mut self, layout: Layout) -> Vec<Row> {
+        let last = self.blocks.len().saturating_sub(1);
+        let mut out = Vec::new();
+        for index in 0..self.blocks.len() {
+            // Every closed block is final, except the last one when a following
+            // block may continue it (a loose list item): its rows are held until
+            // the next block decides.
+            if index == last && self.blocks[index].joins {
+                break;
+            }
+            let text = self.blocks[index].text.clone();
+            let rows = self.rows_after(index, &text, layout);
+            let total = markdown::render_block(&text, layout).len();
+            if rows.is_empty() {
+                continue;
+            }
+            out.extend(rows);
+            self.mark(index, total);
+        }
+        out
+    }
+
+    /// The live rows: what is not in the scrollback yet, at most `height` of
+    /// them — the last block's remaining rows, then the open tail.
+    fn live_rows(&self, layout: Layout, tail: &str, height: usize) -> Vec<Row> {
+        let mut rows = match self.blocks.len().checked_sub(1) {
+            Some(index) => {
+                let text = self.blocks[index].text.clone();
+                self.rows_after(index, &text, layout)
+            }
+            None => Vec::new(),
+        };
+        if !tail.trim().is_empty() {
+            if !rows.is_empty() {
+                rows.push(Row::default());
+            }
+            rows.extend(markdown::render_block(tail, layout));
+        }
+        let start = rows.len().saturating_sub(height);
+        rows.drain(..start);
+        rows
+    }
+
+    /// The stream is over: each block's remaining rows, once, then nothing.
+    fn finish(&mut self, layout: Layout) -> Vec<Row> {
+        let rows = self.settled_rows(layout);
+        self.blocks.clear();
+        rows
+    }
+}
+
 pub struct App {
     pub editor: Editor,
     pub theme: Theme,
@@ -422,10 +570,15 @@ pub struct App {
     pub height: usize,
     /// Rows ready to be written above the viewport, styled.
     pub scroll: Vec<Line<'static>>,
-    /// The streamed message: complete blocks, already rendered, not yet
-    /// committed.
-    pending_blocks: Vec<String>,
-    pending_rows: Vec<Row>,
+    /// Whether a message row has reached the scrollback in this message (so the
+    /// blank row after it is not written twice).
+    committed_message: bool,
+    /// The streamed message, committed a block at a time as the blocks close:
+    /// the text of every block, its rendered rows, and how many of those rows
+    /// are already in the scrollback. Every row is written exactly once and
+    /// nothing is held back, so no row can vanish while a later block streams
+    /// (the B1/S1 class) and a long block can no longer become a ticker.
+    message: Message,
     stream: markdown::Stream,
     /// The output tail view (Ctrl-O).
     pub tail: VecDeque<String>,
@@ -484,8 +637,8 @@ impl App {
             width,
             height,
             scroll: Vec::new(),
-            pending_blocks: Vec::new(),
-            pending_rows: Vec::new(),
+            committed_message: false,
+            message: Message::default(),
             stream: markdown::Stream::new(),
             tail: VecDeque::new(),
             show_tail: false,
@@ -556,20 +709,14 @@ impl App {
         &self.note
     }
 
-    /// The live rows: the tail of what is streaming and not yet committed.
+    /// The live rows: what is still open. With nothing streaming that is the
+    /// open tool group (below); otherwise it is the tail of the message — every
+    /// row the streamed text has produced that is not in the scrollback yet.
+    /// Nothing is held back for a later frame (`S1`).
     pub fn live_view(&self) -> Vec<Row> {
-        let mut rows = self.pending_rows.clone();
         let tail = self.stream.tail();
-        if !tail.trim().is_empty() {
-            if !rows.is_empty() {
-                rows.push(Row::default());
-            }
-            rows.extend(markdown::render_block(&tail, self.layout()));
-        }
-        let keep = self.live_height();
-        let start = rows.len().saturating_sub(keep);
-        rows.drain(..start);
-        rows
+        self.message
+            .live_rows(self.layout(), &tail, self.live_height())
     }
 
     /// The live area as ratatui lines: the open call group (when nothing is
@@ -598,87 +745,62 @@ impl App {
         self.scroll.extend(lines);
     }
 
-    fn commit_pending(&mut self) {
-        // The blocks are already rendered into `pending_rows`; they are kept
-        // only so a resize can re-render what has not been committed.
-        self.pending_blocks.clear();
-        let rows = std::mem::take(&mut self.pending_rows);
-        let theme = self.theme;
-        for row in rows {
-            self.scroll.push(row.line(theme, &NoHighlight));
-        }
-        self.stream = markdown::Stream::new();
-    }
-
-    fn rerender_pending(&mut self) {
-        let blocks = std::mem::take(&mut self.pending_blocks);
-        let mut rows = Vec::new();
-        for block in &blocks {
-            rows.extend(markdown::render_block(block, self.layout()));
-            rows.push(Row::default());
-        }
-        // The trailing blank row is not part of the message.
-        if rows.last().is_some_and(Row::is_empty) {
-            rows.pop();
-        }
-        self.pending_blocks = blocks;
-        self.pending_rows = rows;
-        self.trim_pending();
-    }
-
-    /// A complete block arrived: render it once, append it, and commit the
-    /// excess so the live area never holds more than its height.
-    fn absorb_block(&mut self, block: &str) {
-        let layout = self.layout();
-        let rows = markdown::render_block(block, layout);
-        if !self.pending_rows.is_empty() {
-            self.pending_rows.push(Row::default());
-        }
-        self.pending_blocks.push(block.to_string());
-        self.pending_rows.extend(rows);
-        self.trim_pending();
-    }
-
-    /// Commit the rows that can no longer be seen, exactly once each.
-    fn trim_pending(&mut self) {
-        let keep = self.live_height();
-        let total = self.pending_rows.len();
-        if total <= keep {
+    /// Commit every row that can no longer change and every finished block:
+    /// the open tail is re-rendered as it grows, so only the rows before it are
+    /// stable. Called after every delta and every block, so the scrollback
+    /// always holds everything the streamed text has produced up to its last
+    /// open block.
+    fn commit_settled(&mut self) {
+        let rows = self.message.settled_rows(self.layout());
+        if rows.is_empty() {
             return;
         }
-        let excess = total - keep;
-        let rows: Vec<Row> = self.pending_rows.drain(..excess).collect();
         let theme = self.theme;
         for row in rows {
             self.scroll.push(row.line(theme, &NoHighlight));
         }
-        // Drop the blocks that are now fully committed, so a resize does not
-        // re-render rows the scrollback already has. A conservative rule: keep
-        // the last block, which is the one that may still be growing.
-        while self.pending_blocks.len() > 1 {
-            self.pending_blocks.remove(0);
-        }
+        self.committed_message = true;
+    }
+
+    /// A resize re-renders what is still open for the new width. What the
+    /// scrollback already has is not re-rendered: the terminal owns those rows
+    /// and rewriting them would duplicate them.
+    fn rerender_pending(&mut self) {
+        // Nothing to do: the open tail is rendered from its text, the closed
+        // blocks are already committed, and what is held (one block, until a
+        // following block decides whether it continues it) is committed by the
+        // next delta, at the new width.
+    }
+
+    /// A complete block arrived: it is held (it may still be continued by the
+    /// next block), and everything before it is committed.
+    fn absorb_block(&mut self, block: &str) {
+        self.message.push_block(block);
+        self.commit_settled();
     }
 
     /// Commit the streamed message: whatever is left of it, exactly once, then
     /// one blank row.
     pub fn commit_live(&mut self, fallback: &str) {
         if let Some(block) = self.stream.finish() {
-            let rows = markdown::render_block(&block, self.layout());
-            if !self.pending_rows.is_empty() {
-                self.pending_rows.push(Row::default());
-            }
-            self.pending_rows.extend(rows);
+            self.message.push_block(&block);
         }
-        if self.pending_rows.is_empty() && !fallback.trim().is_empty() {
-            let rows = markdown::render(fallback, self.layout());
-            self.pending_rows = rows;
+        if self.message.is_empty() && !fallback.trim().is_empty() {
+            self.message.push_block(fallback);
         }
-        if self.pending_rows.is_empty() {
-            return;
+        let rows = self.message.finish(self.layout());
+        let theme = self.theme;
+        for row in &rows {
+            self.scroll.push(row.line(theme, &NoHighlight));
         }
-        self.commit_pending();
-        self.scroll.push(Line::from(""));
+        self.stream = markdown::Stream::new();
+        // One blank row after a message, never two at the tail of the
+        // scrollback (a message that was fully committed already has it).
+        let announced = !rows.is_empty() || self.committed_message;
+        if announced && !self.scroll.last().is_some_and(|line| line.spans.is_empty()) {
+            self.scroll.push(Line::from(""));
+        }
+        self.committed_message = false;
     }
 
     /// The turn's own totals, for the one-line summary.
@@ -765,6 +887,12 @@ impl App {
                 ));
             }
             UiEvent::Delta(text) => {
+                // Prose starts: the open tool group closes before the first row
+                // of it is queued, so the transcript's order is the order the
+                // events happened in (`B1`). A group of calls settled without
+                // prose between them stays open here, so consecutive calls still
+                // fold.
+                self.close_group();
                 self.status.phase = Phase::Working;
                 self.activity.text(now, text.chars().count());
                 for block in self.stream.push(&text) {
@@ -785,12 +913,10 @@ impl App {
                 self.turn_cost += cost;
             }
             UiEvent::Assistant { text } => {
+                // The group closes first: its lines describe calls that ran
+                // before this message (`B1`).
+                self.close_group();
                 self.commit_live(&text);
-                // Prose starts: the tool group closes before it.
-                if !self.group.is_empty() {
-                    let lines = self.group.close(self.theme, self.width);
-                    self.scroll.extend(lines);
-                }
             }
             UiEvent::ToolStarted { name, input } => {
                 self.status.running += 1;
@@ -929,6 +1055,14 @@ impl App {
                 Outcome::Submitted(text) => self.submit(&text),
                 Outcome::ChipRemoved(chip) => self.discard_chip(&chip),
                 Outcome::Edited | Outcome::Ignored => {}
+            },
+            Press::Backspace => match self.editor.handle(Key::RemoveChip) {
+                Outcome::ChipRemoved(chip) => self.discard_chip(&chip),
+                _ => match self.editor.handle(Key::Backspace) {
+                    Outcome::ChipRemoved(chip) => self.discard_chip(&chip),
+                    Outcome::Submitted(text) => self.submit(&text),
+                    Outcome::Edited | Outcome::Ignored => {}
+                },
             },
             Press::CtrlC => self.ctrl_c(),
             Press::ToggleTail => self.toggle_tail(),
@@ -1209,6 +1343,9 @@ fn next_path(text: &str) -> Option<(usize, String)> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Press {
     Edit(Key),
+    /// Backspace: the chip at the cursor (and its file) when there is one, a
+    /// character otherwise.
+    Backspace,
     CtrlC,
     ToggleTail,
     /// Esc: stop the turn, but only while working.
@@ -1237,7 +1374,12 @@ pub fn translate(key: KeyEvent) -> Option<Press> {
         // it) starts a new line instead.
         KeyCode::Enter if alt || shift => Some(Press::Edit(Key::Newline)),
         KeyCode::Enter => Some(Press::Edit(Key::Enter)),
-        KeyCode::Backspace => Some(Press::Edit(Key::Backspace)),
+        // Backspace belongs to the chip when the cursor is on one: STEER-10
+        // req. 3 and the docs say one Backspace removes the whole chip. The
+        // editor ignores `RemoveChip` when no chip is at the cursor and the TUI
+        // then falls back to a plain Backspace, so a chip never costs a
+        // keystroke and typed text never loses one.
+        KeyCode::Backspace => Some(Press::Backspace),
         KeyCode::Delete => Some(Press::Edit(Key::Delete)),
         KeyCode::Left => Some(Press::Edit(Key::Left)),
         KeyCode::Right => Some(Press::Edit(Key::Right)),
@@ -2029,13 +2171,20 @@ mod tests {
     fn markdown_is_rendered_in_the_live_area_and_committed_with_its_styles() {
         let mut app = app_of_width(60);
         app.apply(UiEvent::Delta("## Files\n\nsome **bold** text\n".into()));
+        // A closed block never waits for the message to end (S1): the heading is
+        // in the scrollback, and the block still streaming is the live area.
+        let committed: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        assert!(committed.iter().any(|row| row == "Files"), "{committed:?}");
+        assert!(
+            !committed.iter().any(|row| row.contains("##")),
+            "{committed:?}"
+        );
         let live = row_texts(&app.live_view());
-        assert!(live.contains(&"Files".to_string()), "{live:?}");
         assert!(
             live.iter().any(|row| row.contains("some bold text")),
             "{live:?}"
         );
-        assert!(!live.iter().any(|row| row.contains("##")), "{live:?}");
+        assert!(!live.iter().any(|row| row.contains("**")), "{live:?}");
         app.apply(UiEvent::Assistant {
             text: "## Files\n\nsome **bold** text\n".into(),
         });

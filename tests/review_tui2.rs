@@ -41,7 +41,6 @@ fn texts(rows: &[Row]) -> Vec<String> {
 /// History order: calls that ran before a prose message must be written to the
 /// scrollback before that message, never after it.
 #[test]
-#[ignore = "FINDING B1: tool lines are committed after the prose that followed them (tui.rs Assistant arm)"]
 fn tool_lines_land_in_the_scrollback_before_the_prose_that_followed_them() {
     let mut app = app(80);
     app.apply(settled("git --version"));
@@ -65,7 +64,6 @@ fn tool_lines_land_in_the_scrollback_before_the_prose_that_followed_them() {
 
 /// Same, with a three-call group (the fold) and multi-block prose.
 #[test]
-#[ignore = "FINDING B1: the folded group is committed after the prose"]
 fn a_folded_group_precedes_multi_block_prose() {
     let mut app = app(80);
     for c in ["a", "b", "c", "d"] {
@@ -173,7 +171,7 @@ fn streamed_in_any_two_pieces_equals_one_pass() {
             blocks.extend(stream.push(&doc[i..]));
             blocks.extend(stream.finish());
             let mut rows = Vec::new();
-            for b in &blocks {
+            for b in &markdown::join_blocks(blocks) {
                 if !rows.is_empty() {
                     rows.push(Row::default());
                 }
@@ -187,7 +185,6 @@ fn streamed_in_any_two_pieces_equals_one_pass() {
 /// Fidelity: a list item continued after a blank line stays inside the item
 /// (CommonMark), and a loose ordered list keeps counting.
 #[test]
-#[ignore = "FINDING S3: a list item's continuation paragraph loses its indent (Stream splits at the blank line)"]
 fn a_loose_ordered_list_keeps_its_numbers_and_item_continuations_stay_indented() {
     let rows = texts(&markdown::render(
         "1. one\n\n2. two\n\n3. three\n",
@@ -255,7 +252,6 @@ fn a_one_megabyte_message_streams_in_bounded_time() {
 /// While a long block streams, nothing may vanish: every row of the message so
 /// far is either in the scrollback queue or in the live view.
 #[test]
-#[ignore = "FINDING S1: the previous block's last rows vanish while a long block streams (tui.rs live_view/trim_pending)"]
 fn no_row_is_hidden_while_a_later_block_streams() {
     let mut app = app(60);
     app.apply(UiEvent::Delta(
@@ -409,7 +405,6 @@ async fn kelir_view_refuses_a_file_that_is_not_really_an_image() {
 /// Backspace key must remove the whole chip (and its file), not erase its
 /// label one character at a time.
 #[test]
-#[ignore = "FINDING B2: tui::translate maps Backspace to Key::Backspace; Key::RemoveChip is never produced by a key"]
 fn backspace_removes_a_pasted_image_chip_whole() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().unwrap();
