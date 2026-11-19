@@ -324,6 +324,17 @@ async fn budget_exhaustion_pauses_and_a_say_retries() {
     );
     assert!(message.contains("say continue to retry"), "{message}");
     assert_eq!(mock.request_count(), 3);
+    // The last error of the episode says "gave up": no `retry_in_ms`, because
+    // there is no next attempt.
+    let log = session.log();
+    let errors = provider_errors(&log);
+    assert_eq!(errors.len(), 3, "{errors:#?}");
+    assert_eq!(errors[2]["attempt"], 3);
+    assert!(
+        errors[2].get("retry_in_ms").is_none(),
+        "the last error promised a retry: {}",
+        errors[2]
+    );
 
     // A later `say` starts a new turn and retries from the same fold.
     let answer = session.ctl(&["say", "continue"]).await;

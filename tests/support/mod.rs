@@ -853,7 +853,21 @@ impl LiveSession {
     /// Ask the session to end and wait for it to exit.
     pub async fn end(self) -> (i32, String) {
         let answer = self.ctl(&["end"]).await;
-        assert_eq!(answer.code, 0, "end was refused: {}", answer.stdout);
+        // The `end` ack and the process exiting race: the session answers from
+        // its connection task, and on a busy runner the process is gone first,
+        // so the socket that was accepted closes without an answer. The server
+        // exits on `end` by design, so that one signature means the `end` *was*
+        // honoured; every other refusal is still a failure.
+        let already_gone = answer.code != 0
+            && answer
+                .stderr
+                .contains("closed the connection without answering");
+        assert!(
+            answer.code == 0 || already_gone,
+            "end was refused: stdout {:?} stderr {:?}",
+            answer.stdout,
+            answer.stderr
+        );
         // A clean end may leave a promoted job running on purpose (that is the
         // M4 guarantee), and the test may still look at it. When something is
         // still alive, the guard is parked until this test *process* exits,
