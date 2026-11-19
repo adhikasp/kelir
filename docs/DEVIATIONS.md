@@ -991,11 +991,16 @@ this differs from the spec text, or needed a call the brief left open:
   provider table) loads, prints one warning to stderr naming the two supported sources, and never
   uses the value. Failing the load would make an existing config unusable for the sake of a warning
   it does not need, and a maintainer's old config must keep starting.
-- **The store read is synchronous.** `credentials::resolve` blocks for at most `AUTH_TIMEOUT` (5 s)
-  and is called from `prepare`/`reopen` and from a `model` verb that swaps provider. Startup is the
-  only place it costs anything, and it happens before the request is built rather than being woven
-  through the async turn (a background task holding the key would put the secret in another
-  place). The measured cost is ~0.33–0.39 s warm, ~1.7 s worst cold.
+- **The store read is synchronous, and it cannot overlap the model-list fetch.** The brief asks for
+  the read to run concurrently with other startup work. It cannot run beside `GET {base}/models`:
+  that fetch authenticates with the *same* key (Go's list wants it), so the key has to exist first.
+  What could overlap is the config load, the cwd check and the system render, which together cost
+  microseconds. So `credentials::resolve` blocks for at most `AUTH_TIMEOUT` (5 s), called from
+  `prepare`/`reopen` and from a `model` verb that swaps provider, before the first request is built
+  (a background task holding the key would put the secret in another place). Measured on the dev
+  box: `opencode auth export opencode` 1221 ms cold, 289/308/296 ms after; the whole `kelir ask` on
+  `opencode-go` 1964/2063 ms through the store vs 1661/1483 ms with `KELIR_GO_API_KEY` set, i.e.
+  the read costs ~0.4 s of a cold start that is dominated by the first network round trip.
 - **`opencode auth export opencode` is run twice at most, and never in a loop.** When the store's
   entry is inside the two-minute margin the read is repeated once, because the CLI refreshes a
   token as a side effect of running; if the second read is no fresher the stale one is used and the
