@@ -31,6 +31,16 @@ pub struct ProviderConfig {
     pub key: Option<String>,
     pub extra_headers: BTreeMap<String, String>,
     pub reasoning_field: Option<String>,
+    /// How much hidden reasoning the model should spend on this session's
+    /// requests (`low`, `medium`, `high`), sent as `reasoning_effort`. `None`
+    /// sends no field at all, which is the provider's own default.
+    pub reasoning_effort: Option<String>,
+    /// Whether [`ProviderConfig::reasoning_effort`] came from the config file
+    /// rather than from kelir's own default (`medium`). An explicit choice is
+    /// what lets the field reach a model the provider's list says nothing
+    /// about; the default only goes where the list says it is supported
+    /// (STEER-6 review S3).
+    pub reasoning_effort_explicit: bool,
     /// Header carrying the session id for providers that require one.
     pub session_header: Option<String>,
     /// Client-side concurrency governor: at most this many requests in flight
@@ -62,6 +72,10 @@ pub struct Config {
     pub model_windows: BTreeMap<String, u64>,
     /// Fraction of the window at which compaction triggers automatically.
     pub auto_compact_at: f64,
+    /// An absolute soft target in tokens: compaction triggers at
+    /// `min(window * auto_compact_at, compact_at_tokens)`, so a huge window does
+    /// not carry a 400K-token context. `0` disables the cap.
+    pub compact_at_tokens: u64,
     /// The summary prompt (`compact_prompt`/`compact.md`, else embedded).
     pub compact_prompt: String,
     /// Extra skills directories (`skills_dirs`), machine layer: they are named
@@ -103,6 +117,7 @@ struct RawConfig {
     window: Option<u64>,
     model_windows: BTreeMap<String, u64>,
     auto_compact_at: Option<f64>,
+    compact_at_tokens: Option<u64>,
     compact_prompt: Option<String>,
     compact_keep: Option<usize>,
     skills_dirs: Vec<PathBuf>,
@@ -131,6 +146,7 @@ struct RawProvider {
     key_env: Option<String>,
     extra_headers: BTreeMap<String, String>,
     reasoning_field: Option<String>,
+    reasoning_effort: Option<String>,
     session_header: Option<String>,
     max_concurrent_requests: Option<u32>,
 }
@@ -224,6 +240,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             .filter(|url| !url.is_empty())
             .ok_or_else(|| ConfigError(format!("provider `{name}`: base_url is required")))?;
         let key = entry.key_env.as_deref().and_then(secret_from_env);
+        let (effort, effort_explicit) = reasoning_effort(entry.reasoning_effort, &name)?;
         providers.insert(
             name,
             ProviderConfig {
@@ -233,6 +250,8 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
                 key,
                 extra_headers: entry.extra_headers,
                 reasoning_field: entry.reasoning_field,
+                reasoning_effort: effort,
+                reasoning_effort_explicit: effort_explicit,
                 session_header: entry.session_header,
                 max_concurrent_requests: entry.max_concurrent_requests.filter(|slots| *slots > 0),
             },
@@ -251,6 +270,9 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     }
 
     Ok(Config {
+        compact_at_tokens: raw
+            .compact_at_tokens
+            .unwrap_or(crate::compact::DEFAULT_SOFT_TARGET),
         provider: raw.provider.unwrap_or_else(|| PROVIDER_OPENROUTER.into()),
         model: raw
             .model
@@ -303,6 +325,46 @@ fn retry_policy(raw: &RawConfig) -> Result<crate::retry::Policy, ConfigError> {
     })
 }
 
+/// The effort kelir asks for when the config says nothing: enough thinking to
+/// plan, not enough to re-derive the plan every step (STEER-6, F1).
+pub const DEFAULT_REASONING_EFFORT: &str = "medium";
+
+/// The values `reasoning_effort` accepts. The providers document `low`,
+/// `medium` and `high`; a value outside that set is a typo, and a typo sent as
+/// a request field is a 400 at the first step, so it is refused here instead.
+pub const REASONING_EFFORTS: [&str; 3] = ["low", "medium", "high"];
+
+/// Resolve one provider's `reasoning_effort`:
+///
+/// * unset (or empty) -> [`DEFAULT_REASONING_EFFORT`], the loop's own choice;
+/// * `none` -> `None`: send no field at all, i.e. the provider's default;
+/// * `low`/`medium`/`high` -> that, verbatim (lower-cased).
+///
+/// A value outside the set is refused at load: it would be a 400 on the first
+/// request, which is a worse way to find out.
+fn reasoning_effort(
+    configured: Option<String>,
+    provider: &str,
+) -> Result<(Option<String>, bool), ConfigError> {
+    let Some(value) = configured else {
+        return Ok((Some(DEFAULT_REASONING_EFFORT.to_string()), false));
+    };
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return Ok((Some(DEFAULT_REASONING_EFFORT.to_string()), false));
+    }
+    if value == "none" {
+        return Ok((None, true));
+    }
+    if !REASONING_EFFORTS.contains(&value.as_str()) {
+        return Err(ConfigError(format!(
+            "provider `{provider}`: reasoning_effort must be one of {}, `none` or unset (got `{value}`)",
+            REASONING_EFFORTS.join(", ")
+        )));
+    }
+    Ok((Some(value), true))
+}
+
 /// `max_steps`: unset or `0` means no cap at all (the default: a fully
 /// autonomous agent is not stopped by a counter), a positive value caps one
 /// turn. `0` is accepted as "unlimited" rather than refused, because a config
@@ -344,6 +406,15 @@ impl Config {
             provider.base_url = url;
         }
         Ok(provider)
+    }
+
+    /// How much hidden reasoning to ask the current provider/model for: the
+    /// configured `reasoning_effort`, else [`crate::compact`]'s own default for
+    /// the loop (`medium`), else nothing.
+    pub fn reasoning_effort(&self, provider: &str) -> Option<String> {
+        self.providers
+            .get(provider)
+            .and_then(|entry| entry.reasoning_effort.clone())
     }
 
     /// The window a configuration override names, if any: `[model_windows]`
@@ -391,6 +462,7 @@ fn overlay(base: RawProvider, user: RawProvider) -> RawProvider {
             headers
         },
         reasoning_field: user.reasoning_field.or(base.reasoning_field),
+        reasoning_effort: user.reasoning_effort.or(base.reasoning_effort),
         session_header: user.session_header.or(base.session_header),
         max_concurrent_requests: user
             .max_concurrent_requests
@@ -681,6 +753,85 @@ compact_keep = 0
         assert_eq!(cfg.compact_keep, 0);
         assert_eq!(cfg.override_window("deepseek/deepseek-chat"), Some(32_000));
         assert_eq!(cfg.override_window("other/model"), Some(64_000));
+    }
+
+    #[test]
+    fn the_soft_target_is_a_hundred_and_fifty_thousand_by_default() {
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.compact_at_tokens, crate::compact::DEFAULT_SOFT_TARGET);
+        let path = temp_config("compact_at_tokens = 120000\n");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.compact_at_tokens, 120_000);
+        // Zero is "no absolute cap": the window fraction alone decides.
+        let path = temp_config("compact_at_tokens = 0\n");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.compact_at_tokens, 0);
+    }
+
+    #[test]
+    fn reasoning_effort_defaults_to_medium_and_can_be_tuned_or_turned_off() {
+        let path = temp_config("");
+        let cfg = load(Some(&path)).unwrap();
+        for name in [PROVIDER_OPENROUTER, PROVIDER_GO] {
+            assert_eq!(
+                cfg.reasoning_effort(name).as_deref(),
+                Some(crate::config::DEFAULT_REASONING_EFFORT),
+                "{name}"
+            );
+        }
+
+        let path = temp_config(
+            "[providers.openrouter]\nreasoning_effort = \"low\"\n\
+             [providers.opencode-go]\nreasoning_effort = \"none\"\n",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.reasoning_effort("openrouter").as_deref(), Some("low"));
+        // `none` sends no field at all: the provider's own default.
+        assert_eq!(cfg.reasoning_effort("opencode-go"), None);
+        // Case is not the user's problem.
+        let path = temp_config("[providers.openrouter]\nreasoning_effort = \" HIGH \"\n");
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(cfg.reasoning_effort("openrouter").as_deref(), Some("high"));
+    }
+
+    /// The default `medium` and an explicit choice are not the same fact: only
+    /// the explicit one may reach a model the provider's list says nothing
+    /// about (STEER-6 review S3).
+    #[test]
+    fn an_explicit_effort_is_told_apart_from_the_default() {
+        let cfg = load(Some(&temp_config(""))).unwrap();
+        for name in [PROVIDER_OPENROUTER, PROVIDER_GO] {
+            let provider = cfg.provider(name).unwrap();
+            assert_eq!(
+                provider.reasoning_effort.as_deref(),
+                Some(crate::config::DEFAULT_REASONING_EFFORT)
+            );
+            assert!(!provider.reasoning_effort_explicit, "{name}: a default");
+        }
+        let path = temp_config(
+            "[providers.openrouter]
+reasoning_effort = \"low\"
+             [providers.opencode-go]
+reasoning_effort = \"none\"
+",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        let provider = cfg.provider("openrouter").unwrap();
+        assert_eq!(provider.reasoning_effort.as_deref(), Some("low"));
+        assert!(provider.reasoning_effort_explicit);
+        // `none` is an explicit choice too: it is never "the default applies".
+        let provider = cfg.provider(PROVIDER_GO).unwrap();
+        assert_eq!(provider.reasoning_effort, None);
+        assert!(provider.reasoning_effort_explicit);
+    }
+
+    #[test]
+    fn an_unknown_reasoning_effort_is_refused_at_load() {
+        let path = temp_config("[providers.openrouter]\nreasoning_effort = \"maximum\"\n");
+        let error = load(Some(&path)).unwrap_err().to_string();
+        assert!(error.contains("reasoning_effort"), "{error}");
+        assert!(error.contains("low, medium, high"), "{error}");
     }
 
     #[test]

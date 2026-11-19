@@ -50,7 +50,18 @@ wait itself in `session::stream`. Where this differs from the brief:
   rebuilt from the new fold or the new model, with a fresh budget and the new
   provider's governor. A person's correction must not sit out a `Retry-After`
   that can be a week long (STEER-5 review B2). The `verb` event still records
-  which boundary it applied at.
+  which boundary it applied at. The ack is answered *after* the verb lands, so
+  `say --now` and `model` during a wait answer `applies: "now"` with the state
+  the next request really carries — for `model`, `state.model` is the new one
+  (STEER-5 review N1).
+- **`later` keeps its boundary even during a wait.** The brief lists `later`
+  among the verbs that "take effect immediately", and it does — as a *delivery*:
+  it is accepted, logged and queued the moment it arrives. What it does not do
+  is cut the wait: `later` asks for the turn end, its ack says `applies:
+  "turn_end"`, and the text joins the next turn from the fold, which is what
+  SPEC and the `verb` boundary have said since M1. Cutting a `Retry-After` for
+  a message that must not be sent mid-turn would put the message into a request
+  the sender asked it to stay out of (STEER-5 review N3).
 - **A signal is a `stop`, but only while a wait is running.** Ctrl-C (and
   SIGTERM on Unix, Ctrl-Break on Windows) during a retry or slot wait ends the
   turn `stopped` with the reason `interrupted (Ctrl-C)` and leaves a `--keep`
@@ -128,6 +139,127 @@ wait itself in `session::stream`. Where this differs from the brief:
   the next step runs, with a `where: "compact"` error in the log — rather than
   spending the turn's waiting budget on a summary nobody asked for. A step
   always gets the budget (review N3; M3 review N4 made the same call).
+
+## STEER-6: the retro's loop changes (2026-11-19)
+
+- **On Windows a command always runs from a file; on Unix a long one does.** The spec's shell
+  row is `bash -c` (or `cmd.exe /C`), i.e. the command as the last argument. Two things break
+  that on Windows:
+  - a command line past ~8,191 characters is silently **cut** by Git for Windows' `bash.exe`,
+    and a cut heredoc usually exits 0 (three M5-A calls, one STEER-4 call, each with a
+    half-written file);
+  - every run of backslashes is **halved** on the way to the shell (the Win32 command line, then
+    msys' argv rewriting), at any length: `printf 'a\nb'` prints a newline, a regex or a Windows
+    path means something else by the time the shell sees it (STEER-6 review S1, reproduced on the
+    baseline binary). A length threshold cannot fix that one, because the mangling happens below
+    it.
+
+  So the rule is one route per platform: on Windows every command is written to
+  `<call dir>/cmd.sh` (`cmd.bat` for `cmd.exe`, `cmd.ps1` for PowerShell) and the shell is handed
+  the path; on Unix a short command keeps `-c` (no msys layer, one fewer write) and a command
+  over `SHELL_CMD_MAX = 6000` bytes goes through the same file route. The Windows route is not a
+  length threshold, so a command's meaning cannot change at a boundary; the file lives in the
+  call's own directory, not a temp dir, so the exact bytes that ran stay readable, which is what
+  makes a cut diagnosable. `kelir bg run` writes `bg/<id>.sh` for the same reason (one directory
+  holds every job, so the name carries the id).
+- **The shell keeps the switch that makes it read a file.** `cmd.exe` gets `/C <path>` and
+  PowerShell `-File <path>`, because `cmd.exe <path>` starts an interactive shell on a null stdin
+  that runs nothing and exits 0 (STEER-6 review B1: a long command reported success and never
+  ran), and `-Command <path>` would run the path as PowerShell source. A POSIX shell reads the
+  script from its own argv, so its `-c` goes — and a login-shell spelling (`bash -lc`, `-ic`,
+  `-ec`) keeps the flags before the `c` and drops the `c` (`bash -l cmd.sh`), so that common config
+  takes the file route instead of silently keeping the halving argument route (STEER-6 review N5).
+  Any argument before the switch (`cmd.exe /D /C`) is kept. A shell kelir does not know (`--eval`)
+  is left exactly as configured on Unix; on Windows a command for such a shell is an **error**
+  naming the argv and the spellings that work, because the only route left there is the one that
+  halves backslashes.
+  Verified with the inbox `powershell.exe` in an e2e test (`-File cmd.ps1`, output written by the
+  script). A Store-installed `pwsh` cannot be used as a call shell at all on Windows: it is an
+  AppX execution alias, and Windows refuses to put the process an alias starts into a Job Object
+  (`cannot assign it to the job: Access is denied`, os error 5). That is the app-packaging model,
+  not a kelir bug (the STEER-6 reviewer hit the same wall probing `pwsh`); use the inbox
+  `powershell.exe`, or `bash`, as `shell`.
+- **A script's line endings are normalised, and only those.** A POSIX shell gets LF: a CRLF
+  `cmd.sh` puts a `\r` at the end of every line and breaks a heredoc terminator outright.
+  `cmd.exe` and PowerShell get CRLF. The normalisation follows the **shell family, not the route**:
+  a short POSIX command on the argument route is normalised the same way, because otherwise the
+  same text would mean two things at the 6,000-byte boundary (`echo a > f<CR>` created `f<CR>`
+  below it and `f` above it — STEER-6 review N10). A lone `\r` inside a payload (how a heredoc
+  writes a literal CR to a file) is untouched. `KELIR_SHELL_RAW=cr` sends the bytes exactly as
+  written on both POSIX routes, for a caller that needs the raw bytes. A `.bat` also starts with
+  `@echo off`: without it `cmd.exe` echoes the prompt and the command line into the result, so a
+  20 KB command came back as 20 KB of echo (STEER-6 review N6).
+- **A long command also stays off the shim's own command line.** `kelir bg-shim` used to take
+  the command as `--cmd <text>`, and Windows refuses to *start* a process whose command line is
+  past ~32 KB (`os error 206`) — so a 40 KB heredoc failed before the shim existed. It travels
+  as `--cmd-file <path>` instead. `kelir bg run <cmd>` still takes the command as an argument,
+  so a job command past ~32 KB cannot be started through the CLI at all; the model writes the
+  script with `edit` and runs that. This is a process-argv ceiling, not a kelir choice.
+- **`edit` takes `edits: [{old, new, replace_all?}, …]` as well as `old`/`new`.** The spec's
+  tool row names `{path, old, new, replace_all?}`. `edits` is the same operation repeated: it is
+  atomic (all hunks checked before anything is written, one write at the end) and applied in
+  order against the evolving text, because the dogfood model used `python -` patch scripts for
+  multi-hunk changes and those fail with exit 0. `old`/`new` are unchanged and the tool list is
+  the same, so the frozen request prefix only moves at a release.
+- **`session_started.reasoning_effort` is a field the spec's table does not list.** The spec's
+  provider section leaves the effort field unverified and has no way to record it. The value
+  kelir sends is recorded (and absent when the config says `none`) so the log and the request
+  agree and a cache-key question can be answered from the log alone. Measured on the OpenCode Go
+  gateway: the flat `reasoning_effort` field is honoured (the reasoning tokens move with it, ×2
+  between `low` and `high` on a reasoning-heavy prompt); the OpenRouter-style
+  `{"reasoning": {"effort": …}}` object is accepted but added latency with no reason-token
+  effect, so kelir sends the flat field on both providers. A model with a long thinking phase
+  may still spend its budget before the answer (one probe returned an empty `content` with
+  `finish_reason: length`); the knob is a request, not a guarantee.
+- **`compact_at_tokens` is a third auto-compaction input.** The spec says 80 % of the window
+  (configurable). A 1M-token window at 80 % is 800K, and a real session passes 150K with 76 % of
+  the context being old file reads. Compaction now fires at
+  `min(window * auto_compact_at, compact_at_tokens)`; the default target is 150,000 and `0`
+  disables the cap, so the window fraction alone decides, exactly as before.
+- **`parallel_tool_calls` is asked for when the model is known to take it — and the answer does
+  not depend on a warm cache.** The spec says parallel calls are allowed; the request said
+  nothing. OpenRouter's `supported_parameters` states the capability per model, and that wins when
+  the list has an entry. But the list is metadata fetched with a bound, so it can be missing
+  (first session on a machine, an unreachable endpoint) or stale; the loop then fell back to *not*
+  asking, which made F4's benefit silently depend on machine state (STEER-6 review S2: live, a
+  480-model list through a proxy took > 1.5 s, the cache was stored empty, and the request had no
+  field although the model advertises it). The rule now:
+  - the provider's list entry, when there is one (both directions: `false` is believed);
+  - else a conservative built-in family table (`deepseek/`, `anthropic/`, `openai/`, `gpt-4`,
+    `gpt-5`, `google/`, `gemini-`, `qwen/`, `kimi`, …);
+  - else `false`: an unknown model on an unknown gateway is not asked.
+  A slow `/models` fetch is also no longer recorded as a failure (only a real error is), so a
+  proxy that answers in 2 s does not leave the cache empty for an hour. `parallel_tool_calls` is
+  still only sent to OpenRouter: Go's list states no such capability, and a family name is not
+  evidence about *that* gateway's acceptance.
+- **`reasoning_effort` is gated on what the provider advertises, with one retry on a 400.** The
+  field used to go to every model on every provider; a model or gateway that refuses it turned
+  every step into a hard error until the person found the config key (STEER-6 review S3). Now:
+  - listed and advertising `reasoning_effort` (or the `reasoning` object form it is shorthand
+    for) -> sent;
+  - listed without it -> not sent, even when the config names one: the provider said no;
+  - the list has the model but no capability list at all (OpenCode Go) -> unknown, so the
+    default still goes (measured as honoured on Go, see above);
+  - the list has no entry for the model -> only when the person set `reasoning_effort`
+    explicitly. The default `medium` is kelir's own choice and does not go to a model nobody
+    vouched for.
+  An HTTP 400 whose body names the field is retried **once** without it, logged as an `error`
+  note, and remembered: no later request in the session carries it. The retry does not spend the
+  provider-attempt budget (a 400 is not transient). `session_started.reasoning_effort` records
+  what is actually sent, so the log and the request agree.
+- **The "your command may have been cut" notice needs evidence.** The spill notice fired on any
+  output that contained one of the shell's truncation markers, including a command that merely
+  printed them: `git grep "unexpected EOF" src` matched `spill.rs` itself, and the model was told
+  a command that ran fine may have been cut (STEER-6 review N1). It now fires when a marker is in
+  a shell's own diagnostic line (`bash: warning: here-document at line 1 delimited by
+  end-of-file …`, printed *before* the body it did read), or the command failed, or (for a
+  successful command) the marker is in the last three lines. A successful search that quotes the
+  markers in its middle stays quiet.
+- **The base prompt is pinned byte-for-byte.** It is embedded at build time and is the head of
+  every request's frozen prefix, so a changed byte moves the cache for every session.
+  `tests/fixtures/prompt.md.snapshot` holds the released bytes and a unit test compares them;
+  rewording the prompt means updating the snapshot deliberately in the same commit (the rule
+  list in `sources.rs` still pins the lines a retro put there).
 
 ## Sources and skills (M5-A, 2026-11-19)
 

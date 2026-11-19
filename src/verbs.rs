@@ -527,6 +527,7 @@ mod tests {
             started: "2026-11-19T10:00:00Z".into(),
             finished: Some("2026-11-19T10:00:02Z".into()),
             cmd: "sleep 2".into(),
+            cmd_path: None,
             out: "bg/bg_1.out".into(),
             kind: "job".into(),
             promoted: false,

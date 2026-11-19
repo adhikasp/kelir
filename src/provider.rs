@@ -23,6 +23,36 @@ pub struct BuiltRequest {
     pub body: Value,
 }
 
+impl BuiltRequest {
+    /// The same request without one body field: what a retry sends when the
+    /// provider answered 400 *because* of that field (STEER-6 review S3). The
+    /// headers and everything else stay byte-identical, so the cache prefix
+    /// does not move.
+    pub fn without_field(&self, field: &str) -> BuiltRequest {
+        let mut body = self.body.clone();
+        if let Some(object) = body.as_object_mut() {
+            object.remove(field);
+        }
+        BuiltRequest {
+            url: self.url.clone(),
+            headers: self.headers.clone(),
+            body,
+        }
+    }
+
+    pub fn has_field(&self, field: &str) -> bool {
+        self.body.get(field).is_some()
+    }
+}
+
+/// Does an error message name `field` as the thing it refused? Providers answer
+/// an unknown or unsupported body field with a 400 whose `param`/`message` names
+/// it (`"param": "reasoning_effort"` on OpenRouter, "unsupported parameter" in
+/// the text elsewhere), so the name has to appear somewhere in the body.
+pub fn names_field(message: &str, field: &str) -> bool {
+    message.to_ascii_lowercase().contains(field)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderError {
     pub message: String,
@@ -120,6 +150,12 @@ pub fn chat_completions_url(base_url: &str) -> String {
 
 /// Build the request for one step. `messages` already starts with the frozen
 /// system message.
+///
+/// `parallel_calls` says whether the model advertises `parallel_tool_calls`.
+/// When it does, the field is set: the loop already runs the calls of one
+/// assistant message concurrently and appends the results in call order, and
+/// nothing else told the model so — 47 % of M5-A's steps were a single
+/// read-only call, and batching them 3-wide would have saved 5M prompt tokens.
 pub fn build_request(
     cfg: &ProviderConfig,
     session_id: &str,
@@ -127,6 +163,7 @@ pub fn build_request(
     messages: &[ChatMessage],
     tools: &[Value],
     cache_ttl: Option<&str>,
+    parallel_calls: bool,
 ) -> BuiltRequest {
     let mut headers = vec![
         ("content-type".to_string(), "application/json".to_string()),
@@ -153,6 +190,17 @@ pub fn build_request(
     });
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
+    }
+    if parallel_calls && cfg.kind == ProviderKind::OpenRouter {
+        body["parallel_tool_calls"] = Value::Bool(true);
+    }
+    // Hidden reasoning is asked for explicitly. Dogfood runs on the provider's
+    // default effort re-derived the whole design every step (M5-A steps 38-62:
+    // 49 % of all completion tokens in 29 % of the wall clock); `medium` is the
+    // loop's default and the knob is per provider, because only the gateway
+    // knows what it honours.
+    if let Some(effort) = cfg.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
+        body["reasoning_effort"] = Value::String(effort.to_string());
     }
     if cfg.kind == ProviderKind::OpenRouter {
         body["session_id"] = Value::String(session_id.to_string());
@@ -267,6 +315,27 @@ impl Client {
             messages,
             tools,
             self.cache_ttl.as_deref(),
+            false,
+        )
+    }
+
+    /// The same, with the model's own `parallel_tool_calls` capability, which
+    /// the session resolves from the provider's model list.
+    pub fn build_with(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        tools: &[Value],
+        parallel_calls: bool,
+    ) -> BuiltRequest {
+        build_request(
+            &self.cfg,
+            &self.session_id,
+            model,
+            messages,
+            tools,
+            self.cache_ttl.as_deref(),
+            parallel_calls,
         )
     }
 
@@ -396,6 +465,8 @@ mod tests {
             key: Some("sk-test".into()),
             extra_headers: BTreeMap::new(),
             reasoning_field: None,
+            reasoning_effort: None,
+            reasoning_effort_explicit: false,
             session_header: None,
             max_concurrent_requests: None,
         }
@@ -409,6 +480,8 @@ mod tests {
             key: Some("oc_sk-test".into()),
             extra_headers: BTreeMap::new(),
             reasoning_field: None,
+            reasoning_effort: None,
+            reasoning_effort_explicit: false,
             session_header: Some("x-opencode-session".into()),
             max_concurrent_requests: None,
         }
@@ -435,6 +508,7 @@ mod tests {
             &conversation(),
             &[],
             None,
+            false,
         );
         assert_eq!(request.body["session_id"], "ses_01ABC");
         assert_eq!(request.body["stream"], true);
@@ -446,7 +520,15 @@ mod tests {
 
     #[test]
     fn go_sends_the_session_header_and_ua_and_no_body_session() {
-        let request = build_request(&go(), "ses_01ABC", "glm-5", &conversation(), &[], None);
+        let request = build_request(
+            &go(),
+            "ses_01ABC",
+            "glm-5",
+            &conversation(),
+            &[],
+            None,
+            false,
+        );
         assert_eq!(header(&request, "x-opencode-session"), Some("ses_01ABC"));
         assert_eq!(
             header(&request, "user-agent"),
@@ -468,7 +550,15 @@ mod tests {
             "qwen/qwen3-coder",
             "some/claude-x",
         ] {
-            let request = build_request(&openrouter(), "ses_1", model, &conversation(), &[], None);
+            let request = build_request(
+                &openrouter(),
+                "ses_1",
+                model,
+                &conversation(),
+                &[],
+                None,
+                false,
+            );
             assert_eq!(
                 request.body["cache_control"],
                 json!({"type": "ephemeral"}),
@@ -476,7 +566,15 @@ mod tests {
             );
         }
         for model in ["deepseek/deepseek-chat", "openai/gpt-5", "x-ai/grok-4"] {
-            let request = build_request(&openrouter(), "ses_1", model, &conversation(), &[], None);
+            let request = build_request(
+                &openrouter(),
+                "ses_1",
+                model,
+                &conversation(),
+                &[],
+                None,
+                false,
+            );
             assert!(
                 request.body.get("cache_control").is_none(),
                 "{model} must rely on automatic caching"
@@ -493,6 +591,7 @@ mod tests {
             &conversation(),
             &[],
             Some("1h"),
+            false,
         );
         assert_eq!(
             request.body["cache_control"],
@@ -509,6 +608,7 @@ mod tests {
             &conversation(),
             &[],
             Some("1h"),
+            false,
         );
         assert!(request.body.get("cache_control").is_none());
     }
@@ -518,7 +618,7 @@ mod tests {
         let mut cfg = go();
         cfg.extra_headers.insert("x-title".into(), "kelir".into());
         let tools = vec![json!({"type": "function"})];
-        let request = build_request(&cfg, "ses_1", "m", &conversation(), &tools, None);
+        let request = build_request(&cfg, "ses_1", "m", &conversation(), &tools, None, false);
         assert_eq!(header(&request, "x-title"), Some("kelir"));
         assert_eq!(request.body["tools"].as_array().unwrap().len(), 1);
     }
@@ -526,7 +626,7 @@ mod tests {
     #[test]
     fn messages_are_sent_verbatim() {
         let messages = conversation();
-        let request = build_request(&openrouter(), "s", "m", &messages, &[], None);
+        let request = build_request(&openrouter(), "s", "m", &messages, &[], None, false);
         let sent = request.body["messages"].as_array().unwrap();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0]["role"], "system");
@@ -539,7 +639,7 @@ mod tests {
         let tools = vec![json!({"type": "function"})];
         let mut messages = vec![ChatMessage::system("sys"), ChatMessage::user("task")];
 
-        let step_one = build_request(&openrouter(), "s", "m", &messages, &tools, None);
+        let step_one = build_request(&openrouter(), "s", "m", &messages, &tools, None, false);
         let first_prefix = step_one.body["messages"].as_array().unwrap().clone();
 
         let call = ToolCall {
@@ -551,7 +651,7 @@ mod tests {
         messages.push(ChatMessage::tool("call_1", "a.txt"));
         messages.push(ChatMessage::assistant("done", &[]));
 
-        let step_two = build_request(&openrouter(), "s", "m", &messages, &tools, None);
+        let step_two = build_request(&openrouter(), "s", "m", &messages, &tools, None, false);
         let second = step_two.body["messages"].as_array().unwrap().clone();
 
         assert_eq!(second.len(), first_prefix.len() + 3);
@@ -612,5 +712,37 @@ mod tests {
         assert_eq!(backoff(1), Duration::from_millis(400));
         assert_eq!(backoff(2), Duration::from_millis(800));
         assert_eq!(backoff(9), Duration::from_millis(6_400));
+    }
+
+    #[test]
+    fn reasoning_effort_is_sent_only_when_it_is_set() {
+        let mut cfg = go();
+        cfg.reasoning_effort = None;
+        let request = build_request(&cfg, "s", "m", &conversation(), &[], None, false);
+        assert!(request.body.get("reasoning_effort").is_none());
+
+        cfg.reasoning_effort = Some("low".into());
+        let request = build_request(&cfg, "s", "m", &conversation(), &[], None, false);
+        assert_eq!(request.body["reasoning_effort"], json!("low"));
+    }
+
+    #[test]
+    fn parallel_tool_calls_is_asked_for_only_when_the_model_takes_it() {
+        let tools = vec![json!({"type": "function"})];
+        let off = build_request(
+            &openrouter(),
+            "s",
+            "m",
+            &conversation(),
+            &tools,
+            None,
+            false,
+        );
+        assert!(off.body.get("parallel_tool_calls").is_none());
+        let on = build_request(&openrouter(), "s", "m", &conversation(), &tools, None, true);
+        assert_eq!(on.body["parallel_tool_calls"], json!(true));
+        // Go does not document the field, so it is not guessed at.
+        let go_on = build_request(&go(), "s", "m", &conversation(), &tools, None, true);
+        assert!(go_on.body.get("parallel_tool_calls").is_none());
     }
 }

@@ -639,6 +639,16 @@ async fn model_during_a_wait_retries_at_once_on_the_new_model() {
     let started = Instant::now();
     let answer = session.ctl(&["model", "opencode-go/go/model"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    // The ack is answered after the swap landed, so it says what really
+    // happened: the verb applied now and `state.model` is the new model
+    // (STEER-5 review N1).
+    assert_eq!(answer.response()["applies"], "now", "{}", answer.stdout);
+    assert_eq!(
+        answer.response()["state"]["model"],
+        "go/model",
+        "{}",
+        answer.stdout
+    );
     let ended = session.wait_for("turn_ended").await;
     assert!(started.elapsed() < Duration::from_secs(20), "waited it out");
     assert_eq!(ended["outcome"], "done", "{ended}");

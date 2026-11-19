@@ -281,6 +281,12 @@ struct Session {
     window_source: &'static str,
     /// The provider's model list as this process learned it.
     models: Option<crate::models::Cache>,
+    /// Body fields a provider refused with a 400 during this session, by the
+    /// field name: the retry leaves them out and the session remembers, so the
+    /// same 400 is not paid twice (STEER-6 review S3). A provider that rejects
+    /// the field used to make every step a hard error until the person found
+    /// the config key.
+    refused_fields: BTreeSet<String>,
     /// The sources in this context, re-checked at every boundary: an edit on
     /// disk becomes a `source` message, never a system rewrite.
     watch: crate::sources::Watch,
@@ -494,11 +500,38 @@ impl RequestFor<'_> {
                 let messages = crate::fold::fold(&session.events, &session.dir)
                     .map(|folded| folded.request_messages())
                     .unwrap_or_default();
-                session
-                    .client
-                    .build(&session.model, &messages, &session.tool_specs())
+                // The same builder `drive_turn` used for the first attempt, so
+                // a retry keeps STEER-6's capability decisions (`parallel_calls`,
+                // the `reasoning_effort` gate and the fields this session already
+                // saw a 400 for) as well as STEER-5's rebuild after a wait.
+                session.step_request(&messages)
             }
         }
+    }
+}
+
+/// What [`Session::accept_at_once`] did with a verb.
+enum AtOnce {
+    /// Accepted and applied now; the turn may have ended because of it.
+    Applied(Option<Box<StreamEnd>>),
+    /// Refused (the client has its error); nothing was applied, so nothing
+    /// about the running turn changed.
+    Rejected,
+}
+
+/// Does this request ask for a verb that is applied the moment it arrives, and
+/// so is answered only after it landed? `say --now` and `model` (STEER-5 review
+/// N1). Read from the raw request, before it is parsed: the answer needs to know
+/// which path to take.
+fn at_once_verb(request: &Request) -> bool {
+    match request.verb.as_str() {
+        "model" => true,
+        "say" => request
+            .args
+            .get("now")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -731,6 +764,15 @@ fn watch_bg(dir: PathBuf, tx: mpsc::UnboundedSender<Incoming>) {
 /// The provider's model list: the cache when it is fresh, a fetch when it is
 /// not, and the old list when the fetch fails. The fetch is bounded so an
 /// offline box pays it once an hour, not on every start.
+///
+/// A first session on a machine used to leave the list empty for up to an hour
+/// after one slow fetch (STEER-6 review S2: a 480-model list through a
+/// forwarding proxy took more than the 1.5 s bound). So a fetch that times out
+/// is not remembered as a failure unless it *failed*: a slow list is retried at
+/// the next start, and the start after a real failure waits
+/// [`crate::models::RETRY_AFTER_MS`]. The batching and effort decisions no
+/// longer need the list at all (they fall back to the model's family and to
+/// the configured effort), so this is only about the window and the metadata.
 async fn load_models(client: &Client, provider: &str) -> (Option<crate::models::Cache>, bool) {
     let now = crate::models::now_ms();
     let cached = crate::models::load(provider);
@@ -739,18 +781,26 @@ async fn load_models(client: &Client, provider: &str) -> (Option<crate::models::
     {
         return (cached, false);
     }
-    match tokio::time::timeout(Duration::from_millis(1500), client.models()).await {
+    match tokio::time::timeout(crate::models::FETCH_TIMEOUT, client.models()).await {
         Ok(Ok(models)) => {
             let cache = crate::models::Cache::new(provider, models, now);
             let _ = crate::models::store(&cache);
             (Some(cache), true)
         }
-        _ => {
+        Ok(Err(error)) => {
+            // A real answer (`500`, no route, a broken body): back off, so an
+            // offline box or a dead endpoint is not asked on every start.
             let mut cache =
                 cached.unwrap_or_else(|| crate::models::Cache::new(provider, Vec::new(), 0));
             cache.failed_at_ms = Some(now);
             let _ = crate::models::store(&cache);
+            eprintln!("kelir: models: {provider}: {error} (using what is cached)");
             (Some(cache), false)
+        }
+        Err(_) => {
+            // Slow, not wrong: keep whatever was cached (its own age decides
+            // when it is stale) and try again next start.
+            (cached, false)
         }
     }
 }
@@ -1098,6 +1148,7 @@ impl Session {
             turn: prepared.resume.as_ref().map(|read| read.turns).unwrap_or(0),
             turn_steps: 0,
             disabled: BTreeSet::new(),
+            refused_fields: BTreeSet::new(),
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
             compact_request: None,
@@ -1150,6 +1201,14 @@ impl Session {
             },
             sources: prepared.system.sources.clone(),
             tools: session.tool_names.clone(),
+            // What the loop will ask this model for: the configured effort,
+            // unless the provider's list says the model does not take the
+            // parameter (STEER-6 review S3). `None` means no field is sent at
+            // all — config `none`, or a model the list rules out — and the log
+            // then agrees with the request instead of naming a field the
+            // provider would reject. A `model` verb later swaps the client and
+            // the request follows the new provider.
+            reasoning_effort: session.first_effort(),
         })?;
         // What the render had to say about its sources (a non-UTF-8 file read
         // lossily, a truncation, a malformed skill skipped): recorded once, so
@@ -1511,47 +1570,16 @@ impl Session {
         // cancelled), so the session, which is outside it, starts the shim.
         // There is nothing to log: the job's own status file is the record.
         if name == "bg-spawn" {
-            let answer = if from == "job" {
-                match crate::bg::spawn_shim_for_client(&request.args) {
-                    Ok(id) => crate::ipc::Response::ok("bg-spawn", 0, "now", json!({"id": id})),
-                    Err(error) => crate::ipc::Response::error(error),
-                }
-            } else {
-                crate::ipc::Response::error("bg-spawn: an internal verb; jobs report themselves")
-            };
-            let _ = reply.send(answer);
+            let _ = reply.send(self.bg_spawn_answer(&from, &request.args));
             return None;
         }
-        // The `bg` verb is internal: jobs report themselves (the socket path
-        // from `kelir bg run`, or the session's own watcher). A human or a gate
-        // cannot fabricate one, so the log's `bg_` events are the shim's word.
-        let mut parsed = if name == "bg" && from != "job" {
-            Err("bg: an internal verb; jobs report themselves".to_string())
-        } else {
-            verbs::parse(&name, &request.args)
-        };
-        // `stop --call` for a call that is not running (`live_calls` holds only
-        // the unsettled calls of the batch) is a refusal, not a silent no-op.
-        if let Ok(Verb::Stop {
-            call: Some(call), ..
-        }) = &parsed
-            && !self.live_calls.iter().any(|id| id == call)
-        {
-            parsed = Err(format!("no running call with id `{call}`"));
-        }
+        let parsed = self.parse_verb(&request, &from);
         let scope = match &parsed {
             Ok(verb) => applies.unwrap_or_else(|| verb.scope()),
             Err(_) => "rejected",
         };
-        let boundary = scope.to_string();
         let error = parsed.as_ref().err().cloned();
-        let recorded = self.record(EventBody::Verb {
-            name: name.clone(),
-            args: Payload::value(request.args.clone()),
-            from: from.clone(),
-            boundary,
-            error: error.clone(),
-        });
+        let recorded = self.log_verb(&name, &request.args, &from, scope, error);
         // The ack must not outrun the log: a crash right after `{"ok": true}`
         // may not lose a verb the client believes was accepted (M1 review N1).
         self.sync();
@@ -1574,6 +1602,98 @@ impl Session {
                 None
             }
         }
+    }
+
+    /// `accept` for a verb a wait is about to apply at once (`say --now`,
+    /// `model`): the answer goes out *after* the verb landed, so it says
+    /// `applies: "now"` and `state.model` (or the queued text) is what the
+    /// next request really carries (STEER-5 review N1).
+    fn accept_at_once(&mut self, incoming: Incoming) -> AtOnce {
+        let Incoming { request, reply } = incoming;
+        let from = request.from.clone();
+        let name = request.verb.clone();
+        if name == "bg-spawn" {
+            let _ = reply.send(self.bg_spawn_answer(&from, &request.args));
+            return AtOnce::Rejected;
+        }
+        let parsed = self.parse_verb(&request, &from);
+        let boundary = if parsed.is_ok() { "now" } else { "rejected" };
+        let error = parsed.as_ref().err().cloned();
+        let recorded = self.log_verb(&name, &request.args, &from, boundary, error);
+        self.sync();
+        let (verb, event) = match (parsed, recorded) {
+            (Ok(verb), Ok(event)) => (verb, event),
+            (Ok(_), Err(message)) | (Err(message), _) => {
+                let _ = reply.send(Response::error(message));
+                // A refusal changes nothing, so the wait it arrived in goes on.
+                return AtOnce::Rejected;
+            }
+        };
+        let pending = Pending {
+            seq: event.seq,
+            verb,
+            from,
+        };
+        let mut end: Option<StreamEnd> = None;
+        let applied = self.apply_one(pending, &mut end);
+        let answer = match applied {
+            Ok(()) => Response::ok(&name, event.seq, "now", self.state()),
+            Err(message) => Response::error(message),
+        };
+        // The answer goes out either way: the verb has landed (or the log said
+        // why it could not), and a client must not wait on a reply nobody kept.
+        let _ = reply.send(answer);
+        AtOnce::Applied(end.map(Box::new))
+    }
+
+    /// The `bg-spawn` answer: the shim only ever answers a job, and a job is
+    /// the only sender allowed to ask.
+    fn bg_spawn_answer(&mut self, from: &str, args: &Value) -> Response {
+        if from == "job" {
+            match crate::bg::spawn_shim_for_client(args) {
+                Ok(id) => Response::ok("bg-spawn", 0, "now", json!({"id": id})),
+                Err(error) => Response::error(error),
+            }
+        } else {
+            Response::error("bg-spawn: an internal verb; jobs report themselves")
+        }
+    }
+
+    /// Validate one arrival. `bg` is internal, and `stop --call` for a call that
+    /// is not running (`live_calls` holds only the unsettled calls of the
+    /// batch) is a refusal rather than a silent no-op.
+    fn parse_verb(&self, request: &Request, from: &str) -> Result<Verb, String> {
+        let name = request.verb.as_str();
+        if name == "bg" && from != "job" {
+            return Err("bg: an internal verb; jobs report themselves".to_string());
+        }
+        let parsed = verbs::parse(name, &request.args)?;
+        if let Verb::Stop {
+            call: Some(call), ..
+        } = &parsed
+            && !self.live_calls.iter().any(|id| id == call)
+        {
+            return Err(format!("no running call with id `{call}`"));
+        }
+        Ok(parsed)
+    }
+
+    /// Log the arrival, before it is answered or applied.
+    fn log_verb(
+        &mut self,
+        name: &str,
+        args: &Value,
+        from: &str,
+        boundary: &str,
+        error: Option<String>,
+    ) -> Result<crate::event::LogEvent, String> {
+        self.record(EventBody::Verb {
+            name: name.to_string(),
+            args: Payload::value(args.clone()),
+            from: from.to_string(),
+            boundary: boundary.to_string(),
+            error,
+        })
     }
 
     /// Apply the verbs due at `boundary`.
@@ -2013,6 +2133,70 @@ impl Session {
 
     // ---------------------------------------------------------- compaction
 
+    /// The effort the first request will carry: the configured value, unless the
+    /// provider's list says the model does not take the parameter. Recorded in
+    /// `session_started`, so the log and the request agree from the first step.
+    fn first_effort(&self) -> Option<String> {
+        if !self.effort_allowed() {
+            return None;
+        }
+        self.cfg
+            .provider(&self.provider_name)
+            .ok()
+            .and_then(|provider| provider.reasoning_effort)
+    }
+
+    /// Whether the loop may ask this model for several tool calls in one
+    /// message: the provider's list when it has an entry, else the built-in
+    /// family table, so a first session (cold or slow list) still asks a model
+    /// that can do it (STEER-6 review S2).
+    fn parallel_calls(&self) -> bool {
+        crate::models::parallel_calls(
+            self.models.as_ref().map(|cache| cache.models.as_slice()),
+            &self.model,
+        )
+    }
+
+    /// Whether `reasoning_effort` may go in the body: only where the provider
+    /// advertises the parameter, or for a model the list says nothing about
+    /// when the person configured an effort explicitly (STEER-6 review S3).
+    fn effort_allowed(&self) -> bool {
+        let explicit = self
+            .cfg
+            .provider(&self.provider_name)
+            .map(|provider| provider.reasoning_effort_explicit)
+            .unwrap_or(false);
+        crate::models::reasoning_effort_allowed(
+            self.models.as_ref().map(|cache| cache.models.as_slice()),
+            &self.model,
+            explicit,
+        )
+    }
+
+    /// The request for one step, with the two capability decisions applied.
+    fn step_request(&self, messages: &[crate::chat::ChatMessage]) -> provider::BuiltRequest {
+        self.capabilities(self.client.build_with(
+            &self.model,
+            messages,
+            &self.tool_specs(),
+            self.parallel_calls(),
+        ))
+    }
+
+    /// Apply what this provider/model actually takes: `reasoning_effort` only
+    /// where the provider advertises it or the config asked for it on an
+    /// unknown model, and nothing this session already saw a 400 for.
+    fn capabilities(&self, request: provider::BuiltRequest) -> provider::BuiltRequest {
+        let mut request = request;
+        if !self.effort_allowed() {
+            request = request.without_field("reasoning_effort");
+        }
+        for field in &self.refused_fields {
+            request = request.without_field(field);
+        }
+        request
+    }
+
     /// The tool list sent to the provider: the specs for the names frozen at
     /// `session_started`, in that order. A session started before a tool existed
     /// keeps its old list, so the request prefix (and its cache) is unchanged.
@@ -2057,7 +2241,14 @@ impl Session {
                     .compact_floor
                     .map(|floor| tokens > floor)
                     .unwrap_or(true);
-                if above_floor && compact::should_auto(window, self.cfg.auto_compact_at, tokens) {
+                if above_floor
+                    && compact::should_auto(
+                        window,
+                        self.cfg.auto_compact_at,
+                        self.cfg.compact_at_tokens,
+                        tokens,
+                    )
+                {
                     self.compact_request = Some(CompactRequest {
                         by: "auto",
                         focus: None,
@@ -2191,13 +2382,13 @@ impl Session {
             plan.through_seq,
             tokens_before
         )));
-        let summarising = compact::summarise_request(
+        let summarising = self.capabilities(compact::summarise_request(
             &self.client,
             &self.model,
             &self.cfg.compact_prompt,
             &transcript,
             request.focus.as_deref(),
-        );
+        ));
         let assembler = match self
             .stream(rx, RequestFor::Built(&summarising), true)
             .await?
@@ -2535,9 +2726,14 @@ impl Session {
             self.check_sources()?;
 
             let folded = crate::fold::fold(&self.events, &self.dir)?;
-            let request =
-                self.client
-                    .build(&self.model, &folded.request_messages(), &self.tool_specs());
+            // Ask for several calls in one message when the provider says the
+            // model takes them, or (cold or slow list) when the model's family
+            // is known to; the loop already runs a batch concurrently and
+            // appends results in call order. `reasoning_effort` goes only where
+            // the provider advertises it (or where the config asked for it on
+            // an unknown model). Both do not depend on the cache being warm
+            // (STEER-6 review S2/S3).
+            let request = self.step_request(&folded.request_messages());
             let request_text = serde_json::to_string(&request.body).unwrap_or_default();
             self.step += 1;
             let step = self.step;
@@ -2652,6 +2848,37 @@ impl Session {
         }
     }
 
+    /// A 400 that names one of the capability fields kelir added: remove it
+    /// from the request being retried and remember it, so no later request in
+    /// this session pays the same 400 (STEER-6 review S3). Answers `true` when
+    /// the request should be retried, once, without the field.
+    fn drop_refused_field(
+        &mut self,
+        request: &mut provider::BuiltRequest,
+        error: &provider::ProviderError,
+        dropped: &mut Option<String>,
+    ) -> bool {
+        // One drop per request: a second 400 means the field was not the
+        // (only) reason, and looping through the body would hide it.
+        if dropped.is_some() || !error.message.starts_with("http 400") {
+            return false;
+        }
+        let field = ["reasoning_effort", "parallel_tool_calls"]
+            .into_iter()
+            .find(|field| {
+                request.has_field(field)
+                    && !self.refused_fields.contains(*field)
+                    && provider::names_field(&error.message, field)
+            });
+        let Some(field) = field else {
+            return false;
+        };
+        *request = request.without_field(field);
+        self.refused_fields.insert(field.to_string());
+        *dropped = Some(field.to_string());
+        true
+    }
+
     /// Stream one response, taking verbs while it is in flight. A `stop` ends
     /// the turn without committing the half-response; anything else waits for
     /// the next boundary.
@@ -2692,6 +2919,10 @@ impl Session {
         // so the next request is built (new model, new fold) but the
         // `before_step` boundary is not run again.
         let mut rebuild = false;
+        // The body field a 400 asked kelir to drop, once per request
+        // (STEER-6 review S3): the second 400 is the answer, not a queue of
+        // fields to keep removing.
+        let mut dropped: Option<String> = None;
         loop {
             // The governor (opt-in) can make this request wait for a slot that
             // another local kelir holds. That wait is visible and interruptible
@@ -2737,6 +2968,29 @@ impl Session {
                 Attempt::Ok(assembler) => return Ok(StreamEnd::Assembled(assembler)),
                 Attempt::Failed(error) => error,
             };
+            // A 400 that names a field kelir put in the body: drop it, remember
+            // it for the session, and try once more with the same request
+            // without it. Not a rate limit or a server error — the same request
+            // would fail the same way — so it is not the retryable *wait* budget
+            // (STEER-6 review S3). `refused_fields` (filled by the drop) keeps
+            // the field out of every later request this session builds.
+            if self.drop_refused_field(&mut built, &error, &mut dropped) {
+                self.record(EventBody::Error {
+                    location: "provider".into(),
+                    message: format!(
+                        "{}: retrying without `{}` and leaving it out for the rest of the session",
+                        error.message,
+                        dropped.as_deref().unwrap_or("?")
+                    ),
+                    retryable: false,
+                    status: error.status,
+                    attempt: Some(attempt),
+                    // Not a wait: the retry is sent at once, so no countdown.
+                    retry_in_ms: None,
+                })?;
+                self.sync();
+                continue;
+            }
             // A summary is tried once; a step within its budget.
             let will_retry = error.retryable && !summary && budget.fits(Duration::ZERO);
             // The wait, decided before it is recorded so the event can say how
@@ -2939,6 +3193,21 @@ impl Session {
         incoming: Incoming,
         interrupt: &mut Option<StreamEnd>,
     ) -> Result<bool, String> {
+        // `say --now` and `model` are applied here and now, so they are
+        // accepted and answered as such: `applies: "now"`, with the state the
+        // next request will really see (STEER-5 review N1).
+        if at_once_verb(&incoming.request) {
+            return Ok(match self.accept_at_once(incoming) {
+                AtOnce::Applied(end) => {
+                    if let Some(end) = end {
+                        *interrupt = Some(*end);
+                    }
+                    true
+                }
+                // A refused verb changed nothing: the wait it arrived in goes on.
+                AtOnce::Rejected => false,
+            });
+        }
         let Some(pending) = self.accept(incoming) else {
             return Ok(false);
         };
@@ -2953,8 +3222,9 @@ impl Session {
                 *interrupt = Some(StreamEnd::End);
                 Ok(false)
             }
-            // `say --now`: the message is the point, and it is in the fold the
-            // moment it is recorded, so the retry carries it.
+            // `say --now` and `model` never reach here: the branch above
+            // applies them through `accept_at_once`, which is what makes the
+            // ack truthful about a swap that already happened.
             Verb::Say { .. } | Verb::Model { .. } => {
                 let mut applied = Option::<StreamEnd>::None;
                 self.apply_one(pending, &mut applied)?;
@@ -3542,8 +3812,15 @@ mod tests {
         // what makes a `model` verb during a wait apply to the retry.
         let request = RequestFor::Step.build(&test_session("first/model"));
         assert_eq!(request.body["model"], "first/model");
-        let fixed =
-            provider::build_request(&test_provider(), "ses_1", "pinned/model", &[], &[], None);
+        let fixed = provider::build_request(
+            &test_provider(),
+            "ses_1",
+            "pinned/model",
+            &[],
+            &[],
+            None,
+            false,
+        );
         assert_eq!(
             RequestFor::Built(&fixed)
                 .build(&test_session("second/model"))
@@ -3561,6 +3838,8 @@ mod tests {
             key: Some("test".into()),
             extra_headers: Default::default(),
             reasoning_field: None,
+            reasoning_effort: None,
+            reasoning_effort_explicit: false,
             session_header: None,
             max_concurrent_requests: None,
         }
@@ -3591,6 +3870,7 @@ mod tests {
                 window: None,
                 model_windows: Default::default(),
                 auto_compact_at: 0.8,
+                compact_at_tokens: 0,
                 compact_prompt: String::new(),
                 skills_dirs: vec![],
                 compact_keep: 0,
@@ -3613,6 +3893,7 @@ mod tests {
             turn: 0,
             turn_steps: 0,
             disabled: BTreeSet::new(),
+            refused_fields: BTreeSet::new(),
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
             compact_request: None,
@@ -3664,6 +3945,7 @@ mod tests {
             window: None,
             model_windows: Default::default(),
             auto_compact_at: 0.8,
+            compact_at_tokens: crate::compact::DEFAULT_SOFT_TARGET,
             compact_prompt: String::new(),
             skills_dirs: vec![],
             compact_keep: 0,
@@ -3695,6 +3977,8 @@ mod tests {
                     key: None,
                     extra_headers: Default::default(),
                     reasoning_field: None,
+                    reasoning_effort: None,
+                    reasoning_effort_explicit: false,
                     session_header: None,
                     max_concurrent_requests: None,
                 },
