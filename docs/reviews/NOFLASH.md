@@ -98,6 +98,35 @@ without /T mid-call) left no `sleep 61/62/63` behind on any binary. `cancel` lea
 `kelir bg cancel` on all three binaries. At the end `tasklist` showed no `kelir.exe`, `winspy.exe`,
 `canned_server.py`, `sleep.exe` or `flash-*` Herdr panes from this run.
 
+## Final commit re-run (2026-11-19 11:03–11:07, orchestrator)
+
+The question this document left open: does the committed tree flash? Binary: `cargo build --release`
+at **HEAD `1dc2021`**, 6,263,808 B, copied to `~/kelir-scratch/flash/bin-head/kelir.exe`. The
+`flash_matrix2.sh` scenario set run once (bin-wip and bin-wipnow now hold the same bytes, so the
+matrix's three-way loop would only re-measure one build); spy up for each run; canned and live
+(`deepseek/deepseek-v4.1-flash-1017` via OpenRouter) as listed.
+
+| scenario | launch | visible windows attributed | conhost | leftovers |
+|---|---|---|---|---|
+| bg (`kelir bg run` x10 + promotion), canned | pane | 0 / total 0 | 10 | none |
+| bg cancel x3, canned | pane | 0 / 0 | 3 | none |
+| bg, canned | detached bash root | 0 / 0 | 11 | none |
+| mix (calls + bg + promotion), canned | detached bash root | 0 / 0 | 4 | none |
+| calls (10 bash calls, 2x5 parallel), canned | pane | 0 / 0 | 0 | none |
+| kill the session mid-call (taskkill /F, no /T), canned | pane | 0 / 0 | 0 | none |
+| TUI (`kelir`), one bash call, Ctrl-C twice, canned | pane | 0 / 0 | 0 | none |
+| calls, canned | detached bash root | 0 / 0 | 1 | none |
+| calls, live | pane | 0 / 0 | 0 | none |
+| bg, live | pane | 0 / 0 | 10 | none |
+| TUI, live | pane | 0 / 0 | 0 | none |
+| bg, live | detached bash root | 0 / 0 | 11 | none |
+
+**Verdict: NO FLASH on the committed build.** `visible_windows_total` was 0 in all twelve runs
+(not merely unattributed), hidden consoles are still created and stay windowless as the fix
+intends, and every run killed its own processes (`leftover processes after: none`). The `direct`
+rows (kelir itself console-less) were not re-run on this commit; the wipnow binary that scored
+0 windows there is the same source tree that became `05d1d16`..`1dc2021`.
+
 ## How to run the spy
 
 ```

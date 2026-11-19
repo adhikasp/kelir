@@ -16,7 +16,28 @@ transcript (events.jsonl) and proposes improvements to the prompt/loop (docs/ret
 Fresh agent for every pass; the orchestrator carries continuity; delete opencode sessions and
 retire panes after each pass.
 
-## State when the orchestrator stopped (2026-11-19, usage limit)
+## State (2026-11-19 11:10) — orchestrator handed over to opencode
+
+Claude Code hit its usage limit at 10:50 (pane t1x). The orchestrator role moved to the opencode
+pane **t9m**; implementer and reviewer stay fresh panes but are now opencode sessions
+(`~/kelir-scratch/launch-oc.sh <prompt-file>`, default model), because Claude Code cannot be used.
+Everything else is unchanged: one writer on `src/` at a time, one report line to `hc send t9m …`,
+a fresh session per pass, panes retired after each pass.
+
+Gates re-run by the new orchestrator on committed HEAD `1dc2021`:
+
+- Windows: `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings` clean, full
+  `cargo test` twice, both green (262 unit, 16 e2e, 11 e2e_m3, 10 e2e_m4, 15 e2e_tui, 23
+  e2e_verbs, 8 review_m0, 5 review_m1, 2 review_m2, 11 review_m3, 19 review_m4, 7 review_m4b).
+- Linux (the maintainer, `scripts/remote-check.sh the maintainer`): fmt, clippy, 267+ unit and every suite green.
+- Flash re-check: `flash_matrix2`'s twelve scenarios on the committed build, **0 visible windows,
+  0 leftovers** (docs/reviews/NOFLASH.md, "Final commit re-run"). The M4 terminal-window item is
+  closed.
+
+Next in flight: STEER-1 review (reviewer pane, fresh opencode session), then STEER-2 implement,
+STEER-3 implement, M5-M11. The repo is still local only: no remote, nothing pushed.
+
+## State when the Claude orchestrator stopped (2026-11-19 10:50, usage limit)
 
 - M0-M3 closed (reviewed, fixed, verified Windows + Linux). M4 reviewed twice; round-2 fixes
   (docs/tasks/M4-fixes2.md: G1-G4 + repo scrub) were in flight in the main tree, UNCOMMITTED when I stopped.
