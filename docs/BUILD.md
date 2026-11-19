@@ -107,13 +107,27 @@ rules the scripts must keep (nextest not `cargo test`, `--no-fail-fast`, doctest
 5. **Do not delete a work dir to make a gate pass.** `remote-check.sh prune --force` is how Linux work dirs
    are retired, and it skips anything a live run holds.
 
-## Retries seen in the wild
+## Flakes seen from the gate
 
-The Linux gate reported one flaky test on its first nextest run:
+`scripts/gate.sh --load` runs the suite three times under artificial CPU load (`scripts/gate-load.sh`, N
+busy loops it starts and kills itself). That is STEER-9's stress mode, and it works: 2 of 3 rounds green,
+one round red.
 
-- `review_steer1::a_failing_model_list_does_not_fail_the_session` — `TRY 2 PASS`, 0.07 s. A timing
-  assumption in that test, not a product bug; it is STEER-9's territory (event-driven waits) and not fixed
-  here. This is exactly the case rule 3 exists for: it is named, not silently retried.
+| test | runner | how it failed |
+|---|---|---|
+| `e2e_m4::a_client_cannot_fabricate_a_background_job` | nextest under load | "end was refused": `LiveSession::end` got a non-zero exit from `kelir ctl <id> end` with empty stdout/stderr |
+| `review_steer1::a_failing_model_list_does_not_fail_the_session` | nextest on Linux | `TRY 2 PASS`, 0.07 s |
+| `review_m4::r12_a_graceful_exit_leaves_a_promoted_job_running` | `cargo test`, previously | "end was refused" (`docs/QUEUE.md`) |
+
+**This is not nextest.** Reproduced with the old runner too: five runs of `cargo test --test e2e_m4` under
+six busy loops gave one "end was refused" (runs 1-4 passed, run 5 failed). `a_client_cannot_fabricate_a_background_job`
+passed 8/8 under the same load in isolation and 5/5 with `cargo test`. The failure is the known `ctl end`
+race on a loaded box (STEER-9, `docs/QUEUE.md:61`), not the per-process test model. Nextest only makes it
+easier to *see*, because it names the retry.
+
+That is why `scripts/gate.sh` fails on a retry by default instead of hiding it: with `--retries 2` a green
+run still says which test was retried, and the operator decides (`KELIR_GATE_ALLOW_RETRIES=1`) when a known
+flake is acceptable for one landing. The fix belongs to STEER-9 (event-driven waits).
 
 ## Rejected or not taken
 
