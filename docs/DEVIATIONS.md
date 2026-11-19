@@ -84,6 +84,17 @@ consuming a scripted reply) so a session can start in a test.
 - **`step` is a session counter, not a turn counter.** In a `--keep` session the
   second turn starts at the step after the first turn's last one, so `step` stays
   unique in one log. `max_steps` still counts the steps of one turn.
+- **A `max_steps` cap pauses the turn; it never fails it (STEER-4).** Unset or
+  `0` in `config.toml` (or `--max-steps 0`) means no cap at all, which is the
+  default: the old `100` default is gone, and `0` is accepted as "unlimited"
+  rather than refused, so a stopgap config cannot break a session. Reaching an
+  explicit cap ends the turn with `turn_ended outcome=paused` (not `error`), the
+  NDJSON `result` says `paused` with exit code 0 (a pause is not a failure), and
+  stderr/TUI print "turn paused after N steps; say continue to resume". A
+  `--keep` session stays up and its next `say` opens a new turn with a fresh
+  count; `resume` of a paused log continues it like a stopped one (see
+  `resume::interrupted`). The TUI status line shows `step used/limit` only when a
+  cap is set, and the TUI banner names the cap; the phase word is `paused`.
 - **`later` while the session is idle starts a turn at once.** There is no turn
   to end; the message is recorded with `delivery: "later"` and the process runs a
   turn for it. Likewise a `say` still pending when a turn ends opens the next
