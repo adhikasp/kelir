@@ -55,9 +55,81 @@ fn snapshot(app: &mut App) -> String {
     out
 }
 
+/// Render `app` into a `width`x8 TestBackend, one string per row.
+fn render_at(app: &mut App, width: u16) -> String {
+    let backend = TestBackend::new(width, VIEWPORT_HEIGHT);
+    let mut terminal = Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Inline(VIEWPORT_HEIGHT),
+        },
+    )
+    .unwrap();
+    terminal.draw(|frame| tui::render(app, frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut out = String::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            if let Some(cell) = buffer.cell(Rect::new(x, y, 1, 1).as_position()) {
+                line.push_str(cell.symbol());
+            }
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+/// A styled line's text, tones dropped.
+fn line_text(line: &ratatui::text::Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
 fn new_app() -> App {
     let (to_tui, verbs) = channels();
     App::new(60, VIEWPORT_HEIGHT as usize, to_tui, verbs)
+}
+
+/// The text of a pty stream, with every CSI/OSC escape removed: the assertion
+/// is about what a reader sees, not about the bytes that paint it.
+fn plain(screen: &str) -> String {
+    let mut out = String::new();
+    let mut chars = screen.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                // CSI: drop the `[`, then parameters until a final byte in
+                // 0x40..=0x7e (the `[` itself is in that range, so it has to go
+                // first or the scan stops on it).
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // OSC: until BEL or ST.
+                let mut last = '\0';
+                for c in chars.by_ref() {
+                    if c == '\u{7}' || (last == '\u{1b}' && c == '\\') {
+                        break;
+                    }
+                    last = c;
+                }
+            }
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Every OSC 7501 record in a byte stream, exactly as it went out. Herdr
@@ -223,7 +295,7 @@ fn snapshot_the_output_tail_view() {
 }
 
 /// A long line in the editor is clipped by the row, not wrapped into the
-/// status line.
+/// facts row.
 #[test]
 fn snapshot_a_long_editor_line_stays_on_its_row() {
     let mut app = new_app();
@@ -237,6 +309,97 @@ fn snapshot_a_long_editor_line_stays_on_its_row() {
     assert!(rows[7].starts_with("kelir idle"), "{}", rows[7]);
     // The live rows above are untouched.
     assert!(rows[0..3].iter().all(|row| row.is_empty()), "{screen:?}");
+}
+
+/// 80, 60 and 40 columns: the state row, the facts row and a tool line all fit
+/// the width and never spill onto a second row.
+#[test]
+fn snapshot_narrow_panes_keep_every_row_inside_its_width() {
+    for width in [80u16, 60, 40, 30, 20] {
+        let (to_tui, _events) = tokio::sync::mpsc::unbounded_channel();
+        let (verbs, _incoming) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(width as usize, VIEWPORT_HEIGHT as usize, to_tui, verbs);
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "openrouter".into(),
+            model: "deepseek/deepseek-v4.1-flash-1017".into(),
+            limit: None,
+        });
+        app.apply(UiEvent::ToolStarted {
+            name: "bash".into(),
+            input: json!({"command": "cargo test --all-targets -- --nocapture"}),
+        });
+        let screen = render_at(&mut app, width);
+        for (index, row) in screen.lines().enumerate() {
+            assert!(
+                kelir::scrollback::display_width(row) <= width as usize,
+                "width {width}, row {index}: {row:?}"
+            );
+        }
+        let state = screen.lines().nth(3).unwrap_or_default();
+        assert!(state.contains("running"), "width {width}: {state:?}");
+    }
+}
+
+/// The state row and the prompt tell idle from working without colour: the
+/// glyph and the word change, and the prompt dims.
+#[test]
+fn snapshot_the_idle_and_working_rows_are_visibly_different() {
+    let mut app = new_app();
+    let idle = render_at(&mut app, 60);
+    app.apply(UiEvent::TurnStarted {
+        turn: 1,
+        provider: "p".into(),
+        model: "m".into(),
+        limit: None,
+    });
+    let working = render_at(&mut app, 60);
+    let idle_state = idle.lines().nth(3).unwrap_or_default().to_string();
+    let working_state = working.lines().nth(3).unwrap_or_default().to_string();
+    assert!(idle_state.contains("idle"), "{idle_state:?}");
+    assert!(working_state.contains("thinking"), "{working_state:?}");
+    assert_ne!(
+        idle_state.trim_start_matches(' ').chars().next(),
+        working_state.trim_start_matches(' ').chars().next(),
+        "the glyph differs too: {idle_state:?} vs {working_state:?}"
+    );
+}
+
+/// A tool group that folds: the live area shows the calls, the scrollback gets
+/// the folded line plus the errors.
+#[test]
+fn snapshot_a_tool_group_before_and_after_it_closes() {
+    let mut app = new_app();
+    for command in ["git --version", "python --version", "cargo fmt"] {
+        app.apply(UiEvent::ToolSettled {
+            name: "bash".into(),
+            input: json!({"command": command}),
+            outcome: "ok".into(),
+            exit_code: Some(0),
+            elapsed_ms: 300,
+            bytes: 29,
+            lines: 1,
+            spilled: false,
+            out_path: String::new(),
+            tail: String::new(),
+        });
+    }
+    let open = render_at(&mut app, 60);
+    let live: Vec<&str> = open.lines().take(3).collect();
+    // Already three calls: the live area shows the same fold the scrollback
+    // will get, so nobody sees it change shape when it commits.
+    assert!(
+        live.iter().any(|row| row.contains("ran 3 commands")),
+        "the open group is visible: {live:?}"
+    );
+    app.apply(UiEvent::Assistant {
+        text: "all good".into(),
+    });
+    let committed: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+    assert!(
+        committed.iter().any(|row| row.contains("ran 3 commands")),
+        "{committed:?}"
+    );
 }
 
 // -------------------------------------------------- every action is a verb
@@ -529,6 +692,19 @@ async fn the_tui_runs_a_turn_in_a_pty() {
     assert_eq!(run.code, 0, "screen: {:?}", run.screen);
     // The answer was rendered (the scrollback ends up in the pty's output).
     assert!(run.screen.contains("PARROT"), "screen: {:?}", run.screen);
+    // Every frame is wrapped in synchronised output, so a frame is never torn
+    // (`ESC[?2026h` … `ESC[?2026l`). Terminals that do not know the pair ignore
+    // it, so nothing has to probe for it.
+    assert!(
+        run.screen.contains("\u{1b}[?2026h"),
+        "frames are not synchronised: {:?}",
+        run.screen
+    );
+    assert!(
+        run.screen.contains("\u{1b}[?2026l"),
+        "a sync frame is never closed: {:?}",
+        run.screen
+    );
     // The banner names the window compaction measures against and where it came
     // from (STEER-1: the provider's list, fetched before the first step).
     assert!(
@@ -587,6 +763,216 @@ async fn the_tui_runs_a_turn_in_a_pty() {
         .expect("the say was logged as a verb");
     assert_eq!(verb["from"], "tui");
     assert_eq!(verb["name"], "say");
+}
+
+/// A markdown answer arrives rendered: the `##`, `**` and `|---|` never reach
+/// the screen, and the answer lands in the terminal's scrollback.
+#[tokio::test]
+async fn the_tui_renders_a_markdown_answer_and_commits_it() {
+    let answer = "## Files\n\nSome **bold** words and a `code` span.\n\n\
+                  | a | b |\n|---|---|\n| 1 | 2 |\n\n```sh\ncargo test\n```\n";
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn(answer, 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            b"",
+            vec!["cargo test".into(), "Files".into()],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    for markdown in ["## Files", "**bold**", "|---", "```"] {
+        assert!(
+            !run.screen.contains(markdown),
+            "raw markdown {markdown:?} reached the screen: {:?}",
+            run.screen
+        );
+    }
+    // The plain words are there, and the code block keeps its line. The pty
+    // stream interleaves escape sequences with the text, so the assertion is
+    // on the stripped text (a reader sees the stripped text).
+    let text = plain(&run.screen);
+    assert!(text.contains("Some bold words"), "{text:?}");
+    assert!(text.contains("cargo test"), "{text:?}");
+    // The committed turn ends with the one-line summary.
+    assert!(text.contains("1 steps"), "{text:?}");
+    // (the state row's idle text is checked by the snapshot tests; the pty's
+    // repaint diff only rewrites what changed, so it need not appear here)
+}
+
+/// Idle costs no wakeups: after the turn ends, the TUI writes nothing for two
+/// seconds (no spinner, no elapsed tick). This is the "idle must cost zero
+/// wakeups" rule; a constant-rate repaint would fail it.
+#[tokio::test]
+async fn an_idle_tui_writes_nothing_for_two_seconds() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("DONE", 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let quiet = tokio::task::spawn_blocking(move || {
+        drive_and_count_idle_bytes(cwd, config, state, base_url)
+    })
+    .await
+    .expect("the pty driver");
+    assert_eq!(quiet.code, 0, "{quiet:?}");
+    assert_eq!(
+        quiet.bytes_while_idle, 0,
+        "the idle TUI wrote {} bytes in two seconds",
+        quiet.bytes_while_idle
+    );
+}
+
+#[derive(Debug)]
+struct IdleRun {
+    code: u64,
+    bytes_while_idle: usize,
+}
+
+/// Drive one turn, wait for it to settle, then count every byte the TUI writes
+/// while it sits idle for two seconds.
+fn drive_and_count_idle_bytes(
+    cwd: std::path::PathBuf,
+    config: std::path::PathBuf,
+    state: std::path::PathBuf,
+    base_url: String,
+) -> IdleRun {
+    let pty_system = portable_pty::native_pty_system();
+    let pair = pty_system
+        .openpty(portable_pty::PtySize {
+            rows: 40,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open a pty");
+    let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_kelir"));
+    command.cwd(&cwd);
+    command.env("KELIR_CONFIG", &config);
+    command.env("KELIR_CONFIG_DIR", state.join("no-config"));
+    command.env("KELIR_STATE_DIR", &state);
+    command.env("KELIR_HOME", state.join("home"));
+    command.env("KELIR_BASE_URL", &base_url);
+    command.env("OPENROUTER_API_KEY", "test-openrouter-key");
+    command.env("TERM", "xterm-256color");
+    let mut child = pair.slave.spawn_command(command).expect("spawn kelir");
+    drop(pair.slave);
+    let writer = Arc::new(Mutex::new(pair.master.take_writer().expect("pty writer")));
+    let mut reader = pair.master.try_clone_reader().expect("pty reader");
+    let screen = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let sink = screen.clone();
+    let responder = writer.clone();
+    let reader_task = std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    let bytes = &chunk[..n];
+                    sink.lock().unwrap().extend_from_slice(bytes);
+                    let text = String::from_utf8_lossy(bytes);
+                    let mut replies = Vec::new();
+                    for _ in 0..text.matches("\u{1b}[6n").count() {
+                        replies.extend_from_slice(b"\x1b[1;1R");
+                    }
+                    for _ in 0..text.matches("\u{1b}[c").count() {
+                        replies.extend_from_slice(b"\x1b[?1;2c");
+                    }
+                    if !replies.is_empty() {
+                        let mut out = responder.lock().unwrap();
+                        let _ = out.write_all(&replies);
+                        let _ = out.flush();
+                    }
+                }
+            }
+        }
+    });
+    let text = |screen: &Arc<Mutex<Vec<u8>>>| -> String {
+        String::from_utf8_lossy(&screen.lock().unwrap()).into_owned()
+    };
+    let wait_for = |screen: &Arc<Mutex<Vec<u8>>>, needle: &str, limit: Duration| -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if text(screen).contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+    let send = |bytes: &[u8]| {
+        let mut out = writer.lock().unwrap();
+        out.write_all(bytes).unwrap();
+        out.flush().unwrap();
+    };
+    assert!(
+        wait_for(&screen, "kelir", Duration::from_secs(20)),
+        "the TUI never drew"
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    send(b"hi");
+    std::thread::sleep(Duration::from_millis(100));
+    send(b"\r");
+    assert!(
+        wait_for(&screen, "DONE", Duration::from_secs(30)),
+        "the answer never arrived: {:?}",
+        text(&screen)
+    );
+    // Wait for the state row to say idle again (the turn is over and the
+    // spinner is gone).
+    assert!(
+        wait_for(&screen, "idle", Duration::from_secs(10)),
+        "the TUI never went idle: {:?}",
+        text(&screen)
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let before = screen.lock().unwrap().len();
+    std::thread::sleep(Duration::from_secs(2));
+    let after = screen.lock().unwrap().len();
+    send(b"/quit");
+    std::thread::sleep(Duration::from_millis(100));
+    send(b"\r");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.exit_code() as u64,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.clone_killer().kill();
+                panic!("kelir did not exit");
+            }
+        }
+    };
+    drop(reader_task);
+    IdleRun {
+        code,
+        bytes_while_idle: after - before,
+    }
 }
 
 /// The failure word: `error` goes out over the same OSC record — and a failed
