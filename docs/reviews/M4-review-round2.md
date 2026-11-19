@@ -2,7 +2,7 @@
 
 Reviewer: Claude Code (reviewer/tester). Range reviewed: `5af7b0e..5779d3d` (the four `M4:` fix commits),
 then re-run at HEAD (`0f1bbba`, which adds only the default-model pin and is unrelated to M4's behaviour).
-Date: 2026-11-19. Host: a Windows 11 box, build 26300 for everything; Linux gate on a Linux box.
+Date: 2026-11-19. Host: a Windows 11 box (build 26300) for everything; Linux gate on a Linux box.
 
 ## Verdict: **PASS WITH FIXES** (0 blockers, 4 should-fix, 3 nits)
 

@@ -83,7 +83,7 @@ missing shell · R9 quoting battery · R10 32 kB command · R11 leftover `&` chi
 fails) · R12 graceful exit leaves a promoted job · R13 wake never between batch results · R14 `--json` pipe ·
 R15 garbage in `bg/` · R16 torn/deleted status mid-job · R17 call latency (prints, asserts < 2 s) ·
 R18 exec'd grandchildren die with a killed session (F1, fails) · R19 `cancel` takes exec'd grandchildren (F1, fails).
-Seven fail at HEAD on Windows; R1, R11 and R18 pass at `99b3040`. **On Linux (a Linux box)** 14 pass and 5 fail: R1, R2, R3, R5, R11 fail there too (F2, F3, F4, F5, F6 are not Windows-only), while R18/R19 pass (F1 is Windows-only: Unix `killpg` takes the whole group).
+Seven fail at HEAD on Windows; R1, R11 and R18 pass at `99b3040`. **On Linux** 14 pass and 5 fail: R1, R2, R3, R5, R11 fail there too (F2, F3, F4, F5, F6 are not Windows-only), while R18/R19 pass (F1 is Windows-only: Unix `killpg` takes the whole group).
 
 ## Spec / task items not yet covered
 
