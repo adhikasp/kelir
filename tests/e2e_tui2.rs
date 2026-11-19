@@ -41,7 +41,9 @@ async fn kelir_view_queues_an_image_at_the_tail_and_keeps_the_prefix_byte_identi
         Reply::Sse(sse(&tool_turn(
             "call_view",
             "bash",
-            &serde_json::json!({"command": format!("kelir view \"{}\"", image.display())}),
+            // `$KELIR_BIN` is the binary the session exports to every bash child
+            // (kelir is not on PATH inside a test sandbox).
+            &serde_json::json!({"command": format!("\"$KELIR_BIN\" view \"{}\"", image.display())}),
         ))),
         // Step 2: the answer, after the image arrived.
         Reply::Sse(sse(&text_turn("a white circle on a dark background", 0))),
@@ -107,7 +109,7 @@ async fn kelir_view_refuses_a_missing_image_with_a_clear_message() {
         Reply::Sse(sse(&tool_turn(
             "call_view",
             "bash",
-            &serde_json::json!({"command": "kelir view nope.png"}),
+            &serde_json::json!({"command": "\"$KELIR_BIN\" view nope.png"}),
         ))),
         Reply::Sse(sse(&text_turn("I will ask for the right path", 0))),
     ])
