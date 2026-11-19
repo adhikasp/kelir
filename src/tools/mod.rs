@@ -177,7 +177,7 @@ pub fn specs() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "bash",
-                "description": "Run a command in the session shell. Output goes to a file; a result over the spill limit comes back as a notice with a path and a head/tail.",
+                "description": "Run a command in the session shell. The cwd is the session cwd and every call starts there; no shell state carries over between calls. Output goes to a file; a result over the spill limit comes back as a notice with a path and a head/tail. A command over 6000 characters is written to a file and run from there, so length is not a limit. Create big files with `edit` (empty `old`), not with a heredoc.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -192,16 +192,30 @@ pub fn specs() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "edit",
-                "description": "Replace an exact string in one file. `old` must match exactly once unless `replace_all` is true. An empty `old` creates a missing file with `new`. Line endings are preserved.",
+                "description": "Replace exact strings in one file. One change: `old` + `new`. Several: `edits: [{old, new, replace_all?}, ...]`, applied in order against the evolving text, all or none. Each `old` must match exactly once unless `replace_all` is true. An empty `old` creates a missing file with `new`. Line endings are preserved. Prefer this to a python/sed patch: those can fail with exit 0.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "File to edit, relative to the session cwd or absolute."},
                         "old": {"type": "string", "description": "Exact text to replace; empty only when creating a missing file."},
                         "new": {"type": "string", "description": "Replacement text."},
-                        "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one."}
+                        "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one."},
+                        "edits": {
+                            "type": "array",
+                            "description": "Several changes to one file, applied in order; all apply or none does. Use this instead of `old`/`new`.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old": {"type": "string", "description": "Exact text to replace; empty creates a missing file."},
+                                    "new": {"type": "string", "description": "Replacement text."},
+                                    "replace_all": {"type": "boolean", "description": "Replace every occurrence of this hunk."}
+                                },
+                                "required": ["old", "new"],
+                                "additionalProperties": false
+                            }
+                        }
                     },
-                    "required": ["path", "old", "new"],
+                    "required": ["path"],
                     "additionalProperties": false
                 }
             }
