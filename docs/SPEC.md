@@ -293,7 +293,15 @@ One OpenAI Chat Completions client; OpenRouter and OpenCode Go
 User-Agent. Cost (and Go's `allowance`) come from the final usage chunk
 (`stream_options.include_usage`). Keys from the environment (`OPENROUTER_API_KEY`, the Go
 `oc_sk_…` key); never printed. The default model is `deepseek/deepseek-v4.1-flash-1017` on
-OpenRouter (the maintainera's call, 2026-11-19); the Go equivalent is `deepseek-v4.1-flash`. Details:  §11.
+OpenRouter (the maintainera's call, 2026-11-19); the Go equivalent is `deepseek-v4.1-flash`.
+
+kelir keeps no table of model facts. It reads the provider's own `GET {base}/models` —
+`context_length` and `supported_parameters` on OpenRouter, `limit.context` and a `capabilities`
+object on Go — and uses it for the window that drives auto-compaction. The list is cached in the
+state directory for a day, a failed fetch is retried at most hourly, and the fetch is bounded, so a
+start with a fresh cache makes no network call. `[model_windows]`/`window` still win (a person knows
+what the provider cannot), and a model the list does not name falls back to 128 000;
+`window_source` in every verb's `state` says which of the four answered. Details:  §11.
 
 ## Footprint and dependencies
 

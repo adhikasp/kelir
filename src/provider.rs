@@ -163,6 +163,33 @@ impl Client {
         self.cfg.kind
     }
 
+    /// The provider's own model list, for the metadata kelir does not hardcode
+    /// (context window, tool support). Both providers serve `GET /models`;
+    /// OpenRouter's is public, Go's wants the same key as a completion.
+    pub async fn models(&self) -> Result<Vec<crate::models::ModelInfo>, String> {
+        let url = format!("{}/models", self.cfg.base_url.trim_end_matches('/'));
+        let mut request = self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(5))
+            .header("accept", "application/json");
+        if let Some(key) = self.cfg.key.as_deref() {
+            request = request.bearer_auth(key);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("models: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!("models: HTTP {}", response.status()));
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("models: {error}"))?;
+        crate::models::parse(&body)
+    }
+
     pub fn build(&self, model: &str, messages: &[ChatMessage], tools: &[Value]) -> BuiltRequest {
         build_request(
             &self.cfg,

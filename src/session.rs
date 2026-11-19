@@ -170,6 +170,13 @@ struct Prepared {
     tui: bool,
     herdr: Option<Herdr>,
     resume: Option<Reopened>,
+    /// The window compaction measures against, and where it came from
+    /// (`config`, `api`, `cache`, `default`).
+    window: u64,
+    window_source: &'static str,
+    /// The provider's model list as this process learned it, so a `model` swap
+    /// resolves without the network.
+    models: Option<crate::models::Cache>,
 }
 
 /// What a resume reads out of the log before the session continues it.
@@ -252,6 +259,12 @@ struct Session {
     /// The task words from the command line, for the `user` event a resume
     /// adds when it is given a new message.
     pending_task: String,
+    /// The window compaction measures the context against, and where it came
+    /// from (`config`, `api`, `cache`, `default`).
+    window: u64,
+    window_source: &'static str,
+    /// The provider's model list as this process learned it.
+    models: Option<crate::models::Cache>,
 }
 
 /// A compaction asked for by someone; it applies at the next `before_step`.
@@ -452,6 +465,10 @@ async fn drive(opts: Options) -> u8 {
             format!("kelir · {} · {}", session.provider_name, session.model),
             format!("session {}", session.id),
             format!("cwd {}", crate::util::path_string(&session.ctx.cwd)),
+            format!(
+                "window {} tokens ({})",
+                session.window, session.window_source
+            ),
             "Enter sends · Alt-Enter adds a line · /help shows the commands".to_string(),
         ];
         if session.resumed {
@@ -539,6 +556,33 @@ fn watch_bg(dir: PathBuf, tx: mpsc::UnboundedSender<Incoming>) {
     });
 }
 
+/// The provider's model list: the cache when it is fresh, a fetch when it is
+/// not, and the old list when the fetch fails. The fetch is bounded so an
+/// offline box pays it once an hour, not on every start.
+async fn load_models(client: &Client, provider: &str) -> (Option<crate::models::Cache>, bool) {
+    let now = crate::models::now_ms();
+    let cached = crate::models::load(provider);
+    if let Some(cache) = &cached
+        && (cache.is_fresh(now) || cache.in_backoff(now))
+    {
+        return (cached, false);
+    }
+    match tokio::time::timeout(Duration::from_millis(1500), client.models()).await {
+        Ok(Ok(models)) => {
+            let cache = crate::models::Cache::new(provider, models, now);
+            let _ = crate::models::store(&cache);
+            (Some(cache), true)
+        }
+        _ => {
+            let mut cache =
+                cached.unwrap_or_else(|| crate::models::Cache::new(provider, Vec::new(), 0));
+            cache.failed_at_ms = Some(now);
+            let _ = crate::models::store(&cache);
+            (Some(cache), false)
+        }
+    }
+}
+
 async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let common = &opts.common;
     let cfg = config::load(common.config.as_deref())
@@ -554,6 +598,14 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             task_text(&opts.task).await.map_err(Failure::Usage)?
         };
         let herdr = Herdr::detect(opts.json);
+        let (models_cache, models_fetched) =
+            load_models(&reopened.client, &reopened.provider_name).await;
+        let (window, window_source) = crate::models::resolve(
+            cfg.override_window(&reopened.model),
+            models_cache.as_ref(),
+            models_fetched,
+            &reopened.model,
+        );
         return Ok(Prepared {
             json: opts.json,
             ask: opts.ask,
@@ -573,6 +625,9 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             // which also replaces a stale `sock` left by the dead process.
             sock: String::new(),
             resume: Some(reopened.reopened),
+            window,
+            window_source,
+            models: models_cache,
         });
     }
 
@@ -609,6 +664,15 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let id = new_session_id();
     let client = Client::new(provider_cfg, &id, cfg.cache_ttl.clone())
         .map_err(|error| Failure::Usage(error.message))?;
+    // Model metadata from the provider, cached beside the session state; a
+    // `[model_windows]`/`window` setting still wins over it.
+    let (models_cache, models_fetched) = load_models(&client, &provider_name).await;
+    let (window, window_source) = crate::models::resolve(
+        cfg.override_window(&model),
+        models_cache.as_ref(),
+        models_fetched,
+        &model,
+    );
     let dir = crate::paths::session_dir(&id);
     crate::paths::create_private_dir(&dir.join("commands")).map_err(|error| {
         Failure::Run(format!(
@@ -639,6 +703,9 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         system_text,
         sock,
         resume: None,
+        window,
+        window_source,
+        models: models_cache,
     })
 }
 
@@ -826,6 +893,9 @@ impl Session {
                 .unwrap_or(false),
             retryable_failure: false,
             pending_task: prepared.task.clone(),
+            window: prepared.window,
+            window_source: prepared.window_source,
+            models: prepared.models,
         };
         if let Some(read) = prepared.resume {
             // A turn that was in flight continues without a new task.
@@ -1159,6 +1229,8 @@ impl Session {
             "running": self.live_calls,
             "provider": self.provider_name,
             "model": self.model,
+            "window": self.window,
+            "window_source": self.window_source,
             "disabled": self.disabled.iter().cloned().collect::<Vec<_>>(),
         })
     }
@@ -1340,6 +1412,18 @@ impl Session {
         self.provider_name = provider;
         self.model = model;
         self.client = client;
+        // Another model, possibly another provider: resolve from the cached
+        // list (never the network mid-turn); a model the list does not know
+        // falls back to the default window and `state` says so.
+        self.models = crate::models::load(&self.provider_name);
+        let (window, source) = crate::models::resolve(
+            self.cfg.override_window(&self.model),
+            self.models.as_ref(),
+            false,
+            &self.model,
+        );
+        self.window = window;
+        self.window_source = source;
         Ok(())
     }
 
@@ -1479,7 +1563,7 @@ impl Session {
                 // The provider's own count is the honest size; the estimate
                 // covers the step after a compaction.
                 let tokens = self.last_prompt_tokens.unwrap_or(estimate);
-                let window = self.cfg.window(&self.model);
+                let window = self.window;
                 // After a compaction that did not shrink anything, wait for the
                 // context to grow past it instead of paying for a summary on
                 // every step (M3 review N1).

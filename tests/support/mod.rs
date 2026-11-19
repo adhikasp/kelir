@@ -101,6 +101,16 @@ impl Mock {
     }
 }
 
+/// What the mock answers on `GET /models`: both provider shapes, and the
+/// models the tests run (the default one included).
+pub const MODELS_JSON: &str = r#"{"data":[
+ {"id":"deepseek/deepseek-v4.1-flash-1017","context_length":1048576,
+  "supported_parameters":["tools","parallel_tool_calls","reasoning"]},
+ {"id":"anthropic/claude-sonnet-4.5","context_length":200000,"supported_parameters":["tools"]},
+ {"id":"test/model","context_length":262144,"supported_parameters":["tools"]},
+ {"id":"go/model","limit":{"context":1000000},"capabilities":{"tools":{"supported":true}}}
+]}"#;
+
 async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -150,6 +160,21 @@ async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
     }
     let body =
         serde_json::from_slice(&body[..body.len().min(content_length)]).unwrap_or(Value::Null);
+
+    // `GET /models` is metadata every provider serves; a session asks once,
+    // before its first step. It never consumes a scripted reply and is not
+    // recorded, so a test's request stream is still only completions.
+    if path.ends_with("/models") {
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MODELS_JSON.len()
+        );
+        let _ = stream.write_all(head.as_bytes()).await;
+        let _ = stream.write_all(MODELS_JSON.as_bytes()).await;
+        let _ = stream.flush().await;
+        let _ = stream.shutdown().await;
+        return;
+    }
 
     let reply = {
         let mut state = state.lock().unwrap();

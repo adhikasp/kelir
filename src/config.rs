@@ -273,10 +273,15 @@ impl Config {
         Ok(provider)
     }
 
-    /// The model's context window: `[model_windows]`, then `window`, then the
-    /// built-in per-model table, then 128 000.
-    pub fn window(&self, model: &str) -> u64 {
-        crate::compact::window_for(model, &self.model_windows, self.window)
+    /// The window a configuration override names, if any: `[model_windows]`
+    /// for this model, else `window`. What the provider says is
+    /// [`crate::models::resolve`]; this is only the part a person set.
+    pub fn override_window(&self, model: &str) -> Option<u64> {
+        self.model_windows
+            .get(model)
+            .copied()
+            .filter(|window| *window > 0)
+            .or(self.window.filter(|window| *window > 0))
     }
 }
 
@@ -535,7 +540,7 @@ extra_headers = { "x-extra" = "yes" }
             !cfg.compact_prompt.trim().is_empty(),
             "a prompt is always resolved"
         );
-        assert_eq!(cfg.window("deepseek/deepseek-chat"), 128_000);
+        assert_eq!(cfg.override_window("deepseek/deepseek-chat"), None);
 
         let path = temp_config(
             r#"
@@ -549,8 +554,8 @@ compact_keep = 0
         let cfg = load(Some(&path)).unwrap();
         assert_eq!(cfg.auto_compact_at, 0.5);
         assert_eq!(cfg.compact_keep, 0);
-        assert_eq!(cfg.window("deepseek/deepseek-chat"), 32_000);
-        assert_eq!(cfg.window("other/model"), 64_000);
+        assert_eq!(cfg.override_window("deepseek/deepseek-chat"), Some(32_000));
+        assert_eq!(cfg.override_window("other/model"), Some(64_000));
     }
 
     #[test]

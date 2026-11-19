@@ -22,6 +22,29 @@ fn seq(event: &Value) -> u64 {
     event["seq"].as_u64().expect("seq")
 }
 
+/// The window compaction uses is the provider's answer, fetched once and
+/// cached — not a table in kelir's source.
+#[tokio::test]
+async fn the_window_comes_from_the_providers_model_list() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+    session.wait_for("turn_ended").await;
+
+    let answer = session.ctl(&["tools", "--disable", "bash"]).await;
+    assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    let state = &answer.response()["state"];
+    // The test config runs `test/model`; the mock lists it at 262144 tokens.
+    assert_eq!(state["model"], "test/model");
+    assert_eq!(
+        state["window"], 262_144,
+        "from the provider's list, not a table"
+    );
+    assert_eq!(
+        state["window_source"], "api",
+        "fetched before the first step"
+    );
+}
+
 /// `say` without `--now` waits for the next boundary: it arrives as a user
 /// message after the tool result, never between the call and its result.
 #[tokio::test]

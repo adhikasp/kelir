@@ -2,6 +2,23 @@
 
 Small, deliberate differences, with the reason. Everything else tracks the spec.
 
+## Models metadata comes from the provider (2026-11-19)
+
+The built-in window table is gone. It assumed 128k for every `deepseek` model, so the 1M-token
+model kelir now defaults to would have been compacted at a tenth of its real window (the maintainera,
+2026-11-19). `src/models.rs` parses `GET {base}/models` from both providers into one normalised
+list (`context`, `tools`), caches it at `<state>/models-<provider>.json` for 24 hours, and backs off
+for an hour after a failed fetch so an offline box does not pay the timeout on every start. The
+fetch happens at session start (and never mid-turn, including on a `model` swap, which resolves
+against the list already cached) and is bounded to 1.5 s, so a start with a stale cache can cost up
+to 1.5 s once and a start with a fresh cache costs nothing.
+
+`[model_windows]` and `window` still win over the provider; a model the list does not name uses
+`DEFAULT_WINDOW` (128 000). Every verb's `state` carries `window` and `window_source`
+(`config`, `api`, `cache`, `default`), and the TUI banner shows it, so which source answered is
+visible without reading the code. The test mock now serves `/models` (canned, never recorded, never
+consuming a scripted reply) so a session can start in a test.
+
 ## M0
 
 - **`user.from` may be `cli`.** The spec lists `tui`, `ctl`, `channel`, `job`,

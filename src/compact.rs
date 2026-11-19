@@ -32,51 +32,14 @@ and how, what failed and why, and what is still open. Keep file paths, command \
 lines and identifiers exact; do not invent anything. Do not address the agent, do \
 not add advice, and do not use headings — plain prose, under 400 words.";
 
-/// The window used when neither the config nor the per-model table knows the
-/// model.
+/// The window used when neither the config nor the provider's model list
+/// states one. Provider metadata: [`crate::models`].
 pub const DEFAULT_WINDOW: u64 = 128_000;
 /// Compaction is triggered when the context passes this fraction of the window.
 pub const AUTO_FRACTION: f64 = 0.8;
 /// Messages kept verbatim after the summary, so the model still sees what it was
 /// doing; `compact_keep` in the config overrides it.
 pub const DEFAULT_KEEP: usize = 4;
-
-/// Context windows for the models kelir is likely to run, as substrings of the
-/// model id (lowercased). Longest match wins, and the config overrides both.
-const BUILTIN_WINDOWS: &[(&str, u64)] = &[
-    ("claude", 200_000),
-    ("anthropic", 200_000),
-    ("gemini", 1_000_000),
-    ("gpt-5", 400_000),
-    ("gpt-4", 128_000),
-    ("openai", 128_000),
-    ("deepseek-v4.1", 1_048_576),
-    ("deepseek", 128_000),
-    ("glm", 200_000),
-    ("grok", 256_000),
-    ("qwen", 128_000),
-    ("kimi", 128_000),
-    ("moonshot", 128_000),
-];
-
-/// The model's context window: an exact `[model_windows]` entry, then the
-/// config's `window`, then the built-in table, then [`DEFAULT_WINDOW`].
-pub fn window_for(model: &str, windows: &BTreeMap<String, u64>, configured: Option<u64>) -> u64 {
-    if let Some(window) = windows.get(model).filter(|window| **window > 0) {
-        return *window;
-    }
-    if let Some(window) = configured.filter(|window| *window > 0) {
-        return window;
-    }
-    let lowered = model.to_ascii_lowercase();
-    let mut best: Option<(usize, u64)> = None;
-    for (prefix, window) in BUILTIN_WINDOWS {
-        if lowered.contains(prefix) && best.map(|(len, _)| prefix.len() > len).unwrap_or(true) {
-            best = Some((prefix.len(), *window));
-        }
-    }
-    best.map(|(_, window)| window).unwrap_or(DEFAULT_WINDOW)
-}
 
 /// Passed the auto threshold? `at` is the fraction of the window (0.8 by
 /// default); the comparison is `>=`, so `window * at` exactly triggers.
@@ -383,43 +346,6 @@ mod tests {
                 finish_reason: Some("stop".into()),
             },
         )
-    }
-
-    #[test]
-    fn the_builtin_table_knows_the_usual_models() {
-        let none = BTreeMap::new();
-        assert_eq!(
-            window_for("anthropic/claude-sonnet-4.5", &none, None),
-            200_000
-        );
-        assert_eq!(window_for("deepseek/deepseek-chat", &none, None), 128_000);
-        assert_eq!(
-            window_for("deepseek/deepseek-v4.1-flash", &none, None),
-            1_048_576
-        );
-        assert_eq!(window_for("moonshotai/kimi-k2", &none, None), 128_000);
-        assert_eq!(window_for("google/gemini-2.5-pro", &none, None), 1_000_000);
-        assert_eq!(
-            window_for("some/unknown-model", &none, None),
-            DEFAULT_WINDOW
-        );
-    }
-
-    #[test]
-    fn the_config_overrides_the_table_and_a_model_entry_overrides_both() {
-        let mut windows = BTreeMap::new();
-        windows.insert("deepseek/deepseek-chat".to_string(), 32_000);
-        assert_eq!(
-            window_for("deepseek/deepseek-chat", &windows, Some(64_000)),
-            32_000
-        );
-        assert_eq!(window_for("other/model", &windows, Some(64_000)), 64_000);
-        assert_eq!(
-            window_for("anthropic/claude-x", &windows, Some(64_000)),
-            64_000
-        );
-        // A zero is not a window; the next source answers.
-        assert_eq!(window_for("m", &windows, Some(0)), DEFAULT_WINDOW);
     }
 
     #[test]
