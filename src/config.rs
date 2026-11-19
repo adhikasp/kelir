@@ -45,6 +45,10 @@ pub struct Config {
     pub max_steps: u32,
     pub cache_ttl: Option<String>,
     pub system_prompt: String,
+    /// The file `system_prompt` was read from (`prompt` or `prompt.md`), when
+    /// it came from one: `sources[]` records it, so a log reader can tell a
+    /// file's base prompt from the embedded default (F2).
+    pub prompt_path: Option<PathBuf>,
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Context window override for every model (`window`), when set.
     pub window: Option<u64>,
@@ -214,7 +218,9 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         );
     }
 
-    let system_prompt = load_prompt(raw.prompt.as_deref())?;
+    // The base prompt and the file it came from (`None` for the embedded
+    // default), so `sources[]` records the real path (F2).
+    let (system_prompt, prompt_path) = load_prompt(raw.prompt.as_deref())?;
     let compact_prompt = load_compact_prompt(raw.compact_prompt.as_deref())?;
     let auto_compact_at = raw.auto_compact_at.unwrap_or(crate::compact::AUTO_FRACTION);
     if !(0.0..=1.0).contains(&auto_compact_at) || auto_compact_at == 0.0 {
@@ -233,6 +239,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         max_steps: raw.max_steps.unwrap_or(100),
         cache_ttl: raw.cache_ttl,
         system_prompt,
+        prompt_path,
         providers,
         window: raw.window,
         model_windows: raw.model_windows,
@@ -369,18 +376,24 @@ fn find_project_config() -> Option<PathBuf> {
     }
 }
 
-fn load_prompt(configured: Option<&str>) -> Result<String, ConfigError> {
+/// The base prompt text and the file it came from (`None` for the embedded
+/// default), so a reader of the log knows where the words came from.
+fn load_prompt(configured: Option<&str>) -> Result<(String, Option<PathBuf>), ConfigError> {
     if let Some(path) = configured {
         let path = PathBuf::from(path);
         if path.exists() {
-            return std::fs::read_to_string(&path)
-                .map_err(|error| ConfigError(format!("cannot read {}: {error}", path.display())));
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| ConfigError(format!("cannot read {}: {error}", path.display())))?;
+            return Ok((text, Some(path)));
         }
         return Err(ConfigError(format!(
             "prompt file not found: {}",
             path.display()
         )));
     }
+    // The machine `prompt.md`, then the *session* cwd's `.kelir/prompt.md`.
+    // The cwd is the one the config is loaded for (the process runs there), so
+    // this is the same directory the render looks in.
     let candidates = [
         paths::config_dir().join("prompt.md"),
         std::env::current_dir()
@@ -391,10 +404,10 @@ fn load_prompt(configured: Option<&str>) -> Result<String, ConfigError> {
         if candidate.is_file()
             && let Ok(text) = std::fs::read_to_string(&candidate)
         {
-            return Ok(text);
+            return Ok((text, Some(candidate)));
         }
     }
-    Ok(DEFAULT_PROMPT.to_string())
+    Ok((DEFAULT_PROMPT.to_string(), None))
 }
 
 /// The compaction prompt: `compact_prompt` (a path), else `compact.md` in the
