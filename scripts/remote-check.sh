@@ -3,81 +3,211 @@
 # machine through Herdr, and keep what it built so the next run is incremental.
 #
 # usage: scripts/remote-check.sh [--linux-script <path>] <machine> [workdir-name] [-- <extra nextest args>]
-#        scripts/remote-check.sh prune <machine> [--keep N] [--job NAME] [--force]
+#        scripts/remote-check.sh prune <machine> [--keep N] [--job NAME] [--yes]
 #
 # The gate: a git bundle of this checkout is copied over and fetched into a
 # persistent clone on the far side, which is then forced to the bundled commit
 # (fetch + `checkout -f --detach`, no merge, nothing left over in src/ or
 # tests/). There `cargo fmt --check`, `cargo clippy --all-targets -- -D
 # warnings` and the full nextest suite run. One line per stage; exit 1 on any
-# failure.
+# failure. Only committed state travels: the bundle is HEAD, so commit first
+# (a dirty tree is reported, not silently shipped).
 #
 # The work dir is *reused*: `~/kelir-verify-<job>` holds the clone and its
 # `target/`, so the first run pays the cold build and every later run pays the
 # incremental one (BUILD-INFRA rule 3; the old script recloned and rebuilt from
-# cold every time, 62 s build + 29 s clippy per run). Do not delete it per run.
+# cold every time, 62 s build + 29 s clippy per run). Name it after the job
+# (`kelir-verify-<job>`, which is what `gate.sh --linux` passes); one job's dir
+# is never another job's. Do not delete a work dir to make a gate pass.
 #
-# `prune` retires work dirs (the Linux box had 22 of them, 57 GB). It keeps the
-# newest `--keep` (default 3) and reports the rest; `--job NAME` narrows it to
-# that job's dirs (`kelir-verify-NAME`, `kelir-verify-NAME-*`). Nothing is
-# deleted without `--force`, a dir written to in the last hour is skipped, and
-# so is one whose `lock` file names a live pid: a gate that deletes a
-# colleague's target dir costs them a cold build.
+# `prune` retires work dirs, and is deliberately conservative: it deletes only
+# directories *this script created*, proven by the marker file the script writes
+# when it creates a dir (`.kelir-workdir`: a random token, the time and the
+# work-dir name). On top of that a candidate must
+#   * have a name that matches `kelir-verify-<plain job name>` exactly,
+#   * be a real directory, not a symlink, whose physical path is directly under
+#     $HOME,
+#   * contain only what a work dir contains (the marker, `src-tree`, `k.b64`,
+#     `run.sh`, `lock`, `logs`),
+#   * not be a live run (`lock` names a running pid) and not have been written
+#     to in the last hour.
+# Anything else is reported as `skip` with the reason and is never touched: a
+# directory named like a work dir that this script did not create (a user's own
+# project, a decoy, a bare `mkdir`) has no marker and survives. Keeping is per
+# job: the newest `--keep` (default 3) of each job's dirs, so an idle job keeps
+# its warm `target/` no matter how many other jobs ran after it. Nothing is
+# removed without `--yes`; the default is a dry run.
 set -uo pipefail
 
-usage() { sed -n '2,26p' "$0"; exit 2; }
+usage() { sed -n '2,40p' "$0"; exit 2; }
 
 if [ "${1:-}" = "prune" ]; then
   shift
   M="${1:-}"; shift 2>/dev/null || true
   [ -z "$M" ] && usage
-  keep=3; force=0; job=""
+  keep=3; yes=0; job=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --keep) keep="${2:?--keep needs a value}"; shift 2 ;;
       --job) job="${2:?--job needs a value}"; shift 2 ;;
-      --force) force=1; shift ;;
+      --yes | --force) yes=1; shift ;;
+      --dry-run) yes=0; shift ;;
       *) echo "prune: unknown argument: $1" >&2; exit 2 ;;
     esac
   done
-  # The far side lists, sizes and ages the dirs and this side only formats its
-  # tab-separated lines, so both ends agree on what a work dir costs.
+  case "$keep" in
+    '' | *[!0-9]*) echo "prune: --keep must be a whole number, not '$keep'" >&2; exit 2 ;;
+  esac
+  if [ -n "$job" ]; then
+    case "$job" in
+      *[!A-Za-z0-9._-]* | .* | *..*)
+        echo "prune: --job must be a plain job name (letters, digits, . _ -), not '$job'" >&2
+        exit 2
+        ;;
+    esac
+  fi
+  # The far side does the deciding: it is where the directories and their
+  # markers are, and it must refuse an unsafe candidate by itself, not because
+  # this side formatted it carefully. This side only passes the knobs and
+  # prints what came back.
   far_prune='
-keep=$KEEP; force=$FORCE; job=$JOB; now=$(date +%s); n=0
+keep=$KEEP; yes=$YES; job=$JOB
+die() { echo "prune: $*" >&2; exit 2; }
+case "$keep" in
+  "" | *[!0-9]*) die "--keep must be a whole number, not $keep" ;;
+esac
 if [ -n "$job" ]; then
-  set -- "$HOME/kelir-verify-$job" "$HOME"/kelir-verify-"$job"-*
-else
-  set -- "$HOME"/kelir-verify*
+  case "$job" in
+    *[!A-Za-z0-9._-]* | .* | *..*) die "--job must be a plain job name, not $job" ;;
+  esac
 fi
-for d in "$@"; do
-  [ -d "$d" ] || continue
-  printf "%s\t%s\t%s\n" "$(stat -c %Y "$d" 2>/dev/null || echo 0)" \
-    "$(du -sm "$d" 2>/dev/null | cut -f1)" "$d"
-done | sort -rn | {
-  tab=$(printf "\t")
-  while IFS="$tab" read -r mtime size d; do
-    size=${size:-0}; n=$((n+1))
-    busy=""
-    if [ -f "$d/lock" ] && pid=$(sed -n "s/^pid //p" "$d/lock" 2>/dev/null) && kill -0 "$pid" 2>/dev/null; then
-      busy="in use by pid $pid"
-    elif [ -n "$mtime" ] && [ $(( now - mtime )) -lt 3600 ]; then
-      busy="written to $(( now - mtime ))s ago"
+home=$(cd "$HOME" 2>/dev/null && pwd -P) || die "cannot resolve HOME"
+now=$(date +%s)
+tab=$(printf "\t")
+
+# What a work dir this script created contains, and nothing else.
+allowed() {
+  case "$1" in
+    .kelir-workdir | src-tree | k.b64 | run.sh | lock | logs) return 0 ;;
+  esac
+  return 1
+}
+
+# refuse_reason <dir>: print why a dir may not be touched, or nothing.
+refuse_reason() {
+  local d=$1 base real entry name marker
+  base=${d##*/}
+  case "$base" in
+    kelir-verify-?*) ;;
+    *) echo "not a kelir-verify work dir name"; return ;;
+  esac
+  name=${base#kelir-verify-}
+  case "$name" in
+    *[!A-Za-z0-9._-]* | .* | *..*) echo "name is not a plain job name"; return ;;
+  esac
+  if [ -L "$d" ]; then echo "symlink"; return; fi
+  if [ ! -d "$d" ]; then echo "not a directory"; return; fi
+  real=$(cd "$d" 2>/dev/null && pwd -P) || { echo "cannot resolve"; return; }
+  case "$real" in
+    "$home"/*) ;;
+    *) echo "resolves outside HOME ($real)"; return ;;
+  esac
+  case "$real" in
+    "$home"/*/*) echo "not directly under HOME ($real)"; return ;;
+  esac
+  marker="$d/.kelir-workdir"
+  if [ ! -f "$marker" ] || [ -L "$marker" ]; then
+    echo "no marker from this script: not created by it"
+    return
+  fi
+  if ! grep -q "^token [A-Za-z0-9._-]" "$marker" 2>/dev/null; then
+    echo "marker carries no token"
+    return
+  fi
+  while IFS= read -r entry; do
+    name=${entry##*/}
+    if ! allowed "$name"; then
+      echo "contains something a work dir does not ($name)"
+      return
     fi
-    if [ $n -le $keep ]; then
-      printf "keep    %6s MB  %s\n" "$size" "$d"
-    elif [ -n "$busy" ]; then
-      printf "skip    %6s MB  %s  (%s)\n" "$size" "$d" "$busy"
-    elif [ "$force" = 1 ]; then
-      printf "remove  %6s MB  %s\n" "$size" "$d"
+  done <<EOF2
+$(find "$d" -mindepth 1 -maxdepth 1 2>/dev/null)
+EOF2
+}
+
+say_skip() { printf "skip    %6s MB  %s  (%s)\n" "$2" "$1" "$3"; }
+
+n=0; kept=0; skipped=0; stale=0; removed=0
+# Group by job: the work-dir name after `kelir-verify-`, so keeping is per job
+# and an idle job never loses its warm target to a busier one (S8).
+# Records go into an array, not a newline-joined string: this body lives inside
+# a single-quoted assignment, so an ANSI-C quoted newline here would close that
+# quote early and silently turn the separator into a literal n (one merged line
+# for every dir, and every dir then read as "not a directory").
+recs=()
+for d in "$HOME"/kelir-verify*; do
+  [ -e "$d" ] || [ -L "$d" ] || continue
+  base=${d##*/}
+  if [ -n "$job" ]; then
+    case "$base" in
+      "kelir-verify-$job" | "kelir-verify-$job"-*) ;;
+      *) continue ;;
+    esac
+  fi
+  n=$((n + 1))
+  mtime=$(stat -c %Y "$d" 2>/dev/null || echo 0)
+  size=$(du -sm "$d" 2>/dev/null | cut -f1)
+  recs+=("$mtime$tab${size:-0}$tab$d")
+done
+
+# Newest first, then keep the newest `keep` of each job.
+printf "%s\n" ${recs[@]+"${recs[@]}"} | sort -rn | {
+  while IFS="$tab" read -r mtime size d; do
+    [ -n "$d" ] || continue
+    group=${d##*/}
+    group=${group#kelir-verify-}
+    # A job owns `kelir-verify-<job>` and `kelir-verify-<job>-<n>` (a second
+    # work dir for the same job): those are one family, so keeping is per job.
+    case "$group" in
+      *-[0-9] | *-[0-9][0-9] | *-[0-9][0-9][0-9]) group=${group%-*} ;;
+    esac
+    reason=$(refuse_reason "$d")
+    if [ -n "$reason" ]; then
+      say_skip "$d" "$size" "$reason"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    # per-group counter: keeping is per job (S8)
+    key=$(printf "%s" "$group" | tr -c "A-Za-z0-9._-" "_")
+    eval "cnt=\${cnt_$key:-0}"
+    cnt=$((cnt + 1))
+    eval "cnt_$key=$cnt"
+
+    pid=""
+    if [ -f "$d/lock" ] && pid=$(sed -n "s/^pid //p" "$d/lock" 2>/dev/null) && kill -0 "$pid" 2>/dev/null; then
+      say_skip "$d" "$size" "in use by pid $pid"
+      skipped=$((skipped + 1))
+    elif [ "$cnt" -le "$keep" ] && [ -n "$mtime" ] && [ "$mtime" -gt 0 ]; then
+      printf "keep    %6s MB  %s  (job %s, #%s)\n" "$size" "$d" "$group" "$cnt"
+      kept=$((kept + 1))
+    elif [ -n "$mtime" ] && [ $((now - mtime)) -lt 3600 ]; then
+      say_skip "$d" "$size" "written to $((now - mtime))s ago"
+      skipped=$((skipped + 1))
+    elif [ "$yes" = 1 ]; then
+      printf "remove  %6s MB  %s  (job %s, #%s)\n" "$size" "$d" "$group" "$cnt"
       rm -rf "$d"
+      removed=$((removed + 1))
     else
-      printf "stale   %6s MB  %s  (--force removes it)\n" "$size" "$d"
+      printf "stale   %6s MB  %s  (job %s, #%s; --yes removes it)\n" "$size" "$d" "$group" "$cnt"
+      stale=$((stale + 1))
     fi
   done
-  printf "prune: %s work dirs%s; kept the newest %s\n" "$n" "${job:+ for $job}" "$keep"
+  printf "prune: %s work dirs%s: %s kept, %s skipped, %s stale, %s removed (newest %s per job, %s)\n" \
+    "$n" "${job:+ for job $job}" "$kept" "$skipped" "$stale" "$removed" "$keep" \
+    "$([ "$yes" = 1 ] && echo "--yes" || echo "dry run")"
 }'
   hc exec --on "$M" --timeout 300 \
-    --env "KEEP=$keep" --env "FORCE=$force" --env "JOB=$job" \
+    --env "KEEP=$keep" --env "YES=$yes" --env "JOB=$job" \
     -- bash -lc "$far_prune" 2>&1 | tr -d '\r'
   exit "${PIPESTATUS[0]}"
 fi
@@ -88,9 +218,18 @@ shift 2 2>/dev/null || true
 [ "${1:-}" = "--" ] && shift
 extra=("$@")
 
+case "$W" in
+  kelir-verify-?*) ;;
+  kelir-verify) echo "remote-check: name the work dir after the job: kelir-verify-<job>" >&2; exit 2 ;;
+  *) echo "remote-check: the work dir must be kelir-verify or kelir-verify-<job>, not $W" >&2; exit 2 ;;
+esac
+
 root="$(git rev-parse --show-toplevel)" || exit 2
 cd "$root" || exit 2
 HEAD_SHA="$(git rev-parse HEAD)"
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+  echo "remote-check: this checkout has uncommitted changes; the bundle carries HEAD ($(git rev-parse --short HEAD)) only" >&2
+fi
 
 B="$(mktemp -u)".bundle
 far="$(mktemp -u)".sh
@@ -108,7 +247,22 @@ esac
 export CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 wd="$HOME/$W"
+created=0
+[ -d "$wd" ] || created=1
 mkdir -p "$wd" && cd "$wd" || exit 1
+# The marker is the proof that prune may ever remove this dir: it is written
+# only when this script creates the dir, so a directory somebody else made (or
+# one that merely looks like a work dir) is never a prune candidate.
+if [ "$created" = 1 ] && [ ! -e .kelir-workdir ]; then
+  printf 'token %s\ncreated %s\njob %s\ncreator remote-check.sh\n' \
+    "$(date -u +%Y%m%dT%H%M%SZ).$$.$RANDOM$RANDOM" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$W" \
+    >.kelir-workdir
+fi
+# Logs go in this work dir, in a directory of their own per run: two gates for
+# different jobs on the same box must not read each other's results (S6).
+logdir="$wd/logs/$(date -u +%Y%m%dT%H%M%SZ).$$"
+mkdir -p "$logdir" || exit 1
+echo "logdir: $logdir"
 base64 -d k.b64 > k.bundle 2>/dev/null || { echo "MACHINE-GATE: cannot decode k.b64"; exit 1; }
 tree=src-tree
 if [ ! -d "$tree/.git" ]; then
@@ -125,36 +279,37 @@ git checkout -q -f --detach "$HEAD_SHA" 2>/dev/null || {
 git clean -qfdx -e target >/dev/null 2>&1
 echo "HEAD: $(git log --oneline -1)"
 echo "MACHINE-GATE: $(uname -s) $(nproc) cores, $(date -u +%FT%TZ)"
-if cargo fmt --check > /tmp/fmt.log 2>&1; then
+if cargo fmt --check > "$logdir/fmt.log" 2>&1; then
   echo FMT-OK
 else
-  echo FMT-FAIL; head -20 /tmp/fmt.log; exit 1
+  echo FMT-FAIL; head -20 "$logdir/fmt.log"; exit 1
 fi
-if cargo clippy --all-targets -- -D warnings > /tmp/clippy.log 2>&1; then
+if cargo clippy --all-targets -- -D warnings > "$logdir/clippy.log" 2>&1; then
   echo CLIPPY-OK
 else
-  echo CLIPPY-FAIL; tail -20 /tmp/clippy.log; exit 1
+  echo CLIPPY-FAIL; tail -20 "$logdir/clippy.log"; exit 1
 fi
 if command -v cargo-nextest >/dev/null 2>&1; then
-  cargo nextest run --no-fail-fast --retries 2 -j 4 $EXTRA > /tmp/nx.log 2>&1
+  cargo nextest run --no-fail-fast --retries 2 -j 4 $EXTRA > "$logdir/nextest.log" 2>&1
   rc=$?
-  grep -E '^[[:space:]]*(Summary|TRY [2-9]|FLAKY)' /tmp/nx.log | sed 's/^[[:space:]]*//' | tail -30
+  grep -E '^[[:space:]]*(Summary|TRY [2-9]|FLAKY|LEAK)' "$logdir/nextest.log" | sed 's/^[[:space:]]*//' | tail -30
   if [ $rc != 0 ]; then
-    grep -E 'FAIL|panicked' /tmp/nx.log | head -20
-    echo NEXTEST-FAIL; exit $rc
+    grep -E 'FAIL|LEAK|panicked' "$logdir/nextest.log" | head -20
+    echo "NEXTEST-FAIL (log: $logdir/nextest.log)"
+    exit $rc
   fi
   echo NEXTEST-OK
 else
-  cargo test --no-fail-fast > /tmp/ct.log 2>&1
+  cargo test --no-fail-fast > "$logdir/test.log" 2>&1
   rc=$?
-  grep -E '^test result|FAILED|panicked' /tmp/ct.log | head -40
-  if [ $rc != 0 ]; then echo TEST-FAIL; exit $rc; fi
+  grep -E '^test result|FAILED|panicked' "$logdir/test.log" | head -40
+  if [ $rc != 0 ]; then echo "TEST-FAIL (log: $logdir/test.log)"; exit $rc; fi
   echo TEST-OK
 fi
-if cargo test --doc > /tmp/doc.log 2>&1; then
+if cargo test --doc > "$logdir/doc.log" 2>&1; then
   echo DOCTEST-OK
 else
-  echo DOCTEST-FAIL; tail -10 /tmp/doc.log; exit 1
+  echo DOCTEST-FAIL; tail -10 "$logdir/doc.log"; exit 1
 fi
 EOS
 
