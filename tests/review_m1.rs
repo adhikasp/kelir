@@ -103,6 +103,14 @@ async fn stop_during_the_stream_leaves_a_clean_log_and_next_request() {
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     session.wait_for("step_started").await;
+    // `step_started` is logged before the request goes out, so wait until the
+    // mock really has it: a `stop` that wins the race leaves the first request
+    // unsent, and the assertion on two requests would be about the race.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while mock.request_count() == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(mock.request_count(), 1, "the first request never arrived");
     let answer = session.ctl(&["stop", "enough"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     let ended = session.wait_for("turn_ended").await;
