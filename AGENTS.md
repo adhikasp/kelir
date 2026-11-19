@@ -69,3 +69,12 @@ ends with: the gates on Windows **and** Linux (`cargo fmt --check`, `clippy -D w
 (PASS, or fixes verified), then the retro pass, and only then the next one starts. A failing gate or a
 FAIL verdict blocks the next item; it is fixed first. Each landed milestone is recorded in
 `docs/PROGRESS.md`.
+
+## Parallel work: worktrees, one writer per worktree
+
+Concurrency is by **git worktree**: each job has its own worktree (`C:/Users/the maintainer/kelir-wt/<job>`),
+branch `job/<job>`, target dir, state dir and Linux work dir (`bash scripts/remote-check.sh <machine>
+kelir-verify-<job>`). The rule is *one writer per worktree*, and **only the orchestrator merges to
+main**, one branch at a time: gates on the branch (Windows + Linux), a fresh reviewer on the branch, then
+merge, then the gates again on main. Workers keep changes localized (new modules, surgical edits to shared
+files) because several jobs edit `session.rs`/`config.rs`. Never kill processes by image name.

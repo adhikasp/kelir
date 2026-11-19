@@ -112,3 +112,23 @@ slow; never freeze a live count. **M8 builtin skill `herdr`**: `hc ls --json` (a
 prefix to count agents in my space), `hc get/read/send/wait`, `hc machine ls`, rule: never kill another agent's
 pane; outside Herdr the line is absent and the skill says so. In SPEC.md (Sources bullet, M5 and M8 rows). Goes into
 the M5-B brief (M5-A is already in flight and only covers file sources + skills) and the M8 brief.
+
+## Update (2026-11-19 13:25) — parallel workers, worktrees (maintainer: "increase the progress concurrency")
+
+Concurrency model in AGENTS.md ("Parallel work"). Running now:
+
+| job | where | pane | brief |
+|---|---|---|---|
+| M5-A (sources, skills) | main tree (finishing) | t10z | docs/tasks/M5-A.md |
+| steer1fix | kelir-wt/steer1fix, branch job/steer1fix | t110 | STEER-1-fixes.md |
+| steer2 (two providers, opencode credential) | kelir-wt/steer2 | t111 | STEER-2.md |
+| steer3 (markdown in the TUI) | kelir-wt/steer3 | t112 | STEER-3.md |
+| steer4 (no step limit by default) | kelir-wt/steer4 | t113 | STEER-4.md |
+
+All are kelir-as-implementer (OpenCode Go, default model) with per-job state dirs under
+`C:/Users/the maintainer/kelir-wt/state/<job>` (separable transcripts for the introspective pass). Per job: kelir
+implements -> orchestrator gates (Win + Linux) -> fresh QA reviewer on the branch -> fresh introspective
+agent on the transcript (docs/retros/<job>.md) -> orchestrator merges to main -> gates on main. Merge
+order by smallest first, so conflicts stay small: steer4, steer1fix, steer2, steer3. M5-A merges first (it is
+already on main). Next wave when slots free: M5-B (Herdr line, hint, memory, attachments, observe), M6 (MCP).
+CPU is 6C/12T: at most ~4 concurrent cargo-building workers.
