@@ -39,9 +39,21 @@ authoritative; if you must deviate, write the deviation and the reason in `docs/
 
 ## Gates per milestone
 
-`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (all layers 1-2),
-then reviewer sign-off from layer 3. Record the result in `docs/PROGRESS.md` (one row per
-milestone: date, commit, test counts, live-drive verdict, known gaps).
+`bash scripts/gate.sh` (add `--linux` to include the Linux half) is the gate: it takes the one machine-wide
+gate lock, caps itself at 4 build jobs and 4 test threads, runs `cargo fmt --check`, `cargo clippy
+--all-targets -- -D warnings`, the whole suite through `cargo nextest run --no-fail-fast --retries 2 -j 4`,
+`cargo test --doc`, and optionally `scripts/remote-check.sh`. One line per stage; `gate: PASS` or `gate:
+FAIL`; logs in `<scratch>/gate-<job>-<stamp>/`. A test that needed a retry fails the gate and is named in the
+summary (`KELIR_GATE_ALLOW_RETRIES=1` accepts it deliberately). `cargo test --lib <module>` stays the fast
+loop; `scripts/gate.sh --quick` is fmt + clippy before a commit. Numbers and rejected options:
+`docs/BUILD.md`.
+
+Do not run the stages by hand in parallel with another worker's gate: the lock is what keeps three workers on
+one desktop from flaking each other (STEER-9). If you must bypass it, `--no-lock` exists for a driver that
+already holds it.
+
+Then reviewer sign-off from layer 3. Record the result in `docs/PROGRESS.md` (one row per milestone: date,
+commit, test counts, live-drive verdict, known gaps).
 
 ## Linux gate
 
