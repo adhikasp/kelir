@@ -200,3 +200,14 @@ events/providers/troubleshooting + source map), generated where possible and gua
 via `kelir docs`, shipped as a builtin skill `kelir` that the hint (M5-B) and steering rules (M8) can inject. SPEC.md has a
 Self-documentation section; AGENTS.md says docs are part of done. Run it right after STEER-5/6 (it needs the env-var registry
 and the final config surface), before M5-B.
+
+## Update (2026-11-19 18:20) — M5-A fixes merged; steer5/steer6 FAILED review, fixers running
+
+- **m5afix merged** (e12d3d6). 
+- **steer5 (retry/backoff) review = FAIL** (2 blockers: branch predates STEER-4 -> two Paused variants; say --now/model don't
+  interrupt a wait; 4 should-fix): fixer **steer5fix** running in kelir-wt/steer5 (brief docs/tasks/STEER-5-fixes.md, pane t12c).
+- **steer6 (retro-driven loop) review = FAIL** (1 blocker: cmd.exe long route drops /C; S1 backslash halving on the short Windows
+  route; S2 parallel_tool_calls depends on slow model list; S3 reasoning_effort unconditional): fixer **steer6fix** running in
+  kelir-wt/steer6 (docs/tasks/STEER-6-fixes.md, pane t12q).
+- **tui2** (TUI v2 + markdown) running (pane t11z). Design note docs/design/TUI-v2.md (ea9fc54). **steer11** (self-docs) and
+  steer7/8/9, steer1fix, steer2, M5-B, M6.. queued; slots limited to three kelir workers (rate limit until STEER-5 lands).
