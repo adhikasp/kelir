@@ -24,14 +24,17 @@ fn of_type<'a>(log: &'a [Value], event_type: &str) -> Vec<&'a Value> {
 /// itself and prints the count, so "the file has N lines" is the shell's own
 /// statement about what it ran, not kelir's about what it sent.
 fn big_heredoc(lines: usize) -> String {
-    let mut cmd = String::from("cat > big.txt <<'KELIR_EOF'\n");
+    heredoc("big.txt", lines, "past the 8 KB cut")
+}
+
+/// The same shape with the file and the wording as parameters, so one fixture
+/// serves the 40 KB bash call and the `bg run` job.
+fn heredoc(file: &str, lines: usize, tail: &str) -> String {
+    let mut cmd = format!("cat > {file} <<'KELIR_EOF'\n");
     for line in 0..lines {
-        cmd.push_str(&format!(
-            "line {line} of a heredoc written past the 8 KB cut\n"
-        ));
+        cmd.push_str(&format!("line {line} of a heredoc written {tail}\n"));
     }
-    cmd.push_str("KELIR_EOF\nwc -l < big.txt\n");
-    assert!(cmd.len() > 40_000, "the command is {} bytes", cmd.len());
+    cmd.push_str(&format!("KELIR_EOF\nwc -l < {file}\n"));
     cmd
 }
 
@@ -41,6 +44,11 @@ fn big_heredoc(lines: usize) -> String {
 #[tokio::test]
 async fn a_40_kb_heredoc_runs_from_a_file_and_writes_every_line() {
     const LINES: usize = 1_200;
+    assert!(
+        big_heredoc(LINES).len() > 40_000,
+        "the fixture is {} bytes",
+        big_heredoc(LINES).len()
+    );
     let mock = Mock::start(vec![
         Reply::Sse(sse(&tool_turn(
             "call_big",
@@ -312,4 +320,60 @@ async fn a_small_window_keeps_its_own_fraction() {
     let compacted = of_type(&log, "compacted");
     assert_eq!(compacted.len(), 1, "{log:?}");
     assert_eq!(compacted[0]["by"], "auto");
+}
+
+/// F2 for `kelir bg run`: a job command in the band that used to be cut (over
+/// the shell's ~8 KB limit, under the ~32 KB a Windows process's own command
+/// line can carry) runs from a file. A command *past* the process limit cannot
+/// reach `kelir bg run` at all — its own argv is the limit — so the model
+/// writes the script with `edit` and runs it; that is a CLI ceiling, recorded
+/// in DEVIATIONS.md.
+#[tokio::test]
+async fn a_long_bg_job_command_runs_from_a_file() {
+    const LINES: usize = 300;
+    let heredoc = heredoc("job-big.txt", LINES, "in a background job");
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let sandbox = Sandbox::new("");
+    let run = sandbox
+        .kelir(&mock.base_url(), &["run", "--json", "unused"], &[])
+        .await;
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+
+    let job = sandbox
+        .kelir(&mock.base_url(), &["bg", "run", &heredoc], &[])
+        .await;
+    assert_eq!(job.code, 0, "stderr: {}", job.stderr);
+    let id = job
+        .stdout
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    assert!(id.starts_with("bg_"), "{}", job.stdout);
+
+    let status = sandbox.state.join("bg").join(format!("{id}.status"));
+    let mut waited = 0;
+    let settled = loop {
+        let text = std::fs::read_to_string(&status).unwrap_or_default();
+        let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        if value["state"] != "running" && !text.is_empty() {
+            break value;
+        }
+        assert!(waited < 120, "the job never settled: {text}");
+        waited += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
+    assert_eq!(settled["exit_code"], 0, "{settled}");
+
+    let written = std::fs::read_to_string(sandbox.cwd.join("job-big.txt")).unwrap();
+    assert_eq!(
+        written.lines().count(),
+        LINES,
+        "the bg job's heredoc was cut"
+    );
+    // The status file keeps a short reference; the script keeps the bytes.
+    assert!(settled["cmd_path"].is_string(), "{settled}");
+    let script = std::path::Path::new(settled["cmd_path"].as_str().unwrap());
+    assert!(script.is_file(), "{}", script.display());
+    assert_eq!(std::fs::read_to_string(script).unwrap(), heredoc);
 }

@@ -1161,12 +1161,24 @@ async fn run(args: BgRunArgs) -> u8 {
         .ok()
         .map(|call| call.trim().to_string())
         .filter(|call| !call.is_empty());
+    // A long job command takes the same route as a long bash call: it goes in
+    // a file beside the job's output, so neither the shim's spawn nor the
+    // shell's gets a command line past the Windows limit (`shellcmd`).
+    let shell_args: Vec<String> = shell.iter().skip(1).cloned().collect();
+    let cmd_file = match crate::shellcmd::input(&command, &shell_args, &dir) {
+        Ok(crate::shellcmd::ShellInput::Argument(_)) => None,
+        Ok(crate::shellcmd::ShellInput::Script(path)) => Some(path),
+        Err(error) => {
+            eprintln!("kelir: bg run: {error}");
+            return 1;
+        }
+    };
     let launch = Launch {
         dir: dir.clone(),
         id: id.clone(),
         out: out.clone(),
         cmd: command.clone(),
-        cmd_file: None,
+        cmd_file,
         shell,
         kind: KIND_JOB,
         // A job belongs to nobody: it outlives whatever started it.
