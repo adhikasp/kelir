@@ -95,11 +95,14 @@ fn snapshot_streaming_text_in_the_live_area() {
         turn: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
+        limit: None,
     });
     app.apply(UiEvent::Step {
         step: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
+        turn_steps: 1,
+        limit: None,
     });
     app.apply(UiEvent::Delta("Hello ".into()));
     app.apply(UiEvent::Delta("world".into()));
@@ -116,6 +119,7 @@ fn snapshot_a_running_call() {
         turn: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
+        limit: None,
     });
     app.apply(UiEvent::Assistant {
         text: String::new(),
@@ -137,6 +141,7 @@ fn snapshot_an_error() {
         turn: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
+        limit: None,
     });
     app.apply(UiEvent::Error("provider said no".into()));
     assert_eq!(app.status.phase, Phase::Error);
