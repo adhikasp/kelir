@@ -59,3 +59,13 @@ child processes of a console-less parent each get their own window unless starte
 `CREATE_NO_WINDOW`. Before reporting, check `tasklist` for leftover `kelir.exe`/`bash.exe` from your
 runs. Reproduce Windows process bugs from a console-less parent too (not only from a Herdr pane,
 which has a console). Incident: 2026-11-19, 160+ stalled `bg-shim` jobs and their consoles.
+
+## Continuous driving never skips verification
+
+The orchestrator drives M5-A through M11 without pausing for the maintainer's approval between
+milestones. That is the only thing "continuous" removes. Every milestone and every steering job still
+ends with: the gates on Windows **and** Linux (`cargo fmt --check`, `clippy -D warnings`, full
+`cargo test`, `scripts/remote-check.sh`), then a **fresh reviewer's verdict** in `docs/reviews/`
+(PASS, or fixes verified), then the retro pass, and only then the next one starts. A failing gate or a
+FAIL verdict blocks the next item; it is fixed first. Each landed milestone is recorded in
+`docs/PROGRESS.md`.

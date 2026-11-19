@@ -83,3 +83,10 @@ STEER-3 implement, M5-M11. The repo is still local only: no remote, nothing push
   missing key, or a decision only the maintainer can make. A watchdog on the Linux box nudges this pane when idle.
 - Next after M5-A lands: gates -> fresh reviewer (kelir) -> retro (fresh opencode) -> STEER-1-fixes -> STEER-2 ->
   STEER-3 -> M5-B -> M6 ... M11, recording each landed milestone in docs/PROGRESS.md.
+
+## Rule (maintainer clarification, 2026-11-19): continuous never skips verification
+
+"Drive continuously through M11" means **no pause for approval between milestones, nothing else**.
+Every milestone/job ends with, in order: (1) gates on Windows and Linux, (2) a fresh reviewer's verdict
+in `docs/reviews/` (fixes re-verified), (3) the retro pass, (4) the PROGRESS row; only then does the
+next item start. Failing gate or FAIL verdict = fix first. (Also in AGENTS.md.)
