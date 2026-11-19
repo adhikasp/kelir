@@ -354,21 +354,20 @@ fn one_line(text: &str) -> String {
     crate::util::truncate_chars(&text.replace('\n', " ↵ "), 60)
 }
 
-/// The session's one-line label for a running call, which the state row shows.
+/// The session's one-line label for a running call, which the state row shows:
+/// the tool's name and its own first line of input, never the raw JSON (a long
+/// argument blob in a status row is noise).
 pub fn call_label(name: &str, input: &Value) -> String {
-    match name {
-        "bash" => match input.get("command").and_then(Value::as_str) {
-            Some(command) => {
-                let first = command.lines().next().unwrap_or("").trim();
-                format!("bash: {}", crate::util::truncate_chars(first, 60))
-            }
-            None => "bash".to_string(),
-        },
-        "edit" => match input.get("path").and_then(Value::as_str) {
-            Some(path) => format!("edit: {path}"),
-            None => "edit".to_string(),
-        },
-        other => other.to_string(),
+    let detail = input
+        .get("command")
+        .and_then(Value::as_str)
+        .or_else(|| input.get("path").and_then(Value::as_str))
+        .map(|text| text.lines().next().unwrap_or("").trim().to_string())
+        .unwrap_or_default();
+    if detail.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}: {}", crate::util::truncate_chars(&detail, 60))
     }
 }
 
@@ -2458,6 +2457,31 @@ mod tests {
                 .any(|row| row.contains("kelir: nothing to stop")),
             "{texts:?}"
         );
+    }
+
+    #[test]
+    fn a_running_call_label_names_the_tool_and_its_first_line_never_json() {
+        assert_eq!(
+            call_label("bash", &json!({"command": "git --version"})),
+            "bash: git --version"
+        );
+        assert_eq!(
+            call_label(
+                "bash",
+                &json!({"command": "cargo test
+&& cargo fmt"})
+            ),
+            "bash: cargo test"
+        );
+        assert_eq!(
+            call_label("edit", &json!({"path": "src/lib.rs"})),
+            "edit: src/lib.rs"
+        );
+        // An unknown tool with a big blob is just its name: the state row is
+        // not the place for JSON.
+        let blob = json!({"weird": "x".repeat(500)});
+        assert_eq!(call_label("mytool", &blob), "mytool");
+        assert!(!call_label("mytool", &blob).contains('{'));
     }
 
     #[test]

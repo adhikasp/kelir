@@ -265,9 +265,13 @@ fn group_rows(
         let own_line = !fold || call.failed() || call.name != "bash";
         if !own_line {
             if !folded {
-                // The fold counts every shell call in the group; a failed one
-                // still gets its own line below it.
-                let count = calls.iter().filter(|call| call.name == "bash").count();
+                // The fold counts only the calls it stands for: a failed one is
+                // on its own line just below, and counting it twice would read
+                // as "ran 3 commands" next to one of them.
+                let count = calls
+                    .iter()
+                    .filter(|call| call.name == "bash" && !call.failed())
+                    .count();
                 if count > 1 {
                     lines.push(Line::from(Span::styled(
                         format!("  ran {count} commands · {:.1}s", elapsed.as_secs_f64()),
@@ -397,7 +401,10 @@ mod tests {
         group.push(failed);
         group.push(call("$ d", "bash"));
         let rows = text(&group.close(theme, 80));
-        assert!(rows[0].contains("ran 4 commands"), "{rows:?}");
+        assert!(
+            rows[0].contains("ran 3 commands"),
+            "the failed call is not counted twice: {rows:?}"
+        );
         assert!(rows[1].contains("$ cargo test"), "{rows:?}");
         assert!(rows[1].contains("✗ exit 101"), "{rows:?}");
         assert!(rows[2].starts_with("    boom"), "{rows:?}");
