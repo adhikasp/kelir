@@ -31,6 +31,7 @@ pub mod sse;
 pub mod stream;
 pub mod theme;
 pub mod tools;
+pub mod tools_view;
 pub mod tui;
 pub mod util;
 pub mod verbs;
