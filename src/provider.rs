@@ -575,13 +575,13 @@ mod tests {
     #[test]
     fn a_refusal_keeps_a_redacted_body_and_an_outage_keeps_none() {
         let mut cfg = openrouter();
-        cfg.key = Some("sk-or-v1-a-real-looking-key".into());
+        cfg.key = Some("fixture-key-not-a-credential".into());
         let client = Client::new(cfg, "ses_1", None).unwrap();
         // An outage: the status and its class, never the body.
         assert_eq!(
             client.message_for(
                 503,
-                "upstream said: Bearer sk-or-v1-a-real-looking-key refused"
+                "upstream said: Bearer fixture-key-not-a-credential refused"
             ),
             "http 503: provider error"
         );
@@ -591,7 +591,7 @@ mod tests {
         );
         // A refusal: the body is the answer, minus any credential.
         assert_eq!(
-            client.message_for(400, "unknown model; key sk-or-v1-a-real-looking-key"),
+            client.message_for(400, "unknown model; key fixture-key-not-a-credential"),
             "http 400: provider refused: unknown model; key [redacted]"
         );
         assert_eq!(client.message_for(404, "  "), "http 404: provider refused");

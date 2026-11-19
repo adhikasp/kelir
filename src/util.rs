@@ -73,11 +73,14 @@ mod tests {
     #[test]
     fn a_secret_is_redacted_and_short_strings_are_left_alone() {
         assert_eq!(
-            redact("Bearer sk-or-v1-abc into the void", Some("sk-or-v1-abc")),
+            redact(
+                "Bearer fixture-key-abc into the void",
+                Some("fixture-key-abc")
+            ),
             "Bearer [redacted] into the void"
         );
         assert_eq!(
-            redact("nothing to do", Some("sk-or-v1-abc")),
+            redact("nothing to do", Some("fixture-key-abc")),
             "nothing to do"
         );
         assert_eq!(redact("nothing to do", None), "nothing to do");
