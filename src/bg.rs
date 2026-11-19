@@ -233,7 +233,10 @@ pub fn shim_identity(status: &Status) -> ShimIdentity {
     identity(status.shim, status.shim_started.as_deref())
 }
 
-/// The same question for the command's own pid (`pid_started`).
+/// The same question for the command's own pid (`pid_started`): only `cancel`
+/// on Windows walks a lost job's tree by it, and the unit tests ask on every
+/// platform.
+#[cfg(any(windows, test))]
 fn pid_identity(status: &Status) -> ShimIdentity {
     identity(status.pid, status.pid_started.as_deref())
 }
