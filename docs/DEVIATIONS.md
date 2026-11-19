@@ -122,6 +122,31 @@ consuming a scripted reply) so a session can start in a test.
 - **`step` is a session counter, not a turn counter.** In a `--keep` session the
   second turn starts at the step after the first turn's last one, so `step` stays
   unique in one log. `max_steps` still counts the steps of one turn.
+- **A `max_steps` cap pauses the turn; it never fails it (STEER-4).** Unset or
+  `0` in `config.toml` (or `--max-steps 0`) means no cap at all, which is the
+  default: the old `100` default is gone, and `0` is accepted as "unlimited"
+  rather than refused, so a stopgap config cannot break a session. Reaching an
+  explicit cap ends the turn with `turn_ended outcome=paused` (not `error`), the
+  NDJSON `result` says `paused` with exit code 0 (a pause is not a failure), and
+  stderr/TUI print "turn paused after N steps; say continue to resume". A
+  `--keep` session stays up and its next `say` opens a new turn with a fresh
+  count; `resume` of a paused log continues it like a stopped one (see
+  `resume::interrupted`). The TUI status line shows `step used/limit` only when a
+  cap is set, and the TUI banner names the cap; the phase word is `paused`. A
+  verb's answer already carries a `state` object; it now also reports
+  `turn_steps` (the turn's own count) and `max_steps` (the cap, `null` when
+  there is none), so a steering human sees a pause coming. Two details the
+  STEER-4 review asked for (S1, N1, N2): the cap is checked *before* a step is
+  counted, so after a pause `state.turn_steps` is the number of steps that ran
+  (never `cap + 1`), and the count is right the moment the pause is reported;
+  with a cap set the TUI's status line says `step 0/N` while idle too, not a
+  bare `step 0` that would hide the limit until a turn started; and a paused
+  turn reports Herdr `blocked`, not `idle`, because a paused turn *is* waiting
+  for a human (saying `continue`) and a pane supervisor cannot otherwise tell
+  it from one that never started. `paused` would be the clearer word but this
+  Herdr does not know it (measured with `scripts/live/m2_osc_probe.py` on `hc`
+  0.1.21: `state=paused` and `state=waiting` leave the pane's status `null`,
+  `state=blocked` shows as `blocked`), so the record keeps a word Herdr shows.
 - **`later` while the session is idle starts a turn at once.** There is no turn
   to end; the message is recorded with `delivery: "later"` and the process runs a
   turn for it. Likewise a `say` still pending when a turn ends opens the next
@@ -276,7 +301,9 @@ consuming a scripted reply) so a session can start in a test.
 - **A resume takes its id, cwd, provider, model and counters from the log, not  from flags.** `--cwd`, `--model` and `--provider` are ignored with `--resume`;
   the config (windows, prompts, keys) is today's machine's. The model/provider
   are the last `step_started`'s, so a `model` verb swap survives the resume.
-  `step` and `turn` continue from the log instead of restarting.
+  `step` and `turn` continue from the log instead of restarting. The turn's own
+  step count restarts at 0 (it is per turn), and today's `max_steps`/`--max-steps`
+  applies to the resumed turn like every other config knob.
 - **`kelir resume <id>` on a finished session with no task does nothing.** It
   appends the `resumed` event and one `session_ended {reason: "resumed"}`, exits
   0 and makes no provider request. With a task (`kelir resume <id> <task>`,

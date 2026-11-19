@@ -49,11 +49,21 @@ pub enum UiEvent {
         turn: u32,
         provider: String,
         model: String,
+        /// The turn's step cap, when one is set (`None` = no limit).
+        limit: Option<u32>,
     },
     Step {
         step: u32,
         provider: String,
         model: String,
+        /// The steps taken in the current turn, and the turn's cap when one is
+        /// set (`None` = no limit, the default).
+        turn_steps: u32,
+        limit: Option<u32>,
+    },
+    /// An explicit cap was reached: the turn stops here, the session stays up.
+    Paused {
+        steps: u32,
     },
     /// A piece of streamed assistant text.
     Delta(String),
@@ -106,6 +116,8 @@ pub enum Phase {
     Idle,
     Working,
     Done,
+    /// An explicit `max_steps` cap ended the turn; the session is still up.
+    Paused,
     Error,
 }
 
@@ -115,6 +127,7 @@ impl Phase {
             Phase::Idle => "idle",
             Phase::Working => "working",
             Phase::Done => "done",
+            Phase::Paused => "paused",
             Phase::Error => "error",
         }
     }
@@ -132,6 +145,11 @@ pub struct Status {
     pub cached_tokens: u64,
     pub cost: f64,
     pub running: usize,
+    /// Steps taken in the turn now running, and the turn's cap when one is set
+    /// (`None` = no limit, the default). Shown only when a cap exists: a
+    /// counter with no limit is noise.
+    pub turn_steps: u32,
+    pub limit: Option<u32>,
     pub phase: Phase,
 }
 
@@ -147,6 +165,8 @@ impl Default for Status {
             cached_tokens: 0,
             cost: 0.0,
             running: 0,
+            turn_steps: 0,
+            limit: None,
             phase: Phase::Idle,
         }
     }
@@ -166,7 +186,11 @@ pub fn status_text(status: &Status) -> String {
     if !status.model.is_empty() {
         parts.push(status.model.clone());
     }
-    parts.push(format!("step {}", status.step));
+    match status.limit {
+        // An explicit cap: the count that matters is the turn's, against it.
+        Some(limit) => parts.push(format!("step {}/{limit}", status.turn_steps)),
+        None => parts.push(format!("step {}", status.step)),
+    }
     parts.push(format!(
         "{} tok",
         tokens(status.prompt_tokens + status.completion_tokens)
@@ -390,21 +414,37 @@ impl App {
                 turn,
                 provider,
                 model,
+                limit,
             } => {
                 self.status.turn = turn;
                 self.status.provider = provider;
                 self.status.model = model;
                 self.status.phase = Phase::Working;
+                // A new turn counts its own steps (an explicit cap is per turn).
+                self.status.turn_steps = 0;
+                self.status.limit = limit;
                 self.note.clear();
             }
             UiEvent::Step {
                 step,
                 provider,
                 model,
+                turn_steps,
+                limit,
             } => {
                 self.status.step = step;
                 self.status.provider = provider;
                 self.status.model = model;
+                self.status.turn_steps = turn_steps;
+                self.status.limit = limit;
+            }
+            UiEvent::Paused { steps } => {
+                self.status.phase = Phase::Paused;
+                self.status.running = 0;
+                self.status.turn_steps = steps;
+                self.push_text(&format!(
+                    "turn paused after {steps} steps; say continue to resume"
+                ));
             }
             UiEvent::Delta(text) => self.live.push(&text),
             UiEvent::Usage {
@@ -471,6 +511,7 @@ impl App {
             UiEvent::TurnEnded { outcome, .. } => {
                 self.status.phase = match outcome.as_str() {
                     "done" => Phase::Done,
+                    "paused" => Phase::Paused,
                     "error" => Phase::Error,
                     _ => Phase::Idle,
                 };
@@ -748,6 +789,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         Phase::Working => Style::default().fg(Color::Cyan),
         Phase::Error => Style::default().fg(Color::Red),
         Phase::Done => Style::default().fg(Color::Green),
+        Phase::Paused => Style::default().fg(Color::Yellow),
         Phase::Idle => Style::default().fg(Color::DarkGray),
     };
     let mut text = status_text(&app.status);
@@ -799,6 +841,7 @@ pub fn start(
     to_tui: mpsc::UnboundedSender<UiEvent>,
     verbs: mpsc::UnboundedSender<Incoming>,
     banner: &[String],
+    cap: Option<u32>,
 ) -> std::io::Result<Tui> {
     let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, VIEWPORT_HEIGHT));
     let terminal = ratatui::try_init_with_options(ratatui::TerminalOptions {
@@ -821,6 +864,10 @@ pub fn start(
     for line in banner {
         app.push_text(line);
     }
+    // The cap is known before the first turn (it comes from config or the
+    // flag), so the idle status line can already say `step 0/N` instead of a
+    // bare `step 0` that would hide the limit until a turn started (review N1).
+    app.status.limit = cap;
     let (key_tx, keys) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
         loop {
@@ -1050,6 +1097,8 @@ mod tests {
             cached_tokens: 900,
             cost: 0.00042,
             running: 2,
+            turn_steps: 3,
+            limit: None,
             phase: Phase::Working,
         };
         assert_eq!(
@@ -1061,6 +1110,74 @@ mod tests {
             status_text(&Status::default()),
             "kelir idle · step 0 · 0 tok"
         );
+    }
+
+    /// A cap is the only time the step count is shown against a limit: with no
+    /// cap a counter with nothing to count to is noise.
+    #[test]
+    fn the_status_line_shows_steps_used_and_limit_only_when_a_cap_is_set() {
+        let mut status = Status {
+            model: "m".into(),
+            turn_steps: 2,
+            limit: Some(5),
+            phase: Phase::Working,
+            ..Status::default()
+        };
+        assert!(
+            status_text(&status).contains(" · step 2/5 · "),
+            "{}",
+            status_text(&status)
+        );
+        status.limit = None;
+        status.step = 7;
+        assert!(
+            status_text(&status).contains(" · step 7 · "),
+            "{}",
+            status_text(&status)
+        );
+        assert!(!status_text(&status).contains('/'));
+    }
+
+    /// A paused turn says so in the status word and in one line of text, and it
+    /// keeps the turn's own count for the next look.
+    #[test]
+    fn a_paused_turn_reads_paused_and_says_how_to_resume() {
+        let mut app = app_of_width(80);
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: Some(3),
+        });
+        app.apply(UiEvent::Step {
+            step: 3,
+            provider: "p".into(),
+            model: "m".into(),
+            turn_steps: 3,
+            limit: Some(3),
+        });
+        app.apply(UiEvent::Paused { steps: 3 });
+        assert_eq!(app.status.phase, Phase::Paused);
+        assert_eq!(app.status.turn_steps, 3);
+        assert!(
+            status_text(&app.status).starts_with("kelir paused "),
+            "{}",
+            status_text(&app.status)
+        );
+        let scroll = app.take_scroll().join("|");
+        assert!(
+            scroll.contains("turn paused after 3 steps; say continue to resume"),
+            "{scroll}"
+        );
+        // The next turn starts its own count; the cap still applies.
+        app.apply(UiEvent::TurnStarted {
+            turn: 2,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: Some(3),
+        });
+        assert_eq!(app.status.turn_steps, 0, "a new turn counts from zero");
+        assert_eq!(app.status.limit, Some(3));
     }
 
     #[test]
@@ -1170,6 +1287,7 @@ mod tests {
             turn: 1,
             provider: "p".into(),
             model: "m".into(),
+            limit: None,
         });
         assert_eq!(app.status.phase, Phase::Working);
         let mut typed = String::new();
@@ -1287,6 +1405,7 @@ mod tests {
             (HerdrState::Working, "working"),
             (HerdrState::Done, "done"),
             (HerdrState::Idle, "idle"),
+            (HerdrState::Blocked, "blocked"),
             (HerdrState::Error, "error"),
         ] {
             app.apply(UiEvent::Herdr { state });

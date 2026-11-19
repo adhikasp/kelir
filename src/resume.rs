@@ -93,10 +93,11 @@ pub fn turn_in_flight(events: &[LogEvent]) -> bool {
 /// Does a resume have a turn to continue?
 ///
 /// Either a turn was running when the log stopped (no `turn_ended` after its
-/// last step), the last turn ended `stopped` or `error` (SPEC's `resume`
-/// continues a stopped or crashed session, and a provider outage is the
-/// commonest reason to try again — M3 review S1), or the process never closed
-/// the log with `session_ended` — a kill between two turns is still an
+/// last step), the last turn ended `stopped`, `paused` or `error` (SPEC's
+/// `resume` continues a stopped or crashed session, and a provider outage is
+/// the commonest reason to try again — M3 review S1; a turn an explicit
+/// `max_steps` cap paused is continued the same way), or the process never
+/// closed the log with `session_ended` — a kill between two turns is still an
 /// interrupted session. A log whose last turn ended `done` and was closed
 /// continues only when the caller passes a new task.
 pub fn interrupted(events: &[LogEvent]) -> bool {
@@ -105,7 +106,7 @@ pub fn interrupted(events: &[LogEvent]) -> bool {
     }
     if matches!(
         last_turn_outcome(events).as_deref(),
-        Some("stopped") | Some("error")
+        Some("stopped") | Some("paused") | Some("error")
     ) {
         return true;
     }
@@ -421,6 +422,20 @@ mod tests {
         assert!(!interrupted(&done), "a finished session waits for a task");
         assert_eq!(last_turn_outcome(&done).as_deref(), Some("done"));
         assert_eq!(last_turn_outcome(&[]), None);
+        // STEER-4: an explicit cap pauses a turn; a resume continues it like a
+        // stopped one.
+        let mut paused = ended_with("paused");
+        paused.push(LogEvent::new(
+            4,
+            EventBody::SessionEnded {
+                reason: "paused".into(),
+            },
+        ));
+        assert!(
+            interrupted(&paused),
+            "a paused turn is continued by a resume"
+        );
+        assert_eq!(last_turn_outcome(&paused).as_deref(), Some("paused"));
     }
 
     #[test]

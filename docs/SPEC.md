@@ -72,7 +72,7 @@ Every verb works the same from the TUI, `kelir ctl <session> <verb> [json]` and 
 | `say` | inject a user message; `--now` = stop the running calls first | next boundary / now |
 | `later` | queue a message for the end of the turn | turn end |
 | `stop` | stop the turn: signal the tool process trees, keep partial work, `[Skipped]` results for unrun calls. `stop --call <id>` stops one running call; it returns `stopped by user: <reason>` and the turn continues | now |
-| `resume` | continue a stopped or crashed session from its log | now |
+| `resume` | continue a stopped, paused or crashed session from its log | now |
 | `model` | swap provider/model for the rest of the session | next step |
 | `tools` | disable/enable a native tool or an MCP server; the tool list sent to the provider never changes, a disabled tool's call returns `disabled by user` | next step |
 | `skills` | add/replace a skill or an instruction source; arrives as a message | next boundary |
@@ -106,7 +106,7 @@ are never inline: the event holds the path.
 | `verb` | `name`, `args`, `from` | every verb received, applied or not |
 | `gate` | `gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?` | every gate run, including fail-open ones |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by` (`user`, `agent`, `auto`), `tokens_before`, `tokens_after` | the fold replaces everything up to `through_seq` except the pins |
-| `turn_ended` | `outcome` (`done`, `stopped`, `error`), `final_text` | |
+| `turn_ended` | `outcome` (`done`, `stopped`, `paused`, `error`), `final_text` | `paused` is an explicit `max_steps` cap, not a failure: `--keep` stays alive and the next message opens a new turn |
 | `error` | `where`, `message`, `retryable` | provider errors, broken gates, torn lines |
 | `resumed` | `from_seq`, `unsettled[]` | `unsettled` lists started-but-unsettled calls |
 | `session_ended` | `reason` | |
@@ -125,8 +125,11 @@ gives each a `stopped`/`skipped` result, and only then injects the message.
 **No step limit by default.** `max_steps` in `config.toml` (and `--max-steps`) caps the steps of one turn;
 unset or `0` means unlimited, because a fully autonomous agent is not stopped by a clock or a counter.
 The knob exists for jobs that want a cap. When an explicit cap is reached the turn is *paused*, not failed:
-the log records `turn_ended` with outcome `paused` and the message says "turn paused after N steps; say
-`continue` to resume"; the next `say` starts a new turn with a fresh count.
+the log records `turn_ended` with outcome `paused`, `--json`'s `result` says `paused` with exit code 0, and
+the message on stderr and in the TUI says "turn paused after N steps; say `continue` to resume"; the next
+`say` starts a new turn with a fresh count (the session-wide step numbers keep counting) and `resume` of a
+paused log picks it up like a stopped one. The TUI status line shows `step 12/20` only when a cap is set
+(also while idle, before the first turn, and a paused turn reports Herdr `blocked`).
 
 ## Prompt caching (must work)
 
@@ -301,7 +304,9 @@ next boundary so the agent wakes; while it does not, see *Process model*.
   `insert_before`; only the input box and status line repaint. Every TUI action exists as a verb.
 - Herdr status is OSC 7501 (`app=kelir`, root session only, a resume label): `working` at turn
   start, `done` on success, `idle` on stop, `error` with a `msg`; `idle` instead of `done` when
-  `TERM_PROGRAM=herdr-telegram`. kelir never reports `blocked`, since it never waits on a human.
+  `TERM_PROGRAM=herdr-telegram`. A turn paused on an explicit step cap reports `blocked`: it is the
+  one state in which kelir waits on a human (saying `continue`), and the word this Herdr accepts
+  (it drops `paused`; DEVIATIONS).
 
 ## Providers
 

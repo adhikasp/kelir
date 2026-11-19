@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use serde_json::json;
-use support::{Mock, Reply, run_task, sse, text_turn};
+use support::{Mock, Reply, run_task, sse, text_turn, tool_turn};
 
 // ----------------------------------------------------------------- snapshots
 
@@ -95,11 +95,14 @@ fn snapshot_streaming_text_in_the_live_area() {
         turn: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
+        limit: None,
     });
     app.apply(UiEvent::Step {
         step: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
+        turn_steps: 1,
+        limit: None,
     });
     app.apply(UiEvent::Delta("Hello ".into()));
     app.apply(UiEvent::Delta("world".into()));
@@ -116,6 +119,7 @@ fn snapshot_a_running_call() {
         turn: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
+        limit: None,
     });
     app.apply(UiEvent::Assistant {
         text: String::new(),
@@ -137,6 +141,7 @@ fn snapshot_an_error() {
         turn: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
+        limit: None,
     });
     app.apply(UiEvent::Error("provider said no".into()));
     assert_eq!(app.status.phase, Phase::Error);
@@ -779,4 +784,99 @@ fn panic_in_a_pty(
         String::from_utf8_lossy(&screen.lock().unwrap()).into_owned(),
         code,
     )
+}
+
+/// N1: with a cap configured, the status line says `step 0/N` while the session
+/// idles, not a bare `step 0` that hides the limit until a turn starts.
+#[tokio::test]
+async fn the_idle_status_line_already_knows_the_cap() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\nmax_steps = 3\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            b"",
+            vec!["kelir idle · step 0/3 · 0 tok".into()],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    // The bare form would be the same screen with the cap hidden.
+    assert!(
+        run.screen.contains("kelir idle · step 0/3 · 0 tok"),
+        "the idle line must show the cap: {:?}",
+        run.screen
+    );
+    // And the banner names the cap too, so the two never disagree.
+    assert!(
+        run.screen.contains("step cap 3 per turn"),
+        "screen: {:?}",
+        run.screen
+    );
+}
+
+/// N2: a paused turn is a visible Herdr state. The pause word this Herdr
+/// accepts is `blocked` (it silently drops `paused`), so a supervisor can tell
+/// "waiting for a human to say continue" from "never started" (`idle`).
+#[tokio::test]
+async fn the_tui_reports_a_pause_to_herdr_as_blocked() {
+    let edit = serde_json::json!({"path": "f.txt", "old": "", "new": "x\n"});
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn("call_1", "edit", &edit))),
+        Reply::Sse(sse(&tool_turn("call_2", "edit", &edit))),
+        Reply::Sse(sse(&text_turn("never asked", 0))),
+    ])
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\nmax_steps = 2\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            b"",
+            vec!["turn paused after 2 steps".into()],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    assert_eq!(
+        herdr_records(&run.screen),
+        vec![
+            "\u{1b}]7501;state=working\u{1b}\\".to_string(),
+            "\u{1b}]7501;state=blocked\u{1b}\\".to_string(),
+        ],
+        "a pause is not `idle`: it waits for a human; screen: {:?}",
+        run.screen
+    );
+    // The session stayed up after the pause, so `/quit` is what ended it.
+    let text = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
+    assert!(text.contains("\"outcome\":\"paused\""), "{text}");
 }

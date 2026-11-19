@@ -53,6 +53,10 @@ pub struct CommonArgs {
     /// Config file to use instead of the machine/project search.
     #[arg(long)]
     pub config: Option<PathBuf>,
+    /// Cap one turn at N steps, then pause it (overrides `max_steps`). There is
+    /// no cap by default; `0` also means no cap.
+    #[arg(long, value_name = "N")]
+    pub max_steps: Option<u32>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -121,6 +125,7 @@ impl TuiArgs {
                 provider: self.common.provider.or(outer.common.provider),
                 cwd: self.common.cwd.or(outer.common.cwd),
                 config: self.common.config.or(outer.common.config),
+                max_steps: self.common.max_steps.or(outer.common.max_steps),
             },
             resume: self.resume.or(outer.resume),
         }
@@ -504,6 +509,36 @@ mod tests {
         match cli.command {
             Some(Command::Tui(args)) => {
                 assert_eq!(args.with_fallback(outer).common.model.as_deref(), Some("b"));
+            }
+            _ => panic!("expected tui"),
+        }
+    }
+
+    /// `--max-steps N` is a per-session flag on every command that runs a
+    /// session, and it falls through the same way the other common flags do.
+    #[test]
+    fn the_max_steps_flag_is_common_and_overrides_the_config() {
+        match Cli::parse_from(["kelir", "run", "--max-steps", "5", "task"]).command {
+            Some(Command::Run(args)) => assert_eq!(args.common.max_steps, Some(5)),
+            _ => panic!("expected run"),
+        }
+        match Cli::parse_from(["kelir", "ask", "--max-steps", "0", "q"]).command {
+            Some(Command::Ask(args)) => assert_eq!(args.common.max_steps, Some(0)),
+            _ => panic!("expected ask"),
+        }
+        // Unset stays unset: no cap is the default, never a zero.
+        match Cli::parse_from(["kelir", "run", "task"]).command {
+            Some(Command::Run(args)) => assert_eq!(args.common.max_steps, None),
+            _ => panic!("expected run"),
+        }
+        // Before the subcommand, `--max-steps` lands on the TUI and falls
+        // through to `tui` like the other common flags.
+        let cli = Cli::parse_from(["kelir", "--max-steps", "9", "tui"]);
+        let outer = cli.tui;
+        assert_eq!(outer.common.max_steps, Some(9));
+        match cli.command {
+            Some(Command::Tui(args)) => {
+                assert_eq!(args.with_fallback(outer).common.max_steps, Some(9));
             }
             _ => panic!("expected tui"),
         }
