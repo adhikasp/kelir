@@ -92,8 +92,8 @@ deterministic.
 
 ### Verbs (what a human, a script or a gate can do to a session)
 
-Every verb works the same from the TUI, `kelir ctl <session> <verb> [json]` and the socket, and every one of them needs the session's token
-(*Who may drive a session*, above).
+Every verb works the same from the TUI, `kelir ctl <session> <verb> [json]` and the socket, and
+every one of them carries the session's token (*Who may drive a session*, above).
 
 | verb | what it does | applies |
 |---|---|---|
@@ -315,9 +315,9 @@ answers ("do 1,4") resolved at `prompt_submit` against the last numbered list in
 
 A child is a kelir process the model starts from `bash`: `kelir run --child "<task>" [--background]`
 or `kelir brief "<question>"`. There is **no `spawn` tool**; the native tool list is `bash`, `edit`,
-`compact`. `KELIR_ROOT`, `KELIR_PARENT` and `KELIR_DEPTH` ride along with `KELIR_SOCK` and `KELIR_TOKEN` (exported to
-every bash child), so the CLI registers `child_started`/`child_settled` with the **root session's
-socket** (the root stays the only writer of the registry and of its own log; each child still owns
+`compact`. `KELIR_ROOT`, `KELIR_PARENT` and `KELIR_DEPTH` ride along with `KELIR_SOCK` and
+`KELIR_TOKEN` (exported to every bash child), so the CLI registers `child_started`/`child_settled`
+with the **root session's socket** (the root stays the only writer of the registry and of its own log; each child still owns
 its own session dir with `parent`/`depth` in `session_started`). A foreground child's result is the
 bash call's stdout; a background child's `child_settled` arrives at the next boundary and wakes the
 parent. Because a child is a session, `stop`, `resume`, `observe`, `attach` and `kelir ls`/kill work
