@@ -63,11 +63,21 @@ while :; do
     break
   fi
   owner="$(sed -n 's/^pid //p' "$lock/owner" 2>/dev/null | head -1)"
-  if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-    # The holder is gone (a killed gate, a closed pane): take it over. `mv`
-    # makes exactly one waiter win the race; the rest retry the mkdir.
+  stale=""
+  if [ -n "$owner" ]; then
+    # `kill -0` reads the pid the holder wrote, which is a bash pid on both
+    # platforms (Git Bash's kill maps it; a native pid would not be seen).
+    kill -0 "$owner" 2>/dev/null || stale="pid $owner is gone"
+  elif [ "$waited" -ge 10 ]; then
+    # No owner file ten seconds in: the holder died between `mkdir` and writing
+    # it. Without this a crashed gate blocks every worker until the timeout.
+    stale="the lock has no owner file"
+  fi
+  if [ -n "$stale" ]; then
+    # Take it over. `mv` makes exactly one waiter win the race; the rest retry
+    # the mkdir and find the lock gone or fresh.
     if mv "$lock" "$lock.stale.$$" 2>/dev/null; then
-      echo "gate-lock: removed a stale lock (pid $owner is gone)" >&2
+      echo "gate-lock: removed a stale lock ($stale)" >&2
       rm -rf "$lock.stale.$$"
     fi
     continue

@@ -337,6 +337,32 @@ fn a_lock_whose_owner_is_gone_is_taken_over() {
     assert!(!lock.exists());
 }
 
+/// A gate that dies between `mkdir` and writing its owner file leaves a lock
+/// nobody owns. Without a takeover that blocks every worker until the 30-minute
+/// timeout, which is a worse failure than the crash.
+#[test]
+fn a_lock_with_no_owner_file_is_taken_over() {
+    let (lock, _dir) = sandbox_lock("orphan");
+    std::fs::create_dir_all(&lock).expect("lock dir");
+    let start = Instant::now();
+    let out = run_locked(&lock, 90, "echo took-over");
+    assert!(
+        out.status.success(),
+        "an ownerless lock is taken over: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "took-over");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no owner file"),
+        "the takeover is announced"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(60),
+        "the takeover waits the short grace period, not the timeout"
+    );
+    assert!(!lock.exists());
+}
+
 #[test]
 fn waiting_gives_up_with_exit_75_when_the_holder_never_returns() {
     let (lock, dir) = sandbox_lock("timeout");
