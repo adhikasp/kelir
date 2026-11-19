@@ -4,8 +4,10 @@ Reviewer: opencode session (pane t9p), 2026-11-19. Scope: the maintainer's three
 stand at HEAD `1dc2021` — `c8f6b11` (default model + window), `0f1bbba` (pin `-1017`), `ad8ec8f`
 (metadata from the provider) — against `docs/tasks/STEER-1.md`, `docs/SPEC.md` §"Providers" /
 §"Compaction", `docs/DEVIATIONS.md`. Later commits (`05d1d16`, `6988181`, … `1dc2021`) touched none
-of `src/models.rs`, `src/session.rs`, `src/config.rs`, `src/compact.rs`, `src/provider.rs`, so the
-code below is the code those three commits left.
+of `src/models.rs`, `src/session.rs`, `src/config.rs`'s window code, `src/compact.rs`,
+`src/provider.rs`, so the code below is the code those three commits left. HEAD moved while the
+review was running: `52942cf` changed only `DEFAULT_PROMPT` in `src/config.rs` (not the window
+code), `4468b8b` and the two review commits are docs/tests — none of STEER-1's behaviour changed.
 
 ## Verdict: PASS WITH FIXES
 
@@ -40,11 +42,11 @@ passed**: 267 lib, 16 e2e, 13 e2e_m3, 8 e2e_m4, 15 e2e_tui, 23 e2e_verbs, 8 revi
 review_m1, 2 review_m2, 11 review_m3, 19 review_m4, 7 review_m4b. (The lib/e2e_m3/e2e_m4 counts
 differ by platform because five unit tests and two e2e tests are `cfg`-gated; the totals agree.)
 
-After my additions (`tests/review_steer1.rs`, one assertion in `tests/e2e_tui.rs`), on the review
-commit `d02c87c`: `cargo fmt --check` clean, clippy clean, **395 passed, 0 failed, 2 ignored** on
-Windows (the two ignored tests are the findings below and fail with `-- --ignored`), and on Linux
-(`scripts/remote-check.sh the maintainer`, same commit) `FMT-OK`, clippy clean, **400 passed, 0 failed, 2
-ignored**.
+After my additions (`tests/review_steer1.rs`, one assertion in `tests/e2e_tui.rs`): `cargo fmt
+--check` clean, clippy clean, **395 passed, 0 failed, 2 ignored** on Windows — on both the review
+commit `d02c87c` and `fe77ed4` (HEAD at report time) — and on Linux
+(`scripts/remote-check.sh the maintainer` on `d02c87c`) `FMT-OK`, clippy clean, **400 passed, 0 failed, 2
+ignored**. The two ignored tests are the findings below and fail with `-- --ignored`.
 
 ## Findings
 
