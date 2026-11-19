@@ -156,3 +156,14 @@ retries). Decisions (maintainer: "fix that, retry with backoff"):
 
 - 14:00 M5-A review = PASS WITH FIXES (0 blockers, 11 should-fix, docs/reviews/m5a-review.md); fixes job **m5afix**
   (docs/tasks/M5-A-fixes.md) in kelir-wt/m5afix; running now with steer4 and steer5 (three kelir workers).
+
+## Update (2026-11-19 15:05) — three gaps recorded (from the admin session on the maintainer; I agree with all three)
+
+1. **STEER-7** (docs/tasks/STEER-7.md): socket hardening — refuse foreign job ids/paths, per-session token (retro F8).
+2. **STEER-8** (docs/tasks/STEER-8.md): cost from a price table when the provider reports 0, `ctl status` with steps,
+   last prompt size, window %, cache ratio, retry state; threshold warnings (retro F9).
+3. **M12** (docs/tasks/M12.md): publish preparation (history scrub, first CI run, README/LICENSE/SECURITY,
+   dry-run publish). **The push itself is gated on the maintainer's explicit yes** (a decision only he can make):
+   asked once at the end of M12, not before.
+Order after the current wave: steer4, steer5, m5afix -> steer6 -> steer7 -> steer8 -> steer1fix -> steer2 -> steer3 ->
+M5-B -> M6 ... M11 -> M12. STEER-5/6 already cover rate-limit, compaction trigger, design thrash, lying-tool exit codes.
