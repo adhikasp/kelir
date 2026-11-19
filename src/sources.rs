@@ -710,6 +710,34 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         }
     }
 
+    /// The prompt is a contract with the model: a line that survives a retro
+    /// must not vanish in a later edit. This pins the *lines* (not the exact
+    /// bytes, which wrap), so a rewording has to be deliberate.
+    #[test]
+    fn the_embedded_prompt_carries_every_retro_rule() {
+        let base = crate::config::DEFAULT_PROMPT;
+        for (rule, why) in [
+            ("Plan once, briefly", "F1: design thrash"),
+            ("reasoning is dropped", "F1: the plan has nowhere to live"),
+            ("edits", "F3: multi-hunk edits"),
+            ("python/sed patch", "F3: a patch script fails with exit 0"),
+            ("never chain", "F3: the exit code of each command"),
+            ("Batch independent reads", "F4: parallel read-only calls"),
+            ("git grep", "F7: search hygiene"),
+            ("target/", "F7: do not walk the build directory"),
+            ("never `cat` a big file", "F7: ranged reads"),
+            (
+                "share no shell state",
+                "STEER-4: every call starts in the cwd",
+            ),
+            ("name the proving command", "F6: verify before claiming"),
+            ("AGENTS.md", "instruction files are already loaded"),
+            ("{{skills_dirs}}", "the skills pull path"),
+        ] {
+            assert!(base.contains(rule), "{why}: no {rule:?} in\n{base}");
+        }
+    }
+
     #[test]
     fn a_prompt_without_the_placeholder_gets_the_dirs_appended() {
         let dir = temp_dir("append");
