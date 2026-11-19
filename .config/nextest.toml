@@ -14,6 +14,11 @@ test-threads = 4
 # process tree and reported as timed out. STEER-9 replaced fixed sleeps with
 # event-driven waits whose ceilings are >= 60 s, so this is slack.
 slow-timeout = { period = "90s", terminate-after = 4 }
+# A leaked child process fails the run. AGENTS.md makes "no leaked processes" a
+# hard rule, and nextest does not enforce it by default: the test passed, the
+# run exited 0 and the gate went green with a stray process on the dev box
+# (buildinfra-review S5). The short period only has to notice, not to wait.
+leak-timeout = { period = "100ms", result = "fail" }
 
 # The TUI suite drives a real PTY, one process per test. Four of those at once
 # alongside the other suites is more load than the assertions expect: under it
