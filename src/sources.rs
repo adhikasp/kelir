@@ -59,6 +59,13 @@ pub enum SourceKind {
     Instruction,
     /// A skill's `SKILL.md`.
     Skill,
+    /// A file of the configured memory directory (`memory_dir`): rendered into
+    /// the frozen system at the start, announced as a `source` message when it
+    /// changes (the model writes memory with `edit`).
+    Memory,
+    /// The one Herdr line (`src/herdr_ctx.rs`): a fact of the pane, rendered
+    /// into the frozen system; it has no file, so it is never watched.
+    Herdr,
 }
 
 impl SourceKind {
@@ -68,6 +75,8 @@ impl SourceKind {
             SourceKind::Base => "prompt",
             SourceKind::Instruction => "instruction",
             SourceKind::Skill => "skill",
+            SourceKind::Memory => "memory",
+            SourceKind::Herdr => "herdr",
         }
     }
 
@@ -78,6 +87,8 @@ impl SourceKind {
         match self {
             SourceKind::Base | SourceKind::Instruction => "instruction",
             SourceKind::Skill => "skill",
+            SourceKind::Memory => "memory",
+            SourceKind::Herdr => "herdr",
         }
     }
 
@@ -86,6 +97,8 @@ impl SourceKind {
         match kind {
             "prompt" => SourceKind::Base,
             "skill" => SourceKind::Skill,
+            "memory" => SourceKind::Memory,
+            "herdr" => SourceKind::Herdr,
             _ => SourceKind::Instruction,
         }
     }
@@ -183,6 +196,9 @@ pub struct Places {
     /// Where the walk up stops (the repository root): a directory holding
     /// `.git`. Set by the caller that knows the session's cwd.
     pub repo_root: Option<PathBuf>,
+    /// The configured memory directory (`memory_dir`), already resolved against
+    /// the cwd; `None` is memory off.
+    pub memory_dir: Option<PathBuf>,
 }
 
 /// The paths this process looks in, built from the config and the environment.
@@ -195,6 +211,7 @@ pub fn places(cwd: &Path, skills_dirs: &[PathBuf], config_dir: Option<PathBuf>) 
         cwd: cwd.to_path_buf(),
         home: Some(home),
         repo_root: repo_root_above(cwd),
+        memory_dir: None,
     }
 }
 
@@ -329,6 +346,10 @@ pub fn discover_with_notes(places: &Places, notes: &mut Vec<String>) -> Vec<Foun
                 Layer::Project,
             );
         }
+    }
+    // The configured memory directory: one source per file, project layer.
+    if let Some(directory) = &places.memory_dir {
+        found.extend(crate::memory::scan(directory, notes));
     }
     // The skill kelir ships about itself: machine layer, so a project (or
     // machine) skill directory of the same name replaces it.
@@ -475,7 +496,7 @@ struct SkillFile {
 /// `budget` is the room left in the total cap for this kind of source; it is
 /// reduced by this file's bytes. `None` means the file is missing, is not a
 /// file, could not be read, or had no room left at all.
-fn read_file(
+pub(crate) fn read_file(
     path: &Path,
     limit: usize,
     budget: &mut usize,
@@ -580,7 +601,8 @@ pub fn read_source(path: &Path, limit: usize) -> Option<(String, Vec<String>)> {
 pub fn limit_for(kind: SourceKind) -> usize {
     match kind {
         SourceKind::Skill => MAX_SKILL_BYTES,
-        SourceKind::Base | SourceKind::Instruction => MAX_INSTRUCTION_BYTES,
+        SourceKind::Memory => crate::memory::MAX_FILE_BYTES,
+        SourceKind::Base | SourceKind::Instruction | SourceKind::Herdr => MAX_INSTRUCTION_BYTES,
     }
 }
 
@@ -719,6 +741,8 @@ pub struct Inputs<'a> {
     pub cwd: &'a std::path::Path,
     /// `YYYY-MM-DD`: the date goes in, never the time.
     pub date: &'a str,
+    /// The one Herdr line (`herdr_ctx`), when the session runs in a pane.
+    pub herdr: Option<&'a str>,
 }
 
 /// Render the system prompt once: the base prompt with the skills directories
@@ -774,12 +798,34 @@ pub fn render_system(inputs: &Inputs) -> Rendered {
             ));
         }
     }
+    // Memory is rendered like an instruction file: a heading, the path, the
+    // text. It is the model's own notes, loaded once; later changes are `source`
+    // messages at the tail.
+    let memory: Vec<&Found> = discovered
+        .iter()
+        .filter(|found| found.kind == SourceKind::Memory)
+        .collect();
+    if !memory.is_empty() {
+        text.push_str("\n# Memory\n");
+        for found in memory.iter() {
+            text.push_str(&format!(
+                "\n## {} - {}\n\n{}\n",
+                found.name,
+                crate::util::path_string(&found.path),
+                found.text.trim_end()
+            ));
+        }
+    }
     text.push_str(&format!(
         "\n# Environment\ncwd: {}\nos: {}\ndate: {}\n",
         crate::util::path_string(inputs.cwd),
         std::env::consts::OS,
         inputs.date
     ));
+    if let Some(line) = inputs.herdr {
+        text.push_str(line);
+        text.push('\n');
+    }
 
     let mut sources = vec![info("prompt.md", &base_path, SourceKind::Base, &base_text)];
     for found in &instructions {
@@ -788,6 +834,22 @@ pub fn render_system(inputs: &Inputs) -> Rendered {
             &found_path(found),
             found.kind,
             &found.text,
+        ));
+    }
+    for found in &memory {
+        sources.push(info(
+            &found.name,
+            &found_path(found),
+            found.kind,
+            &found.text,
+        ));
+    }
+    if let Some(line) = inputs.herdr {
+        sources.push(info(
+            crate::herdr_ctx::SOURCE_NAME,
+            &SourcePath::Embedded,
+            SourceKind::Herdr,
+            line,
         ));
     }
     // Skills are pull: their bodies stay out of the prompt, but they are
@@ -960,6 +1022,11 @@ impl Watch {
             else {
                 continue;
             };
+            // A pushed hint and a media note are context, not files: nothing
+            // on disk is watched for them.
+            if matches!(kind.as_str(), "hint" | "attachment-note") {
+                continue;
+            }
             let kind = SourceKind::parse(kind);
             let Some(text) = text else {
                 continue;
@@ -1130,6 +1197,7 @@ mod tests {
 
     fn places_in(root: &Path) -> Places {
         Places {
+            memory_dir: None,
             config_dir: Some(root.join("config")),
             machine_claude: Some(root.join("machine-claude")),
             skills_dirs: vec![root.join("extra-skills")],
@@ -1360,6 +1428,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
     fn missing_directories_are_tolerated() {
         let dir = temp_dir("missing");
         let places = Places {
+            memory_dir: None,
             config_dir: Some(dir.join("nope")),
             machine_claude: Some(dir.join("nope-claude")),
             skills_dirs: vec![dir.join("nope-skills")],
@@ -1374,6 +1443,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         assert!(found[0].builtin, "{found:?}");
         assert!(found[0].path.as_os_str().is_empty());
         let rendered = render_system(&Inputs {
+            herdr: None,
             base: "BASE",
             base_path: None,
             places: &places,
@@ -1431,6 +1501,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         // Every file is read the same way the watcher re-reads it, so a source
         // is not announced again at the first boundary.
         let rendered = render_system(&Inputs {
+            herdr: None,
             base: "BASE",
             base_path: None,
             places: &places,
@@ -1516,6 +1587,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             "---\nname: a\ndescription: ay\n---\na",
         );
         let inputs = Inputs {
+            herdr: None,
             base: crate::config::DEFAULT_PROMPT,
             base_path: None,
             places: &places,
@@ -1541,6 +1613,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             "ALWAYS RUN THE GATES",
         );
         let inputs = Inputs {
+            herdr: None,
             base: "BASE {{skills_dirs}}",
             base_path: None,
             places: &places,
@@ -1579,6 +1652,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         let machine = dir.join("config").join("prompt.md");
         write(&machine, "MACHINE PROMPT");
         let inputs = Inputs {
+            herdr: None,
             base: "MACHINE PROMPT",
             base_path: Some(&machine),
             places: &places,
@@ -1606,6 +1680,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         let file = places.cwd.join("AGENTS.md");
         write(&file, "ONE");
         let rendered = render_system(&Inputs {
+            herdr: None,
             base: "BASE",
             base_path: None,
             places: &places,
@@ -1641,6 +1716,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         let file = places.cwd.join("AGENTS.md");
         write(&file, "SAME");
         let rendered = render_system(&Inputs {
+            herdr: None,
             base: "BASE",
             base_path: None,
             places: &places,
@@ -1784,6 +1860,7 @@ READ THE TAIL
         let dir = temp_dir("embedded");
         let places = places_in(&dir);
         let rendered = render_system(&Inputs {
+            herdr: None,
             base: "BASE",
             base_path: None,
             places: &places,

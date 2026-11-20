@@ -42,7 +42,11 @@ The tree is flat on purpose: a file is a subject.
 | file | owns |
 |---|---|
 | `src/sources.rs` | prompt, instruction files, skills discovery, the per-boundary watcher |
-| `src/attachments.rs` | `kelir view`: sniff, copy, the `image_url` part |
+| `src/attachments.rs` | `kelir view`: sniff, copy, the `image_url` part; audio/video notes |
+| `src/herdr_ctx.rs` | the one Herdr line in the frozen system (`hc get`, fail open) |
+| `src/hint.rs` | the pushed hint: catalogue, scorer trait, `Chat` scorer, parser |
+| `src/memory.rs` | `memory_dir` notes as sources |
+| `src/observe.rs` | `kelir observe`: the next request, human and `--raw` |
 | `src/compact.rs` | the summary prompt and the compaction fold |
 | `src/prompt.md` | the base prompt itself (1 KB, snapshot-pinned) |
 

@@ -224,6 +224,70 @@ fn mime_from_extension(path: &Path) -> &'static str {
     }
 }
 
+// ------------------------------------------------------------ audio and video
+
+/// Audio extensions kept as a stored file with a note (never sent to the model).
+pub const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "ogg", "oga", "m4a", "flac", "opus", "aac"];
+/// Video extensions kept as a stored file with a note.
+pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "mov", "webm", "avi", "m4v"];
+/// The most a stored audio or video file may be: it is copied, never read into
+/// a request, so the limit is about the disk, not the prompt.
+pub const MEDIA_MAX_BYTES: u64 = 256 * 1024 * 1024;
+/// The `kind` of the `source` event that carries a media note.
+pub const MEDIA_SOURCE_KIND: &str = "attachment-note";
+
+/// `audio` or `video` when the file's extension says so. Audio and video are
+/// not decoded, transcribed or framed in M5: the file is stored under the
+/// session and the model is told it exists. **Later hook:** a transcriber
+/// (audio) or frame sampler (video) would turn the stored file into a text
+/// `source` event of the same shape, so nothing about the log or the cache
+/// prefix changes when it lands; see `kelir docs files`.
+pub fn media_kind(path: &Path) -> Option<&'static str> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)?;
+    if AUDIO_EXTENSIONS.contains(&extension.as_str()) {
+        Some("audio")
+    } else if VIDEO_EXTENSIONS.contains(&extension.as_str()) {
+        Some("video")
+    } else {
+        None
+    }
+}
+
+/// The note the model reads in place of the media: where it is and what it is
+/// not. One short line, no bytes.
+pub fn media_note(kind: &str, rel: &str, bytes: u64) -> String {
+    format!(
+        "{kind} file stored at {rel} ({}); its content is not in this conversation (no transcription yet). Use a tool on the file if you need it.",
+        bytes_label(bytes)
+    )
+}
+
+/// Copy an audio or video file into `<session>/attachments/` (streamed by the
+/// OS, not read into memory) and return its path relative to the session dir.
+pub fn save_media(session_dir: &Path, seq: u32, source: &Path) -> Result<String, String> {
+    let extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let stem = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(sanitise)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "media".to_string());
+    let name = format!("{seq}-{stem}.{extension}");
+    let dir = dir(session_dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    std::fs::copy(source, dir.join(&name))
+        .map_err(|error| format!("cannot copy {}: {error}", source.display()))?;
+    Ok(format!("attachments/{name}"))
+}
+
 /// `attachments/<seq>-<name>.png`: the name inside the session dir. The source
 /// name is sanitised to `[A-Za-z0-9._-]` and shortened, so a pasted path can
 /// never escape the directory or blow the name budget.
@@ -942,5 +1006,37 @@ mod tests {
         assert_eq!(fingerprint(&a), fingerprint(&b));
         assert_ne!(fingerprint(&a), fingerprint(&c));
         assert_ne!(fingerprint(b""), fingerprint(b"\0"));
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+
+    #[test]
+    fn audio_and_video_are_told_apart_by_extension() {
+        assert_eq!(media_kind(Path::new("a/b.MP3")), Some("audio"));
+        assert_eq!(media_kind(Path::new("clip.webm")), Some("video"));
+        assert_eq!(media_kind(Path::new("pic.png")), None);
+        assert_eq!(media_kind(Path::new("noext")), None);
+    }
+
+    #[test]
+    fn the_note_names_the_file_and_says_it_is_not_in_the_conversation() {
+        let note = media_note("audio", "attachments/1-memo.mp3", 2048);
+        assert!(note.contains("attachments/1-memo.mp3") && note.contains("2 KB"));
+        assert!(note.contains("not in this conversation"));
+    }
+
+    #[test]
+    fn save_media_copies_under_a_sanitised_name() {
+        let dir = std::env::temp_dir().join(format!("kelir-media-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("my memo (1).wav");
+        std::fs::write(&source, b"RIFF").unwrap();
+        let rel = save_media(&dir, 3, &source).unwrap();
+        assert_eq!(rel, "attachments/3-my-memo--1-.wav");
+        assert_eq!(std::fs::read(dir.join(&rel)).unwrap(), b"RIFF");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

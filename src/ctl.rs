@@ -11,6 +11,13 @@ use crate::ipc::{self, Request};
 use crate::{paths, verbs};
 
 pub async fn ctl(args: CtlArgs) -> u8 {
+    // `observe` is a read, not a steer: it needs no boundary, no token and no
+    // log line, so it is answered from the session's log (same as
+    // `kelir observe`; `ctl <s> observe raw` prints the exact body).
+    if args.verb == "observe" {
+        let raw = args.args.iter().any(|arg| arg == "raw" || arg == "--raw");
+        return crate::observe::run(&args.session, raw, None);
+    }
     let flags = verbs::CliFlags {
         now: args.now,
         call: args.call.clone(),
