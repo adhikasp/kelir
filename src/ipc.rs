@@ -392,18 +392,32 @@ pub async fn connect(dir: &Path, id: &str) -> Result<LocalStream, String> {
 /// One request/answer round trip, for `kelir ctl`.
 pub async fn request(dir: &Path, id: &str, request: &Request) -> Result<Response, String> {
     let stream = connect(dir, id).await?;
-    round_trip(stream, request).await
+    round_trip(stream, request, IO_TIMEOUT).await
 }
 
 /// The same round trip to an address taken from `KELIR_SOCK`, so a process that
 /// only inherited the variable (a bash child, the `kelir bg` CLI) can talk to
 /// its session without knowing the session dir or id.
 pub async fn request_value(address: &str, request: &Request) -> Result<Response, String> {
-    let stream = connect_value(address).await?;
-    round_trip(stream, request).await
+    request_value_within(address, request, IO_TIMEOUT).await
 }
 
-async fn round_trip(stream: LocalStream, request: &Request) -> Result<Response, String> {
+/// [`request_value`] with its own wait for the answer, for a verb that is slow
+/// by nature (`kelir mcp` waits for a server's tool).
+pub async fn request_value_within(
+    address: &str,
+    request: &Request,
+    wait: Duration,
+) -> Result<Response, String> {
+    let stream = connect_value(address).await?;
+    round_trip(stream, request, wait).await
+}
+
+async fn round_trip(
+    stream: LocalStream,
+    request: &Request,
+    wait: Duration,
+) -> Result<Response, String> {
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read);
     let mut line = serde_json::to_string(request)
@@ -429,7 +443,7 @@ async fn round_trip(stream: LocalStream, request: &Request) -> Result<Response, 
         serde_json::from_str(answer.trim())
             .map_err(|error| format!("the answer is not JSON: {error}"))
     };
-    match tokio::time::timeout(IO_TIMEOUT, answer).await {
+    match tokio::time::timeout(wait, answer).await {
         Ok(result) => result,
         Err(_) => Err("the session did not answer in time".to_string()),
     }

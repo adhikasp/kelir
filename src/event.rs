@@ -368,6 +368,21 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             state,
             out_path,
         },
+        // An MCP call's arguments are the only field that could grow; its
+        // result is in the file `out_path` names, never inline.
+        EventBody::McpStarted {
+            mcp_id,
+            server,
+            tool,
+            args,
+            parent_call_id,
+        } => EventBody::McpStarted {
+            mcp_id,
+            server,
+            tool,
+            args: spill_payload(blobs, seq, "mcp.args", args)?,
+            parent_call_id,
+        },
         EventBody::TurnEnded {
             outcome,
             reason,
@@ -574,6 +589,32 @@ pub enum EventBody {
         reason: Option<String>,
         final_text: Payload,
     },
+    /// A `kelir mcp <server> <tool>` call reached the session broker. Written
+    /// before the call goes to the server (intent, like `tool_started`).
+    /// `parent_call_id` is the bash call it was made from, when there was one.
+    McpStarted {
+        mcp_id: String,
+        server: String,
+        tool: String,
+        args: Payload,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
+    },
+    /// The call's one commit. `outcome` is `ok`, `error` (the tool said
+    /// `isError`, or the server answered with a JSON-RPC error), `timeout`
+    /// (unknown outcome, never retried) or `unavailable` (the server could not
+    /// be started or died). The result itself is in the file `out_path` names.
+    McpSettled {
+        mcp_id: String,
+        server: String,
+        tool: String,
+        outcome: String,
+        exit_code: i32,
+        bytes: u64,
+        out_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
+    },
     /// A background job exists: an explicit `kelir bg run` (which reports
     /// itself over the session socket) or a bash call promoted past
     /// `promote_after`. `bg_id` is the job's id: the call's output directory
@@ -676,6 +717,8 @@ impl LogEvent {
             EventBody::ToolStarted { .. } => "tool_started",
             EventBody::ToolSettled { .. } => "tool_settled",
             EventBody::TurnEnded { .. } => "turn_ended",
+            EventBody::McpStarted { .. } => "mcp_started",
+            EventBody::McpSettled { .. } => "mcp_settled",
             EventBody::BgStarted { .. } => "bg_started",
             EventBody::BgSettled { .. } => "bg_settled",
             EventBody::Compacted { .. } => "compacted",
@@ -944,6 +987,23 @@ mod tests {
                 outcome: "done".into(),
                 reason: None,
                 final_text: "done".into(),
+            },
+            EventBody::McpStarted {
+                mcp_id: "mcp_01".into(),
+                server: "demo".into(),
+                tool: "echo".into(),
+                args: json!({"text": "hi"}).into(),
+                parent_call_id: Some("call_1".into()),
+            },
+            EventBody::McpSettled {
+                mcp_id: "mcp_01".into(),
+                server: "demo".into(),
+                tool: "echo".into(),
+                outcome: "ok".into(),
+                exit_code: 0,
+                bytes: 2,
+                out_path: "commands/mcp_01/out".into(),
+                parent_call_id: Some("call_1".into()),
             },
             EventBody::BgStarted {
                 bg_id: "bg_01".into(),

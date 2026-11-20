@@ -18,7 +18,7 @@ applied at **one named boundary** — never between a tool call and its result.
 | `later` | `<text>` or a JSON object with `text` | `turn_end` | queues a user message for the end of the turn (`user` event, `delivery` `later`) |
 | `stop` | `[reason]`; `--call <id>` | `now` | stops the turn: every running tool process tree is signalled and its call settles `stopped`; `--call` stops one call and the turn continues |
 | `model` | `<provider>/<model>` or `<model>` | `next_step` | swaps provider/model for the rest of the session; the next `step_started` carries the new one |
-| `tools` | `--disable <name>` / `--enable <name>` (repeatable) | `next_step` | disables or enables a native tool; the tool list sent to the provider never changes, a disabled tool's call settles `disabled` |
+| `tools` | `--disable <name>` / `--enable <name>` (repeatable) | `next_step` | disables or enables a native tool, or MCP calls (`mcp:<server>` or `mcp:<server>.<tool>`); the tool list sent to the provider never changes, a disabled tool's call settles `disabled` |
 | `skills` | `--name <n> --path <file-or-dir>` or `--text <body>`; `--kind skill\|instruction` | `next_step` | adds or replaces one source; it arrives as a `source` message at the tail, never as a rewrite of the frozen system prompt |
 | `compact` | `[focus]` | `next_step` | summarises the earlier context at the next boundary and writes a `compacted` event; the task and the messages a human typed stay verbatim |
 | `view` | `<path>` | `now` | queues an image for the next message: a `source` event of kind `attachment` at the tail, so the cached prefix is untouched |

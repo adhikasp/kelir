@@ -28,6 +28,7 @@ variables above still win when set. Isolate a run with the two `*_DIR` variables
   events.jsonl.torn       # the fragment of a torn last line, kept when it was cut off
   sock                    # the session socket (a pipe name on Windows)
   commands/<call-id>/out  # a tool call's whole output, from the first byte
+  commands/mcp_<ulid>/    # a `kelir mcp` call: `out` (its text) and any decoded image/blob files
   blobs/<seq>-<field>     # a payload over 10 KB, referenced from its event
   attachments/<n>-<name>  # an image `kelir view` queued
   bg/<bg-id>.status       # a job's state, written by its shim: survives kelir exiting
@@ -46,6 +47,7 @@ prompt-cache key.
   models-<endpoint>.json  # one endpoint's model list, cached for a day, written temp-then-rename
   locks/<provider>-<slot> # the concurrency governor's advisory locks
   bg/<bg-id>.*            # jobs started outside a session (kelir bg run from a plain shell)
+  mcp/<ulid>/             # decoded images/blobs of a one-shot `kelir mcp` call (outside a session)
 ```
 
 `locks/` holds OS file locks, not pid files: a kelir that crashes leaks nothing
@@ -63,6 +65,10 @@ kelir creates.
 2. Otherwise `<config>/config.toml`, then the nearest `.kelir/config.toml`
    walking up from the cwd (the project's, merged per key over the machine's).
 
+`mcp.toml` follows the same two layers, in its own file: `<config>/mcp.toml`
+(or `KELIR_MCP_CONFIG`), then the nearest `.kelir/mcp.toml`, merged per server
+name (`docs/reference/mcp.md`).
+
 ## The pieces, and the file that owns each
 
 | path | owner | what it is |
@@ -70,6 +76,7 @@ kelir creates.
 | `events.jsonl` | `src/event.rs` | the log (`docs/reference/events.md`) |
 | `blobs/` | `src/event.rs` | a payload too big to be inline |
 | `commands/<call-id>/out` | `src/tools/bash.rs`, `src/spill.rs` | a tool call's whole output |
+| `commands/mcp_<ulid>/` | `src/mcp/broker.rs`, `src/mcp/mod.rs` | a `kelir mcp` call's text and decoded blobs |
 | `bg/` | `src/bg.rs` | background jobs (they outlive the session on purpose) |
 | `attachments/` | `src/attachments.rs` | images `kelir view` queued |
 | `sock` | `src/ipc.rs` | verbs in, status out |

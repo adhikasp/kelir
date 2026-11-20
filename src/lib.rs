@@ -24,6 +24,7 @@ pub mod governor;
 pub mod herdr;
 pub mod ipc;
 pub mod markdown;
+pub mod mcp;
 pub mod models;
 pub mod paths;
 pub mod proc;

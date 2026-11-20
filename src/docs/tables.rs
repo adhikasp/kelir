@@ -52,8 +52,9 @@ pub const VERBS: &[VerbDoc] = &[
         name: "tools",
         args: "`--disable <name>` / `--enable <name>` (repeatable)",
         applies: "`next_step`",
-        effect: "disables or enables a native tool; the tool list sent to the provider never \
-                 changes, a disabled tool's call settles `disabled`",
+        effect: "disables or enables a native tool, or MCP calls (`mcp:<server>` or \
+                 `mcp:<server>.<tool>`); the tool list sent to the provider never changes, a \
+                 disabled tool's call settles `disabled`",
     },
     VerbDoc {
         name: "skills",
@@ -481,6 +482,16 @@ pub const EVENTS: &[EventDoc] = &[
         name: "turn_ended",
         fields: "`outcome`, `reason?`, `final_text`",
         written_by: "the end of a turn; `reason` distinguishes `steps` from `provider` pausing",
+    },
+    EventDoc {
+        name: "mcp_started",
+        fields: "`mcp_id`, `server`, `tool`, `args`, `parent_call_id?`",
+        written_by: "a `kelir mcp <server> <tool>` call reached the session broker (intent:                      written before the server is asked)",
+    },
+    EventDoc {
+        name: "mcp_settled",
+        fields: "`mcp_id`, `server`, `tool`, `outcome`, `exit_code`, `bytes`, `out_path`,                  `parent_call_id?`",
+        written_by: "the call's one commit; `outcome` is `ok`, `error`, `timeout`,                      `unavailable` or `disabled`, and the result is in the file `out_path` names",
     },
     EventDoc {
         name: "bg_started",

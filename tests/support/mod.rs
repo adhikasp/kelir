@@ -759,6 +759,17 @@ impl LiveSession {
         Self::start_in_base(reuse_state, &base, args, extra_config, extra_flags).await
     }
 
+    /// A session whose project has this `.kelir/mcp.toml` (M6).
+    pub async fn start_with_mcp(
+        mock: &Mock,
+        args: &[&str],
+        extra_config: &str,
+        mcp_toml: &str,
+    ) -> LiveSession {
+        let base = mock.base_url();
+        Self::start_in_base_mcp(None, &base, args, extra_config, 0, Some(mcp_toml)).await
+    }
+
     async fn start_in_base(
         reuse_state: Option<PathBuf>,
         base_url: &str,
@@ -766,9 +777,24 @@ impl LiveSession {
         extra_config: &str,
         extra_flags: u32,
     ) -> LiveSession {
+        Self::start_in_base_mcp(reuse_state, base_url, args, extra_config, extra_flags, None).await
+    }
+
+    async fn start_in_base_mcp(
+        reuse_state: Option<PathBuf>,
+        base_url: &str,
+        args: &[&str],
+        extra_config: &str,
+        extra_flags: u32,
+        mcp_toml: Option<&str>,
+    ) -> LiveSession {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().join("work");
         std::fs::create_dir_all(&cwd).unwrap();
+        if let Some(text) = mcp_toml {
+            std::fs::create_dir_all(cwd.join(".kelir")).unwrap();
+            std::fs::write(cwd.join(".kelir").join("mcp.toml"), text).unwrap();
+        }
         let config = temp.path().join("config.toml");
         std::fs::write(&config, test_config(extra_config)).unwrap();
         let state = reuse_state.unwrap_or_else(|| temp.path().join("state"));

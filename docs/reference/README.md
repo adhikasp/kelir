@@ -24,6 +24,7 @@ else has to move with it.
 | `cli` | every subcommand and flag, generated from clap |
 | `env` | every environment variable kelir reads or sets |
 | `verbs` | every `kelir ctl` verb: arguments, when it applies, what it writes |
+| `mcp` | `mcp.toml`, `kelir mcp`, exit codes, the session broker, channel servers |
 | `providers` | the two providers: key sources, retries, limits, model metadata |
 | `sources-and-skills` | instruction files, skills, hints, memory, attachments |
 | `files` | the state dir, a session dir, the event log, blobs, bg, locks, config search |
@@ -32,7 +33,7 @@ else has to move with it.
 | `troubleshooting` | 429s, a paused turn, a stale socket, a lost job, Windows quirks |
 | `source-map` | which source file owns what |
 
-`gates-and-mcp` joins this list when MCP servers and gates land (M6, M10).
+Gates join this list when they land (M7); MCP is `mcp`.
 
 ## Generated, and checked
 

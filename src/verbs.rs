@@ -215,9 +215,10 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             }
             let known = tools::names();
             for name in disable.iter().chain(enable.iter()) {
-                if !known.contains(name) {
+                // `mcp:<server>` / `mcp:<server>.<tool>` switch MCP calls off.
+                if !known.contains(name) && !is_mcp_tool_name(name) {
                     return Err(format!(
-                        "tools: unknown tool `{name}` (known: {})",
+                        "tools: unknown tool `{name}` (known: {}, mcp:<server>,                          mcp:<server>.<tool>)",
                         known.join(", ")
                     ));
                 }
@@ -434,6 +435,18 @@ fn name_list(args: &Value, key: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// `mcp:<server>` or `mcp:<server>.<tool>`: the gate-side name of an MCP call.
+fn is_mcp_tool_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("mcp:") else {
+        return false;
+    };
+    let (server, tool) = match rest.split_once('.') {
+        Some((server, tool)) => (server, Some(tool)),
+        None => (rest, None),
+    };
+    crate::mcp::config::valid_name(server) && tool.is_none_or(|tool| !tool.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +544,10 @@ mod tests {
         assert!(parse("tools", &json!({})).is_err());
         let error = parse("tools", &json!({"disable": "spawn"})).unwrap_err();
         assert!(error.contains("unknown tool"), "{error}");
+        // An MCP server, or one of its tools, can be switched off by name.
+        assert!(parse("tools", &json!({"disable": ["mcp:demo", "mcp:demo.echo"]})).is_ok());
+        assert!(parse("tools", &json!({"disable": "mcp:"})).is_err());
+        assert!(parse("tools", &json!({"disable": "mcp:a b"})).is_err());
     }
 
     /// The job report is a verb so that it arrives through the same channel as
