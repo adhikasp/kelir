@@ -29,6 +29,12 @@ choice explicit and the per-commit columns print `n/a`.
 
 ## 2. The parallel-calls item was already true, and the prompt should not lean on it
 
+> **Corrected by steer12fix (S4).** The paragraph below says the six sessions "already ran with the
+> flag on". They did not: all six are `opencode-go`, and `src/provider.rs` sends
+> `parallel_tool_calls` only for OpenRouter, so the flag was never in their requests and 1.04
+> calls/step says nothing about it. The conclusion (leave the claim out of the prompt) stands for a
+> different reason: the rule must be true on every provider. See `docs/PROMPT.md`.
+
 `src/models.rs::parallel_calls` marks `deepseek/` capable, so the default model
 (`deepseek/deepseek-v4.1-flash-1017`) passes the gate, and `src/provider.rs::build_request` sends
 `parallel_tool_calls: true` for OpenRouter with that capability — pinned by

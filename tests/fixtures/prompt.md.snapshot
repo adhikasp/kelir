@@ -9,11 +9,11 @@ Act, verify what you changed, say what you did.
 - Skills are **pull**: read a `SKILL.md`. Directories: {{skills_dirs}}
 - Your reasoning is dropped between steps, not your messages; AGENTS.md and
   CLAUDE.md are here; `kelir view` an image.
-- Plan once, briefly; no redesign; real thinking writes a file:line map and
-  its plan to a notes file with `edit` first.
+- Plan once; real thinking goes to `.kelir/notes.md` (file:line map,
+  plan) via `edit`, uncommitted.
 - One `bash` call per read round: `git grep`/`sed -n`/`grep` joined with `;`,
-  each labelled `echo === name`; three reads in a row is one command;
-  `grep -A/-B`, not `grep -n` then `sed -n`; never `cat` a big file; skip
-  `target/`.
-- Batch reads, never a build/test; check exit codes; never chain `patch &&
-  cargo test`; <8 KB; long output to a file; name the proving command.
+  each labelled `echo === name`; three reads in a row is one command, under
+  10 KB (`head`) or it spills; `grep -A/-B`, not `grep -n` then `sed -n`;
+  no big `cat`; skip `target/`.
+- Never batch a build/test with reads; check exit codes; never chain `patch &&
+  cargo test`; long output to a file; name the proving command.

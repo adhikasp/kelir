@@ -80,7 +80,9 @@ fn log_with(commands: &[&str]) -> String {
 
 fn read_calls(commands: &[&str]) -> Option<u64> {
     let python = python()?;
-    let dir = std::env::temp_dir().join(format!("kelir-review-steer12-{}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("kelir-review-steer12-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("events.jsonl");
     std::fs::write(&path, log_with(commands)).unwrap();
@@ -119,26 +121,33 @@ fn a_labelled_batch_is_one_read_call() {
 /// (the old logs hold three such calls) inflates the very number the AFTER table is
 /// compared on.
 #[test]
-#[ignore = "finding S2: redirects and sed -i make a write a read call in trajectory.py"]
 fn a_write_is_not_a_read_call() {
     let Some(reads) = read_calls(&[
         "cat > notes.md <<'EOF'\nplan\nEOF",
         "sed -i 's/a/b/' src/x.rs",
         "echo plan >> notes.md",
         "find . -name '*.tmp' -delete",
+        "git branch -D x",
+        "git config user.name x",
+        "sleep 5",
+        "git show HEAD:f > out.txt",
     ]) else {
         return;
     };
-    assert_eq!(reads, 0, "four writes counted as reads");
+    assert_eq!(reads, 0, "writes counted as reads");
 }
 
 /// FINDING N3 (metrics): `powershell -Command "Get-Content f"` is a read the brief
 /// names ("powershell reads"); the double-quoted payload is one word and is not looked into.
 #[test]
-#[ignore = "finding N3: a double-quoted powershell -Command payload is not classified"]
 fn a_quoted_powershell_read_is_a_read_call() {
-    let Some(reads) = read_calls(&["powershell -NoProfile -Command \"Get-Content a.txt\""]) else {
+    let Some(reads) = read_calls(&[
+        "powershell -NoProfile -Command \"Get-Content a.txt\"",
+        "bash -c 'cat f'",
+        "for f in src/*.rs; do wc -l $f; done",
+        "grep \"a\\\"b\" f; cargo build",
+    ]) else {
         return;
     };
-    assert_eq!(reads, 1);
+    assert_eq!(reads, 3, "the quoted-escape call also builds");
 }

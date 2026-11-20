@@ -20,6 +20,9 @@ usage:
 options:
   --commits N     commits landed in these sessions (default: ask git, see below)
   --big-tokens N  a "big" step's completion-token floor (default: 2000)
+  --by-prompt     also one table per base prompt the sessions actually ran
+                  (steer12 | batch-reads | pre-m5 | no-batching), read from
+                  `session_started.system.text`
   --json          one JSON object instead of the tables
   --quiet         no notes on stderr
 
@@ -73,27 +76,69 @@ READ_COMMANDS = {
 # `git` verbs that only read the repository.
 READ_GIT_VERBS = {
     "grep", "log", "show", "status", "diff", "ls-files", "rev-parse",
-    "blame", "cat-file", "ls-tree", "describe", "shortlog", "branch",
-    "remote", "config",
+    "blame", "cat-file", "ls-tree", "describe", "shortlog",
+}
+# `git branch`, `remote` and `config` read or write depending on their arguments.
+GIT_BRANCH_WRITE = {
+    "-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u", "--delete", "--move",
+    "--copy", "--force", "--set-upstream-to", "--unset-upstream", "--edit-description",
+}
+GIT_CONFIG_READ = {
+    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l",
+    "--show-origin", "--show-scope", "--name-only",
+}
+GIT_REMOTE_READ = {"-v", "--verbose", "show", "get-url"}
+# Shell control words that carry no command of their own.
+CONTROL_WORDS = {"for", "while", "until", "case", "done", "fi", "esac", "{", "}", "(", ")", "!"}
+# ...and the ones that precede the command they introduce.
+CONTROL_PREFIXES = {"do", "then", "else", "elif", "if", "while", "until", "!", "{"}
+SHELLS = {"bash", "sh", "zsh", "dash"}
+POWERSHELL_WRITERS = {
+    "set-content", "out-file", "new-item", "remove-item", "add-content",
+    "move-item", "copy-item", "rename-item", "set-item", "clear-content", "tee-object",
 }
 # Commands that only look: they never make a call a non-read call.
 NEUTRAL_COMMANDS = {
     "echo", "printf", "cd", "pushd", "popd", "pwd", "export", "unset",
-    "set", "true", "false", ":", "wait", "sleep", "date", "test", "[",
+    "set", "true", "false", ":", "wait", "date", "test", "[",
     "", "2>&1", "2>&2", "1>&2",
 }
+HEREDOC = re.compile(r"<<-?[ ]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def strip_heredocs(command):
+    """Drop heredoc bodies: `cat > f <<'EOF' ... EOF` keeps only its first line."""
+    out = []
+    end = None
+    for line in command.split("\n"):
+        if end is not None:
+            if line.strip() == end:
+                end = None
+            continue
+        out.append(line)
+        match = HEREDOC.search(line)
+        if match and "<<<" not in line:
+            end = match.group(2)
+    return "\n".join(out)
+
+
 def split_commands(command):
     """Split a shell line into simple commands, honouring quotes.
 
     A `|` inside `grep -n "a|b"` is an argument, not a pipe, so a plain regex
     would cut a read in half and call it a non-read. This walks the line.
     """
+    command = strip_heredocs(command)
     parts = []
     current = []
     quote = None
     index = 0
     while index < len(command):
         character = command[index]
+        if character == "\\" and quote != "'" and index + 1 < len(command):
+            current.append(command[index:index + 2])
+            index += 2
+            continue
         if quote:
             current.append(character)
             if character == quote:
@@ -131,7 +176,16 @@ def split_words(part):
     words = []
     current = []
     quote = None
-    for character in part:
+    skip = False
+    for position, character in enumerate(part):
+        if skip:
+            skip = False
+            current.append(character)
+            continue
+        if character == "\\" and quote != "'" and position + 1 < len(part):
+            current.append(character)
+            skip = True
+            continue
         if quote:
             current.append(character)
             if character == quote:
@@ -170,6 +224,33 @@ def parse_ts(text):
         return datetime.fromisoformat(f"{base}.{micro}{rest}")
 
 
+def unquote(word):
+    if len(word) >= 2 and word[0] == word[-1] and word[0] in "'\"":
+        return word[1:-1]
+    return word
+
+
+REDIRECT = re.compile(r"^(?:\d*|&)>>?(.*)$")
+
+
+def writes_to_file(words):
+    """True when an unquoted word redirects output into a file."""
+    for index, word in enumerate(words):
+        if word[:1] in "'\"":
+            continue
+        match = REDIRECT.match(word)
+        if not match:
+            continue
+        target = match.group(1)
+        if not target and index + 1 < len(words):
+            target = words[index + 1]
+        target = unquote(target).lower()
+        if target.startswith("&") or target in ("/dev/null", "nul", "$null"):
+            continue
+        return True
+    return False
+
+
 def segments(command):
     """The command words of a shell line, one list per simple command."""
     out = []
@@ -177,8 +258,11 @@ def segments(command):
         if part.startswith("#"):
             continue
         words = split_words(part)
-        # Drop leading `VAR=value` environment assignments.
-        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+        # Drop leading `VAR=value` environment assignments and `do`/`then`/`if`.
+        while words and (
+            re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0])
+            or (words[0] in CONTROL_PREFIXES and len(words) > 1)
+        ):
             words = words[1:]
         if words:
             out.append(words)
@@ -186,31 +270,90 @@ def segments(command):
 
 
 def program(word):
-    name = word.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    name = unquote(word).replace("\\", "/").rsplit("/", 1)[-1].lower()
     for suffix in (".exe", ".cmd", ".bat", ".ps1"):
         if name.endswith(suffix):
             name = name[: -len(suffix)]
     return name
 
 
+def positionals(words):
+    return [word for word in words if not word.startswith("-")]
+
+
+def classify_git(words):
+    rest = list(words[1:])
+    # Skip `-C dir` and `-c k=v` global options.
+    while rest and rest[0] in ("-C", "-c") and len(rest) > 2:
+        rest = rest[2:]
+    rest = [word for word in rest if not word.startswith("--no-pager")]
+    verb_at = next((i for i, word in enumerate(rest) if not word.startswith("-")), None)
+    if verb_at is None:
+        return "other"
+    verb, args = rest[verb_at], rest[verb_at + 1:]
+    if verb in READ_GIT_VERBS:
+        return "read"
+    if verb == "branch":
+        flagged = {word.split("=")[0] for word in args if word.startswith("-")}
+        return "other" if flagged & GIT_BRANCH_WRITE or len(positionals(args)) > 0 and not (
+            flagged & {"--list", "-l", "--contains", "--merged", "--no-merged", "--points-at"}
+        ) else "read"
+    if verb == "config":
+        if {word for word in args if word.startswith("-")} & GIT_CONFIG_READ:
+            return "read"
+        return "read" if len(positionals(args)) == 1 else "other"
+    if verb == "remote":
+        sub = positionals(args)
+        return "read" if not sub or sub[0] in GIT_REMOTE_READ or "-v" in args else "other"
+    return "other"
+
+
+def classify_powershell(words):
+    tokens = []
+    for word in words[1:]:
+        text = unquote(word)
+        tokens.extend(split_words(text) if text != word else [word])
+    inner = []
+    for token in tokens:
+        inner.append(program(token))
+        inner.extend(program(piece) for piece in re.split(r"[;|]", unquote(token)) if piece.strip())
+    if any(item in POWERSHELL_WRITERS for item in inner) or writes_to_file(tokens):
+        return "other"
+    return "read" if any(item in READ_COMMANDS for item in inner) else "other"
+
+
 def classify(words):
     """`read`, `neutral` (a label, an env var, a no-op) or `other`."""
     name = program(words[0])
-    if name in NEUTRAL_COMMANDS:
+    if writes_to_file(words):
+        return "other"
+    if name in NEUTRAL_COMMANDS or name in CONTROL_WORDS:
         return "neutral"
     if name == "git":
-        for word in words[1:]:
-            if word.startswith("-"):
-                continue
-            return "read" if word in READ_GIT_VERBS else "other"
-        return "other"
+        return classify_git(words)
     if name in ("powershell", "pwsh"):
-        # A PowerShell read: Get-Content/Select-String/Get-ChildItem anywhere.
-        writers = {"set-content", "out-file", "new-item", "remove-item"}
-        inner = [program(word) for word in words[1:]]
-        if any(word in writers for word in inner):
-            return "other"
-        return "read" if any(word in READ_COMMANDS for word in inner) else "other"
+        return classify_powershell(words)
+    if name in SHELLS:
+        for index, word in enumerate(words[1:-1], start=1):
+            if word in ("-c", "-lc", "-ec"):
+                return "read" if is_read_call(unquote(words[index + 1])) else "other"
+        return "other"
+    args = words[1:]
+    if name == "sed" and any(
+        word == "--in-place" or word.startswith("--in-place=")
+        or (word.startswith("-") and not word.startswith("--") and "i" in word)
+        for word in args
+    ):
+        return "other"
+    if name == "find" and any(
+        word in ("-delete", "-exec", "-execdir", "-ok", "-fprint", "-fprintf", "-fls")
+        for word in args
+    ):
+        return "other"
+    if name in ("sort", "awk", "gawk") and any(
+        word == "-o" or word.startswith("--output") for word in args
+    ):
+        return "other"
     return "read" if name in READ_COMMANDS else "other"
 
 
@@ -261,6 +404,22 @@ class Session:
             if event.get("type") == "session_started":
                 self.cwd = event.get("cwd")
                 break
+
+    def prompt_label(self):
+        """Which base prompt this session ran, read from `session_started.system.text`."""
+        for event in self.events:
+            if event.get("type") != "session_started":
+                continue
+            system = event.get("system")
+            text = system.get("text", "") if isinstance(system, dict) else str(system or "")
+            if "One `bash` call per read round" in text:
+                return "steer12"
+            if "Batch independent reads" in text:
+                return "batch-reads"
+            if "Reach for `bash`" in text:
+                return "pre-m5"
+            return "no-batching" if text else "unknown"
+        return "unknown"
 
     def of_type(self, kind):
         return [event for event in self.events if event.get("type") == kind]
@@ -572,6 +731,7 @@ def main(argv):
     commits = None
     big_tokens = 2000
     as_json = False
+    by_prompt = False
     quiet = False
     selftest = None
     index = 0
@@ -585,6 +745,9 @@ def main(argv):
             index += 2
         elif argument == "--json":
             as_json = True
+            index += 1
+        elif argument == "--by-prompt":
+            by_prompt = True
             index += 1
         elif argument == "--quiet":
             quiet = True
@@ -612,6 +775,7 @@ def main(argv):
     for path in collect(arguments):
         session = Session(path)
         row = session.metrics(big_tokens)
+        row["prompt"] = session.prompt_label()
         row["commits"] = commits if commits is not None else session.commits()
         rows.append(row)
     total = summarise(rows, commits, big_tokens)
@@ -621,6 +785,14 @@ def main(argv):
     print(table(total, rows))
     print()
     print(render(total))
+    if by_prompt:
+        for label in sorted({row["prompt"] for row in rows}):
+            group = [row for row in rows if row["prompt"] == label]
+            part = summarise(group, 0 if commits == 0 else None, big_tokens)
+            print(f"\n== prompt:{label} ({len(group)} session(s)) ==")
+            print(table(part, group))
+            print()
+            print(render(part))
     if commits is None and any(row.get("commits") is None for row in rows) and not quiet:
         print(
             "\nnote: the commit count could not be derived for every session "

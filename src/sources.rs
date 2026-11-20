@@ -1126,10 +1126,10 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
     fn the_embedded_prompt_carries_every_retro_rule() {
         let base = crate::config::DEFAULT_PROMPT;
         for (rule, why) in [
-            ("Plan once, briefly", "F1: design thrash"),
+            ("Plan once", "F1: design thrash"),
             ("reasoning is dropped", "F1: the plan has nowhere to live"),
             (
-                "notes file",
+                ".kelir/notes.md",
                 "STEER-12: the plan is externalised, not re-derived",
             ),
             ("edits", "F3: multi-hunk edits"),
@@ -1149,7 +1149,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             ),
             ("git grep", "F7: search hygiene"),
             ("target/", "F7: do not walk the build directory"),
-            ("never `cat` a big file", "F7: ranged reads"),
+            ("no big `cat`", "F7: ranged reads"),
             (
                 "share no shell state",
                 "STEER-4: every call starts in the cwd",

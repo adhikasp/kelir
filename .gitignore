@@ -5,3 +5,6 @@
 /scratch
 # Bytecode from scripts/metrics/trajectory.py, which tests/steer12.rs runs.
 __pycache__/
+
+# Per-run agent notes (src/prompt.md tells the model to write them here).
+/.kelir/notes.md

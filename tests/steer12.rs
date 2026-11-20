@@ -172,7 +172,8 @@ fn the_base_prompt_carries_the_batching_and_the_notes_file() {
         "each labelled `echo === name`",
         "three reads in a row is one command",
         "grep -A/-B",
-        "notes file",
+        ".kelir/notes.md",
+        "under\n  10 KB",
         // Not a retro rule but a fixture another suite depends on: the live
         // system message is cut at this word to compare the head across runs
         // (`tests/review_steer6.rs`, F1). Renaming it fails that test, so it is
