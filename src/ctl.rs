@@ -55,7 +55,13 @@ pub async fn ctl(args: CtlArgs) -> u8 {
         // environment a tool child would get.
         match ipc::request_with_token_file(&dir, id, &request).await {
             Ok(response) => {
-                println!("{}", response.line());
+                // `status` reads for a human unless `--json` asks for the line.
+                match (&args.verb[..], &response.state, args.json) {
+                    ("status", Some(state), false) if response.ok => {
+                        println!("{}", crate::spend::render_text(state));
+                    }
+                    _ => println!("{}", response.line()),
+                }
                 return if response.ok { 0 } else { 1 };
             }
             Err(error) => last = Some((id.clone(), error)),

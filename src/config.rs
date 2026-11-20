@@ -117,6 +117,16 @@ pub struct Config {
     /// What to retry and how long to wait (`retry_base_ms`, `retry_cap_ms`,
     /// `retry_max_wait`).
     pub retry: crate::retry::Policy,
+    /// Warn (log and screen, never the model) when the last prompt is larger
+    /// than this many tokens (`warn_prompt_tokens`, default 150000; `None` =
+    /// off).
+    pub warn_prompt_tokens: Option<u64>,
+    /// Warn once when the session's cost passes this many dollars (`warn_cost`,
+    /// default unset).
+    pub warn_cost: Option<f64>,
+    /// `[prices."<model>"]`: per-million-token prices that override and extend
+    /// the built-in table.
+    pub prices: BTreeMap<String, crate::spend::Price>,
 }
 
 /// The pushed hint, configured: which model scores, and where.
@@ -179,6 +189,18 @@ struct RawConfig {
     /// A count cap inside the budget (`retry_max_attempts`), for a job that
     /// wants "three tries and out".
     retry_max_attempts: Option<u32>,
+    warn_prompt_tokens: Option<u64>,
+    warn_cost: Option<f64>,
+    prices: BTreeMap<String, RawPrice>,
+}
+
+/// One `[prices."<model>"]` table: dollars per million tokens.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawPrice {
+    input: Option<f64>,
+    cached_input: Option<f64>,
+    output: Option<f64>,
 }
 
 /// The `[hint]` table: the scorer of the pushed hint.
@@ -436,6 +458,13 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         hint,
         promote_after: promote_after(raw.promote_after)?,
         retry,
+        warn_prompt_tokens: match raw.warn_prompt_tokens {
+            Some(0) => None,
+            Some(tokens) => Some(tokens),
+            None => Some(crate::spend::DEFAULT_WARN_PROMPT_TOKENS),
+        },
+        warn_cost: warn_cost(raw.warn_cost)?,
+        prices: prices(&raw.prices)?,
     })
 }
 
@@ -482,6 +511,55 @@ fn hint_config(
             .map(str::to_string),
         timeout: std::time::Duration::from_millis(timeout_ms),
     }))
+}
+
+/// `warn_cost`: a positive dollar amount, or unset. `0` and below are refused
+/// rather than read as "off": a person who writes it means something else.
+fn warn_cost(raw: Option<f64>) -> Result<Option<f64>, ConfigError> {
+    match raw {
+        None => Ok(None),
+        Some(value) if value.is_finite() && value > 0.0 => Ok(Some(value)),
+        Some(value) => Err(ConfigError(format!(
+            "warn_cost must be a positive dollar amount (got {value}); leave it out to turn it off"
+        ))),
+    }
+}
+
+/// `[prices]`: `input` and `output` are required, `cached_input` defaults to
+/// `input` (no cache discount). A negative or missing price is a config error:
+/// a wrong price is worse than none.
+fn prices(
+    raw: &BTreeMap<String, RawPrice>,
+) -> Result<BTreeMap<String, crate::spend::Price>, ConfigError> {
+    let mut out = BTreeMap::new();
+    for (model, price) in raw {
+        let need = |name: &str, value: Option<f64>| -> Result<f64, ConfigError> {
+            match value {
+                Some(value) if value.is_finite() && value >= 0.0 => Ok(value),
+                Some(value) => Err(ConfigError(format!(
+                    "[prices.\"{model}\"] {name} must be zero or more dollars per million tokens (got {value})"
+                ))),
+                None => Err(ConfigError(format!(
+                    "[prices.\"{model}\"] needs `{name}` (dollars per million tokens)"
+                ))),
+            }
+        };
+        let input = need("input", price.input)?;
+        let output = need("output", price.output)?;
+        let cached_input = match price.cached_input {
+            Some(value) => need("cached_input", Some(value))?,
+            None => input,
+        };
+        out.insert(
+            model.clone(),
+            crate::spend::Price {
+                input,
+                cached_input,
+                output,
+            },
+        );
+    }
+    Ok(out)
 }
 
 /// The retry schedule and budget. A wrong value is a config error rather than a
@@ -909,6 +987,58 @@ extra_headers = { "x-extra" = "yes" }
             assert!(error.contains("Rename the table"), "{error}");
             assert!(error.contains("key_env"), "{error}");
             assert!(!error.contains("kind = \"…\" is no longer used\n"));
+        }
+    }
+
+    #[test]
+    fn warn_and_price_keys_have_defaults_and_validate() {
+        let cfg = load(Some(&temp_config(""))).unwrap();
+        assert_eq!(cfg.warn_prompt_tokens, Some(150_000));
+        assert_eq!(cfg.warn_cost, None);
+        assert!(cfg.prices.is_empty());
+
+        let cfg = load(Some(&temp_config(
+            "warn_prompt_tokens = 0
+warn_cost = 0.5
+[prices.\"a/b\"]
+input = 1.0
+output = 2.0
+",
+        )))
+        .unwrap();
+        assert_eq!(
+            cfg.warn_prompt_tokens, None,
+            "0 turns the prompt warning off"
+        );
+        assert_eq!(cfg.warn_cost, Some(0.5));
+        let price = cfg.prices.get("a/b").unwrap();
+        assert_eq!(
+            (price.input, price.cached_input, price.output),
+            (1.0, 1.0, 2.0)
+        );
+
+        for bad in [
+            "warn_cost = 0
+",
+            "warn_cost = -1.0
+",
+            "[prices.\"a/b\"]
+input = 1.0
+",
+            "[prices.\"a/b\"]
+input = -1.0
+output = 1.0
+",
+            "[prices.\"a/b\"]
+input = 1.0
+output = 1.0
+extra = 3
+",
+        ] {
+            assert!(
+                load(Some(&temp_config(bad))).is_err(),
+                "{bad:?} must be refused"
+            );
         }
     }
 
