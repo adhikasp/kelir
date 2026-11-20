@@ -290,3 +290,7 @@ implementer pauses; the retro/introspective passes keep reading the transcripts 
 
 - 2026-11-20 16:40: **STEER-7 merged** after four review rounds (accepted with the documented same-user boundary). M6 must now merge main and put the MCP broker requests under the
   session token (the m6fix worker was told to keep the request path in one function). Next: M6 review fixes (m6fix running), then merge M6 + token integration; steer8, steer9, M5-B, M7...
+
+- 2026-11-20 18:00: Claude's 5-hour limit was hit with three Claude workers running in parallel; panes were relaunched after the reset (workers told to continue from the
+  worktree state). Keep Claude concurrency at <= 3 to leave headroom for reviews; if the limit hits again, wait for the reset rather than falling back to opencode-go.
+  Running: steer8 (cost/status), M5-B, M6 merge+STEER-7 token integration (m6m).
