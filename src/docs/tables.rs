@@ -76,7 +76,8 @@ pub const VERBS: &[VerbDoc] = &[
         // boundary, like the message it belongs to.
         applies: "`now`",
         effect: "queues an image for the next message: a `source` event of kind `attachment` at \
-                 the tail, so the cached prefix is untouched",
+                 the tail, so the cached prefix is untouched; an audio or video file is stored \
+                 under the session and noted (kind `attachment-note`), not sent",
     },
     VerbDoc {
         name: "bg",
@@ -292,6 +293,31 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
     },
     KeyDoc {
         scope: KeyScope::Top,
+        name: "memory_dir",
+        kind: "path",
+        default: "unset: no memory",
+        overrides: "—",
+        effect: "a directory of `.md`/`.txt` notes loaded as `memory` sources: rendered once into \
+                 the frozen system, and a note edited or created later arrives as a `source` \
+                 message at the tail; the model writes memory with `edit`; `~/` expands, a \
+                 relative path is the session cwd's",
+        field_fn: "load",
+    },
+    KeyDoc {
+        scope: KeyScope::Top,
+        name: "hint",
+        kind: "table",
+        default: "unset: the pushed hint is off",
+        overrides: "—",
+        effect: "`[hint]` with `model` (required to turn it on), `provider` (default: the session \
+                 provider), `endpoint` (a base URL instead of the provider's) and `timeout_ms` \
+                 (default `2000`): one cheap scoring call per human prompt appends `might be \
+                 relevant: name - description` as a `source` message of kind `hint`; it fails \
+                 open",
+        field_fn: "load",
+    },
+    KeyDoc {
+        scope: KeyScope::Top,
         name: "promote_after",
         kind: "integer (seconds)",
         default: "`600`; `0` disables promotion",
@@ -448,8 +474,8 @@ pub const EVENTS: &[EventDoc] = &[
     EventDoc {
         name: "source",
         fields: "`kind`, `name`, `text?`, `path?`",
-        written_by: "context that arrived after the start: a hint, a skill, an instruction edit, \
-                     an attachment, a channel message",
+        written_by: "context that arrived after the start: a `hint`, a skill, an instruction or \
+                     memory edit, an `attachment` or `attachment-note`, a channel message",
     },
     EventDoc {
         name: "step_started",

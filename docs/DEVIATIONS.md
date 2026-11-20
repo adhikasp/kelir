@@ -1488,3 +1488,8 @@ follow-up commit series that restores three things the first pass lost.
   `src/config.rs:LINE`; `docs/reference` uses `src/config.rs:<fn>` (`git grep -n 'fn <name>'`),
   because a line number is stale after the next edit and the drift test checks that the named
   function exists. Top-level config keys share `load`; that is a known coarse pointer.
+
+- **`observe` reads the log, not the socket (M5-B).** The task allows "a verb over the socket"; a
+  verb would be logged, token-gated and scheduled at a boundary, which is wrong for a read.
+  `kelir observe` and `kelir ctl <s> observe` read `events.jsonl` and build the request with the
+  loop's own code. Limit: a body field dropped after a provider 400 is process memory, not log.

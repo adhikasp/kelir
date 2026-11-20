@@ -31,6 +31,7 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_HERDR` | force Herdr status records on (`1`) or off (`0`) |
 | `KELIR_ASCII` | non-empty: ASCII glyphs instead of Unicode in the TUI |
 | `NO_COLOR` | non-empty (the convention): no colours; attributes and glyphs stay |
+| `HC_TERMINAL_ID` | set by herdr-core in every pane: its presence makes kelir ask `hc get` once for the pane/space/tab line in the frozen system prompt |
 | `TERM` | `dumb` picks the ASCII glyph set |
 | `TERM_PROGRAM` | `herdr-telegram` marks a pane a Telegram bridge reads (a job reports `idle`, not `done`) |
 | `HOME` | the home directory on Unix (`~`) |

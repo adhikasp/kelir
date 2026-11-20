@@ -21,7 +21,7 @@ resume: `src/fold.rs` renders the frozen system message, then `user`,
 |---|---|---|
 | `session_started` | `id`, `parent?`, `depth`, `cwd`, `os`, `kelir_version`, `provider`, `model`, `system{text,hash}`, `sources[]`, `tools[]`, `reasoning_effort?`, `key_origin?` | the first event of a session: the frozen request prefix |
 | `user` | `text`, `from`, `delivery`, `attachments[]` | a human message: the TUI, `kelir ctl say`, a job's wake-up, a channel |
-| `source` | `kind`, `name`, `text?`, `path?` | context that arrived after the start: a hint, a skill, an instruction edit, an attachment, a channel message |
+| `source` | `kind`, `name`, `text?`, `path?` | context that arrived after the start: a `hint`, a skill, an instruction or memory edit, an `attachment` or `attachment-note`, a channel message |
 | `step_started` | `step`, `provider`, `model`, `request_hash` | just before one provider request |
 | `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]`, `finish_reason?` | the model's answer to one step |
 | `usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `cost`, `allowance?`, `kind?` | the final stream chunk; `kind: "compact"` marks the summarising request |

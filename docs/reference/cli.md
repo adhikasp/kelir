@@ -187,6 +187,16 @@ Background jobs: run, ls, out, wait, cancel
 | flag | takes | what it does |
 |---|---|---|
 
+### `kelir observe`
+
+Print exactly what the model will see on its next request
+
+| flag | takes | what it does |
+|---|---|---|
+| `<SESSION>` | `<SESSION>` | Session id, a unique prefix, or `latest` |
+| `--raw` | nothing | Print only the exact JSON request body that would be sent |
+| `--config` | `<CONFIG>` | Config file to use instead of the machine/project search |
+
 ### `kelir doctor`
 
 Show which key each provider would use (never the key itself)

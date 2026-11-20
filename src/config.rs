@@ -104,6 +104,12 @@ pub struct Config {
     pub skills_dirs: Vec<PathBuf>,
     /// Messages kept verbatim after a compaction.
     pub compact_keep: usize,
+    /// The memory directory (`memory_dir`): its files are loaded as sources.
+    /// `None` is memory off.
+    pub memory_dir: Option<PathBuf>,
+    /// The pushed hint's scorer (`[hint]`); `None` is the hint off, which is
+    /// the default.
+    pub hint: Option<HintConfig>,
     /// A bash call still running after this long is promoted to a background
     /// job instead of being killed (`config.toml` `promote_after`, seconds;
     /// `KELIR_PROMOTE_AFTER` overrides it; zero disables promotion).
@@ -112,6 +118,21 @@ pub struct Config {
     /// `retry_max_wait`).
     pub retry: crate::retry::Policy,
 }
+
+/// The pushed hint, configured: which model scores, and where.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HintConfig {
+    /// The provider whose key and base URL the scorer uses.
+    pub provider: String,
+    pub model: String,
+    /// A base URL for the scorer, instead of the provider's own.
+    pub endpoint: Option<String>,
+    /// How long one scoring call may take before the hint is skipped.
+    pub timeout: std::time::Duration,
+}
+
+/// How long the scoring call may take by default.
+pub const HINT_TIMEOUT_MS: u64 = 2000;
 
 #[derive(Debug)]
 pub struct ConfigError(pub String);
@@ -146,6 +167,10 @@ struct RawConfig {
     compact_prompt: Option<String>,
     compact_keep: Option<usize>,
     skills_dirs: Vec<PathBuf>,
+    /// A directory of notes loaded as sources (`memory_dir`).
+    memory_dir: Option<PathBuf>,
+    /// The pushed hint's scorer (the `[hint]` table).
+    hint: Option<RawHint>,
     promote_after: Option<u64>,
     retry_base_ms: Option<u64>,
     retry_cap_ms: Option<u64>,
@@ -154,6 +179,16 @@ struct RawConfig {
     /// A count cap inside the budget (`retry_max_attempts`), for a job that
     /// wants "three tries and out".
     retry_max_attempts: Option<u32>,
+}
+
+/// The `[hint]` table: the scorer of the pushed hint.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct RawHint {
+    provider: Option<String>,
+    model: Option<String>,
+    endpoint: Option<String>,
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -359,6 +394,12 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         )));
     }
 
+    let default_provider = raw
+        .provider
+        .clone()
+        .unwrap_or_else(|| PROVIDER_OPENROUTER.to_string());
+    let hint = hint_config(raw.hint.as_ref(), &default_provider)?;
+
     Ok(Config {
         compact_at_tokens: raw
             .compact_at_tokens
@@ -388,9 +429,59 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             .map(|path| expand_home(&path.to_string_lossy()))
             .collect(),
         compact_keep: raw.compact_keep.unwrap_or(crate::compact::DEFAULT_KEEP),
+        memory_dir: raw
+            .memory_dir
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| expand_home(&path.to_string_lossy())),
+        hint,
         promote_after: promote_after(raw.promote_after)?,
         retry,
     })
+}
+
+/// The pushed hint: off unless a `[hint]` table names a model. A wrong provider
+/// name or a zero timeout is a config error (a person who wrote them meant
+/// something); a missing model is simply "off".
+fn hint_config(
+    raw: Option<&RawHint>,
+    default_provider: &str,
+) -> Result<Option<HintConfig>, ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let Some(model) = raw
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    else {
+        return Ok(None);
+    };
+    let provider = match raw
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        Some(name) if PROVIDERS.contains(&name) => name.to_string(),
+        Some(other) => return Err(unknown_provider(other)),
+        None => default_provider.to_string(),
+    };
+    let timeout_ms = raw.timeout_ms.unwrap_or(HINT_TIMEOUT_MS);
+    if timeout_ms == 0 {
+        return Err(ConfigError("hint.timeout_ms must be above 0".into()));
+    }
+    Ok(Some(HintConfig {
+        provider,
+        model: model.to_string(),
+        endpoint: raw
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string),
+        timeout: std::time::Duration::from_millis(timeout_ms),
+    }))
 }
 
 /// The retry schedule and budget. A wrong value is a config error rather than a

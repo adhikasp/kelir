@@ -36,6 +36,8 @@ pub enum Command {
     View(ViewArgs),
     /// Background jobs: run, ls, out, wait, cancel.
     Bg(BgArgs),
+    /// Print exactly what the model will see on its next request.
+    Observe(ObserveArgs),
     /// Show which key each provider would use (never the key itself).
     Doctor(DoctorArgs),
     /// Read kelir's own reference (config, CLI, verbs, files, …).
@@ -192,6 +194,20 @@ pub struct ViewArgs {
     /// first), or any path.
     #[arg(value_name = "PATH")]
     pub path: String,
+}
+
+/// `kelir observe <session> [--raw]`: the next request, read from the log.
+#[derive(Debug, Args, Clone)]
+pub struct ObserveArgs {
+    /// Session id, a unique prefix, or `latest`.
+    #[arg(value_name = "SESSION")]
+    pub session: String,
+    /// Print only the exact JSON request body that would be sent.
+    #[arg(long)]
+    pub raw: bool,
+    /// Config file to use instead of the machine/project search.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }
 
 /// `kelir docs [topic]`: the reference, embedded in this binary, so a session

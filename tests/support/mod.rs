@@ -42,6 +42,9 @@ pub struct Recorded {
     /// Names lowercased.
     pub headers: Vec<(String, String)>,
     pub body: Value,
+    /// The body exactly as received (`body` is it parsed): for tests that
+    /// compare bytes.
+    pub raw_body: String,
 }
 
 impl Recorded {
@@ -289,6 +292,7 @@ async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
             Err(_) => return,
         }
     }
+    let raw_body = String::from_utf8_lossy(&body[..body.len().min(content_length)]).into_owned();
     let body =
         serde_json::from_slice(&body[..body.len().min(content_length)]).unwrap_or(Value::Null);
 
@@ -324,6 +328,7 @@ async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
             path,
             headers,
             body,
+            raw_body,
         });
         state.script.pop_front()
     };
