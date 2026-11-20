@@ -253,7 +253,9 @@ fn shell_count() -> usize {
         .map(|out| {
             let text = String::from_utf8_lossy(&out.stdout);
             text.lines()
-                .filter(|line| line.to_ascii_lowercase().contains("sh.exe") || line.contains(" sh "))
+                .filter(|line| {
+                    line.to_ascii_lowercase().contains("sh.exe") || line.contains(" sh ")
+                })
                 .count()
         })
         .unwrap_or(0)
