@@ -594,3 +594,58 @@ async fn a_cmd_gate_runs_from_a_console_less_parent() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------- a gate that talks to its own session
+
+/// A `before_tool` gate that runs `kelir ctl latest say hi` against the session
+/// that is waiting for it. The session reads verbs only after the gate ends, so
+/// the ctl call can only time out or be refused; it must neither deadlock the
+/// session past the gate timeout nor start a second gate run for the message.
+#[tokio::test]
+async fn a_gate_that_sends_a_verb_to_its_own_session_cannot_deadlock_it() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "c1",
+            "bash",
+            &json!({"command": "echo hi"}),
+        ))),
+        Reply::Sse(sse(&text_turn("done", 0))),
+        Reply::Sse(sse(&text_turn("never", 0))),
+    ])
+    .await;
+    let probe = tempfile::tempdir().unwrap();
+    let sandbox = Sandbox::new("");
+    let kelir = fwd(env!("CARGO_BIN_EXE_kelir"));
+    let state = fwd(&sandbox.state);
+    let config = format!(
+        "[gates]\nbefore_tool = {{ name = 'self-ctl', command = '\"{kelir}\" ctl latest say hi-from-gate', env = {{ KELIR_STATE_DIR = '{state}', KELIR_CONFIG = '{cfg}', KELIR_HOME = '{state}/home' }} }}\nprompt_submit = '{counter}'\n",
+        cfg = fwd(&sandbox.config),
+        counter = rev_cmd("allow", probe.path()),
+    );
+    std::fs::write(&sandbox.config, test_config(&config)).unwrap();
+    let started = Instant::now();
+    let out = sandbox
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "go"],
+            &[("KELIR_GATE_TIMEOUT_MS", "4000")],
+        )
+        .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(started.elapsed() < Duration::from_secs(30));
+    let log = sandbox.log(&sandbox.only_session());
+    assert_eq!(gate_events(&log, "before_tool").len(), 1, "{log:?}");
+    let injected = log
+        .iter()
+        .filter(|e| e["type"] == "user" && e["text"] == "hi-from-gate")
+        .count();
+    eprintln!(
+        "self-ctl gate: {:?}; injected user messages: {injected}; prompt_submit runs: {}",
+        gate_events(&log, "before_tool")[0],
+        gate_events(&log, "prompt_submit").len()
+    );
+    // The message from a gate is a human prompt for gating purposes only if the
+    // docs' "never a gate's own message" holds: the prompt gate saw at most the
+    // task and that one message, never a loop.
+    assert!(gate_events(&log, "prompt_submit").len() <= 2);
+}
