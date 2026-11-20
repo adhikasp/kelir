@@ -80,9 +80,17 @@ session's own provider (or an expired credential) does not.
 ## `kelir docs [TOPIC] [--list] [--find <words>] [--generate] [--check]`
 
 The reference, embedded in this binary with `include_str!`, so it works in a
-session with no checkout on disk. `--list` names the topics; `--find` is a
-ranked search over them; `--generate` rewrites the generated blocks from the
-code and `--check` fails when one is stale (both need a checkout).
+session with no checkout on disk. `--list` names the topics; a bare `kelir docs`
+is the index; `kelir docs <topic>` prints one file; `--find <words>` is a
+ranked search over them.
+
+`--generate` rewrites the blocks between `<!-- generated:kind -->` markers from
+the code, and `--check` fails when one is stale: those two are for a person
+with a checkout (`docs/reference/` under the current directory, or the
+directory `KELIR_DOCS_ROOT` names) and are the only part of `docs` that touches
+a file. Exit codes: `0` a read or a clean `--check`, `1` an unknown topic or a
+search with no hit (the message suggests a topic), `2` `--generate` together
+with `--check`.
 
 The whole surface, generated:
 
