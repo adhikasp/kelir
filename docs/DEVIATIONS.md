@@ -1646,3 +1646,7 @@ follow-up commit series that restores three things the first pass lost.
   when the configured shell is not cmd or PowerShell (MSYS would rewrite `/C` to `C:/`).
 - **`git_sync.py` stages tracked files only (M8 fix, review F4).** `git add -u` by default; `GIT_SYNC_ADD_NEW`
   adds new files; a secret-like name refuses the commit; `GIT_SYNC_DRY_RUN` prints and does nothing.
+- **The builtin skills' descriptions are in the system prompt (M8 fix, F5)**, reversing STEER-11's "a skill
+  description is a listing, not in the prompt" for the three builtins only (about 130 tokens): they have no
+  file the model could find. Format `name - description` (not `name:`, which the Herdr-line tests own). Bodies
+  stay pull. `e2e_steer11` was changed to assert exactly that.

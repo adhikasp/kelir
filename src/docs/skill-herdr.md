@@ -1,6 +1,6 @@
 ---
 name: herdr
-description: inside a Herdr pane, list the agents and terminals around you (hc ls --json) and count those sharing my space; never kill another agent's pane
+description: inside a Herdr pane, list the terminals around you (hc ls --json) and count those sharing my space; never kill, remove or type into another pane
 metadata:
   builtin: true
   body: kelir docs

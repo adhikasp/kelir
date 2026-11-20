@@ -647,7 +647,7 @@ pub fn builtin_listing() -> String {
         let description = parse_skill(text)
             .map(|skill| skill.description)
             .unwrap_or_default();
-        out.push_str(&format!("\n    - {name}: {description}"));
+        out.push_str(&format!("\n    - {name} - {description}"));
     }
     out
 }
@@ -1268,13 +1268,13 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         for (name, text) in BUILTIN_SKILLS {
             let description = parse_skill(text).unwrap().description;
             assert!(
-                rendered.contains(&format!("- {name}: {description}")),
+                rendered.contains(&format!("- {name} - {description}")),
                 "{name} is not advertised in:\n{rendered}"
             );
         }
         // Also when a hand-written prompt has no placeholder.
         let appended = render_base("BASE", &places);
-        assert!(appended.contains("- herdr: "), "{appended}");
+        assert!(appended.contains("- herdr - "), "{appended}");
     }
 
     /// The prompt is a contract with the model: a line that survives a retro

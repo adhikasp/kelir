@@ -79,7 +79,7 @@ async fn the_system_prompt_sent_to_the_model_advertises_the_builtin_skills() {
         .unwrap_or_else(|| requests[0].body["messages"][0]["content"].to_string());
     for name in ["kelir", "delegation", "herdr"] {
         assert!(
-            system.contains(&format!("- {name}: ")),
+            system.contains(&format!("- {name} - ")),
             "{name} missing in:\n{system}"
         );
     }
