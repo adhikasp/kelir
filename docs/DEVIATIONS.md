@@ -1544,3 +1544,12 @@ follow-up commit series that restores three things the first pass lost.
   the log, the NDJSON stream and `observe`. Keys are kept and every string becomes
   `<string, N bytes>`. The values are in the `tool_started` of the bash call that carried them, and
   the broker requests are authenticated with the session token like every other verb.
+- **Unix MCP servers run under a `sh` watcher (m6fix2, review F2).** `killpg` on drop does not run
+  when the session is `kill -9`ed. The server starts as `sh -c '<watcher> & exec server'`: the
+  watcher polls the session's pid once a second and kills the process group when it is gone (or
+  when the server exits). Worst case a killed session's server lives about a second. Windows keeps
+  its Job Object.
+- **A server's stderr hint is redacted (m6fix2, review F1).** `env` values of 6+ bytes become `***`
+  in the hint. A shorter value, or one the server transforms (encoded, split), is not caught;
+  secrets belong in `env` and servers should not echo them. An unknown TOML *key* is still echoed
+  by name (review N1, accepted).

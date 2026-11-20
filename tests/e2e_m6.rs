@@ -719,7 +719,7 @@ async fn a_canary_in_env_reaches_no_output_channel() {
 #[tokio::test]
 async fn a_server_that_dies_at_start_says_why() {
     let files = Files::new();
-    let toml = server("env = { MCP_TEST_DIE = \"boom: missing API key\" }");
+    let toml = server("env = { MCP_TEST_DIE = \"key\" }");
     let out = one_shot(&files, &toml, &["demo", "echo", "text=x"], &[]).await;
     assert_eq!(out.code, 3, "{}", out.stderr);
     assert!(

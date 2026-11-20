@@ -11,6 +11,7 @@ Environment (all optional):
                      right after the client says "initialized"
   MCP_TEST_NO_TOOLS  answer tools/list with a -32601 error
   MCP_TEST_DIE       write this text to stderr at start and exit 1
+                     (the value `key` writes "boom: missing API key")
   MCP_TEST_LISTCHANGED  after the first tools/call add a tool `late` and
                      send notifications/tools/list_changed
 """

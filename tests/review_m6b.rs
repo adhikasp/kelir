@@ -460,7 +460,6 @@ fn config_errors_never_echo_a_secret() {
 /// A server that prints its configuration when it fails to start: its stderr
 /// tail goes into the error shown to the model and into `kelir mcp ls`.
 #[tokio::test]
-#[ignore = "m6b-F1"]
 async fn a_server_that_echoes_its_env_on_death_is_redacted() {
     let files = Files::new();
     let env_c = "CANARY-ENV-m6b-DEAD-1212";
@@ -486,7 +485,6 @@ async fn a_server_that_echoes_its_env_on_death_is_redacted() {
 /// and does not read stdin) and the server does not exit on stdin EOF (as the
 /// TypeScript SDK's stdio transport): neither it nor its grandchild may remain.
 #[tokio::test]
-#[cfg_attr(not(windows), ignore = "m6b-F2: Linux orphan")]
 async fn a_killed_session_leaves_no_server_and_no_grandchild() {
     let files = Files::new();
     let pidfile = files.text("srv.pid");

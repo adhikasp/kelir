@@ -70,6 +70,8 @@ pub struct Client {
     next_id: AtomicU64,
     alive: Arc<AtomicBool>,
     stderr_tail: Arc<Mutex<String>>,
+    /// Configured `env` values (6+ bytes): never shown in an error hint.
+    secrets: Arc<Vec<String>>,
     /// Set by the reader on `notifications/tools/list_changed`.
     tools_changed: Arc<AtomicBool>,
     group: ProcessGroup,
@@ -171,7 +173,23 @@ impl Client {
         label: &str,
         notify: Option<mpsc::UnboundedSender<Notification>>,
     ) -> Result<Client, CallError> {
-        let mut command = Command::new(resolve_command(&config.command));
+        let resolved = resolve_command(&config.command);
+        #[cfg(unix)]
+        let mut command = {
+            // The server runs under a tiny watcher (same process group) that
+            // kills the group when this process is gone, so a `kill -9` of the
+            // session leaves no server and no grandchild even if the server
+            // ignores stdin EOF (M6 round 2, F2).
+            let mut command = Command::new("sh");
+            command
+                .arg("-c")
+                .arg(UNIX_GUARD)
+                .arg("kelir-mcp")
+                .arg(&resolved);
+            command
+        };
+        #[cfg(not(unix))]
+        let mut command = Command::new(&resolved);
         command
             .args(&config.args)
             .current_dir(cwd)
@@ -230,6 +248,7 @@ impl Client {
         let alive = Arc::new(AtomicBool::new(true));
         let stderr_tail = Arc::new(Mutex::new(String::new()));
         let stderr_closed = Arc::new(AtomicBool::new(false));
+        let secrets = Arc::new(secret_values(config));
         let tools_changed = Arc::new(AtomicBool::new(false));
         tokio::spawn(drain_stderr(
             stderr,
@@ -243,6 +262,7 @@ impl Client {
             next_id: AtomicU64::new(1),
             alive: alive.clone(),
             stderr_tail: stderr_tail.clone(),
+            secrets: secrets.clone(),
             tools_changed: tools_changed.clone(),
             group,
             _child: Mutex::new(child),
@@ -256,6 +276,7 @@ impl Client {
             notify,
             replies: reply_tx,
             stderr_tail,
+            secrets,
             stderr_closed,
             tools_changed,
         }));
@@ -303,7 +324,7 @@ impl Client {
 
     /// The last of the server's stderr, as a suffix for an error message.
     pub fn stderr_hint(&self) -> String {
-        hint_from(&self.stderr_tail)
+        hint_from(&self.stderr_tail, &self.secrets)
     }
 
     /// Did the server announce `notifications/tools/list_changed` since the
@@ -445,10 +466,34 @@ impl Client {
     }
 }
 
-fn hint_from(tail: &Mutex<String>) -> String {
+/// Shell wrapper for Unix servers: a watcher in the server's process group
+/// polls the session's pid and kills the group (server, its children, itself)
+/// once the session is gone or the server has exited.
+#[cfg(unix)]
+const UNIX_GUARD: &str = "g=$$; p=$PPID; ( while kill -0 $p 2>/dev/null && kill -0 $g 2>/dev/null; do sleep 1; done; kill -s KILL -- -$g ) </dev/null >/dev/null 2>&1 & exec \"$@\"";
+
+/// `env` values worth redacting (short ones would mangle ordinary text).
+fn secret_values(config: &ServerConfig) -> Vec<String> {
+    config
+        .env
+        .values()
+        .filter(|value| value.len() >= 6)
+        .cloned()
+        .collect()
+}
+
+fn redact(text: &str, secrets: &[String]) -> String {
+    let mut text = text.to_string();
+    for secret in secrets {
+        text = text.replace(secret.as_str(), "***");
+    }
+    text
+}
+
+fn hint_from(tail: &Mutex<String>, secrets: &[String]) -> String {
     let tail = tail
         .lock()
-        .map(|tail| tail.trim().to_string())
+        .map(|tail| redact(tail.trim(), secrets))
         .unwrap_or_default();
     if tail.is_empty() {
         return String::new();
@@ -498,6 +543,7 @@ struct ReadLoop {
     notify: Option<mpsc::UnboundedSender<Notification>>,
     replies: mpsc::UnboundedSender<Value>,
     stderr_tail: Arc<Mutex<String>>,
+    secrets: Arc<Vec<String>>,
     stderr_closed: Arc<AtomicBool>,
     tools_changed: Arc<AtomicBool>,
 }
@@ -511,6 +557,7 @@ async fn read_loop(state: ReadLoop) {
         notify,
         replies,
         stderr_tail,
+        secrets,
         stderr_closed,
         tools_changed,
     } = state;
@@ -590,7 +637,7 @@ async fn read_loop(state: ReadLoop) {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let hint = hint_from(&stderr_tail);
+    let hint = hint_from(&stderr_tail, &secrets);
     let waiters: Vec<_> = pending
         .lock()
         .map(|mut map| map.drain().collect())

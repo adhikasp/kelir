@@ -45,7 +45,15 @@ the error and exits 2.
   variables a process needs to start, locale (`LANG`, `LC_*`), proxy and CA
   variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`,
   `NODE_EXTRA_CA_CERTS`) and nothing else: not `KELIR_*`, not provider keys.
-  Anything more it needs goes in its `env` table.
+  Anything more it needs goes in its `env` table. That includes registry and
+  tool settings that exist only in your environment (`npm_config_*`, `UV_*`,
+  `PYTHONPATH`, `VIRTUAL_ENV`, `NODE_OPTIONS`): put them in `env`.
+- **A server's stderr is redacted.** The last line of a failed server's stderr
+  is shown in errors and `kelir mcp ls`; every `env` value of 6 or more bytes
+  in it is replaced by `***`.
+- **A killed session leaves no server (Unix).** Each server runs under a small
+  watcher in its process group that kills the group when the session is gone,
+  even if the server ignores stdin EOF. On Windows a Job Object does this.
 - **When the file is read.** The session reads both layers once, when it
   starts. Editing `mcp.toml` has no effect on a running session (`kelir resume`
   or a new session picks it up); a one-shot `kelir mcp` outside a session
