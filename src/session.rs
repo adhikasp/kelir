@@ -390,7 +390,18 @@ struct Session {
     refused_status: std::collections::HashSet<String>,
     /// The highest signed sequence number believed per job.
     seen_seq: std::collections::HashMap<String, u64>,
+    /// What this session has spent and what state it is in, folded from the
+    /// log as it is written (STEER-8): the `status` verb's answer, and what the
+    /// warnings are decided from.
+    tally: crate::spend::Tally,
+    /// The retry or slot wait in progress, for `status`: when it ends, the
+    /// status and attempt, and whether it is a slot wait. Set and cleared by
+    /// the same `Retrying`/`RetryingDone` events the screen gets.
+    retry_wait: std::cell::Cell<Option<RetryWait>>,
 }
+
+/// A retry or slot wait in progress: ends at, status, attempt, is-a-slot-wait.
+type RetryWait = (Instant, Option<u16>, u32, bool);
 
 /// A compaction asked for by someone; it applies at the next `before_step`.
 struct CompactRequest {
@@ -1567,7 +1578,10 @@ impl Session {
             trust,
             refused_status: std::collections::HashSet::new(),
             seen_seq: std::collections::HashMap::new(),
+            tally: crate::spend::Tally::default(),
+            retry_wait: std::cell::Cell::new(None),
         };
+        session.tally = crate::spend::Tally::from_events(&session.events, session.warn());
         // The watcher re-checks the sources the frozen system was rendered
         // from; on a resume it is rebuilt from the log's `sources[]` *and* the
         // `source` events it already carries, so a source the verb added keeps
@@ -1898,8 +1912,97 @@ impl Session {
             );
             let _ = lock.flush();
         }
+        self.tally.observe(event.seq, &event.body);
         self.events.push(event.clone());
         Ok(event)
+    }
+
+    /// The thresholds this session warns at.
+    fn warn(&self) -> crate::spend::Warn {
+        crate::spend::Warn {
+            prompt_tokens: self.cfg.warn_prompt_tokens,
+            cost: self.cfg.warn_cost,
+        }
+    }
+
+    /// What a request cost: the provider's number when it gave one, else the
+    /// price table's estimate, else nothing known (STEER-8).
+    fn resolve_cost(&self, usage: &crate::stream::Usage) -> (f64, crate::spend::CostSource) {
+        let price = crate::spend::lookup(&self.provider_name, &self.model, &self.cfg.prices);
+        crate::spend::resolve(
+            usage.cost,
+            price.as_ref().map(|(price, _)| price),
+            usage.prompt_tokens,
+            usage.cached_tokens,
+            usage.completion_tokens,
+        )
+    }
+
+    /// After a `usage` event: say so, once, when a threshold was crossed. The
+    /// log gets a `warning` event and the screen one dim line; the model is
+    /// never told (the fold ignores the event).
+    fn note_spend(&mut self) {
+        let warn = self.warn();
+        for warning in self.tally.warnings(warn) {
+            let _ = self.record(EventBody::Warning {
+                kind: warning.kind.to_string(),
+                message: warning.message.clone(),
+                value: warning.value,
+                threshold: warning.threshold,
+            });
+            self.emit(UiEvent::Info(format!("» warning: {}", warning.message)));
+            if !self.json && !self.tui {
+                eprintln!("kelir: warning: {}", warning.message);
+            }
+        }
+    }
+
+    /// The `status` answer, built on the spot from the tally and the live
+    /// fields. Read-only: it is never queued or logged.
+    fn status_answer(&self) -> Response {
+        let retry =
+            self.retry_wait
+                .get()
+                .map(|(until, status, attempt, slot)| crate::spend::RetryNote {
+                    status,
+                    attempt,
+                    remaining_ms: until.saturating_duration_since(Instant::now()).as_millis()
+                        as u64,
+                    slot,
+                });
+        let live = crate::spend::Live {
+            id: &self.id,
+            provider: &self.provider_name,
+            model: &self.model,
+            turn: self.turn,
+            turn_steps: self.turn_steps,
+            max_steps: self.cfg.max_steps,
+            session_steps: self.step,
+            // Until the model list answers (or a window is configured) the
+            // number is a guess, and a guess is `null`, not 128000 (review F2).
+            window: (self.window_source != "default").then_some(self.window),
+            window_source: self.window_source,
+            running: &self.live_calls,
+            retry,
+            warn: self.warn(),
+        };
+        let mut state = crate::spend::status_json(&self.tally, &live);
+        // MCP servers: name, state, tool count and channel flag only. Never
+        // config, env, descriptions or server stderr (those can hold secrets).
+        let servers = self.mcp.servers();
+        let mcp: Vec<Value> = servers["servers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| {
+                let state = s["state"].as_str().unwrap_or("");
+                // A `failed: ...` state carries server text; keep the word only.
+                let state = if state.starts_with("failed") { "failed" } else { state };
+                json!({"name": s["name"], "state": state, "tools": s["tools"], "channel": s["channel"]})
+            })
+            .collect();
+        state["mcp"] = Value::Array(mcp);
+        Response::ok("status", 0, "now", state)
     }
 
     fn sync(&mut self) {
@@ -1909,6 +2012,21 @@ impl Session {
     /// Tell the UI what happened. A closed UI is not an error: the session is
     /// the source of truth and keeps working headless.
     fn emit(&self, event: UiEvent) {
+        match &event {
+            UiEvent::Retrying {
+                until,
+                status,
+                attempt,
+                ..
+            } => self.retry_wait.set(Some((
+                *until,
+                *status,
+                *attempt,
+                *attempt == 0 && status.is_none(),
+            ))),
+            UiEvent::RetryingDone => self.retry_wait.set(None),
+            _ => {}
+        }
         if let Some(ui) = &self.ui {
             let _ = ui.send(event);
         }
@@ -2043,6 +2161,10 @@ impl Session {
         }
         let from = request.from.clone();
         let name = request.verb.clone();
+        if name == "status" {
+            let _ = reply.send(self.status_answer());
+            return None;
+        }
         if crate::mcp::broker::is_mcp_verb(&name) {
             self.mcp_verb(request, reply);
             return None;
@@ -2116,6 +2238,10 @@ impl Session {
         }
         let from = request.from.clone();
         let name = request.verb.clone();
+        if name == "status" {
+            let _ = reply.send(self.status_answer());
+            return AtOnce::Rejected;
+        }
         if crate::mcp::broker::is_mcp_verb(&name) {
             self.mcp_verb(request, reply);
             return AtOnce::Rejected;
@@ -2640,6 +2766,8 @@ impl Session {
                         applied.messages += 1;
                     }
                 }
+                // Answered where it arrives; it never gets this far.
+                Verb::Status => {}
                 // A job of this session's own, killed on request (STEER-7).
                 // The refusal (a foreign id) already answered the client; here
                 // the kill happens and, if it worked, the job's own settled
@@ -2959,6 +3087,7 @@ impl Session {
                 Verb::Bg(status) => woke |= self.note_bg(&status).unwrap_or(false),
                 Verb::End => end = true,
                 Verb::Stop { .. }
+                | Verb::Status
                 | Verb::Cancel { .. }
                 | Verb::Model { .. }
                 | Verb::Tools { .. }
@@ -3638,13 +3767,15 @@ impl Session {
         // reader (and `kelir ls`) can tell it is not a step of the turn
         // (M3 review N4).
         if let Some(usage) = &assembler.usage {
+            let (cost, source) = self.resolve_cost(usage);
             self.record(EventBody::Usage {
                 step: self.step,
                 prompt_tokens: usage.prompt_tokens,
                 completion_tokens: usage.completion_tokens,
                 cached_tokens: usage.cached_tokens,
                 cache_write_tokens: usage.cache_write_tokens,
-                cost: usage.cost,
+                cost,
+                cost_source: Some(source.as_str().into()),
                 allowance: usage.allowance.clone(),
                 kind: Some("compact".into()),
             })?;
@@ -3652,8 +3783,9 @@ impl Session {
                 prompt: usage.prompt_tokens,
                 completion: usage.completion_tokens,
                 cached: usage.cached_tokens,
-                cost: usage.cost,
+                cost,
             });
+            self.note_spend();
             self.sync();
         }
         let summary = assembler.text.trim().to_string();
@@ -4070,13 +4202,15 @@ impl Session {
             })?;
             self.emit(UiEvent::Assistant { text: text.clone() });
             if let Some(usage) = &assembler.usage {
+                let (cost, source) = self.resolve_cost(usage);
                 self.record(EventBody::Usage {
                     step,
                     prompt_tokens: usage.prompt_tokens,
                     completion_tokens: usage.completion_tokens,
                     cached_tokens: usage.cached_tokens,
                     cache_write_tokens: usage.cache_write_tokens,
-                    cost: usage.cost,
+                    cost,
+                    cost_source: Some(source.as_str().into()),
                     allowance: usage.allowance.clone(),
                     kind: None,
                 })?;
@@ -4087,8 +4221,9 @@ impl Session {
                     prompt: usage.prompt_tokens,
                     completion: usage.completion_tokens,
                     cached: usage.cached_tokens,
-                    cost: usage.cost,
+                    cost,
                 });
+                self.note_spend();
             }
             // Even a turn that ends up stopped keeps the last thing the model
             // said in `turn_ended.final_text`.
@@ -5349,6 +5484,9 @@ mod tests {
                 compact_keep: 0,
                 promote_after: std::time::Duration::from_secs(0),
                 retry: crate::retry::Policy::default(),
+                warn_prompt_tokens: Some(crate::spend::DEFAULT_WARN_PROMPT_TOKENS),
+                warn_cost: None,
+                prices: Default::default(),
             },
             provider_name: "openrouter".into(),
             model: model.into(),
@@ -5401,6 +5539,8 @@ mod tests {
             trust: std::sync::Arc::new(crate::trust::Trust::new(dir_for_trust(), String::new())),
             refused_status: std::collections::HashSet::new(),
             seen_seq: std::collections::HashMap::new(),
+            tally: Default::default(),
+            retry_wait: Default::default(),
         }
     }
 
@@ -5449,6 +5589,9 @@ mod tests {
             compact_keep: 0,
             promote_after: std::time::Duration::from_secs(0),
             retry: crate::retry::Policy::default(),
+            warn_prompt_tokens: Some(crate::spend::DEFAULT_WARN_PROMPT_TOKENS),
+            warn_cost: None,
+            prices: Default::default(),
         };
         let a = render_system(&cfg, Path::new("tmp"));
         let b = render_system(&cfg, Path::new("tmp"));

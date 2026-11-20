@@ -146,7 +146,7 @@ pub struct CtlArgs {
     /// error if it is not running).
     #[arg(value_name = "SESSION")]
     pub session: String,
-    /// The verb: say, later, stop, model, tools, end.
+    /// The verb: say, later, stop, model, tools, compact, skills, view, cancel, status, end.
     #[arg(value_name = "VERB")]
     pub verb: String,
     /// Text for `say`/`later`/`stop`, or one JSON object with the verb's args.
@@ -179,6 +179,9 @@ pub struct CtlArgs {
     /// `skills --kind <skill|instruction>` (default `skill`).
     #[arg(long, value_name = "KIND")]
     pub kind: Option<String>,
+    /// `status --json`: print the answer as one JSON line instead of text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// `kelir view <path>`: make an image arrive in the model's next message.

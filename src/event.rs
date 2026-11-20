@@ -544,6 +544,12 @@ pub enum EventBody {
         cached_tokens: u64,
         cache_write_tokens: u64,
         cost: f64,
+        /// Where `cost` came from: `provider` (its own number), `table` (tokens
+        /// times a known price) or `unknown` (no cost reported, no price known:
+        /// the 0.0 is "not known", not "free"). Absent in logs from before
+        /// STEER-8.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_source: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allowance: Option<Value>,
         /// `None` for a model step. `"compact"` marks the summarising request,
@@ -701,6 +707,16 @@ pub enum EventBody {
     SessionEnded {
         reason: String,
     },
+    /// A threshold the human or the driver set was crossed (`warn_prompt_tokens`,
+    /// `warn_cost`). It informs whoever watches; it is never part of the
+    /// conversation the model reads, so it renders nothing in the fold.
+    Warning {
+        /// `prompt_tokens` or `cost`.
+        kind: String,
+        message: String,
+        value: f64,
+        threshold: f64,
+    },
 }
 
 /// A log line: envelope plus payload.
@@ -741,6 +757,7 @@ impl LogEvent {
             EventBody::Resumed { .. } => "resumed",
             EventBody::Error { .. } => "error",
             EventBody::SessionEnded { .. } => "session_ended",
+            EventBody::Warning { .. } => "warning",
         }
     }
 }
@@ -970,6 +987,7 @@ mod tests {
                 cached_tokens: 4,
                 cache_write_tokens: 2,
                 cost: 0.001,
+                cost_source: Some("provider".into()),
                 allowance: Some(json!({"remaining": 1})),
                 kind: None,
             },
@@ -980,6 +998,7 @@ mod tests {
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 cost: 0.002,
+                cost_source: None,
                 allowance: None,
                 kind: Some("compact".into()),
             },

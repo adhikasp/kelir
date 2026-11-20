@@ -1553,3 +1553,16 @@ follow-up commit series that restores three things the first pass lost.
   in the hint. A shorter value, or one the server transforms (encoded, split), is not caught;
   secrets belong in `env` and servers should not echo them. An unknown TOML *key* is still echoed
   by name (review N1, accepted).
+
+- **Status is a `ctl` verb, not a TUI panel (STEER-8).** The brief says status is "also shown in
+  the TUI"; the TUI shows only the threshold warning line and its existing facts row, which
+  stays lean (tui3). `kelir ctl <session> status [--json]` is the one surface. A `/status` TUI
+  command is not built.
+- **The default model has no built-in price (STEER-8 review F1).** `deepseek/deepseek-v4.1-flash-1017`
+  is priced by time of day and the peak row overestimated 1.3x-4.5x against what OpenRouter
+  billed, so it is `unknown` unless `[prices."..."]` sets it; OpenRouter reports cost anyway.
+  `PRICES_AS_OF` is one date for the whole table.
+- **Table costs, edge cases (STEER-8 review F5, F6).** A provider cost of exactly 0.0 on a
+  priced model is replaced by a table estimate labelled `table` (intended for Go; a free/BYOK
+  request on a priced model gets one too). A crash between a `usage` event and its `warning`
+  event loses that warning: a resume arms against the rebuilt state. `children` is always 0.

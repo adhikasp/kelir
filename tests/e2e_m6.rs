@@ -1009,3 +1009,25 @@ async fn the_cli_without_the_token_is_refused_by_the_session() {
     );
     assert!(run.events_of("mcp_started").is_empty());
 }
+
+// ------------------------------------------------------------------- m6m2
+
+/// `ctl status` lists the MCP servers (state word, tool count, channel flag)
+/// and nothing from their config or output; the canary stays out of the answer.
+#[tokio::test]
+async fn status_lists_mcp_servers_without_secrets() {
+    let files = Files::new();
+    let canary = "sk-CANARY-m6m2-91bd";
+    let toml = server(&format!("env = {{ API_TOKEN = \"{canary}\" }}"));
+    let command = "\"$KELIR_BIN\" mcp demo echo text=x; id=$(basename \"$KELIR_SESSION_DIR\"); \
+                   \"$KELIR_BIN\" ctl \"$id\" status --json; \"$KELIR_BIN\" ctl \"$id\" status";
+    let run = session_run(&files, &toml, command).await;
+    let out = format!(
+        "{}{}",
+        run.stdout,
+        serde_json::to_string(&run.events).unwrap()
+    );
+    assert!(!out.contains(canary), "the canary leaked");
+    assert!(out.contains("mcp\\\":[{"), "{out}");
+    assert!(out.contains("mcp       demo ("), "{out}");
+}

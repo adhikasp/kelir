@@ -94,6 +94,10 @@ pub enum Verb {
         id: String,
     },
     End,
+    /// `status`: read-only. The session answers it where it is read (it never
+    /// queues, never logs and never waits for a boundary), so this variant only
+    /// exists to name the verb and its scope.
+    Status,
 }
 
 impl Verb {
@@ -105,6 +109,7 @@ impl Verb {
             | Verb::End
             | Verb::Bg(..)
             | Verb::Cancel { .. }
+            | Verb::Status
             | Verb::View { .. } => "now",
             Verb::Say { .. } => "queued",
             Verb::Later { .. } => "turn_end",
@@ -132,6 +137,7 @@ impl Verb {
             | Verb::Stop { .. }
             | Verb::End
             | Verb::Bg(..)
+            | Verb::Status
             | Verb::Cancel { .. } => true,
             // An attachment applies at the next boundary, like a `say` that
             // opens a turn: it is a message, and it must not land in a tool
@@ -310,6 +316,7 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             Ok(Verb::View { path })
         }
         "end" => Ok(Verb::End),
+        "status" => Ok(Verb::Status),
         // Applies at the next `before_step`: the summary is a provider call and
         // must not land inside a tool batch.
         "compact" => Ok(Verb::Compact {
@@ -333,7 +340,7 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             id: cancel_id(args)?,
         }),
         other => Err(format!(
-            "unknown verb `{other}` (say, later, stop, model, tools, compact, skills, view, end, cancel)"
+            "unknown verb `{other}` (say, later, stop, model, tools, compact, skills, view, end, cancel, status)"
         )),
     }
 }

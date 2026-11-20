@@ -47,6 +47,9 @@ keys come from the environment, `key_cmd`, or opencode's store.
 | `retry_cap_ms` | integer (ms) | `120000` | — | the longest a backoff grows to; it must be at least `retry_base_ms` | `src/config.rs:retry_policy` |
 | `retry_max_wait` | integer (seconds) | `1800`; `0` waits as long as the provider asks | — | the total wait budget per request; running out pauses the turn (`reason: "provider"`) | `src/config.rs:retry_policy` |
 | `retry_max_attempts` | integer | unset: only the budget and `retry_max_wait` bound the retries | — | a count cap inside the budget (`3` = three tries and out) | `src/config.rs:retry_policy` |
+| `warn_prompt_tokens` | integer (tokens) | `150000`; `0` turns the warning off | — | when the last prompt is larger than this, one `warning` event and one dim line on                  the screen; it speaks again only after the prompt has fallen back under it.                  Never sent to the model | `src/config.rs:load` |
+| `warn_cost` | number (US dollars) | unset: no cost warning | — | when the session's cost passes this, one `warning` event and one dim line; never                  sent to the model. Only costs that are known count | `src/config.rs:warn_cost` |
+| `prices` | table of tables `[prices."<model>"]` with `input`, `output`, `cached_input`                (dollars per million tokens) | empty: the built-in table (`src/spend.rs`, stamped with its date) applies | — | overrides and extends the built-in price table. Used only when the provider                  reports no cost; a model with no price anywhere gets no estimate                  (`cost_source: "unknown"`). `cached_input` defaults to `input` | `src/config.rs:prices` |
 
 ### Per provider (`[providers.<name>]`)
 
