@@ -324,15 +324,13 @@ async fn the_project_layer_adds_to_the_machine_layer_and_wins_a_name_clash() {
     std::fs::create_dir_all(sandbox.cwd.join(".kelir")).unwrap();
     std::fs::write(
         sandbox.cwd.join(".kelir").join("mcp.toml"),
-        format!(
-            "[servers.demo]
+        "[servers.demo]
 command = 'no-such-program-kelir-m6'
 description = \"project\"
-             [servers.extra]
+         [servers.extra]
 command = 'x'
 description = \"only in the project\"
-"
-        ),
+",
     )
     .unwrap();
     let config = files.mcp_toml(&format!(
