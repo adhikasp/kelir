@@ -23,12 +23,14 @@ kelir sessions rename <old> <new>
 kelir sessions forget <name>        # drops the name; the session and its log stay
 ```
 
-- A name is `[a-z0-9._-]{1,64}`, starting with a letter or digit, not ending in a dot,
-  and not a Windows device name (`con`, `nul`, `com1`, …).
+- A name is `[a-z0-9._-]{1,64}`, starts letter/digit (no hidden dot-files), no trailing
+  dot, not a Windows device name (`con`, `nul`, `com1`, …).
 - `names/<name>` in the state dir holds `{"session", "created", "updated"}`. It is
   published create-or-fail and replaced by rename, so two processes naming one session
   cannot both win and a reader never sees half a file. An unreadable name file is a
   warning and reads as free; the next run replaces it. The directory is owner-only.
+- A name is bound before start; a crash leaves a `new` name (`sessions ls`) that the next
+  `run --name` resumes.
 - `run --name` on a name that exists **resumes** that session (the same resume as
   `kelir resume`: the model, tools, system prompt and cwd come from the log) and adds the
   task as a `user` event with `from: "job"`. The first task of a new named session is
@@ -50,7 +52,7 @@ task = "Check the build and write what changed to notes/changes.md"   # or task_
 # task_file = "nightly.md"          # relative to this jobs.toml
 provider = "openrouter"             # optional; applies when a session STARTS
 model = "some/model"                # optional; a resumed session keeps its own
-max_steps = 40                      # optional; pauses the turn at N steps
+max_steps = 40                      # optional; pauses the run at N steps
 timeout = "30m"                     # wall clock for the run; "90", "90s", "30m", "12h", "7d"
 session = "nightly"                 # the named session every run resumes (default: the job name)
 new_session_every = "7d"            # "never" (default) or a duration
@@ -59,6 +61,9 @@ schedule = "every night at 03:00"   # for humans: kelir does not schedule
 cwd = "."                           # relative to this jobs.toml (default: the caller's cwd)
 ```
 
+- **`max_steps`** caps a job run's steps (flag wins). Unlike an interactive turn (answer
+  on the cap-th step is `done`, STEER-4), a job reaching its cap is `paused`: the next run
+  resumes it. Unset or `0` = no cap.
 - **`new_session_every`** starts a fresh session (the name is moved to it; the old session
   stays) when the old one is older than the duration **or** its last request filled 90 % of
   the window (compaction normally keeps it below that). The new session's first context
@@ -147,6 +152,10 @@ torn or corrupt lines are skipped.
 
 Under `kelir job run` the model is told the paths by **one** `source` line (kind `job`)
 at the tail of its context, not by a longer base prompt.
+
+A rotating run adds a **second** tail source: a `carry` line (old session's summary), then
+  the `job` line. Both go after the frozen prefix (cache untouched); they stay separate
+  because they say different things (leftovers, this run's paths).
 
 ## Resuming the next day
 

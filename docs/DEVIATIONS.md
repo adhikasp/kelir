@@ -1751,6 +1751,12 @@ side). Where the code had to choose:
   the 128k default), measured on the last request's prompt tokens.
 - **Run numbers are the run's own** (steps, tokens, cost are the deltas since the run began), not
   the session's cumulative ones.
+- **A job's `max_steps` pauses the run at the cap even on a final answer.** STEER-4 records an
+  interactive turn that answers on the cap-th step as `done`. A job's cap instead marks the
+  boundary between scheduled runs, so reaching it is `paused` (the next run resumes the same
+  session) even if the answer landed on that step. The cap still arrives through `CommonArgs`
+  (`prepare` applies it to the config the loop reads); the Plan only adds the job-specific pause
+  rule. `--max-steps 0` lifts the cap and leaves the run `done`.
 
 ## M10: channel mode
 

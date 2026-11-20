@@ -43,6 +43,11 @@ pub struct Plan {
     pub sources: Vec<PlanSource>,
     /// The wall-clock cap of the run, if any.
     pub deadline: Option<Duration>,
+    /// A job's declared `max_steps`: reaching it pauses the run even when the
+    /// last allowed step produced a final answer (a scheduler resumes the job
+    /// next run). Interactive `--max-steps` keeps STEER-4's rule that an answer
+    /// on the cap-th step is `done`.
+    pub job_step_cap: Option<u32>,
     /// The deadline fired: the turn was told to stop because of it.
     pub timed_out: AtomicBool,
     /// An error the loop could not put in a log (no session existed yet).

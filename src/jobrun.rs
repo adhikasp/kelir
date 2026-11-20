@@ -143,13 +143,27 @@ pub async fn run(args: JobRunArgs) -> u8 {
     let guard = match acquired {
         Ok(Outcome::Held(guard)) => guard,
         Ok(Outcome::Busy(holder)) => {
-            jobs::append_run(&dir, &jobs::skipped_record(&name, holder.pid));
+            let detail = holder
+                .pid
+                .map(|pid| format!(" (pid {pid} since {})", holder.started))
+                .unwrap_or_else(|| {
+                    if holder.reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", holder.reason)
+                    }
+                });
+            let mut record = jobs::skipped_record(&name, holder.pid);
+            if holder.pid.is_none() && !holder.reason.is_empty() {
+                record["error"] = json!(format!(
+                    "another run of this job holds the lock: {}",
+                    holder.reason
+                ));
+            }
+            jobs::append_run(&dir, &record);
             eprintln!(
                 "kelir: job `{name}` is already running{}; this run is skipped",
-                holder
-                    .pid
-                    .map(|pid| format!(" (pid {pid} since {})", holder.started))
-                    .unwrap_or_default()
+                detail
             );
             return EXIT_SKIPPED;
         }
@@ -282,12 +296,19 @@ pub async fn run(args: JobRunArgs) -> u8 {
             crate::util::path_string(&dir.join(jobs::NOTES)),
         ),
     });
+    // The effective step cap for this run: the CLI flag wins over jobs.toml.
+    // It goes to the session through `CommonArgs` (where `prepare` applies it
+    // to the config the loop reads) and into the Plan so a job that reaches its
+    // cap reports `paused` even on an answer at the last allowed step. `0`
+    // means no cap, so it is not a boundary and is not passed to the Plan.
+    let step_cap = args.common.max_steps.or(def.max_steps).filter(|n| *n > 0);
     if !jobs::install(Plan {
         planned_id: planned,
         task_from: Some("job"),
         on_new: true,
         sources,
         deadline: def.timeout,
+        job_step_cap: step_cap,
         ..Plan::default()
     }) {
         return fail_early(
@@ -309,7 +330,7 @@ pub async fn run(args: JobRunArgs) -> u8 {
         provider: args.common.provider.clone().or(def.provider.clone()),
         cwd: Some(cwd),
         config: args.common.config.clone(),
-        max_steps: args.common.max_steps.or(def.max_steps),
+        max_steps: step_cap,
     };
     let code = crate::session::run_as_job(common, task, resume).await;
     finalize(Some(code), None).await

@@ -313,3 +313,19 @@ implementer pauses; the retro/introspective passes keep reading the transcripts 
 - 2026-11-21: usage limit reset; resumed. Running now (Claude): **M8 review** (t16y: gate-runner hammering with a process watchdog) and **m7m** (t16z: merge main into M7). Next: M7 gate + review, M8 fixes + merge, steer9, M9..M12.
 
 - 2026-11-21: **M7 and M8 merged**. Remaining: steer9 (de-flake e2e), M9 (jobs, named sessions, STATUS), M10 (Telegram through MCP channel), M11 (attach viewer + notifications), M12 (publish prep; push needs the maintainer's yes). A final post-merge reviewer pass on M8-in-main (child-session gating, the cap across a root) is still advisable.
+
+- 2026-11-21 05:40: running (Claude): **M9** (t188: named sessions, jobs, single-flight, STATUS; brief docs/tasks/M9.md) and **steer9** (t189: de-flake e2e under load). Next: M10 (channel mode: durable inbound spool, MCP channel notifications, turn_done; verify with a fake channel server; the real Telegram bridge needs the maintainer's credentials and infra), M11 (attach viewer + notifications), M12 (publish prep). Post-merge reviewer pass on M8 child-session gating still advisable.
+
+## Queue item (maintainer, 2026-11-21 05:45): `bash` tool gets a human-readable `description` field
+
+Wanted: the native `bash` tool call accepts a second field, `description` — a short human-readable label for what the command does. Show **that** text for the call in both the TUI (settled call line and the live `⠹ …` row) and headless `run` output, instead of the truncated `bash <script>` snippet printed today. The command line is a means, not the intent: a batched read or a long heredoc says nothing in a 60-column pane, while the description is what a human scanning the transcript wants.
+
+Starting points (verify before designing):
+- Schema: `src/tools/mod.rs` `specs()` at lines 189-205 — add `description` to `properties` beside `command`. Recommend optional with a fallback to today's truncated command, so old sessions and callers keep working. Tool-call args are also written to the event log; check `src/event.rs` / `src/fold.rs` / `src/observe.rs` for anything that assumes the only key is `command`.
+- Dispatch: `src/tools/mod.rs:274-279` — capture `args.get("description")` and carry it with the call outcome.
+- Rendering: `src/tools_view.rs` `CallLine.head` (today `$ cargo test` / `edit src/lib.rs`) and `src/activity.rs`'s live row. Find the exact headless print site in the session path too; both must use the description. Keep the command itself in the log and `/expand`.
+- Cap the label at a short length (suggest <= 120 chars); never put the full command in it.
+- Tests: extend the schema test in `src/tools/mod.rs`, the line tests in `src/tools_view.rs`, and an e2e asserting the description reaches both TUI head and NDJSON head.
+- Docs: `src/prompt.md` tool bullet, the closest `docs/reference/` tool topic, then `kelir docs --generate` and `cargo test --lib docs` (drift test must pass).
+
+- 2026-11-21: **M9 merged** (c73a11f, main gate 1349 green). M10 running (worktree m10, pane t18w; must merge main before its gate). steer9 (de-flake, worktree steer9) not yet started. Then M11, M12.
