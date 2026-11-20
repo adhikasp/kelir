@@ -42,11 +42,11 @@ rather than argued:
 | `e2e_m3` under `eval "$(bash scripts/remote-check.sh far-env)"` | **0** (`coredumpctl` lists the 11 SIGABRTs with `COREFILE none`) | 2,686 files / 911 MB before **and** after |
 
 "Abort recorded, core not written" is exactly the state we want: the crash still happens (the test needs it),
-the store does not grow. The gate itself agrees: the `--linux=the maintainer` run's log line 1 is
+the store does not grow. The gate itself agrees: the `bash scripts/gate.sh --linux=<machine>` run's log line 1 is
 `CORE-LIMIT: ulimit -c = 0`, and every `kelir-verify-buildinfra2` entry it produces is `none`.
 
 Full gate at the commit below: Windows fmt/clippy/nextest (`708 tests run: 708 passed, 5 skipped`, no retries)
-and doctests green; Linux (the maintainer) `FMT-OK CLIPPY-OK NEXTEST-OK (708 passed) DOCTEST-OK`, `gate: PASS`.
+and doctests green; the Linux half `FMT-OK CLIPPY-OK NEXTEST-OK (708 passed) DOCTEST-OK`, `gate: PASS`.
 
 ## What was hard / worth knowing
 
