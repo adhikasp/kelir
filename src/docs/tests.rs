@@ -744,3 +744,169 @@ fn the_base_prompt_names_kelir_docs_within_its_budget() {
         PROMPT.len()
     );
 }
+
+// ------------------------------------------- values, not only names (steer11fix)
+
+/// The documented default of a key, as the table words it.
+fn default_of(key: &str) -> &'static str {
+    tables::CONFIG_KEYS
+        .iter()
+        .find(|row| row.scope == tables::KeyScope::Top && row.name == key)
+        .unwrap_or_else(|| panic!("no row for `{key}`"))
+        .default
+}
+
+/// A default that changes in the code but not in the table is a wrong
+/// instruction: the numbers are read from the running code, not retyped.
+#[test]
+fn the_documented_defaults_are_the_ones_the_code_applies() {
+    let dir = std::env::temp_dir().join(format!("kelir-docs-defaults-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "").unwrap();
+    let cfg = crate::config::load(Some(&path)).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let checks: Vec<(&str, String)> = vec![
+        ("spill_limit", cfg.spill_limit.to_string()),
+        ("compact_keep", crate::compact::DEFAULT_KEEP.to_string()),
+        ("compact_keep", cfg.compact_keep.to_string()),
+        ("window", crate::compact::DEFAULT_WINDOW.to_string()),
+        ("auto_compact_at", crate::compact::AUTO_FRACTION.to_string()),
+        (
+            "compact_at_tokens",
+            crate::compact::DEFAULT_SOFT_TARGET.to_string(),
+        ),
+        ("promote_after", cfg.promote_after.as_secs().to_string()),
+        ("retry_base_ms", crate::retry::DEFAULT_BASE_MS.to_string()),
+        ("retry_cap_ms", crate::retry::DEFAULT_CAP_MS.to_string()),
+        (
+            "retry_max_wait",
+            crate::retry::DEFAULT_WAIT_SECS.to_string(),
+        ),
+        ("provider", cfg.provider.clone()),
+        ("model", cfg.model.clone()),
+    ];
+    for (key, value) in checks {
+        assert!(
+            default_of(key).contains(&value),
+            "docs/tables.rs says the default of `{key}` is {:?}, the code applies `{value}`",
+            default_of(key)
+        );
+    }
+}
+
+/// A `rename`/`alias` on a config field would make the key the user writes
+/// differ from the field name the table is checked against.
+#[test]
+fn config_fields_are_not_renamed_behind_the_tables_back() {
+    for (name, src) in [("RawConfig", CONFIG_SRC), ("RawProvider", CONFIG_SRC)] {
+        let mut inside = false;
+        for line in src.lines() {
+            if line.starts_with(&format!("struct {name} {{")) {
+                inside = true;
+                continue;
+            }
+            if inside && line == "}" {
+                break;
+            }
+            if inside {
+                let t = line.trim();
+                assert!(
+                    !(t.starts_with("#[serde(") && (t.contains("rename") || t.contains("alias"))),
+                    "`{name}` renames a key (`{t}`): the drift test reads field names, teach it \
+                     the wire name first"
+                );
+            }
+        }
+    }
+}
+
+/// `field` names of every `EventBody` variant, by its snake_case event name.
+fn event_fields(src: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut inside = false;
+    let mut current: Option<String> = None;
+    let mut rename: Option<String> = None;
+    for line in src.lines() {
+        if line.starts_with("pub enum EventBody {") {
+            inside = true;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if line == "}" {
+            break;
+        }
+        let t = line.trim();
+        if t.starts_with("//") || t.is_empty() {
+            continue;
+        }
+        if let Some(r) = t.strip_prefix("#[serde(rename = \"") {
+            rename = r.split('"').next().map(str::to_string);
+            continue;
+        }
+        if t.starts_with("#[") {
+            continue;
+        }
+        if line.starts_with("    ") && !line.starts_with("     ") {
+            // `Name {` (or `Name { a: T },`) opens a variant; `},` closes one.
+            if t == "}," {
+                current = None;
+                continue;
+            }
+            let name = t.split([' ', '{']).next().unwrap();
+            let mut snake = String::new();
+            for (i, ch) in name.chars().enumerate() {
+                if ch.is_uppercase() && i > 0 {
+                    snake.push('_');
+                }
+                snake.push(ch.to_ascii_lowercase());
+            }
+            out.insert(snake.clone(), Vec::new());
+            current = Some(snake);
+            continue;
+        }
+        if let (Some(variant), Some((field, _))) = (&current, t.split_once(':')) {
+            let field = rename.take().unwrap_or_else(|| field.trim().to_string());
+            out.get_mut(variant).unwrap().push(field);
+        }
+    }
+    out
+}
+
+/// The field names a table cell promises: every backticked span's leading
+/// identifier (`system{text,hash}` → `system`, `parent?` → `parent`).
+fn promised_fields(cell: &str) -> Vec<String> {
+    cell.split('`')
+        .skip(1)
+        .step_by(2)
+        .map(|span| {
+            span.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect::<String>()
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+#[test]
+fn every_event_field_the_code_writes_is_in_the_table_and_the_other_way() {
+    let code = event_fields(EVENT_SRC);
+    assert!(code.len() >= 16, "parsed {} variants", code.len());
+    for row in tables::EVENTS {
+        let mut table = promised_fields(row.fields);
+        table.sort();
+        let mut fields = code
+            .get(row.name)
+            .unwrap_or_else(|| panic!("no EventBody variant for `{}`", row.name))
+            .clone();
+        fields.sort();
+        assert_eq!(
+            fields, table,
+            "event `{}`: the fields in `EventBody` (left) and docs/tables.rs (right) differ",
+            row.name
+        );
+    }
+}

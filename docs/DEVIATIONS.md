@@ -1357,3 +1357,8 @@ follow-up commit series that restores three things the first pass lost.
   about the flag. Enabling it for opencode-go was not tried: nothing shows the gateway honours it.
   The base prompt makes no parallel-calls claim; it asks for the one-command batching that works
   on every provider.
+
+- **Reference source pointers name a function, not a line (STEER-11).** The brief asked for
+  `src/config.rs:LINE`; `docs/reference` uses `src/config.rs:<fn>` (`git grep -n 'fn <name>'`),
+  because a line number is stale after the next edit and the drift test checks that the named
+  function exists. Top-level config keys share `load`; that is a known coarse pointer.

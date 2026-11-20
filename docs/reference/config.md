@@ -28,11 +28,11 @@ keys come from the environment, `key_cmd`, or opencode's store.
 |---|---|---|---|---|---|
 | `provider` | string | `openrouter` | `--provider` | which of the two providers this session uses | `src/config.rs:load` |
 | `model` | string | `deepseek/deepseek-v4.1-flash-1017` | `--model` | the model id sent with every request | `src/config.rs:load` |
-| `shell` | string or array of strings | git bash, else `bash -c`, else `sh -c` (Windows: `cmd.exe /C`); the array is the argv prefix | — | the program `bash` tool calls and `kelir bg run` commands run in | `src/config.rs:load` |
+| `shell` | string or array of strings | Windows: Git for Windows `bash.exe`, else `bash` on PATH, else `cmd.exe /C`; elsewhere: `bash` on PATH, else `$SHELL`, else `sh`, each with `-c`; the array is the argv prefix | — | the program `bash` tool calls and `kelir bg run` commands run in | `src/config.rs:load` |
 | `spill_limit` | integer (bytes) | `10240` | — | output over this many bytes is written to `commands/<call>/out` and the model sees a spill notice instead of the whole text | `src/config.rs:load` |
 | `max_steps` | integer | unset: no cap. `0` also means no cap | `--max-steps` | cap the steps of one turn; reaching it *pauses* the turn (`turn_ended` with `reason: "steps"`), and the next message starts a new turn | `src/config.rs:load` |
 | `cache_ttl` | string | unset: the provider's own default | — | the `cache_control.ttl` sent with the request (`5m`, `1h`), for providers that price a longer break-even separately | `src/config.rs:load` |
-| `prompt` | path | the embedded `src/prompt.md` | — | the base prompt file; `<config>/prompt.md` and `<cwd>/.kelir/prompt.md` win over it, project last | `src/config.rs:load_prompt` |
+| `prompt` | path | the embedded `src/prompt.md` | — | the base prompt file; when set it replaces `<config>/prompt.md` (read only when `prompt` is unset); only `<cwd>/.kelir/prompt.md` wins over it | `src/config.rs:load_prompt` |
 | `providers` | table, keyed by provider name | both providers, with their built-in base URL and key source | — | per-provider settings (see the `providers.*` rows); any other table name is a config error | `src/config.rs:load` |
 | `key` | string | — | — | **refused**: a literal key is warned about and ignored (the environment, `key_cmd` and opencode's store are the three sources) | `src/config.rs:load` |
 | `window` | integer (tokens) | unset: the provider's model metadata, else `128000` | — | the context window for every model, for a provider that publishes none | `src/config.rs:load` |
@@ -73,8 +73,9 @@ merge order.
 
 ## Where the prompt and the skills come from
 
-- `prompt`: a file. It loses to `<config>/prompt.md`, which loses to
-  `<cwd>/.kelir/prompt.md`. `sources[]` in `session_started` records which one
+- `prompt`: a file. When set it is used instead of `<config>/prompt.md` (that
+  file is read only when `prompt` is unset); `<cwd>/.kelir/prompt.md` beats
+  either. `sources[]` in `session_started` records which one
   won, so a log reader does not have to guess.
 - `compact_prompt`: a file; `<config>/compact.md` is read when the key is unset,
   else the embedded default in `src/compact.rs`.

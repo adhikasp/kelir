@@ -94,7 +94,7 @@ pub const VARS: &[Var] = &[
     ),
     read(
         "KELIR_HOME",
-        "the base directory `KELIR_STATE_DIR` and `KELIR_CONFIG_DIR` derive from; tests set it",
+        "replaces `$HOME`/`USERPROFILE` only (user skills, `~`); it does NOT move state or config, set `KELIR_STATE_DIR` and `KELIR_CONFIG_DIR` for that",
     ),
     read(
         "KELIR_DOCS_ROOT",
@@ -295,7 +295,18 @@ mod tests {
             }
             for (number, line) in text.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or("");
-                if code.contains("env::var(") {
+                if [
+                    "env::var(",
+                    "env::var_os(",
+                    "env::vars(",
+                    "env::vars_os(",
+                    "env::var_os as",
+                    "env::var as",
+                    "env::{",
+                ]
+                .iter()
+                .any(|p| code.contains(p))
+                {
                     out.push(format!(
                         "{}:{}: {}",
                         path.display(),

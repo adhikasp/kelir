@@ -62,5 +62,4 @@ change goes through.
 
 A change that adds a key, a flag, a verb, an event type or an environment
 variable is not done until the reference says so: `kelir docs --generate`, then
-`cargo test --lib docs` (the drift test reads the code both ways). The gate is
-`scripts/gate.sh`; the review is a fresh reviewer, not you.
+`cargo test --lib docs` (the drift test reads the code both ways).

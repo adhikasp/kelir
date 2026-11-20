@@ -16,7 +16,8 @@ every request's cached prefix). `{{skills_dirs}}` is where the skills
 directories are named; a prompt without the placeholder gets them appended, so a
 hand-written one cannot lose the pull path.
 
-Overridden, weakest first: the config's `prompt` file, `<config>/prompt.md`,
+Overridden, weakest first: `<config>/prompt.md` or, when the config sets
+`prompt`, that file in its place (they do not stack), then
 `<cwd>/.kelir/prompt.md`. `sources[]` records which one won (no path means the
 embedded default — never the sentinel `embedded`).
 

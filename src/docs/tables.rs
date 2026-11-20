@@ -152,7 +152,7 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
         scope: KeyScope::Top,
         name: "shell",
         kind: "string or array of strings",
-        default: "git bash, else `bash -c`, else `sh -c` (Windows: `cmd.exe /C`); the array is the argv prefix",
+        default: "Windows: Git for Windows `bash.exe`, else `bash` on PATH, else `cmd.exe /C`; elsewhere: `bash` on PATH, else `$SHELL`, else `sh`, each with `-c`; the array is the argv prefix",
         overrides: "—",
         effect: "the program `bash` tool calls and `kelir bg run` commands run in",
         field_fn: "load",
@@ -193,8 +193,8 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
         kind: "path",
         default: "the embedded `src/prompt.md`",
         overrides: "—",
-        effect: "the base prompt file; `<config>/prompt.md` and `<cwd>/.kelir/prompt.md` win \
-                 over it, project last",
+        effect: "the base prompt file; when set it replaces `<config>/prompt.md` (read only \
+                 when `prompt` is unset); only `<cwd>/.kelir/prompt.md` wins over it",
         field_fn: "load_prompt",
     },
     KeyDoc {

@@ -101,7 +101,7 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | command | does |
 |---|---|
 | `/stop [reason]` | stop the turn now |
-| `/say-now <text>` | stop the running calls, then send the message |
+| `/say-now <text>` (`/say_now`, `/now`) | stop the running calls, then send the message |
 | `/later <text>` | queue a message for the end of the turn |
 | `/model <p/m>` | swap provider/model for the rest of the session |
 | `/tools off\|on <name>` | disable or enable `bash`/`edit` |
@@ -109,8 +109,8 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | `/expand` | from the next call on, print each call's output too |
 | `/expand [n\|last]` | append call `n`'s output here (a committed line cannot be unfolded) |
 | `/collapse` | one line per tool call from the next call on |
-| `/help` | the list |
-| `/quit` | end the session |
+| `/help` (`/?`) | the list |
+| `/quit` (`/exit`) | end the session |
 
 Each of the three is idempotent and has one direction: `/collapse` never
 expands, and saying either one twice changes nothing.

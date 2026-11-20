@@ -454,7 +454,7 @@ pub fn render_cli() -> String {
             // A help flag is clap's, not kelir's: `kelir <cmd> --help` is
             // clap's own output and is the same thing one screen away.
             let id = arg.get_id().as_str();
-            if id == "help" || id == "version" {
+            if id == "help" || id == "version" || arg.is_hide_set() {
                 continue;
             }
             let mut names = Vec::new();

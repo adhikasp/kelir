@@ -44,7 +44,7 @@ A job outlives the session on purpose: its shim writes `bg/<id>.status`, and
 nothing wakes a stopped session. `kelir bg ls` (inside a session) and
 `kelir bg out <id>` read it; the next `resume` folds the settled job into the log
 as `bg_settled` plus the wake-up message. A job killed with the machine is the
-one case with no status file: `bg ls` shows it as missing and the log has a
+one case with no status file: `bg ls` does not list it at all (no status file, no row) and the log has a
 `bg_started` with no settle.
 
 ## "The model does not know a rule I wrote in AGENTS.md"
@@ -97,3 +97,17 @@ event say so. The model is told the path; a `bash` call can read the rest.
 --generate` rewrites it from the code. `cargo test --lib docs` is the stricter
 version: it also reads the code, so a key, flag, verb, variable or event that
 exists in one place and not the other fails there.
+
+## "What will the model see?"
+
+There is no print command. The request is the fold of `events.jsonl`:
+`session_started.system` is the frozen system prompt (with its `sources[]`),
+then the `user`/`assistant`/`tool_settled` events in order, minus what a
+`compacted` event replaced. Read the log (`kelir docs files`) to see it.
+
+## "Rotate or replace a credential"
+
+Change the first source in the key order of `kelir docs providers` for the
+provider in use: set the new value in `OPENROUTER_API_KEY`/`KELIR_GO_API_KEY`
+(or the `key_env` variable, or what `key_cmd` prints), or re-login with
+`opencode` for the store. `session_started.key_origin` says which source won.

@@ -16,9 +16,9 @@ dir up, or writing a test that must not touch the machine's own files
 | state | `$XDG_STATE_HOME/kelir`, else `~/.local/state/kelir` | `~/Library/Application Support/kelir` | `%LOCALAPPDATA%\kelir` |
 | config | `$XDG_CONFIG_HOME/kelir`, else `~/.config/kelir` | `~/Library/Application Support/kelir` | `%APPDATA%\kelir` |
 
-`KELIR_STATE_DIR` and `KELIR_CONFIG_DIR` replace them outright; `KELIR_HOME`
-replaces the base both derive from (that is what a test sets, so a run never
-reads the machine's own `~/.claude/skills`).
+`KELIR_STATE_DIR` and `KELIR_CONFIG_DIR` replace them outright. `KELIR_HOME`
+does not: it only replaces `$HOME`/`USERPROFILE` (user skills), and the platform
+variables above still win when set. Isolate a run with the two `*_DIR` variables.
 
 ## A session directory
 
@@ -35,7 +35,7 @@ reads the machine's own `~/.claude/skills`).
 ```
 
 Session ids are ULIDs, so the directory names sort into creation order and
-`kelir ls` (and `ctl latest`) can pick the newest. The id is also the provider's
+`ctl latest` can pick the newest (there is no `kelir ls`). The id is also the provider's
 prompt-cache key.
 
 ## State root, outside a session

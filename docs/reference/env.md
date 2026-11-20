@@ -24,7 +24,7 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_CONFIG` | the config file to use instead of the machine/project search |
 | `KELIR_CONFIG_DIR` | the machine config directory (`config.toml`, `prompt.md`, `skills/`) |
 | `KELIR_STATE_DIR` | the state root (sessions, model caches, bg jobs, locks) |
-| `KELIR_HOME` | the base directory `KELIR_STATE_DIR` and `KELIR_CONFIG_DIR` derive from; tests set it |
+| `KELIR_HOME` | replaces `$HOME`/`USERPROFILE` only (user skills, `~`); it does NOT move state or config, set `KELIR_STATE_DIR` and `KELIR_CONFIG_DIR` for that |
 | `KELIR_DOCS_ROOT` | the `docs/reference` directory `kelir docs --generate` and `--check` read (a checkout, or a copy) |
 | `KELIR_BASE_URL` | overrides a provider's base URL (a proxy, or a test's mock server) |
 | `KELIR_PROMOTE_AFTER` | seconds before a still-running bash call becomes a background job (overrides `promote_after`) |
@@ -69,8 +69,11 @@ the value; `session_started.key_origin` records the same.
   `std::env::var` call appears anywhere else in `src/`. The one exception is a
   provider's `key_env` from the config, which names a variable kelir did not
   choose (`envs::named`).
-- `KELIR_HOME` is the switch the test suite uses so a run never reads the
-  machine's own `~/.claude/skills`: a home directory is not a fixture.
+- `KELIR_HOME` replaces only `$HOME`/`USERPROFILE` (user skills, `~`) so a run
+  never reads the machine's own `~/.claude/skills`. It does not relocate state
+  or config: `LOCALAPPDATA`/`APPDATA` (Windows) and `XDG_STATE_HOME`/
+  `XDG_CONFIG_HOME` (Linux) still win. To isolate a run, set `KELIR_STATE_DIR`
+  and `KELIR_CONFIG_DIR` as well.
 - The two provider keys are read through `src/credentials.rs`, which also reads
   opencode's store. That module's precedence rules are in
   `docs/reference/providers.md`.
