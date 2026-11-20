@@ -1,8 +1,26 @@
 # TUI v2 design note (input to STEER-10 + STEER-3)
-
 Status: analyst note, 2026-11-19. The implementer follows it and may deviate with a reason in
 `docs/DEVIATIONS.md`. Facts below are *observed* unless marked `(recalled)` (not driven in this
 session) or `(source)` (read from kelir's code).
+
+> **Amended by tui3 (`docs/tasks/TUI3-fixes.md`, 2026-11-20).** The maintainer's calm pass changed
+> four things this note describes, and the sections below are corrected where they are now wrong:
+>
+> 1. The **facts row** is `kelir <phase> · model · <n> tok` only. Step count, cache % and cost are
+>    not ambient (§5, §8.7).
+> 2. A `done` turn gets **no summary line**: it ends on its prose. `paused`, `stopped` and `error`
+>    keep exactly one line, `⏸ 2 steps · 3.6k tok` — no cost, no time (§5, §8.1).
+> 3. **Tool verdicts** carry exit/bytes and no duration: `ok · 1.2 KB`, `✗ exit 101 · 4.1 KB`,
+>    `⏹ cancelled`. A fold reads `✓ 2 calls · 1 failed · 1 stopped` and never counts a stopped call
+>    as checked; `edit` and any non-`bash` call keep their own line (§5, §8.2).
+> 4. The **banner** has no window line; a *degraded* window (a 401, an offline endpoint, a default
+>    fallback) is one dim line, and a `/model` swap that changes the window says so once (§3).
+>
+> Where the dropped numbers went: `events.jsonl` (`usage` events, `jq`-readable), the `state`
+> object every `kelir ctl` verb answers with (`window`, `window_source`, `window_note`, `step`), and
+> the facts row's token count. `kelir ctl status` (STEER-8) is the planned one-command answer and is
+> not landed; until then a live session's spend is in the log. The reasons for all four are in
+> `docs/DEVIATIONS.md` under "tui3 and its fixes".
 
 ## 1. Method and what was compared
 
@@ -95,12 +113,15 @@ cap in the banner and the status.
 | finish | per-message stats line | `✻ <verb> for 49s · done <time>` | status word flips to `done` |
 | slow provider (recalled) | a retry notice in the transcript | spinner stays, retry text with countdown appears under it | n/a until STEER-5 |
 
-**Pointer to adopt.** Split the viewport's bottom into two single rows with different jobs: a **state row**
+**Pointer to adopt (as amended by tui3).** Split the viewport's bottom into two single rows with different jobs: a **state row**
 directly above the editor (always present, glyph + word + detail + elapsed; this is the "unmistakable" part) and
-a **facts row** at the very bottom (model, step, tokens, cache %, cost; dim, clipped first). State is conveyed by
+a **facts row** at the very bottom (phase word, model, tokens; dim, clipped first — step, cache % and cost are
+not ambient, see the note at the top). State is conveyed by
 glyph *and* word *and* colour so it survives `NO_COLOR` and colour-blind themes. Spinner and elapsed exist only
-in working states. The prompt glyph dims while working. On `TurnEnded`, commit one dim summary line to
-scrollback (`✓ 3 steps · 4.8k tok · $0.0010 · 49 s`, `✗`/`⏸` variants) so history shows where each turn ended.
+in working states. The prompt glyph dims while working. On `TurnEnded`, commit **one dim line only when the turn
+needs a human** (`⏸ 2 steps · 3.6k tok`, `⏹`/`✗` variants, no cost and no time); a `done` turn ends on its prose.
+The banner above the viewport carries model, session, cwd and the help line, plus one dim line when the window
+is not the provider's.
 
 State row text (width 80; `⠹` is the spinner, ASCII fallback `|/-\`). Elapsed counts from the state's start:
 
@@ -178,21 +199,25 @@ row; Claude Code's in-place expand is a full redraw we cannot do):
 2. **When it settles it joins the open group** held in the live area (not yet committed). The group closes when
    assistant prose starts, a user message arrives, or the turn ends. On close, commit:
    - group of 1-2 calls: one dim line each;
-   - group of 3+: one dim line `  ran 5 commands · 3.2 s`, plus each failed call as its own red line;
-   - `edit`/`write` calls always get their own line (the diff is what the user cares about).
+   - group of 3+: one dim line `  ✓ 2 calls · 1 failed · 1 stopped`, plus each failed call as its own red line,
+     each call a human stopped (`⏹ cancelled`) and every `edit`/non-`bash` call on its own line;
+   - a stopped call is never counted as checked, and `edit`/`write` calls always get their own line (the file is
+     what the user cares about; tui3's fold briefly lost this, `tui3fix` restored it).
 
 ```
-  $ git --version                                  ok · 29 B · 0.2 s        <- dim, indent 2
-  $ python --version                               ok · 16 B · 0.3 s
+  $ git --version                                  ok · 29 B               <- dim, indent 2
+  $ python --version                               ok · 16 B
 Done: git 2.56.0 and Python 3.12.10 are installed.                          <- prose, default weight, col 0
 
-  ran 5 commands · 3.2 s
-  $ cargo test                                     ✗ exit 101 · 4.1 s       <- red
+  ✓ 2 calls · 1 failed · 1 stopped
+  $ cargo test                                     ✗ exit 101 · 4.1 KB     <- red
     error[E0432]: unresolved import `foo`                                   <- <=1 dim tail line
-  edit src/lib.rs                                  +12 -3
+  $ sleep 20                                       ⏹ cancelled             <- a stop is not a success
+  edit src/lib.rs                                  ok · 1.2 KB
 ```
-Line grammar: `  <verb> <preview>` left, right-aligned dim meta `ok|✗ exit N · bytes · time`. If the meta does not fit,
-drop bytes, then time, then the meta; the preview is clipped with `…` first, never the verdict. Multi-line
+Line grammar: `  <verb> <preview>` left, right-aligned dim meta `ok|✗ exit N · bytes` (no duration: the transcript
+is not a profiler). If the meta does not fit,
+drop bytes, then the meta; the preview is clipped with `…` first, never the verdict. Multi-line
 commands show the first line plus `↵…`. Non-zero exit: whole line red (`Color::Red`; plus the `✗` so it survives
 `NO_COLOR`) and one extra dim tail line (last non-empty output line, clipped to the width). A cancelled call
 reads `⏹ cancelled`. Prose is never indented and never dim; tool lines are indented 2 and dim: that asymmetry is
@@ -363,12 +388,13 @@ Never let a resize emit duplicate scrollback rows: the exactly-once counters in 
 **Width tiers** (derived from the layout, to be snapshot-tested at 80/60/40):
 
 ```
-80+  state row full; facts: model · step · tok · cache% · $cost ; tool meta right-aligned; tables boxed
-60   facts: model(short) · tok · $cost (drop step, cache%); tool meta: ok/exit + time only; state detail clipped
-40   state row: glyph word elapsed only; facts: tok · $cost; tool lines: preview + ✗/ok; tables -> pipe rows (<30)
+80+  state row full; facts: kelir <phase> · model · tok ; tool meta right-aligned; tables boxed
+60   facts: phase · model(short) · tok; state detail clipped
+40   state row: glyph word elapsed only; facts: phase · tok; tool lines: preview + ✗/ok; tables -> pipe rows (<30)
 <30  everything is a single clipped line; editor prefix "› " stays; no right-aligned meta
 ```
-Truncation priority for the facts row (drop from the right end first): cache % -> step -> cost -> model -> tokens.
+Truncation priority for the facts row (drop from the right end first): model -> tokens. There is no step, cache %
+or cost in it (tui3; the design's original `cache % -> step -> cost -> model -> tokens` no longer applies).
 The state word is never dropped; the detail is clipped with `…`, the spinner glyph first column.
 
 **Themes and colour.** Only named 16 ANSI colours and the terminal default (`Color::Reset`), never `White`,
@@ -386,9 +412,11 @@ tick happens while idle (count writes over 2 s of idleness: expect 0).
 
 ## 8. Decisions I would make (ranked by impact)
 
-1. **State row + facts row split, spinner/elapsed only while working, dim prompt, one-line turn summary.**
+1. **State row + facts row split, spinner/elapsed only while working, dim prompt, a one-line outcome only for
+turns that need a human.**
    Biggest single win; fixes "is it alive?" and costs one tokio interval that exists only while working.
-2. **Dim one-line tool calls; group 3+ into `ran N commands`; errors red with a `✗` and one tail line;
+2. **Dim one-line tool calls; group 3+ into `✓ N calls` naming what it does not cover (`· 1 failed · 1
+   stopped`); errors red with a `✗` and one tail line; `edit` and non-`bash` calls keep their own line;
    expansion by Ctrl-O overlay and an append-only `/expand`.** Make prose the only default-weight text.
 3. **Block-based incremental markdown**, with the 16-colour map in section 6 and tables boxed on commit.
 4. **Synchronised updates + 33 ms frame cap + clear-on-resize.** Cheap, removes visible tearing during streaming.

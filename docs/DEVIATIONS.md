@@ -1378,6 +1378,63 @@ this differs from the spec text, or needed a call the brief left open:
   unauthenticated peer cannot make the session hold a megabyte or a connection for as long as it
   likes (STEER-7 review N3).
 
+## tui3 and its fixes: the calm transcript (2026-11-20)
+
+The brief is `docs/tasks/TUI3-fixes.md`; the design it changes is
+`docs/design/TUI-v2.md`, amended in place. Where this differs from STEER-10's
+requirements 1 and 2 (the design note's source), and why. `tui3fix` is the
+follow-up commit series that restores three things the first pass lost.
+
+- **Req. 1's "one-line summary (steps, tokens, cost, time)" is gone.** A `done`
+  turn ends on its prose and gets no summary line at all; `paused`, `stopped`
+  and `error` keep exactly one line, `⏸ 2 steps · 3.6k tok`, with no cost and no
+  time. Reason: the maintainer's direction for this pass is that the transcript
+  is prose plus de-emphasised facts, and a line of numbers after every turn is
+  the loudest thing on the screen. The state row already says what is happening
+  and the facts row says tokens; a `done` turn ending on its answer is the point
+  of the design. The old summary is not lost, it moved: see the reach note
+  below.
+- **Req. 2's per-call time (`… · 4.2 s`) is gone from tool lines.** A settled
+  call shows `ok · 1.2 KB` or `✗ exit 101 · 4.1 KB`; the duration is recorded in
+  the event log and nowhere on screen. Reason: the transcript is not a profiler,
+  and a right-aligned time column made every line jump as it changed. The verdict
+  (exit/bytes) is kept: that is what a reader acts on.
+- **Cost, cache ratio, step count and the context-window percent are no longer
+  ambient anywhere in the pane.** Where they live today: the `usage` event in
+  `events.jsonl` (`{"type":"usage","step":2,"prompt_tokens":1380,"cached_tokens":1024,"cost":0.0000538}`),
+  readable with `jq`; the step cap in the banner, the paused line (`⏸ 2 steps ·
+  3.6k tok`) and the state row; tokens in the facts row; the window, its source
+  and its note in the `state` object every `kelir ctl` verb answers with
+  (`window`, `window_source`, `window_note`). `kelir ctl status` (STEER-8) is
+  the planned one-command answer for a live session's spend and is not landed
+  yet; until it is, a maintainer who wants the spend of a *running* session
+  reads the log. Do not call this gap closed before STEER-8 lands and the TUI
+  shows it on request (tracked as `N-reach` in `docs/reviews/tui3-review.md`).
+- **The banner carries no window line, but a degraded window still speaks.**
+  Dropping `window N tokens (source)` from the banner is the brief; dropping the
+  `(note)` that STEER-1 review N4 added for a 401, an offline endpoint or a
+  default fallback was not, and it is restored in `tui3fix` as one dim banner
+  line, shown only when the source is not the provider's
+  (`src/session.rs::window_banner_line`). A start whose metadata fetch has not
+  landed cannot put the reason in the banner (it does not exist yet), so
+  `apply_list` writes the same line, once, when the answer turns out to be a
+  fallback: `» window 128000 tokens (default) · the model list: http 503`.
+  Exactly one of the two appears.
+- **A `/model` swap announces the window it moved to.** `window_model` is
+  seeded from the startup answer at `Session::open` (it used to be `None`, and a
+  startup with a fresh models cache started no fetch, so `apply_list` never saw
+  a different model and stayed silent — the announce path the earlier commit
+  promised could be lost). A swap whose `/models` answer has not landed says the
+  number from the new endpoint's cache and source, once; the answer that lands
+  later is silent unless the number moved again.
+- **A cancelled call is not a success, and an `edit` is not folded away.** The
+  fold line counts only `bash` calls that finished cleanly and names the rest
+  (`✓ 2 calls · 1 failed · 1 stopped`); a stopped call keeps its own line
+  (`⏹ cancelled`), and so does any tool that changed a file (`edit … ok · 1.2
+  KB`). Reason: tui2's rule was that the transcript must say which files were
+  touched, and a check mark over the one call a human interrupted is the kind of
+  quiet lie this project avoids. Cheap, and it keeps the fold's arithmetic
+  honest.
 ## steer12fix
 
 - **A spilled output lists its `=== label` sections.** The spec says the model sees "the spill

@@ -225,6 +225,12 @@ impl Theme {
         Style::default()
     }
 
+    /// The human's own words in the transcript, so a long session can be
+    /// scanned for what was asked: a colour of its own, still default weight.
+    pub fn user(self) -> Style {
+        self.fg(Color::Cyan)
+    }
+
     /// Tool lines, meta, hints: dim, never a colour.
     pub fn dim(self) -> Style {
         Style::default().add_modifier(Modifier::DIM)

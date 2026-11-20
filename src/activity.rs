@@ -358,19 +358,11 @@ pub fn short_elapsed(elapsed: Duration) -> String {
     }
 }
 
-/// The one-line turn summary committed to the scrollback when a turn ends:
-/// `✓ 3 steps · 4.8k tok · $0.0010 · 49 s`. `stopped`, `paused` and `error`
-/// differ only in the glyph and in whether the cost is shown.
-pub fn summary_line(
-    theme: Theme,
-    outcome: &str,
-    steps: u32,
-    tokens: u64,
-    cost: f64,
-    elapsed: Duration,
-) -> Line<'static> {
+/// The one-line outcome committed to the scrollback for the turns that need a
+/// human: `⏸ paused · 3 steps · 4.8k tok`, `✗ error · …`, `⏹ stopped · …`.
+/// A `done` turn ends on its prose, so it writes no line.
+pub fn summary_line(theme: Theme, outcome: &str, steps: u32, tokens: u64) -> Line<'static> {
     let (glyph, style) = match outcome {
-        "done" => (theme.glyphs.done(), theme.ok()),
         "stopped" => (theme.glyphs.stopped(), theme.waiting()),
         "paused" => (theme.glyphs.paused(), theme.waiting()),
         _ => (theme.glyphs.error(), theme.error()),
@@ -382,10 +374,6 @@ pub fn summary_line(
         format!("{steps} steps")
     }];
     parts.push(format!("{} tok", crate::tui::tokens(tokens)));
-    if cost > 0.0 {
-        parts.push(format!("${cost:.4}"));
-    }
-    parts.push(short_elapsed(elapsed));
     Line::from(vec![
         Span::styled(format!("{glyph} "), style),
         Span::styled(parts.join(" · "), theme.dim()),
@@ -598,43 +586,18 @@ mod tests {
     }
 
     #[test]
-    fn the_turn_summary_is_one_dim_line_per_outcome() {
+    fn the_outcome_line_is_one_dim_line_and_only_for_a_turn_that_needs_a_human() {
         let theme = Theme::plain();
-        let done = text(summary_line(
-            theme,
-            "done",
-            3,
-            4800,
-            0.001,
-            Duration::from_secs(49),
-        ));
-        assert!(done.starts_with('✓'), "{done}");
-        assert!(
-            done.contains("3 steps · 4.8k tok · $0.0010 · 49s"),
-            "{done}"
-        );
-        let stopped = text(summary_line(
-            theme,
-            "stopped",
-            1,
-            10,
-            0.0,
-            Duration::from_secs(2),
-        ));
+        let stopped = text(summary_line(theme, "stopped", 1, 10));
         assert!(stopped.starts_with('⏹'), "{stopped}");
+        assert!(stopped.contains("1 step · 10 tok"), "{stopped}");
         assert!(
             !stopped.contains('$'),
-            "a zero cost is not shown: {stopped}"
+            "no cost in the outcome line: {stopped}"
         );
-        let failed = text(summary_line(
-            theme,
-            "error",
-            1,
-            10,
-            0.0,
-            Duration::from_secs(2),
-        ));
+        let failed = text(summary_line(theme, "error", 2, 3000));
         assert!(failed.starts_with('✗'), "{failed}");
+        assert!(failed.contains("2 steps · 3.0k tok"), "{failed}");
     }
 
     #[test]

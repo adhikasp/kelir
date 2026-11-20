@@ -73,7 +73,7 @@ fn a_folded_group_precedes_multi_block_prose() {
     app.apply(UiEvent::Delta(prose.into()));
     app.apply(UiEvent::Assistant { text: prose.into() });
     let scroll: Vec<String> = app.take_scroll().iter().map(line_text).collect();
-    let fold = scroll.iter().position(|l| l.contains("ran 4 commands"));
+    let fold = scroll.iter().position(|l| l.contains("4 calls"));
     let first = scroll.iter().position(|l| l.contains("First paragraph"));
     assert!(fold.is_some() && first.is_some(), "{scroll:?}");
     assert!(fold < first, "{scroll:?}");
