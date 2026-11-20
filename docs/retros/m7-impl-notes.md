@@ -66,4 +66,6 @@ in, under that session's token). The session's loop hands the work to a task:
 
 ## Gate
 
-See the PROGRESS row.
+`bash scripts/gate.sh --linux=<machine>` at 54429ea: fmt, clippy `-D warnings`, nextest 1139 passed / 3 skipped (0 retried),
+doctest, Linux half: `gate: PASS`. No leftover `kelir.exe` after the runs (checked with `tasklist`; the e2e harness's Job Object
+also asserts it).
