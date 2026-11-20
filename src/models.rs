@@ -733,7 +733,7 @@ mod tests {
         assert_eq!(models[1].vision, Some(false));
         assert_eq!(models[2].vision, None, "silence is not a refusal");
         // And the cache answers per model.
-        let cache = Cache::new("p", models, 0);
+        let cache = Cache::new("p", "http://example.invalid/v1", models, 0);
         assert_eq!(cache.vision_for("a/yes"), Some(true));
         assert_eq!(cache.vision_for("b/no"), Some(false));
         assert_eq!(cache.vision_for("c/silent"), None);
