@@ -38,6 +38,10 @@ use tokio::process::Command;
 
 use crate::proc::ProcessGroup;
 
+/// Windows job names handed out by this process.
+#[cfg(windows)]
+static JOBS: AtomicU64 = AtomicU64::new(0);
+
 /// A gate that has not answered after this long is killed and allowed.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// More stdout than this is garbage (and the rest is discarded).
@@ -647,6 +651,7 @@ pub struct Runner {
     session_id: String,
     session_dir: PathBuf,
     runs: AtomicU64,
+    timeout: Duration,
 }
 
 impl Runner {
@@ -664,7 +669,15 @@ impl Runner {
             session_id,
             session_dir,
             runs: AtomicU64::new(0),
+            timeout: timeout(),
         }
+    }
+
+    /// A runner with another timeout (the unit tests; the env hook is for the
+    /// binary).
+    pub fn with_timeout(mut self, timeout: Duration) -> Runner {
+        self.timeout = timeout;
+        self
     }
 
     pub fn defs(&self) -> &[GateDef] {
@@ -814,8 +827,13 @@ impl Runner {
         let group = ProcessGroup::new();
         #[cfg(windows)]
         let group = {
-            let n = self.runs.fetch_add(1, Ordering::SeqCst);
-            let name = crate::bg::job_name(&self.session_id, &format!("gate-{n}"));
+            // Process-wide counter: a job name that is already taken would hand
+            // back the *other* job, and killing one gate would kill the other.
+            let n = JOBS.fetch_add(1, Ordering::SeqCst);
+            let name = crate::bg::job_name(
+                &self.session_id,
+                &format!("gate-{}-{n}", std::process::id()),
+            );
             let job = crate::proc::win::Job::create_named(&name, true)
                 .ok_or_else(|| "cannot create a job object".to_string())?;
             group.with_job(job)
@@ -848,7 +866,7 @@ impl Runner {
         let out_task = tokio::spawn(read_capped(stdout, OUTPUT_MAX));
         let err_task = tokio::spawn(read_capped(stderr, 8 * 1024));
 
-        let limit = timeout();
+        let limit = self.timeout;
         let waited = tokio::time::timeout(limit, child.wait()).await;
         // The tree dies with the gate whatever happened: a gate that left a
         // background process behind leaves nothing.
@@ -958,4 +976,577 @@ pub fn describe(defs: &[GateDef]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn def(event: Event, command: &str) -> GateDef {
+        GateDef {
+            name: name_from_command(command),
+            event,
+            command: command.to_string(),
+            tools: Vec::new(),
+            env: BTreeMap::new(),
+            origin: "test".into(),
+        }
+    }
+
+    fn runner(dir: &Path, defs: Vec<GateDef>) -> Runner {
+        std::fs::create_dir_all(dir).unwrap();
+        Runner::new(
+            defs,
+            crate::config::default_shell(),
+            dir.to_path_buf(),
+            "ses_test".into(),
+            dir.to_path_buf(),
+        )
+        .with_timeout(Duration::from_secs(20))
+    }
+
+    // ------------------------------------------------------- decision parsing
+
+    #[test]
+    fn a_decision_is_one_json_object() {
+        assert_eq!(
+            parse_decision(r#"{"decision":"allow"}"#),
+            Ok(Parsed::Allow {
+                reason: String::new()
+            })
+        );
+        assert_eq!(
+            parse_decision(r#" {"decision":"deny","reason":"no"} "#),
+            Ok(Parsed::Deny {
+                reason: "no".into()
+            })
+        );
+        assert_eq!(
+            parse_decision(r#"{"decision":"rewrite","input":{"text":"x"}}"#),
+            Ok(Parsed::Rewrite {
+                reason: String::new(),
+                input: json!({"text": "x"})
+            })
+        );
+    }
+
+    #[test]
+    fn empty_output_is_allow_and_everything_else_wrong_is_an_error() {
+        assert!(matches!(parse_decision(""), Ok(Parsed::Allow { .. })));
+        assert!(matches!(parse_decision("  \n"), Ok(Parsed::Allow { .. })));
+        for bad in [
+            "garbage",
+            "[]",
+            "42",
+            r#"{"reason":"x"}"#,
+            r#"{"decision":"maybe"}"#,
+            r#"{"decision":7}"#,
+            r#"{"decision":"rewrite"}"#,
+            r#"{"decision":"rewrite","input":"text"}"#,
+            r#"{"decision":"deny","reason":3}"#,
+            r#"{"decision":"allow"} trailing"#,
+        ] {
+            assert!(parse_decision(bad).is_err(), "{bad} should not parse");
+        }
+    }
+
+    #[test]
+    fn a_huge_answer_is_an_error_and_a_long_reason_is_cut() {
+        let huge = format!(
+            r#"{{"decision":"deny","reason":"{}"}}"#,
+            "x".repeat(OUTPUT_MAX)
+        );
+        assert!(parse_decision(&huge).is_err());
+        let long = format!(r#"{{"decision":"deny","reason":"{}"}}"#, "y".repeat(10_000));
+        match parse_decision(&long).unwrap() {
+            Parsed::Deny { reason } => assert!(reason.chars().count() <= REASON_MAX + 1),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // ----------------------------------------------------------- declarations
+
+    #[test]
+    fn the_gates_table_takes_strings_tables_and_lists() {
+        let value: toml::Value = toml::from_str(
+            r#"
+turn_end = "python gates/verify.py"
+before_tool = [ "sh a.sh", { name = "no-rm", command = "sh b.sh", tools = ["bash"], env = { A = "b" } } ]
+session_end = { command = "git push" }
+"#,
+        )
+        .unwrap();
+        let defs = from_toml(&value).unwrap();
+        assert_eq!(defs.len(), 4);
+        let turn_end = defs.iter().find(|d| d.event == Event::TurnEnd).unwrap();
+        assert_eq!(turn_end.name, "verify");
+        let named = defs.iter().find(|d| d.name == "no-rm").unwrap();
+        assert_eq!(named.tools, vec!["bash"]);
+        assert_eq!(named.env.get("A").map(String::as_str), Some("b"));
+    }
+
+    #[test]
+    fn a_bad_gates_table_says_what_is_wrong() {
+        for (text, needle) in [
+            ("turn_start = \"x\"", "not an event"),
+            ("turn_end = 3", "command string"),
+            ("turn_end = \"\"", "empty command"),
+            ("turn_end = { name = \"x\" }", "needs a `command`"),
+            (
+                "turn_end = { command = \"x\", tools = [\"bash\"] }",
+                "before_tool",
+            ),
+            (
+                "before_tool = { command = \"x\", bogus = 1 }",
+                "unknown key",
+            ),
+            (
+                "before_tool = { command = \"x\", env = { \"1A\" = \"b\" } }",
+                "variable name",
+            ),
+            (
+                "before_tool = { command = \"x\", name = \"a b\" }",
+                "`name`",
+            ),
+        ] {
+            let value: toml::Value = toml::from_str(text).unwrap();
+            let error = from_toml(&value).unwrap_err();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn two_gates_with_one_name_are_told_apart() {
+        let mut defs = Vec::new();
+        push_unique(&mut defs, def(Event::TurnEnd, "sh check.sh"));
+        push_unique(&mut defs, def(Event::BeforeTool, "sh check.sh"));
+        assert_eq!(defs[0].name, "check");
+        assert_eq!(defs[1].name, "check-2");
+    }
+
+    #[test]
+    fn names_come_from_the_last_path_of_the_command() {
+        assert_eq!(name_from_command("python gates/verify.py"), "verify");
+        assert_eq!(
+            name_from_command("python \"C:/x/y/note_check.py\" --fast"),
+            "note_check"
+        );
+        assert_eq!(name_from_command("true"), "true");
+    }
+
+    #[test]
+    fn tool_patterns_match_a_name_a_server_or_a_prefix() {
+        assert!(tool_matches("bash", "bash"));
+        assert!(!tool_matches("bash", "edit"));
+        assert!(tool_matches("mcp:notes", "mcp:notes.search"));
+        assert!(!tool_matches("mcp:notes", "mcp:notesy.search"));
+        assert!(tool_matches("mcp:notes.search", "mcp:notes.search"));
+        assert!(tool_matches("mcp:*", "mcp:a.b"));
+        let mut gate = def(Event::BeforeTool, "x");
+        assert!(gate.matches(Some("anything")));
+        gate.tools = vec!["edit".into()];
+        assert!(gate.matches(Some("edit")) && !gate.matches(Some("bash")));
+    }
+
+    // ---------------------------------------------------------- skill binding
+
+    #[test]
+    fn a_skill_binds_its_scripts_by_metadata() {
+        assert_eq!(
+            skill_binding("kelir-gate: turn_end").as_deref(),
+            Some("turn_end")
+        );
+        assert_eq!(
+            skill_binding("{kelir-gate: turn_end}").as_deref(),
+            Some("turn_end")
+        );
+        assert_eq!(
+            skill_binding("owner: x, kelir-gate: \"after_tool=scripts/a.py\"").as_deref(),
+            Some("after_tool=scripts/a.py")
+        );
+        assert_eq!(skill_binding("owner: x"), None);
+    }
+
+    fn skill_on_disk(root: &Path, front: &str, scripts: &[&str]) -> Vec<crate::sources::Found> {
+        let dir = root.join("verify");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        for name in scripts {
+            std::fs::write(dir.join("scripts").join(name), "print()").unwrap();
+        }
+        let text = format!("---\nname: verify\ndescription: d\n{front}\n---\nbody\n");
+        std::fs::write(dir.join("SKILL.md"), &text).unwrap();
+        vec![crate::sources::Found {
+            kind: crate::sources::SourceKind::Skill,
+            name: "verify".into(),
+            path: dir.join("SKILL.md"),
+            text,
+            layer: crate::sources::Layer::Project,
+            builtin: false,
+        }]
+    }
+
+    #[test]
+    fn a_skill_script_is_found_by_event_then_gate_then_the_only_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut notes = Vec::new();
+        let found = skill_on_disk(
+            temp.path(),
+            "metadata: {kelir-gate: turn_end}",
+            &["other.py", "turn_end.py"],
+        );
+        let defs = from_skills(&found, &mut notes);
+        assert_eq!(defs.len(), 1, "{notes:?}");
+        assert_eq!(defs[0].event, Event::TurnEnd);
+        assert_eq!(defs[0].name, "verify.turn_end");
+        assert!(
+            defs[0].command.contains("turn_end.py"),
+            "{}",
+            defs[0].command
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let found = skill_on_disk(
+            temp.path(),
+            "metadata:\n  kelir-gate: turn_end",
+            &["only.sh"],
+        );
+        let defs = from_skills(&found, &mut notes);
+        assert!(defs[0].command.starts_with("bash "), "{}", defs[0].command);
+    }
+
+    #[test]
+    fn a_skill_binding_that_cannot_be_resolved_is_a_note_not_a_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut notes = Vec::new();
+        let found = skill_on_disk(
+            temp.path(),
+            "metadata: {kelir-gate: turn_end}",
+            &["a.py", "b.py"],
+        );
+        assert!(from_skills(&found, &mut notes).is_empty());
+        assert!(notes[0].contains("name one"), "{notes:?}");
+        let found = skill_on_disk(
+            temp.path(),
+            "metadata: {kelir-gate: \"turn_end=../../etc/x\"}",
+            &["a.py"],
+        );
+        assert!(from_skills(&found, &mut notes).is_empty());
+        assert!(
+            notes.iter().any(|n| n.contains("inside the skill")),
+            "{notes:?}"
+        );
+        let found = skill_on_disk(temp.path(), "metadata: {kelir-gate: sometimes}", &["a.py"]);
+        assert!(from_skills(&found, &mut notes).is_empty());
+    }
+
+    // ------------------------------------------------------- the event JSON
+
+    #[test]
+    fn the_event_json_carries_the_session_and_the_events_own_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let runner = runner(temp.path(), vec![]);
+        let text = runner.stdin_for(
+            Event::BeforeTool,
+            3,
+            &json!({"tool":"bash","input":{"command":"ls"}}),
+        );
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["event"], "before_tool");
+        assert_eq!(value["session"], "ses_test");
+        assert_eq!(value["turn"], 3);
+        assert_eq!(value["tool"], "bash");
+        assert_eq!(value["input"]["command"], "ls");
+        for key in ["session_dir", "log", "cwd"] {
+            assert!(value[key].as_str().is_some_and(|s| !s.is_empty()), "{key}");
+        }
+        assert!(value["log"].as_str().unwrap().ends_with("events.jsonl"));
+        assert!(!text.contains("token"), "{text}");
+    }
+
+    #[test]
+    fn rewrite_shapes_follow_the_event() {
+        let mut payload = json!({"text": "a"});
+        let value = apply_rewrite(
+            Event::PromptSubmit,
+            "g",
+            &mut payload,
+            &json!({"text": "b"}),
+        )
+        .unwrap();
+        assert_eq!(value, json!({"text": "b"}));
+        assert_eq!(payload["text"], "b");
+        assert!(apply_rewrite(Event::PromptSubmit, "g", &mut payload, &json!({"x": 1})).is_err());
+
+        let mut payload = json!({"final_text": "a"});
+        apply_rewrite(Event::TurnEnd, "g", &mut payload, &json!({"text": "b"})).unwrap();
+        assert_eq!(payload["final_text"], "b");
+
+        let mut payload = json!({"input": {"command": "a"}});
+        apply_rewrite(
+            Event::BeforeTool,
+            "g",
+            &mut payload,
+            &json!({"command": "b"}),
+        )
+        .unwrap();
+        assert_eq!(payload["input"]["command"], "b");
+
+        let mut payload = json!({"result": "out"});
+        let value = apply_rewrite(
+            Event::AfterTool,
+            "chk",
+            &mut payload,
+            &json!({"note": "hm"}),
+        )
+        .unwrap();
+        assert_eq!(value["result"], "out\n[gate chk] hm");
+        assert!(apply_rewrite(Event::AfterTool, "g", &mut payload, &json!({})).is_err());
+        assert!(apply_rewrite(Event::SessionEnd, "g", &mut payload, &json!({"text":"x"})).is_err());
+    }
+
+    // ------------------------------------------------------------ environment
+
+    #[test]
+    fn a_gate_never_inherits_a_secret() {
+        for secret in [
+            "KELIR_TOKEN",
+            "KELIR_SOCK",
+            "OPENROUTER_API_KEY",
+            "KELIR_GO_API_KEY",
+            "MY_CUSTOM_KEY_ENV",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+        ] {
+            assert!(!allowed_env(secret), "{secret} must not reach a gate");
+        }
+        for ordinary in [
+            "PATH",
+            "HOME",
+            "TEMP",
+            "SystemRoot",
+            "SSH_AUTH_SOCK",
+            "LC_ALL",
+        ] {
+            assert!(allowed_env(ordinary), "{ordinary}");
+        }
+    }
+
+    // --------------------------------------------------- real gate processes
+
+    fn answers(temp: &Path, name: &str, body: &str) -> String {
+        let path = temp.join(name);
+        std::fs::write(&path, body).unwrap();
+        format!(
+            "bash \"{}\"",
+            crate::util::path_string(&path).replace('\\', "/")
+        )
+    }
+
+    #[tokio::test]
+    async fn a_chain_runs_in_order_and_a_deny_stops_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let rewrite = answers(
+            temp.path(),
+            "rewrite.sh",
+            "cat > seen1.json\necho '{\"decision\":\"rewrite\",\"input\":{\"text\":\"second\"}}'\n",
+        );
+        let seen = answers(
+            temp.path(),
+            "seen.sh",
+            "cat > seen2.json\necho '{\"decision\":\"deny\",\"reason\":\"stop here\"}'\n",
+        );
+        let never = answers(temp.path(), "never.sh", "echo ran > never.txt\n");
+        let runner = runner(
+            temp.path(),
+            vec![
+                def(Event::PromptSubmit, &rewrite),
+                def(Event::PromptSubmit, &seen),
+                def(Event::PromptSubmit, &never),
+            ],
+        );
+        let chain = runner
+            .run_event(Event::PromptSubmit, None, 1, json!({"text": "first"}))
+            .await;
+        assert_eq!(chain.runs.len(), 2, "{:?}", chain.runs);
+        assert_eq!(chain.runs[0].decision, "rewrite");
+        assert!(chain.runs[0].rewritten);
+        assert_eq!(chain.runs[1].decision, "deny");
+        assert_eq!(
+            chain.verdict,
+            Verdict::Deny {
+                gate: "seen".into(),
+                reason: "stop here".into()
+            }
+        );
+        let second: Value =
+            serde_json::from_str(&std::fs::read_to_string(temp.path().join("seen2.json")).unwrap())
+                .unwrap();
+        assert_eq!(second["text"], "second", "the next gate sees the rewrite");
+        assert!(!temp.path().join("never.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn a_crash_garbage_and_silence_all_fail_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let crash = answers(temp.path(), "crash.sh", "echo boom >&2\nexit 3\n");
+        let garbage = answers(temp.path(), "garbage.sh", "echo not json\n");
+        let silent = answers(temp.path(), "silent.sh", "true\n");
+        let missing = "definitely-not-a-command-kelir-test".to_string();
+        let runner = runner(
+            temp.path(),
+            vec![
+                def(Event::BeforeTool, &crash),
+                def(Event::BeforeTool, &garbage),
+                def(Event::BeforeTool, &silent),
+                def(Event::BeforeTool, &missing),
+            ],
+        );
+        let chain = runner
+            .run_event(
+                Event::BeforeTool,
+                Some("bash"),
+                1,
+                json!({"tool":"bash","input":{}}),
+            )
+            .await;
+        assert_eq!(chain.verdict, Verdict::Allow);
+        assert_eq!(chain.runs.len(), 4);
+        assert!(chain.runs.iter().all(|run| run.decision == "allow"));
+        let errors: Vec<_> = chain.runs.iter().map(|run| run.error.clone()).collect();
+        assert!(
+            errors[0]
+                .as_deref()
+                .unwrap()
+                .contains("exited with 3: boom"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[1].as_deref().unwrap().contains("not JSON"),
+            "{errors:?}"
+        );
+        assert_eq!(errors[2], None, "silence is not an error");
+        assert!(
+            errors[3].is_some(),
+            "a missing command is a failure: {errors:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_means_nothing_where_the_table_says_so() {
+        let temp = tempfile::tempdir().unwrap();
+        let deny = answers(
+            temp.path(),
+            "deny.sh",
+            "echo '{\"decision\":\"deny\",\"reason\":\"x\"}'\n",
+        );
+        let runner = runner(
+            temp.path(),
+            vec![def(Event::SessionEnd, &deny), def(Event::AfterTool, &deny)],
+        );
+        let chain = runner
+            .run_event(Event::SessionEnd, None, 1, json!({}))
+            .await;
+        assert_eq!(chain.verdict, Verdict::Allow);
+        assert!(
+            chain.runs[0].reason.contains("ignored"),
+            "{:?}",
+            chain.runs[0]
+        );
+        let chain = runner
+            .run_event(Event::AfterTool, Some("bash"), 1, json!({"result": "r"}))
+            .await;
+        assert_eq!(chain.verdict, Verdict::Allow);
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_hangs_is_killed_with_its_tree_and_allowed() {
+        let temp = tempfile::tempdir().unwrap();
+        // A background child that would write a file in 3 s, and a hang. If the
+        // tree is killed, the file never appears.
+        let hang = answers(
+            temp.path(),
+            "hang.sh",
+            "(sleep 3; echo alive > flag.txt) &\nsleep 60\n",
+        );
+        let runner = runner(temp.path(), vec![def(Event::TurnEnd, &hang)])
+            .with_timeout(Duration::from_millis(800));
+        let started = Instant::now();
+        let chain = runner
+            .run_event(Event::TurnEnd, None, 1, json!({"final_text": "x"}))
+            .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(chain.verdict, Verdict::Allow);
+        assert!(
+            chain.runs[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("timed out"),
+            "{:?}",
+            chain.runs[0]
+        );
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            !temp.path().join("flag.txt").exists(),
+            "the gate's tree outlived its timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_exits_cleanly_leaves_no_background_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let leaves = answers(
+            temp.path(),
+            "leaves.sh",
+            "(sleep 3; echo alive > flag.txt) >/dev/null 2>&1 &\necho '{\"decision\":\"allow\"}'\n",
+        );
+        let runner = runner(temp.path(), vec![def(Event::SessionEnd, &leaves)]);
+        let chain = runner
+            .run_event(Event::SessionEnd, None, 1, json!({}))
+            .await;
+        assert_eq!(chain.runs[0].error, None, "{:?}", chain.runs[0]);
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            !temp.path().join("flag.txt").exists(),
+            "a leftover child survived the gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chatty_gate_cannot_wedge_the_pipe() {
+        let temp = tempfile::tempdir().unwrap();
+        let chatty = answers(
+            temp.path(),
+            "chatty.sh",
+            "i=0\nwhile [ $i -lt 40000 ]; do echo 0123456789012345678901234567890123456789; i=$((i+1)); done\n",
+        );
+        let runner = runner(temp.path(), vec![def(Event::SessionStart, &chatty)]);
+        let chain = runner
+            .run_event(Event::SessionStart, None, 1, json!({}))
+            .await;
+        assert!(
+            chain.runs[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("output over"),
+            "{:?}",
+            chain.runs[0]
+        );
+        assert_eq!(chain.verdict, Verdict::Allow);
+    }
+
+    #[test]
+    fn describe_names_environment_variables_but_never_their_values() {
+        let mut gate = def(Event::TurnEnd, "sh x.sh");
+        gate.env
+            .insert("SECRET_THING".into(), "hunter2-canary".into());
+        let text = serde_json::to_string(&describe(&[gate])).unwrap();
+        assert!(text.contains("SECRET_THING"));
+        assert!(!text.contains("hunter2-canary"), "{text}");
+    }
 }

@@ -4766,12 +4766,26 @@ impl Session {
                             self.sync();
                             continue;
                         }
+                        crate::gates::Verdict::Deny { gate, .. } => {
+                            // Blocks at most once per turn: a second deny is
+                            // logged, not enforced.
+                            let _ = self.record(EventBody::Error {
+                                location: "gate".into(),
+                                message: format!(
+                                    "turn_end: the deny from gate {gate} was ignored (this turn was already blocked once)"
+                                ),
+                                retryable: false,
+                                status: None,
+                                attempt: None,
+                                retry_in_ms: None,
+                            });
+                        }
                         crate::gates::Verdict::Rewrite(value) => {
                             if let Some(new) = value.get("text").and_then(Value::as_str) {
                                 self.final_text = new.to_string();
                             }
                         }
-                        _ => {}
+                        crate::gates::Verdict::Allow => {}
                     }
                 }
                 // ---------------------------------------------------- after_step
