@@ -425,6 +425,10 @@ async fn session_end_fires_on_end_but_not_on_a_hard_kill() {
 /// Killing kelir while a gate is running must take the gate's tree with it
 /// (Windows: kill-on-close Job Object; Unix: nothing does this today, F3).
 #[tokio::test]
+#[cfg_attr(
+    unix,
+    ignore = "F3: Unix has no kill-on-parent-death for a gate's process group"
+)]
 async fn killing_the_session_mid_gate_kills_the_gate_tree() {
     let work = tempfile::tempdir().unwrap();
     let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("done", 0)))]).await;
