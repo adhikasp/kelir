@@ -94,6 +94,14 @@ its Job Object; Unix: its process group); no gate leaves a process behind,
 and none opens a console window on Windows. While a gate runs the session waits
 for it, so a `stop` verb is read when the gate ends (at most 30 s).
 
+## Limits: a gate cannot multiply
+
+At most **8** gate processes are alive in one kelir process at any moment; a run
+past that is skipped and logged (`error: 8 gates are already running; this run was
+skipped`), never queued or retried. A spawn failure is one `gate` event with `error`,
+never a retry. A kelir started by a gate (it inherits `KELIR_GATE_EVENT`) runs **no
+gates**: a gate never triggers gates. An empty command is a config error at load.
+
 ## What a gate's environment holds
 
 An allow-list, not a copy: `PATH`, the home/temp/system variables, locale,

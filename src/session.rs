@@ -1929,6 +1929,10 @@ impl Session {
     /// Gates from `[gates]` and from skills bound with `kelir-gate`; `None`
     /// when there are none (the default), so nothing below costs a thing.
     fn build_gates(&mut self) -> Option<Arc<crate::gates::Runner>> {
+        // A kelir that a gate started runs no gates: a gate never triggers gates.
+        if crate::gates::started_by_a_gate(crate::envs::var("KELIR_GATE_EVENT").as_deref()) {
+            return None;
+        }
         let mut defs = self.cfg.gates.clone();
         let places = crate::sources::places(
             &self.ctx.cwd,

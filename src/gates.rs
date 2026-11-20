@@ -43,6 +43,51 @@ use crate::proc::ProcessGroup;
 #[cfg(windows)]
 static JOBS: AtomicU64 = AtomicU64::new(0);
 
+/// At most this many gate processes are alive in one process at any moment. A
+/// gate that is slow, misbehaves or re-enters kelir cannot multiply: the run
+/// past the cap is skipped (fail open, logged) instead of started.
+pub const MAX_LIVE: usize = 8;
+
+static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Gate processes alive right now (the tests assert it is back to zero).
+pub fn live() -> usize {
+    LIVE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// One of the [`MAX_LIVE`] slots; released on drop, whatever happened.
+struct Slot;
+
+impl Slot {
+    fn take() -> Result<Slot, String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mut now = LIVE.load(SeqCst);
+        loop {
+            if now >= MAX_LIVE {
+                return Err(format!(
+                    "{MAX_LIVE} gates are already running; this run was skipped"
+                ));
+            }
+            match LIVE.compare_exchange(now, now + 1, SeqCst, SeqCst) {
+                Ok(_) => return Ok(Slot),
+                Err(seen) => now = seen,
+            }
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A kelir started by a gate (`KELIR_GATE_EVENT` is in its environment) runs
+/// no gates of its own: a gate never triggers gates.
+pub fn started_by_a_gate(marker: Option<&str>) -> bool {
+    marker.is_some_and(|value| !value.trim().is_empty())
+}
+
 /// A gate that has not answered after this long is killed and allowed.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// More stdout than this is garbage (and the rest is discarded).
@@ -799,6 +844,8 @@ impl Runner {
         let Some(program) = self.shell.first() else {
             return Err("no shell configured".into());
         };
+        // Held until the gate and its tree are gone.
+        let _slot = Slot::take()?;
         let shell_args: Vec<String> = self.shell.iter().skip(1).cloned().collect();
         let dir = self.session_dir.join("gates");
         let input = crate::shellcmd::input(&def.command, &shell_args, &dir, &format!("g{index}"))?;
@@ -978,6 +1025,20 @@ pub fn describe(defs: &[GateDef]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The live counter is process-wide: tests that start gates take turns.
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Holds the turn and, when the test ends, asserts no gate slot leaked.
+    struct Quiet(#[allow(dead_code)] tokio::sync::MutexGuard<'static, ()>);
+
+    impl Drop for Quiet {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                assert_eq!(live(), 0, "a test left a gate process counted as alive");
+            }
+        }
+    }
 
     fn def(event: Event, command: &str) -> GateDef {
         GateDef {
@@ -1341,6 +1402,7 @@ session_end = { command = "git push" }
 
     #[tokio::test]
     async fn a_chain_runs_in_order_and_a_deny_stops_it() {
+        let _serial = Quiet(SERIAL.lock().await);
         let temp = tempfile::tempdir().unwrap();
         let rewrite = answers(
             temp.path(),
@@ -1384,6 +1446,7 @@ session_end = { command = "git push" }
 
     #[tokio::test]
     async fn a_crash_garbage_and_silence_all_fail_open() {
+        let _serial = Quiet(SERIAL.lock().await);
         let temp = tempfile::tempdir().unwrap();
         let crash = answers(temp.path(), "crash.sh", "echo boom >&2\nexit 3\n");
         let garbage = answers(temp.path(), "garbage.sh", "echo not json\n");
@@ -1430,6 +1493,7 @@ session_end = { command = "git push" }
 
     #[tokio::test]
     async fn deny_means_nothing_where_the_table_says_so() {
+        let _serial = Quiet(SERIAL.lock().await);
         let temp = tempfile::tempdir().unwrap();
         let deny = answers(
             temp.path(),
@@ -1457,6 +1521,7 @@ session_end = { command = "git push" }
 
     #[tokio::test]
     async fn a_gate_that_hangs_is_killed_with_its_tree_and_allowed() {
+        let _serial = Quiet(SERIAL.lock().await);
         let temp = tempfile::tempdir().unwrap();
         // A background child that would write a file in 3 s, and a hang. If the
         // tree is killed, the file never appears.
@@ -1495,6 +1560,7 @@ session_end = { command = "git push" }
 
     #[tokio::test]
     async fn a_gate_that_exits_cleanly_leaves_no_background_process() {
+        let _serial = Quiet(SERIAL.lock().await);
         let temp = tempfile::tempdir().unwrap();
         let leaves = answers(
             temp.path(),
@@ -1515,6 +1581,7 @@ session_end = { command = "git push" }
 
     #[tokio::test]
     async fn a_chatty_gate_cannot_wedge_the_pipe() {
+        let _serial = Quiet(SERIAL.lock().await);
         let temp = tempfile::tempdir().unwrap();
         let chatty = answers(
             temp.path(),
@@ -1545,5 +1612,83 @@ session_end = { command = "git push" }
         let text = serde_json::to_string(&describe(&[gate])).unwrap();
         assert!(text.contains("SECRET_THING"));
         assert!(!text.contains("hunter2-canary"), "{text}");
+    }
+
+    #[test]
+    fn a_kelir_started_by_a_gate_runs_no_gates() {
+        assert!(started_by_a_gate(Some("turn_end")));
+        assert!(!started_by_a_gate(Some("  ")));
+        assert!(!started_by_a_gate(None));
+    }
+
+    #[tokio::test]
+    async fn the_live_cap_holds_when_many_runs_pile_up() {
+        let _serial = Quiet(SERIAL.lock().await);
+        let temp = tempfile::tempdir().unwrap();
+        let slow = answers(
+            temp.path(),
+            "slow.sh",
+            "sleep 2
+",
+        );
+        let runner = std::sync::Arc::new(runner(temp.path(), vec![def(Event::SessionEnd, &slow)]));
+        let mut peak = 0usize;
+        let mut tasks = Vec::new();
+        for _ in 0..(MAX_LIVE * 3) {
+            let runner = runner.clone();
+            tasks.push(tokio::spawn(async move {
+                runner
+                    .run_event(Event::SessionEnd, None, 1, json!({}))
+                    .await
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        peak = peak.max(live());
+        let mut skipped = 0;
+        for task in tasks {
+            let chain = task.await.unwrap();
+            if chain.runs[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("already running"))
+            {
+                skipped += 1;
+            }
+            assert_eq!(chain.runs[0].decision, "allow");
+        }
+        assert!(peak <= MAX_LIVE, "{peak} gates were alive at once");
+        assert!(skipped >= MAX_LIVE, "only {skipped} runs were skipped");
+        assert_eq!(live(), 0, "a gate slot leaked");
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_spawns_itself_is_bounded_and_leaves_nothing() {
+        let _serial = Quiet(SERIAL.lock().await);
+        let temp = tempfile::tempdir().unwrap();
+        // Each level starts two more, three levels deep at most (the script
+        // counts its own depth), and then sleeps: 15 processes if nothing
+        // stopped it. The runner starts exactly one; its tree dies with it.
+        let script = answers(
+            temp.path(),
+            "selfish.sh",
+            "d=${DEPTH:-0}
+if [ $d -lt 3 ]; then DEPTH=$((d+1)) bash \"$0\" & DEPTH=$((d+1)) bash \"$0\" & fi
+(sleep 3; echo alive > flag.txt) &
+sleep 1
+",
+        );
+        let mut gate = def(Event::SessionEnd, &script);
+        gate.env.insert("DEPTH".into(), "0".into());
+        let runner = runner(temp.path(), vec![gate]).with_timeout(Duration::from_millis(600));
+        let chain = runner
+            .run_event(Event::SessionEnd, None, 1, json!({}))
+            .await;
+        assert_eq!(chain.runs.len(), 1);
+        assert_eq!(live(), 0);
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            !temp.path().join("flag.txt").exists(),
+            "a descendant of the gate survived"
+        );
     }
 }

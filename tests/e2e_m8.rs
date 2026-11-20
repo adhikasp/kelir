@@ -891,3 +891,58 @@ async fn a_session_without_a_console_runs_its_gates() {
     let (code, stderr) = live.end().await;
     assert_eq!(code, 0, "{stderr}");
 }
+
+// ------------------------------------------------- a gate that starts kelir again
+
+/// A gate whose command runs kelir with the same config (and so the same gate).
+/// Without the guard that is unbounded recursion; the script stops itself at 5
+/// so a missing guard shows up as a counter, not a fork bomb.
+#[tokio::test]
+async fn a_gate_that_starts_kelir_does_not_start_gates_again() {
+    let reenter = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/gate_reenter.py");
+    let dir = tempfile::tempdir().unwrap();
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&text_turn("inner done", 0))),
+        Reply::Sse(sse(&text_turn("outer done", 0))),
+    ])
+    .await;
+    let config = format!(
+        "[gates]
+session_start = {{ name = 'again', command = '{} \"{}\" \"{}\"' }}
+",
+        python(),
+        fwd(reenter),
+        fwd(dir.path())
+    );
+    let sandbox = Sandbox::new(&config);
+    let plan = json!({
+        "bin": env!("CARGO_BIN_EXE_kelir"),
+        "args": ["run", "--json", "inner"],
+        "env": {
+            "KELIR_CONFIG": sandbox.config.to_string_lossy(),
+            "KELIR_CONFIG_DIR": sandbox.state.join("no-config").to_string_lossy(),
+            "KELIR_STATE_DIR": sandbox.state.to_string_lossy(),
+            "KELIR_BASE_URL": mock.base_url(),
+            "KELIR_HOME": sandbox.state.join("home").to_string_lossy(),
+            "OPENROUTER_API_KEY": "test-openrouter-key",
+        },
+    });
+    std::fs::write(dir.path().join("reenter.json"), plan.to_string()).unwrap();
+    let out = sandbox
+        .kelir(&mock.base_url(), &["run", "--json", "outer"], &[])
+        .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let runs = std::fs::read_to_string(dir.path().join("count")).unwrap_or_default();
+    assert_eq!(runs.lines().count(), 1, "the inner kelir ran gates again");
+    let ids = sandbox.session_ids();
+    assert_eq!(
+        ids.len(),
+        2,
+        "the gate's kelir should have made a second session"
+    );
+    let with_gates = ids
+        .iter()
+        .filter(|id| sandbox.log(id).iter().any(|e| e["type"] == "gate"))
+        .count();
+    assert_eq!(with_gates, 1, "only the outer session runs gates");
+}

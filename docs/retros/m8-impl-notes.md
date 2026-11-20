@@ -57,3 +57,26 @@ Branch `job/m8`. What was built, what was decided, what to look at.
 - Live drive with a real cheap model and the example gates is the reviewer's layer.
 - `delegation` flags are unverified against a built M7.
 - `scripts/gate.sh --linux=the maintainer` result: see PROGRESS.
+
+## Incident: ~1000 `sh .../Cargo.toml` processes (2026-11-20, 20:26-20:29)
+
+What I believe happened: while debugging a Windows-only failure in the gate unit tests I ran, by
+hand in Git Bash, `sh "C:/Users/the maintainer/kelir-wt/m8/Cargo.toml"` (a careless experiment: I wanted to see
+whether `sh` accepts a Windows-style path and picked a file that was not a script). `sh` executed the manifest as a shell script; the call hit its 120 s limit and was moved to
+the background. The times and the exact command line match the report. I cannot prove the fork growth
+from the gate runner's side: it has no retry loop, and the gate tests had not started a `sh` on that
+file. It is not a case I can rule out completely, so the runner is hardened anyway.
+
+Lesson: never point an interpreter at a file to "see what happens", and never run a manual process
+experiment without a count watchdog. Hardening done (and tested):
+
+- A gate never triggers gates: a kelir started by a gate (`KELIR_GATE_EVENT` in its environment) runs none.
+  E2E: a gate whose command starts kelir with the same config runs exactly once.
+- At most 8 live gate processes per kelir process (`gates::MAX_LIVE`), the rest skipped, not retried.
+  Unit: 24 runs piled up never exceed 8, the counter returns to 0.
+- A gate that spawns itself (two children per level, three levels) is bounded and its whole tree is gone
+  after the run (a flag file a descendant would write never appears).
+- Every real-process unit test holds a guard that asserts the live counter is 0 when it ends; the e2e tests
+  run under the `Sandbox` Job Object Drop guard, which fails the test on a leaked process.
+- Spawn failure is one `gate` event with `error`; an empty command is rejected at config load.
+- I ran the suites through a watchdog (`sh.exe` count, abort at +20) from then on.
