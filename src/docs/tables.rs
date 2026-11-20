@@ -92,6 +92,12 @@ pub const VERBS: &[VerbDoc] = &[
         effect: "kills one of this session's background jobs and records it `cancelled`; a job id                  the session did not start is refused",
     },
     VerbDoc {
+        name: "status",
+        args: "none; `--json` prints the answer as one JSON line",
+        applies: "`now`",
+        effect: "read-only and never logged: answers at once, even mid-request or in a retry wait,                  with steps used/limit, turn, last prompt size and context %, cache hit ratio,                  tokens, cost and its source, last error, retry in progress, running calls,                  background jobs, children. Needs the session token like every verb",
+    },
+    VerbDoc {
         name: "end",
         args: "none",
         applies: "`now`",
@@ -338,6 +344,33 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
         field_fn: "retry_policy",
     },
     KeyDoc {
+        scope: KeyScope::Top,
+        name: "warn_prompt_tokens",
+        kind: "integer (tokens)",
+        default: "`150000`; `0` turns the warning off",
+        overrides: "—",
+        effect: "when the last prompt is larger than this, one `warning` event and one dim line on                  the screen; it speaks again only after the prompt has fallen back under it.                  Never sent to the model",
+        field_fn: "load",
+    },
+    KeyDoc {
+        scope: KeyScope::Top,
+        name: "warn_cost",
+        kind: "number (US dollars)",
+        default: "unset: no cost warning",
+        overrides: "—",
+        effect: "when the session's cost passes this, one `warning` event and one dim line; never                  sent to the model. Only costs that are known count",
+        field_fn: "warn_cost",
+    },
+    KeyDoc {
+        scope: KeyScope::Top,
+        name: "prices",
+        kind: "table of tables `[prices.\"<model>\"]` with `input`, `output`, `cached_input`                (dollars per million tokens)",
+        default: "empty: the built-in table (`src/spend.rs`, stamped with its date) applies",
+        overrides: "—",
+        effect: "overrides and extends the built-in price table. Used only when the provider                  reports no cost; a model with no price anywhere gets no estimate                  (`cost_source: \"unknown\"`). `cached_input` defaults to `input`",
+        field_fn: "prices",
+    },
+    KeyDoc {
         scope: KeyScope::Provider,
         name: "base_url",
         kind: "string",
@@ -464,8 +497,16 @@ pub const EVENTS: &[EventDoc] = &[
     EventDoc {
         name: "usage",
         fields: "`step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, \
-                 `cache_write_tokens`, `cost`, `allowance?`, `kind?`",
-        written_by: "the final stream chunk; `kind: \"compact\"` marks the summarising request",
+                 `cache_write_tokens`, `cost`, `cost_source?`, `allowance?`, `kind?`",
+        written_by: "the final stream chunk; `cost_source` says whether `cost` is the provider's \
+                    own (`provider`), tokens times a known price (`table`) or not known \
+                    (`unknown`, cost 0.0); `kind: \"compact\"` marks the summarising request",
+    },
+    EventDoc {
+        name: "warning",
+        fields: "`kind`, `message`, `value`, `threshold`",
+        written_by: "the session when the last prompt passes `warn_prompt_tokens` or the cost \
+                    passes `warn_cost`, once per crossing; never rendered into the conversation",
     },
     EventDoc {
         name: "verb",
