@@ -67,23 +67,45 @@ Reaching the socket is **not** authorisation. Two things gate every request:
   token stops a *different* session's child, a stray process and a script that found the pipe by
   name, not the user or the model's own tools. The token file is removed when the session ends: a
   token nobody serves is only something to find.
-- **A registry of the jobs this session created, and a capability per job.** The session is the
-  only issuer of job ids: `bg_<32 random hex>` for an explicit job, `call_<32 random hex>` for a
-  `bg/` id of a bash call. An id is minted in this process, recorded in an in-memory registry *and*
-  in the log (`bg_started`, and `tool_started.dir` for a call), and rebuilt from the log on resume.
-  **A file is never ownership evidence**: `commands/<id>/` and `bg/<id>.status` are writable by any
-  tool child, so neither registers a job. `bg` reports, `cancel` and `bg-spawn` name an id, and the
+- **A registry of the jobs this session created, a capability per job, and a signing key per
+  job.** The session is the only issuer of ids for explicit jobs (`bg_<32 random hex>`, minted on
+  `bg-claim`/`bg-spawn`); a bash call's `bg/` id is the deterministic `<seq>-<step>-<n>` its
+  output directory is named after, so two sessions can share those names (each has its own `bg/`,
+  and every id is checked against *this* session's registry and keys). An id is recorded in an
+  in-memory registry *and* in the log (`bg_started`, and `tool_started.dir` for a call), and
+  rebuilt from the log on resume. `bg` reports, `cancel` and `bg-spawn` name an id, and the
   session answers only for one in the registry. A `bg` report must *also* carry **that job's
-  capability** — 32 random bytes, handed only to that job's shim (`KELIR_JOB_CAP` in its
-  environment, never an argv, never a file) — because every tool child holds the session token by
-  design. A request that names an unknown id, an id that is not a job (a call's own id, a job
-  adopted by a resume) or the wrong capability is refused with a clear error and a `verb` event
-  with boundary `rejected`, rate-limited to `32` such events per session so a child cannot grow the
-  log by trying. `kelir bg run` asks for its id and capability with the internal `bg-claim` verb
-  (it starts nothing); the number of ids one session mints on request is bounded (`256`).
-  Every job directory and status/out path in a request must resolve **inside the session's own
-  `bg/` or `commands/`**, canonicalised: `..`, a symlink out of it and, on Windows, a UNC or
-  another drive's path are all refused.
+  capability** (32 random bytes returned to the process that claimed the job), because every tool
+  child holds the session token by design. A request that names an unknown id, an id that is not
+  a job (a call's own id, a job adopted by a resume) or the wrong capability is refused with a
+  clear error and a `verb` event with boundary `rejected`, rate-limited to `32` such events per
+  session. `kelir bg run` asks for its id with the internal `bg-claim` verb (it starts nothing);
+  the number of ids one session mints on request is bounded (`256`). Every job directory and
+  status/out path in a request must resolve **inside the session's own `bg/` or `commands/`**,
+  canonicalised: `..`, a symlink out of it and, on Windows, a UNC or another drive's path are all
+  refused.
+- **A status file is evidence only if the job's shim signed it.** Writing `bg/<id>.status` is
+  within every tool child's rights, so the file's existence or contents prove nothing. The
+  session mints an Ed25519 key pair per job (per bash call too); the private key goes to the
+  session's memory and to that job's shim **over an inherited pipe** (not argv, not the
+  environment, which a same-user process reads through `/proc/<pid>/environ` or the PEB, not a
+  file), and the shim does not pass it to the command it runs. The shim signs every status record
+  (`sig`, hex, over the record without it); the session verifies every record it folds into the
+  log (the watcher, the resume pass, a `bg` report, a promotion) under the job's public key,
+  which `bg_started` records (`pubkey`) so a resume can verify a shim that outlived its session.
+  An unsigned or badly signed record is ignored and recorded once per id as a refused `verb`
+  event. After a resume, a job whose public key the log does not hold cannot be authenticated and
+  is reported `lost`.
+  **What this does not cover.** `kelir bg ls|out|wait|cancel` run in a tool child or a terminal,
+  hold no key, and read the files as a view; they never write the log. A process of the same user
+  that can read another process's memory (a debugger, `ReadProcessMemory`, `/proc/<pid>/mem`
+  where ptrace is allowed) can read a shim's key; and `events.jsonl` and the session directory
+  are writable by any same-user process, so code that deliberately rewrites the log (a forged
+  `bg_started.pubkey` or `tool_started.dir`) is inside the boundary. The boundary is other users,
+  other sessions, stray processes and **the model's own tools acting through the files and the
+  socket the design exposes**; it is not same-user code that attacks the session's memory or
+  rewrites its log on purpose. A signature cannot stop a child from deleting or rolling back a
+  status file (the shim's next write restores it; a job that never writes again reads as `lost`).
 - **The socket and the pipe are owner-only too.** The Unix socket is `0600` in a directory only
   the user can enter; the Windows pipe's DACL grants this user and no one else. Both are read
   back at start: a session that cannot prove its socket is private says so and refuses to serve.
@@ -352,10 +374,10 @@ the session. Completion while the session runs appends `bg_settled` and admits a
 next boundary so the agent wakes; while it does not, see *Process model*.
 
 A job's shim inherits `KELIR_SOCK` and `KELIR_TOKEN` from the session that started it (its
-command line carries neither), plus its own `KELIR_JOB_CAP` — the capability that makes its `bg`
-report its own. A shim from a *different* session, a report with the token but not the job's
-capability, and a `cancel` for an id this session did not create are all refused (see *Who may
-drive a session*).
+command line carries neither) and receives its signing key over a pipe, never in an environment
+variable. A report with the token but not the job's capability, a status file the shim did not
+sign, and a `cancel` for an id this session did not create are all refused (see *Who may drive a
+session*).
 
 ## Scriptable, TUI and Herdr status
 

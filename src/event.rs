@@ -348,12 +348,14 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             cmd,
             pid,
             out_path,
+            pubkey,
         } => EventBody::BgStarted {
             bg_id,
             call_id,
             cmd: spill_payload(blobs, seq, "bg.cmd", cmd)?,
             pid,
             out_path,
+            pubkey,
         },
         EventBody::BgSettled {
             bg_id,
@@ -596,6 +598,12 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pid: Option<u32>,
         out_path: String,
+        /// The job's Ed25519 **public** key (hex), the one its shim's status
+        /// records verify under. A resume adopts it from here, so a job that
+        /// outlived its session still settles with its real exit code
+        /// (STEER-7 round 2). Not a secret.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pubkey: Option<String>,
     },
     /// A background job settled (exited or was cancelled) while this session
     /// owned its log. `state` is `exited` or `cancelled`; the wake-up message
@@ -960,6 +968,7 @@ mod tests {
                 cmd: "sleep 60".into(),
                 pid: Some(4242),
                 out_path: "bg/bg_01.out".into(),
+                pubkey: None,
             },
             EventBody::BgSettled {
                 bg_id: "bg_01".into(),

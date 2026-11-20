@@ -282,6 +282,26 @@ def child():
     send(tid, {"verb": "bg", "from": "job", "token": tok,
                "args": {"id": fake2, "state": "exited", "started": "2026-01-01T00:00:00Z", "out": os.path.join(sdir, "bg", fake2 + ".out"), "kind": "job"}},
          "a4-forge-via-status-file-drop")
+    # (a5) steer7b B1': rewrite the status file of an id the session really holds (an earlier call), with and
+    # without a (garbage) signature. The watcher must ignore both; nothing may reach the log as a bg event
+    # or a wake message from `job`.
+    for k, c in enumerate(cmds[:1]):
+        jid = os.path.basename(c)
+        for label, extra in (("unsigned", {}), ("bad-signature", {"sig": "ab" * 64})):
+            rec = {"id": jid, "state": "exited", "exit_code": 0, "started": "2026-01-01T00:00:00Z",
+                   "finished": "2026-01-01T00:00:01Z", "cmd": "FORGED-BY-CHILD", "out": os.path.join(c, "out"),
+                   "kind": "call", "promoted": True}
+            rec.update(extra)
+            before = log_lines(tid)
+            with open(os.path.join(sdir, "bg", jid + ".status"), "w") as f:
+                json.dump(rec, f)
+            time.sleep(2.0)
+            new = log_lines(tid)[len(before):]
+            bad = [l for l in new if b"bg_started" in l or b"bg_settled" in l or b"FORGED-BY-CHILD" in l]
+            print(json.dumps({"attack": "a5-forge-status-file-" + label + ":" + jid, "ok": False, "error": "",
+                              "new_events": ["bg/forged-reached-log"] * len(bad) or []}), flush=True)
+            if bad:
+                exploits.append("a5-forge-status-file-" + label)
     # (e) path escapes via bg-spawn and bg report (control: all must be refused; nothing may be spawned)
     junction = os.path.join(sdir, "bg", "evil_junction")
     target_out = os.path.join(os.environ.get("TEMP", "/tmp"), "steer7_escape_target")
@@ -323,6 +343,11 @@ def child():
     if vid:
         vsess = os.path.join(SESS, vid)
         vjobs = [os.path.basename(p)[:-7] for p in glob.glob(os.path.join(vsess, "bg", "*.status"))]
+        # A bash call's id is `<seq>-<step>-<n>`, so two sessions share those names: only a victim id the
+        # attacker session does not itself own tells "refused" from "it is my own call" (steer7b S-C).
+        vjobs = [j for j in vjobs
+                 if not os.path.exists(os.path.join(sdir, "bg", j + ".status"))
+                 and not os.path.isdir(os.path.join(sdir, "commands", j))]
         print(json.dumps({"attack": "victim-jobs-visible", "n": len(vjobs)}), flush=True)
         for j in vjobs[:1]:
             # own token against the victim's socket: wrong token

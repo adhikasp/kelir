@@ -1335,31 +1335,42 @@ this differs from the spec text, or needed a call the brief left open:
   precedence list starts with *when set*; the store is the default that answers when it is not.
   `config::load` therefore stays pure (no process read, so `kelir doctor` and a unit test can load a
   config without starting a helper) and the resolution happens exactly once, at session start.
-- **The session socket's trust boundary is the token *and* a per-job capability.** SPEC said a
-  request must carry the session token and that the session answers `bg`/`cancel`/`bg-spawn` only
-  for jobs "it started or registered", where a `bg/<id>.status` file or a `commands/<id>/`
-  directory counted as registration. That is not a boundary: every bash child holds the token by
-  design (it is exported as `KELIR_TOKEN`), and it can create either path itself, which is exactly
-  how 43 fabricated "bg job was lost" messages reached a turn (M5-A retro F8, STEER-7 review B1).
-  Now the session is the only issuer of job ids (random, `bg_`/`call_` + 128 bits), the registry is
-  this process's memory rebuilt from the log, files are never evidence, and a `bg` report must also
-  carry the job's own 256-bit capability (`KELIR_JOB_CAP`, handed to that job's shim only). A call's
-  id is registered with an empty capability, so no report is ever accepted for it.
-- **What the boundary does not defend against, precisely.** A sibling process running as the same
-  user can read `<session dir>/token` (and, in principle, `/proc/<pid>/environ`). That is the
-  same-user trust boundary and it is deliberate: the token and the capability protect against
-  other users, against a stray process or a script that found the pipe by name, and against *the
-  model's own tools impersonating a job's shim* — not against code the user chose to run with the
-  user's own rights. The capability is what makes the second half work: a tool child has the token,
-  so the token can only say "somebody inside this session"; the capability says "that job's shim".
-  The token file is still written (`kelir ctl` needs it) and now removed when the session ends.
-- **A resume adopts jobs from the log only, and an adopted job has no capability.** The registry is
-  memory, so a resumed session rebuilds it from `bg_started` and from a new optional
-  `tool_started.dir` field (the call's own `commands/` name). An adopted job answers `cancel` but
-  never a `bg` report: the secret died with the process that minted it, and a shim that outlives
-  its session settles through its status file and the watcher instead. A status file left behind by
-  a job nobody logged is therefore still listed by `kelir bg ls` (which reads files) but never
-  becomes an event.
+- **The session socket's trust boundary is the token, a per-job capability, and a signature on
+  every status record.** SPEC said a request must carry the session token and that the session
+  answers `bg`/`cancel`/`bg-spawn` only for jobs "it started or registered", where a
+  `bg/<id>.status` file or a `commands/<id>/` directory counted as registration. That is not a
+  boundary: every bash child holds the token by design (`KELIR_TOKEN`), and it can create either
+  path itself (M5-A retro F8, STEER-7 review B1). Round 1 closed the socket (random ids, an
+  in-memory registry, a capability per job); round 2 (steer7b review B1') found that the
+  session's own `bg/` watcher still folded any `bg/<id>.status` for a registered id into the log,
+  so a child could forge `bg_started`/`bg_settled` and a wake message from `job`, and could name
+  any file in `out`. The earlier claims "files are never evidence" and "the model's own tools
+  cannot impersonate a shim" were false and are withdrawn. Now **a status file is believed only if
+  it carries an Ed25519 signature that verifies under the job's public key**: the session mints a
+  key pair per job and per bash call, gives the private half to that job's shim over an inherited
+  pipe (the capability and key are no longer in the shim's environment, which a same-user process
+  reads: steer7b S-A), and records the public half in `bg_started.pubkey`. A bash call's id is
+  `<seq>-<step>-<n>`, not a random id (steer7b S-B2): two sessions share those names, which is
+  harmless because each session has its own `bg/`, registry and keys.
+- **What the boundary is, honestly.** It is other users, other sessions, stray processes and the
+  model's own tools acting through the files and the socket kelir exposes. It is not same-user
+  code that reads another process's memory (a debugger, `ReadProcessMemory`) or rewrites
+  `events.jsonl`/the session directory on purpose: the session directory is the user's, the log
+  is a plain file, and a forged `bg_started.pubkey` would be adopted by a resume. The token file
+  is still written (`kelir ctl` needs it) and removed when the session ends.
+- **`kelir bg ls|out|wait|cancel` do not verify.** They run in a terminal or a tool child, hold
+  no key, and read files as a view; they never write the log, so a forged file can only mislead a
+  reader that already had the rights to forge it. `kelir bg cancel` from a terminal writes an
+  unsigned `cancelled`, which the session ignores; the cancelled job is then reported `lost` (the
+  `cancel` verb through the session writes a signed status).
+- **A resume adopts jobs from the log only, and an adopted job has no capability and no
+  secret.** The registry is memory, so a resumed session rebuilds it from `bg_started` (which now
+  carries the job's public key) and from the optional `tool_started.dir` (the call's `commands/`
+  name). An adopted job answers `cancel` but never a `bg` report, and its status is verified under
+  the logged public key, so a shim that outlived its session still settles with its real exit
+  code. A job the log holds no key for (an older log, or a call that was never promoted) is
+  reported `lost` once its file says it stopped. A status file left behind by a job nobody logged
+  is still listed by `kelir bg ls` but never becomes an event.
 - **`tool_started` grew an optional `dir`, and request lines are bounded.** A `tool_started` written
   by an older kelir has no `dir` and is read as a call whose job id a resume does not adopt (its
   `commands/` dir is still there; a `cancel` for it is refused after a resume, which is the safe

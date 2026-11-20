@@ -81,8 +81,8 @@ pub struct Request {
     /// the session's own watcher run inside the session and set it from memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// The **job capability** the sender holds ([`crate::trust::CAP_ENV`]): a
-    /// per-job secret only that job's shim has. A `bg` report must carry it, and
+    /// The **job capability** the sender holds (returned by `bg-claim` to the
+    /// process that started the job): a per-job secret. A `bg` report must carry it, and
     /// the session's token is not a substitute — every tool child has the token
     /// (STEER-7 review B1). Never logged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
