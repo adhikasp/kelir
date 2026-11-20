@@ -910,3 +910,56 @@ fn every_event_field_the_code_writes_is_in_the_table_and_the_other_way() {
         );
     }
 }
+
+// -------------------------------------------------- the delegation and herdr skills
+
+#[test]
+fn the_delegation_and_herdr_skills_are_valid_short_and_say_what_they_must() {
+    for (name, text) in crate::sources::BUILTIN_SKILLS {
+        let skill = crate::sources::parse_skill(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(skill.name, name);
+        assert!(!skill.description.is_empty(), "{name} has no description");
+        assert!(
+            text.len() <= 6 * 1024,
+            "{name} is {} bytes: keep skills short",
+            text.len()
+        );
+        // No private names, hosts or paths in a public repo's embedded text.
+        for banned in ["the maintainer", "the maintainer", "a Linux box", "a build box", "users/"] {
+            assert!(
+                !text
+                    .to_ascii_lowercase()
+                    .contains(&banned.to_ascii_lowercase()),
+                "{name}: {banned}"
+            );
+        }
+    }
+    let delegation = crate::sources::BUILTIN_SKILLS[1].1;
+    for needle in [
+        "kelir run --child",
+        "kelir brief",
+        "--background",
+        "10 children",
+        "16 live",
+    ] {
+        assert!(
+            delegation.contains(needle),
+            "delegation does not mention {needle}"
+        );
+    }
+    let herdr = crate::sources::BUILTIN_SKILLS[2].1;
+    for needle in [
+        "hc ls --json",
+        "hc get",
+        "hc read",
+        "hc send",
+        "hc wait",
+        "hc machine ls",
+        "HC_TERMINAL_ID",
+        "where",
+        "Never kill",
+        "NOT in Herdr",
+    ] {
+        assert!(herdr.contains(needle), "herdr does not mention {needle}");
+    }
+}

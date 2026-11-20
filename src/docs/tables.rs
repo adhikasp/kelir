@@ -591,7 +591,7 @@ pub const EVENTS: &[EventDoc] = &[
     EventDoc {
         name: "gate",
         fields: "`gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?`",
-        written_by: "every gate run, including the ones that failed open (`error` says why:                      crash, timeout, garbage)",
+        written_by: "every gate run, including the ones that failed open (`error` says why: crash, timeout, garbage)",
     },
     EventDoc {
         name: "compacted",

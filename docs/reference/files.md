@@ -28,6 +28,7 @@ variables above still win when set. Isolate a run with the two `*_DIR` variables
   events.jsonl.torn       # the fragment of a torn last line, kept when it was cut off
   sock                    # the session socket (a pipe name on Windows)
   commands/<call-id>/out  # a tool call's whole output, from the first byte
+  gates/g<n>.sh|.bat|.ps1 # the command text of gate number n, written for the shell (`gates`)
   commands/mcp_<ulid>/    # a `kelir mcp` call: `out` (its text) and any decoded image/blob files
   blobs/<seq>-<field>     # a payload over 10 KB, referenced from its event
   attachments/<n>-<name>  # an image `kelir view` queued
@@ -77,6 +78,7 @@ name (`docs/reference/mcp.md`).
 | `blobs/` | `src/event.rs` | a payload too big to be inline |
 | `commands/<call-id>/out` | `src/tools/bash.rs`, `src/spill.rs` | a tool call's whole output |
 | `commands/mcp_<ulid>/` | `src/mcp/broker.rs`, `src/mcp/mod.rs` | a `kelir mcp` call's text and decoded blobs |
+| `gates/` | `src/gates.rs` | the script each gate's command string is run from |
 | `bg/` | `src/bg.rs` | background jobs (they outlive the session on purpose) |
 | `attachments/` | `src/attachments.rs` | images `kelir view` queued |
 | `sock` | `src/ipc.rs` | verbs in, status out |

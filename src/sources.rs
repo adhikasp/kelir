@@ -280,20 +280,32 @@ const INSTRUCTION_FILES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 pub const BUILTIN_SKILL_NAME: &str = "kelir";
 pub const BUILTIN_SKILL: &str = include_str!("docs/skill-kelir.md");
 
-/// The builtin skill, if it is a valid Agent Skill (a broken one would be a
-/// build-time typo, and the drift test proves it is not).
-fn builtin_skill() -> Option<Found> {
-    // A broken builtin is a build-time typo, not a skipped skill: the drift test
-    // parses it too, so this is the assertion and not a silent `None`.
-    parse_skill(BUILTIN_SKILL).ok()?;
-    Some(Found {
-        kind: SourceKind::Skill,
-        name: BUILTIN_SKILL_NAME.to_string(),
-        path: PathBuf::new(),
-        text: BUILTIN_SKILL.to_string(),
-        layer: Layer::Machine,
-        builtin: true,
-    })
+/// The skills compiled into the binary besides `kelir` (M8): guidance on
+/// delegating to children and on living inside a Herdr pane. Each is an Agent
+/// Skill with no file on disk, discovered like any other skill (the pushed hint
+/// can name it, steering can inject it) and replaced by a skills directory
+/// entry of the same name.
+pub const BUILTIN_SKILLS: [(&str, &str); 3] = [
+    (BUILTIN_SKILL_NAME, BUILTIN_SKILL),
+    ("delegation", include_str!("docs/skill-delegation.md")),
+    ("herdr", include_str!("docs/skill-herdr.md")),
+];
+
+/// The builtin skills, each a valid Agent Skill (a broken one would be a
+/// build-time typo, and the drift test proves none is).
+fn builtin_skills() -> Vec<Found> {
+    BUILTIN_SKILLS
+        .iter()
+        .filter(|(_, text)| parse_skill(text).is_ok())
+        .map(|(name, text)| Found {
+            kind: SourceKind::Skill,
+            name: (*name).to_string(),
+            path: PathBuf::new(),
+            text: (*text).to_string(),
+            layer: Layer::Machine,
+            builtin: true,
+        })
+        .collect()
 }
 
 /// Discover every machine and project source for `places`, dropping the notes.
@@ -353,9 +365,7 @@ pub fn discover_with_notes(places: &Places, notes: &mut Vec<String>) -> Vec<Foun
     }
     // The skill kelir ships about itself: machine layer, so a project (or
     // machine) skill directory of the same name replaces it.
-    if let Some(skill) = builtin_skill() {
-        found.push(skill);
-    }
+    found.extend(builtin_skills());
     // Skills directories, machine layer then project. A skill's name is its
     // directory's name; a project skill of that name wins.
     for directory in places.skills_directories() {
@@ -1354,7 +1364,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             .iter()
             .filter(|item| item.kind == SourceKind::Skill)
             .collect();
-        assert_eq!(skills.len(), 2, "{skills:?}");
+        assert_eq!(skills.len(), 1 + BUILTIN_SKILLS.len(), "{skills:?}");
         let builtin = skills
             .iter()
             .find(|skill| skill.builtin)
@@ -1439,9 +1449,9 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         // Nothing on disk is a source: the only one is the skill the binary
         // carries, and it has no file to read or watch.
         let found = discover(&places);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].builtin, "{found:?}");
-        assert!(found[0].path.as_os_str().is_empty());
+        assert_eq!(found.len(), BUILTIN_SKILLS.len(), "{found:?}");
+        assert!(found.iter().all(|item| item.builtin), "{found:?}");
+        assert!(found.iter().all(|item| item.path.as_os_str().is_empty()));
         let rendered = render_system(&Inputs {
             herdr: None,
             base: "BASE",
@@ -1635,7 +1645,10 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         let names: Vec<&str> = rendered.sources.iter().map(|s| s.name.as_str()).collect();
         // The base prompt, the instruction file, and the builtin skill: a
         // skill's body is pull, so only its name and hash are here.
-        assert_eq!(names, vec!["prompt.md", "AGENTS.md", "kelir"]);
+        assert_eq!(
+            names,
+            vec!["prompt.md", "AGENTS.md", "delegation", "herdr", "kelir"]
+        );
         // The embedded default records an empty path and its kind, never a
         // sentinel a reader could mistake for a file (F2, F2b).
         assert_eq!(rendered.sources[0].path, "");

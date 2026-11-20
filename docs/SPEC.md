@@ -382,7 +382,12 @@ The event goes to the gate as JSON on stdin (with the session dir and log path);
 that crashes, times out or prints garbage is logged and treated as `allow` (fail open). Every run
 is a `gate` event, so `observe` shows what fired.
 
-Example opinions, as gates (all M8): verify-before-claim at `turn_end`; `note_check.py` at
+As built (M8, details in `docs/reference/gates.md` and `docs/DEVIATIONS.md`): `rewrite`'s `input` is `{"text"}` for
+`prompt_submit`/`turn_end`, the tool input for `before_tool`, `{"result"}`/`{"note"}` for `after_tool`; the gate's
+environment is an allow-list with no token, socket or provider key; a skill binds a gate with
+`metadata: {kelir-gate: <event>}`; `observe` prints the effective gates and what fired.
+
+Example opinions, as gates (all M8, shipped under `examples/gates/`): verify-before-claim at `turn_end`; `note_check.py` at
 `after_tool` on `edit`; commit and push at `session_end`, pull at `session_start`; numbered-item
 answers ("do 1,4") resolved at `prompt_submit` against the last numbered list in the log. A
 `bakeoff` (one prompt, two models, diff) is a script outside kelir driving two `kelir run --json`.

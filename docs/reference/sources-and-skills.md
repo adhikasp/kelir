@@ -66,6 +66,20 @@ still read how kelir works.
   changed. Editing the repo's copy takes a rebuild, and the drift test fails if
   the file stops being a valid Agent Skill.
 
+### The builtin `delegation` and `herdr` skills (M8)
+
+Two more embedded skills, discovered exactly like `kelir` (machine layer, no file,
+replaced by a skills-directory entry of the same name): `delegation`
+(`src/docs/skill-delegation.md`: when and how to start children with
+`kelir run --child` / `kelir brief`, the caps, foreground vs background, what to
+put in the task, reading results) and `herdr` (`src/docs/skill-herdr.md`: inside
+a pane, `hc ls --json` with state/status/agent/where/cwd across machines, counting
+the agents that share my space by the `where` prefix, `hc get/read/send/wait`,
+`hc machine ls`, and the rule never to kill another agent's pane; outside Herdr
+the skill says to answer that it is not in Herdr). Both are short and point at
+`kelir docs` for depth; a skill's `metadata: {kelir-gate: <event>}` additionally
+binds a script as a gate (see `gates`).
+
 ## Hints, memory and channels
 
 A `source` event is how *anything* that arrives after the start reaches the

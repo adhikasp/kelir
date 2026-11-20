@@ -63,6 +63,17 @@ what the model saw is `tool_settled.result`, which is a head/tail excerpt once t
 output passes `spill_limit` (10 KB). `spilled: true` and `out_path` in the same
 event say so. The model is told the path; a `bash` call can read the rest.
 
+## "A gate did not do anything"
+
+Gates fail open, so a broken one is silent to the model. Look at the log:
+`kelir observe <session>` ends its gate section with `== gates fired ==`, and the
+`gate` events (`jq 'select(.type=="gate")' events.jsonl`) carry `error`: `exited
+with N: <stderr>`, `timed out after N ms`, `not JSON (...)`, `output over ...`, or
+`cannot start the gate`. Test it by hand with the event on stdin
+(`echo '{"event":"turn_end","final_text":"x"}' | python gate.py`). A gate gets a
+**scrubbed environment**: no provider key, no `KELIR_TOKEN`, not even your
+`PATH`-adjacent extras; put what it needs in its `env` table (`kelir docs gates`).
+
 ## Windows
 
 - **A console window flashes.** No spawn path may create one: every child of a
