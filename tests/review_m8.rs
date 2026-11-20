@@ -445,3 +445,152 @@ async fn killing_the_session_mid_gate_kills_the_gate_tree() {
         "the gate's grandchild outlived a killed session (orphan)"
     );
 }
+
+// ------------------------------------------ three declarations, one behaviour
+
+fn deny_script(dir: &Path) -> PathBuf {
+    let path = dir.join("deny.py");
+    std::fs::write(
+        &path,
+        "import sys,json\nsys.stdin.read()\nprint(json.dumps({'decision':'deny','reason':'nope'}))\n",
+    )
+    .unwrap();
+    path
+}
+
+use std::path::PathBuf;
+
+/// The same veto declared as an inline string, a `[gates]` table and a skill's
+/// bound script: the model sees the same denial text and the log holds the same
+/// decision (only the gate's name differs).
+#[tokio::test]
+async fn the_three_declarations_are_equivalent() {
+    let scratch = tempfile::tempdir().unwrap();
+    let script = deny_script(scratch.path());
+    let command = format!("{} \"{}\"", python(), fwd(&script));
+    let mut seen: Vec<(String, String, String)> = Vec::new();
+    for how in ["inline", "table", "skill"] {
+        let mock = Mock::start(vec![
+            Reply::Sse(sse(&tool_turn(
+                "c1",
+                "bash",
+                &json!({"command": "echo RAN"}),
+            ))),
+            Reply::Sse(sse(&text_turn("done", 0))),
+        ])
+        .await;
+        let config = match how {
+            "inline" => format!("[gates]\nbefore_tool = '{command}'\n"),
+            "table" => format!("[gates]\nbefore_tool = {{ name = 'x', command = '{command}' }}\n"),
+            _ => String::new(),
+        };
+        let sandbox = Sandbox::new(&config);
+        if how == "skill" {
+            let skill = sandbox.cwd.join(".kelir").join("skills").join("x");
+            std::fs::create_dir_all(skill.join("scripts")).unwrap();
+            std::fs::write(
+                skill.join("SKILL.md"),
+                "---\nname: x\ndescription: veto\nmetadata: {kelir-gate: before_tool}\n---\nBody.\n",
+            )
+            .unwrap();
+            std::fs::copy(&script, skill.join("scripts").join("before_tool.py")).unwrap();
+        }
+        let out = sandbox
+            .kelir(&mock.base_url(), &["run", "--json", "go"], &[])
+            .await;
+        assert_eq!(out.code, 0, "{how}: {}", out.stderr);
+        let log = sandbox.log(&sandbox.only_session());
+        let gate = gate_events(&log, "before_tool");
+        assert_eq!(gate.len(), 1, "{how}: {log:?}");
+        let settled = log.iter().find(|e| e["type"] == "tool_settled").unwrap();
+        assert_eq!(settled["outcome"], "denied", "{how}");
+        let name = gate[0]["gate"].as_str().unwrap().to_string();
+        let result = settled["result"].as_str().unwrap().to_string();
+        assert_eq!(result, format!("denied by gate {name}: nope"), "{how}");
+        seen.push((
+            how.into(),
+            gate[0]["decision"].to_string(),
+            settled["outcome"].to_string(),
+        ));
+    }
+    assert!(
+        seen.windows(2)
+            .all(|w| w[0].1 == w[1].1 && w[0].2 == w[1].2),
+        "{seen:?}"
+    );
+}
+
+/// Runs one skill-bound script gate from a console-less parent; `Err` says what
+/// went wrong.
+#[cfg(windows)]
+async fn script_gate_detached(file: &str, body: &str, reason: &str) -> Result<(), String> {
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let sandbox = Sandbox::new("");
+    let skill = sandbox.cwd.join(".kelir").join("skills").join("w");
+    std::fs::create_dir_all(skill.join("scripts")).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---
+name: w
+description: watch
+metadata: {kelir-gate: turn_end}
+---
+Body.
+",
+    )
+    .unwrap();
+    std::fs::write(skill.join("scripts").join(file), body).unwrap();
+    let mut command = sandbox.kelir_command(&mock.base_url());
+    command
+        .args(["run", "--json", "go"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = sandbox
+        .guard
+        .spawn_sync_with(&mut command, DETACHED_PROCESS)
+        .unwrap();
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    let log = sandbox.log(&sandbox.only_session());
+    let runs = gate_events(&log, "turn_end");
+    if output.status.code() == Some(0)
+        && runs.len() == 1
+        && runs[0]["reason"] == reason
+        && runs[0].get("error").is_none()
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{file}: exit {:?}, gate events {runs:?}",
+            output.status.code()
+        ))
+    }
+}
+
+/// `.ps1` skill scripts run as gates from a console-less parent.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_ps1_gate_runs_from_a_console_less_parent() {
+    let body = "$null = [Console]::In.ReadToEnd(); Write-Output '{\"decision\":\"allow\",\"reason\":\"ps-saw\"}'
+";
+    script_gate_detached("turn_end.ps1", body, "ps-saw")
+        .await
+        .unwrap();
+}
+
+/// F1: a `.cmd` skill gate is run as `cmd /C "<path>"` through the configured
+/// shell, which is Git Bash on Windows; MSYS rewrites `/C` into `C:/` and cmd
+/// starts its interactive banner instead of the script.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "F1: cmd /C is mangled by MSYS path conversion under the default bash shell"]
+async fn a_cmd_gate_runs_from_a_console_less_parent() {
+    let body = "@echo off & echo {\"decision\":\"allow\",\"reason\":\"cmd-saw\"}
+";
+    script_gate_detached("turn_end.cmd", body, "cmd-saw")
+        .await
+        .unwrap();
+}
