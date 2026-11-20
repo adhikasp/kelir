@@ -916,6 +916,16 @@ impl App {
         }
     }
 
+    /// Queue plain text dimmed: the banner's note about a degraded window
+    /// (F-window). It is information, not prose, and it never outranks the
+    /// answer below it.
+    pub fn push_dim_text(&mut self, text: &str) {
+        let style = self.theme.dim();
+        for row in scrollback::wrap(text, self.width) {
+            self.scroll.push(Line::from(Span::styled(row, style)));
+        }
+    }
+
     /// Queue the user's own words (`› …`) in the user colour.
     pub fn push_user(&mut self, text: &str) {
         let style = self.theme.user();
@@ -1030,9 +1040,14 @@ impl App {
     /// The outcome line, for the turns that need a human: `paused`, `stopped`
     /// and `error`. A `done` turn ends on its prose, so it gets no checkmark
     /// line and no cost or timing noise.
+    ///
+    /// The final text above it (`turn paused after 2 steps; say continue to
+    /// resume`) and this line are separate blocks: one blank row between them,
+    /// the same rule every other pair of blocks follows (review N-paused).
     fn turn_summary(&mut self, outcome: &str) {
         let steps = self.turn_steps.max(self.status.turn_steps);
         if outcome != "done" {
+            self.separate();
             let summary = activity::summary_line(self.theme, outcome, steps, self.turn_tokens);
             self.scroll.push(summary);
         }
@@ -2039,6 +2054,31 @@ enum Step {
 /// first time the terminal changes size.
 const KEY_POLL: Duration = Duration::from_millis(30);
 
+/// `kelir`'s own words above the viewport, in the order they appear: the
+/// banner's identity lines, then a note or the cap. `dim` marks a line that is
+/// information rather than the banner's plain text (the degraded window's
+/// reason, F-window).
+pub struct BannerLine {
+    pub text: String,
+    pub dim: bool,
+}
+
+impl BannerLine {
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            dim: false,
+        }
+    }
+
+    pub fn dim(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            dim: true,
+        }
+    }
+}
+
 /// Take the terminal (raw mode, panic hook, inline viewport), the keyboard, and
 /// the session's event stream. The caller has already checked that stdout is a
 /// terminal.
@@ -2046,7 +2086,7 @@ pub fn start(
     events: mpsc::UnboundedReceiver<UiEvent>,
     to_tui: mpsc::UnboundedSender<UiEvent>,
     verbs: mpsc::UnboundedSender<Incoming>,
-    banner: &[String],
+    banner: &[BannerLine],
     cap: Option<u32>,
     theme: Theme,
 ) -> std::io::Result<Tui> {
@@ -2070,7 +2110,11 @@ pub fn start(
     );
     app.theme = theme;
     for line in banner {
-        app.push_text(line);
+        if line.dim {
+            app.push_dim_text(&line.text);
+        } else {
+            app.push_text(&line.text);
+        }
     }
     // The cap is known before the first turn (it comes from config or the
     // flag), so the idle facts row can already say `step 0/N` instead of a

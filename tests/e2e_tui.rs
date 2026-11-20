@@ -1557,3 +1557,127 @@ async fn the_tui_reports_a_pause_to_herdr_as_blocked() {
     let text = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
     assert!(text.contains("\"outcome\":\"paused\""), "{text}");
 }
+
+/// F-window: the banner stays silent about the window the provider answered,
+/// and says one dim line when the start could not read the list — because that
+/// fallback silently sets the compaction threshold (STEER-1 review N4). A list
+/// endpoint that answers 503 is the offline case, made deterministic here.
+#[tokio::test]
+async fn the_tui_banner_names_a_window_only_when_it_fell_back() {
+    let mock = Mock::start_with_models(
+        vec![Reply::Sse(sse(&text_turn("PARROT", 0)))],
+        support::ModelsAnswer::http(503, "later"),
+    )
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            b"",
+            vec![
+                "window 128000 tokens (default)".into(),
+                "the model list: http 503".into(),
+                "PARROT".into(),
+            ],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    // One line, not two: the same fallback is never announced twice.
+    assert_eq!(
+        run.screen.matches("window 128000 tokens").count(),
+        1,
+        "one fallback line: {:?}",
+        run.screen
+    );
+}
+
+/// F-window: the *normal* window is not in the banner. A start whose list
+/// answers must not print a window line at all, at any width.
+#[tokio::test]
+async fn the_tui_banner_is_silent_about_the_providers_own_window() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(cwd, config, state, base_url, b"", vec!["kelir".into()])
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    assert!(
+        !run.screen.contains("tokens ("),
+        "the banner carries no window line when the list answered: {:?}",
+        run.screen
+    );
+}
+
+/// F-window: a `/model` swap announces the window it moved to, once, on the
+/// line above the editor — the banner has no window line to update, so without
+/// this a person would never learn the compaction threshold changed.
+#[tokio::test]
+async fn a_model_swap_announces_the_new_window() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    // A configured window for the *start* model, so the swap has a number to
+    // move away from; the new model comes from the mock's list (200000).
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n[model_windows]\n\"test/model\" = 64000\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            b"/model anthropic/claude-sonnet-4.5\r",
+            vec![
+                "» model anthropic/claude-sonnet-4.5".into(),
+                "» window 200000 tokens (".into(),
+            ],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    let screen = &run.screen;
+    // The source is `cache` or `api` depending on whether the swap's fetch had
+    // landed; the point is that the number is said at all, once.
+    assert!(
+        screen.matches("» window 200000 tokens").count() == 1,
+        "the swap's window is announced, once: {screen:?}"
+    );
+}
