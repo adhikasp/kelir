@@ -173,7 +173,7 @@ fn snapshot_the_idle_viewport() {
     row_eq(&screen, 2, "");
     row_eq(&screen, 3, " ● idle · ready");
     row_eq(&screen, 4, "›");
-    row_eq(&screen, 7, "kelir idle · step 0 · 0 tok");
+    row_eq(&screen, 7, "kelir idle · 0 tok");
 }
 
 #[test]
@@ -212,10 +212,7 @@ fn snapshot_streaming_text_in_the_live_area() {
         "no literal markers: {committed:?}"
     );
     let facts = screen.lines().nth(7).unwrap_or_default();
-    assert!(
-        facts.starts_with("kelir working · test/model · step 1"),
-        "{facts:?}"
-    );
+    assert!(facts.starts_with("kelir working · test/model"), "{facts:?}");
 }
 
 #[test]
@@ -400,7 +397,7 @@ fn snapshot_a_tool_group_before_and_after_it_closes() {
     // Already three calls: the live area shows the same fold the scrollback
     // will get, so nobody sees it change shape when it commits.
     assert!(
-        live.iter().any(|row| row.contains("ran 3 commands")),
+        live.iter().any(|row| row.contains("3 calls")),
         "the open group is visible: {live:?}"
     );
     app.apply(UiEvent::Assistant {
@@ -408,7 +405,7 @@ fn snapshot_a_tool_group_before_and_after_it_closes() {
     });
     let committed: Vec<String> = app.take_scroll().iter().map(line_text).collect();
     assert!(
-        committed.iter().any(|row| row.contains("ran 3 commands")),
+        committed.iter().any(|row| row.contains("3 calls")),
         "{committed:?}"
     );
 }
@@ -827,8 +824,8 @@ async fn the_tui_renders_a_markdown_answer_and_commits_it() {
     let text = plain(&run.screen);
     assert!(text.contains("Some bold words"), "{text:?}");
     assert!(text.contains("cargo test"), "{text:?}");
-    // The committed turn ends with the one-line summary.
-    assert!(text.contains("1 step"), "{text:?}");
+    // A done turn ends on its prose: no check mark, no dollar figure.
+    assert!(!text.contains('$'), "no cost in the pane: {text:?}");
     // (the state row's idle text is checked by the snapshot tests; the pty's
     // repaint diff only rewrites what changed, so it need not appear here)
 }
@@ -1467,10 +1464,10 @@ fn panic_in_a_pty(
     )
 }
 
-/// N1: with a cap configured, the status line says `step 0/N` while the session
-/// idles, not a bare `step 0` that hides the limit until a turn starts.
+/// The facts row stays calm even with a cap: no step counter is ambient, and
+/// the banner is where the cap is named.
 #[tokio::test]
-async fn the_idle_status_line_already_knows_the_cap() {
+async fn the_idle_status_line_stays_calm_even_with_a_cap() {
     let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("work");
@@ -1490,17 +1487,16 @@ async fn the_idle_status_line_already_knows_the_cap() {
             state,
             base_url,
             b"",
-            vec!["kelir idle · step 0/3 · 0 tok".into()],
+            vec!["kelir idle · 0 tok".into()],
         )
     })
     .await
     .expect("the pty driver");
 
     assert_eq!(run.code, 0, "screen: {:?}", run.screen);
-    // The bare form would be the same screen with the cap hidden.
     assert!(
-        run.screen.contains("kelir idle · step 0/3 · 0 tok"),
-        "the idle line must show the cap: {:?}",
+        run.screen.contains("kelir idle · 0 tok"),
+        "the idle line is phase, model and tokens: {:?}",
         run.screen
     );
     // And the banner names the cap too, so the two never disagree.

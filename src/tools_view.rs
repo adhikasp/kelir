@@ -1,5 +1,5 @@
-//! How tool calls appear: one dim line per call, groups of three or more folded
-//! into one line, and the append-only expansion for `/expand`.
+//! How tool calls appear: one dim line per call, runs of three or more folded
+//! into one checked line, and the append-only expansion for `/expand`.
 //!
 //! This is the design note's central claim (TUI-v2 §4): **prose is the only
 //! default-weight text in the transcript**. A call is two columns of indent, a
@@ -14,9 +14,9 @@
 //!    [`crate::activity`]).
 //! 2. When it settles it joins the open [`Group`]. The group closes when prose
 //!    starts, a user message arrives or the turn ends; then it commits: one
-//!    line per call for one or two calls, `ran N commands · 3.2 s` for three or
-//!    more, plus every failed call as its own line, and `edit`/`write` always
-//!    on their own line (the diff is what a reader cares about).
+//!    line per call for one or two calls, `✓ 3 calls` for three or more, plus
+//!    every failed call as its own line. The prose between runs is what stays
+//!    at full weight.
 //!
 //! `/expand [n]` appends a call's output tail to the scrollback; it cannot
 //! unfold the line that is already committed, and the help text says so.
@@ -59,7 +59,7 @@ impl CallLine {
         !self.cancelled() && (self.outcome != "ok" || self.exit_code.is_some_and(|code| code != 0))
     }
 
-    /// The right-hand dim verdict: `ok · 29 B · 0.2s`, `✗ exit 101 · 4.1 s`.
+    /// The right-hand dim verdict: `ok · 29 B`, `✗ exit 101`.
     pub fn verdict(&self, theme: Theme) -> String {
         let mut parts = Vec::new();
         if self.failed() {
@@ -75,9 +75,6 @@ impl CallLine {
         }
         if self.bytes > 0 {
             parts.push(bytes_label(self.bytes));
-        }
-        if let Some(elapsed) = self.elapsed {
-            parts.push(format!("{:.1}s", elapsed.as_secs_f64()));
         }
         parts.join(" · ")
     }
@@ -205,15 +202,10 @@ impl Policy {
 #[derive(Debug, Default)]
 pub struct Group {
     calls: Vec<CallLine>,
-    /// Calls settled since the group opened, for the folded line's total time.
-    elapsed: Duration,
 }
 
 impl Group {
     pub fn push(&mut self, call: CallLine) {
-        if let Some(elapsed) = call.elapsed {
-            self.elapsed += elapsed;
-        }
         self.calls.push(call);
     }
 
@@ -233,53 +225,37 @@ impl Group {
     /// The group as the live area shows it while it is still open: the last few
     /// call lines, folded the same way they will be committed.
     pub fn preview(&self, theme: Theme, width: usize, rows: usize) -> Vec<Line<'static>> {
-        let lines = group_rows(theme, width, &self.calls, self.elapsed);
+        let lines = group_rows(theme, width, &self.calls);
         let start = lines.len().saturating_sub(rows);
         lines[start..].to_vec()
     }
 
     /// Close the group: the rows to commit, in order. One or two calls keep one
-    /// line each; three or more fold into `ran N commands`, with every failure
-    /// and every edit still getting its own line.
+    /// line each; three or more collapse into one checked line (`✓ 3 calls`),
+    /// with every failure still getting its own line and tail.
     pub fn close(&mut self, theme: Theme, width: usize) -> Vec<Line<'static>> {
         let calls = std::mem::take(&mut self.calls);
-        let elapsed = std::mem::take(&mut self.elapsed);
-        group_rows(theme, width, &calls, elapsed)
+        group_rows(theme, width, &calls)
     }
 }
 
-fn group_rows(
-    theme: Theme,
-    width: usize,
-    calls: &[CallLine],
-    elapsed: Duration,
-) -> Vec<Line<'static>> {
+fn group_rows(theme: Theme, width: usize, calls: &[CallLine]) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let important: Vec<&CallLine> = calls
-        .iter()
-        .filter(|call| call.failed() || call.name != "bash")
-        .collect();
-    let fold = calls.len() >= 3 && important.len() < calls.len();
-    let mut folded = false;
+    // Three or more calls between two pieces of prose collapse into one line;
+    // the prose around them is what the reader is meant to see.
+    let fold = calls.len() >= 3;
+    let clean = calls.iter().filter(|call| !call.failed()).count();
+    if fold && clean > 0 {
+        let noun = if clean == 1 { "call" } else { "calls" };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", theme.glyphs.done()), theme.ok()),
+            Span::styled(format!("{clean} {noun}"), theme.dim()),
+        ]));
+    }
     for call in calls {
-        let own_line = !fold || call.failed() || call.name != "bash";
-        if !own_line {
-            if !folded {
-                // The fold counts only the calls it stands for: a failed one is
-                // on its own line just below, and counting it twice would read
-                // as "ran 3 commands" next to one of them.
-                let count = calls
-                    .iter()
-                    .filter(|call| call.name == "bash" && !call.failed())
-                    .count();
-                if count > 1 {
-                    lines.push(Line::from(Span::styled(
-                        format!("  ran {count} commands · {:.1}s", elapsed.as_secs_f64()),
-                        theme.dim(),
-                    )));
-                }
-                folded = true;
-            }
+        // A failure stays visible even inside a fold: the harness must not hide
+        // the one line that says something went wrong.
+        if fold && !call.failed() {
             continue;
         }
         lines.push(call.line(theme, width));
@@ -330,7 +306,7 @@ mod tests {
         let line = call("$ git --version", "bash").line(theme, 60);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("  $ git --version"), "{text:?}");
-        assert!(text.ends_with("ok · 29 B · 0.2s"), "{text:?}");
+        assert!(text.ends_with("ok · 29 B"), "{text:?}");
         assert_eq!(crate::scrollback::display_width(&text), 60, "right-aligned");
         // Dim, not the prose weight: the asymmetry is the point.
         assert!(
@@ -379,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn three_or_more_shell_calls_fold_into_one_line_but_errors_and_edits_do_not() {
+    fn three_or_more_calls_collapse_but_errors_stay_visible() {
         let theme = Theme::plain();
         let mut group = Group::default();
         group.push(call("$ git --version", "bash"));
@@ -387,10 +363,12 @@ mod tests {
         group.push(call("$ cargo fmt", "bash"));
         let rows = text(&group.close(theme, 80));
         assert_eq!(rows.len(), 1, "{rows:?}");
-        assert!(rows[0].contains("ran 3 commands"), "{rows:?}");
-        assert!(rows[0].contains("0.6s"), "{rows:?}");
+        assert!(rows[0].starts_with('✓'), "{rows:?}");
+        assert!(rows[0].contains("3 calls"), "{rows:?}");
+        assert!(!rows[0].contains('·'), "no duration: {rows:?}");
 
-        // A failure stays visible as its own line, plus its tail.
+        // A failure stays visible as its own line, plus its tail; it is not
+        // counted in the collapsed line.
         let mut group = Group::default();
         group.push(call("$ a", "bash"));
         group.push(call("$ b", "bash"));
@@ -401,23 +379,19 @@ mod tests {
         group.push(failed);
         group.push(call("$ d", "bash"));
         let rows = text(&group.close(theme, 80));
-        assert!(
-            rows[0].contains("ran 3 commands"),
-            "the failed call is not counted twice: {rows:?}"
-        );
+        assert!(rows[0].contains("3 calls"), "{rows:?}");
         assert!(rows[1].contains("$ cargo test"), "{rows:?}");
         assert!(rows[1].contains("✗ exit 101"), "{rows:?}");
         assert!(rows[2].starts_with("    boom"), "{rows:?}");
 
-        // An edit always gets its own line, even inside a fold.
+        // An edit is a call like any other: it joins the fold.
         let mut group = Group::default();
         group.push(call("$ a", "bash"));
         group.push(call("edit src/lib.rs", "edit"));
         group.push(call("$ c", "bash"));
         let rows = text(&group.close(theme, 80));
-        assert_eq!(rows.len(), 2, "{rows:?}");
-        assert!(rows[0].contains("ran 2 commands"), "{rows:?}");
-        assert!(rows[1].contains("edit src/lib.rs"), "{rows:?}");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains("3 calls"), "{rows:?}");
     }
 
     #[test]

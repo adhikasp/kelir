@@ -18,7 +18,7 @@
 //!   live rows   (3): the tail of the streaming answer, or a running call
 //!   state row   (1): ● idle · ready   /  ⠹ thinking 12s · waiting …  /  …
 //!   editor      (3): › your message
-//!   facts row   (1): kelir · model · step · tok · cache · $
+//!   facts row   (1): kelir · model · tok
 //! ```
 
 use std::collections::{HashMap, VecDeque};
@@ -204,7 +204,8 @@ impl Phase {
     }
 }
 
-/// The facts row's data: model, step, tokens, cost, cache ratio.
+/// The facts row's data: model and tokens; steps, cache and cost are
+/// tracked for the summary and the log, not shown in the ambient row.
 #[derive(Debug, Clone)]
 pub struct Status {
     pub provider: String,
@@ -280,8 +281,8 @@ pub fn status_text(status: &Status) -> String {
 
 /// One state, one word: `done` reads as `idle` here (the state row's kind for
 /// it is idle too, so the two rows cannot disagree), while `paused` and `error`
-/// keep their own word because they are not idle (S5). The summary line above
-/// the row already carries the outcome.
+/// keep their own word because they are not idle (S5). A finished turn ends on
+/// its prose; only the two states that need a human announce themselves.
 fn status_word(status: &Status) -> &'static str {
     match status.phase {
         Phase::Done => Phase::Idle.word(),
@@ -295,66 +296,26 @@ fn facts_text(status: &Status) -> String {
     if !status.model.is_empty() {
         parts.push(status.model.clone());
     }
-    match status.limit {
-        // An explicit cap: the count that matters is the turn's, against it.
-        Some(limit) => parts.push(format!("step {}/{limit}", status.turn_steps)),
-        None => parts.push(format!("step {}", status.step)),
-    }
     parts.push(format!(
         "{} tok",
         tokens(status.prompt_tokens + status.completion_tokens)
     ));
-    if status.cached_tokens > 0 && status.prompt_tokens > 0 {
-        let ratio = 100.0 * status.cached_tokens as f64 / status.prompt_tokens as f64;
-        parts.push(format!("{ratio:.0}% cache"));
-    }
-    if status.cost > 0.0 {
-        parts.push(format!("${:.4}", status.cost));
-    }
     parts.join(" · ")
 }
 
-/// The facts row trimmed for a narrow pane: the least useful facts go first
-/// (cache %, then step, then cost), the model and the token count stay longest.
+/// The facts row trimmed for a narrow pane: the model goes first, the phase
+/// word and the token count stay longest.
 pub fn facts_for_width(status: &Status, width: usize) -> String {
     let full = status_text(status);
     if scrollback::display_width(&full) <= width {
         return full;
     }
-    // The design's truncation order, from the right end: cache %, then step,
-    // then cost, then the model. Tokens and the phase word stay longest.
-    let attempts = [
-        Status {
-            cached_tokens: 0,
-            ..status.clone()
-        },
-        Status {
-            cached_tokens: 0,
-            turn_steps: 0,
-            limit: None,
-            ..status.clone()
-        },
-        Status {
-            cached_tokens: 0,
-            turn_steps: 0,
-            limit: None,
-            cost: 0.0,
-            ..status.clone()
-        },
-        Status {
-            cached_tokens: 0,
-            turn_steps: 0,
-            limit: None,
-            cost: 0.0,
-            model: String::new(),
-            ..status.clone()
-        },
-    ];
-    for candidate in attempts {
-        let text = status_text(&candidate);
-        if scrollback::display_width(&text) <= width {
-            return text;
-        }
+    let shorter = status_text(&Status {
+        model: String::new(),
+        ..status.clone()
+    });
+    if scrollback::display_width(&shorter) <= width {
+        return shorter;
     }
     fit(
         &format!(
@@ -774,11 +735,10 @@ pub struct App {
     pub call_ordinal: u64,
     /// Every settled call of this session, by ordinal, for `/expand`.
     calls: HashMap<u64, CallLine>,
-    /// Per-role totals of the turn now running, for the summary line.
-    turn_started: Option<Instant>,
+    /// Per-turn totals of the turn now running, for the paused/stopped/error
+    /// line.
     turn_steps: u32,
     turn_tokens: u64,
-    turn_cost: f64,
     /// The spinner frame, advanced by the working-state tick.
     frame: u64,
     /// Images saved from pastes, by content hash: a second paste of the same
@@ -830,10 +790,8 @@ impl App {
             policy: Policy::default(),
             call_ordinal: 0,
             calls: HashMap::new(),
-            turn_started: None,
             turn_steps: 0,
             turn_tokens: 0,
-            turn_cost: 0.0,
             frame: 0,
             seen_images: HashMap::new(),
             session_dir: None,
@@ -958,6 +916,14 @@ impl App {
         }
     }
 
+    /// Queue the user's own words (`› …`) in the user colour.
+    pub fn push_user(&mut self, text: &str) {
+        let style = self.theme.user();
+        for row in scrollback::wrap(text, self.width) {
+            self.scroll.push(Line::from(Span::styled(row, style)));
+        }
+    }
+
     /// Queue styled rows (a tool line, a summary).
     pub fn push_lines(&mut self, lines: Vec<Line<'static>>) {
         self.scroll.extend(lines);
@@ -1061,27 +1027,18 @@ impl App {
         self.committed_message = false;
     }
 
-    /// The turn's own totals, for the one-line summary.
+    /// The outcome line, for the turns that need a human: `paused`, `stopped`
+    /// and `error`. A `done` turn ends on its prose, so it gets no checkmark
+    /// line and no cost or timing noise.
     fn turn_summary(&mut self, outcome: &str) {
-        let elapsed = self
-            .turn_started
-            .take()
-            .map(|started| started.elapsed())
-            .unwrap_or_default();
         let steps = self.turn_steps.max(self.status.turn_steps);
-        let summary = activity::summary_line(
-            self.theme,
-            outcome,
-            steps,
-            self.turn_tokens,
-            self.turn_cost,
-            elapsed,
-        );
-        self.scroll.push(summary);
+        if outcome != "done" {
+            let summary = activity::summary_line(self.theme, outcome, steps, self.turn_tokens);
+            self.scroll.push(summary);
+        }
         self.scroll.push(Line::from(""));
         self.turn_steps = 0;
         self.turn_tokens = 0;
-        self.turn_cost = 0.0;
     }
 
     /// Close the open tool group, if any: its rows go to the scrollback.
@@ -1121,10 +1078,8 @@ impl App {
                 // A new turn counts its own steps (an explicit cap is per turn).
                 self.status.turn_steps = 0;
                 self.status.limit = limit;
-                self.turn_started = Some(now);
                 self.turn_steps = 0;
                 self.turn_tokens = 0;
-                self.turn_cost = 0.0;
                 self.note.clear();
                 self.activity.step_started(now);
             }
@@ -1196,7 +1151,6 @@ impl App {
                 self.status.cached_tokens += cached;
                 self.status.cost += cost;
                 self.turn_tokens += prompt + completion;
-                self.turn_cost += cost;
             }
             UiEvent::Assistant { text } => {
                 // The group closes first: its lines describe calls that ran
@@ -1572,7 +1526,12 @@ impl App {
                 self.group = Group::default();
                 // The echo starts a block of its own (spacing rule).
                 self.separate();
-                self.push_text(&action.line());
+                match &action {
+                    // The human's own words get a colour of their own, so a
+                    // long session can be scanned for what was asked.
+                    Action::Submit(_) | Action::SayNow(_) => self.push_user(&action.line()),
+                    _ => self.push_text(&action.line()),
+                }
                 self.dispatch(&action);
             }
             Ok(Parsed::Note(note)) => self.push_text(&note),
@@ -1925,7 +1884,7 @@ fn render_editor(app: &App, frame: &mut Frame, screen: Rect, area: Rect) {
     let prompt_style = if app.activity.kind.working() {
         theme.dim()
     } else {
-        theme.prose()
+        theme.user()
     };
     let (first, visible) = app.editor.window(area.height as usize);
     let lines = app.editor.lines();
@@ -1965,13 +1924,13 @@ fn chip_spans(app: &App, line: &str, theme: Theme) -> Vec<Span<'static>> {
         match earliest {
             Some((at, chip)) => {
                 if at > 0 {
-                    spans.push(Span::styled(rest[..at].to_string(), theme.prose()));
+                    spans.push(Span::styled(rest[..at].to_string(), theme.user()));
                 }
                 spans.push(Span::styled(chip.label.clone(), theme.chip()));
                 rest = &rest[at + chip.label.len()..];
             }
             None => {
-                spans.push(Span::styled(rest.to_string(), theme.prose()));
+                spans.push(Span::styled(rest.to_string(), theme.user()));
                 break;
             }
         }
@@ -2455,10 +2414,10 @@ mod tests {
             .collect::<String>()
     }
 
-    /// The facts row as tui2 named it: model, step, tokens, cache and cost, in
-    /// that order, with no running-calls count (the state row carries it).
+    /// The facts row is the calm one: phase, model, tokens. Steps, cache and
+    /// cost are not ambient; the state row carries the running count.
     #[test]
-    fn the_facts_row_names_model_step_tokens_cost_and_ignores_calls() {
+    fn the_facts_row_names_only_the_phase_model_and_tokens() {
         let status = Status {
             provider: "openrouter".into(),
             model: "deepseek/deepseek-chat".into(),
@@ -2476,8 +2435,11 @@ mod tests {
         };
         assert_eq!(
             status_text(&status),
-            "kelir working · deepseek/deepseek-chat · step 3 · 1.5k tok · 75% cache · $0.0004"
+            "kelir working · deepseek/deepseek-chat · 1.5k tok"
         );
+        assert!(!status_text(&status).contains("step"));
+        assert!(!status_text(&status).contains("cache"));
+        assert!(!status_text(&status).contains('$'));
         assert!(!status_text(&status).contains("running"));
         // `done` reads as `idle`, so the two rows cannot disagree (S5).
         let done = Status {
@@ -2518,11 +2480,10 @@ mod tests {
             text.ends_with("33 s left") || text.ends_with("34 s left"),
             "{text}"
         );
-        // The countdown is a person's clock: sub-second waits read as `ms`.
-        // The usual summary comes back when the wait ends.
+        // The facts row comes back when the wait ends.
         status.retrying = None;
         assert!(
-            status_text(&status).contains("step 3"),
+            status_text(&status).contains("1.5k tok"),
             "{}",
             status_text(&status)
         );
@@ -2620,7 +2581,7 @@ mod tests {
     /// The same row under the name main's side gave it: after the merge there
     /// is one facts row, so both names assert it.
     #[test]
-    fn the_status_line_names_model_step_tokens_cost_and_calls() {
+    fn the_status_line_is_phase_model_and_tokens() {
         let status = Status {
             provider: "openrouter".into(),
             model: "deepseek/deepseek-chat".into(),
@@ -2638,37 +2599,28 @@ mod tests {
         };
         assert_eq!(
             status_text(&status),
-            "kelir working · deepseek/deepseek-chat · step 3 · 1.5k tok · 75% cache · $0.0004"
+            "kelir working · deepseek/deepseek-chat · 1.5k tok"
         );
         // The state row carries the running count now, so the facts row does
         // not repeat it.
         assert!(!status_text(&status).contains("running"));
-        assert_eq!(
-            status_text(&Status::default()),
-            "kelir idle · step 0 · 0 tok"
-        );
+        assert_eq!(status_text(&Status::default()), "kelir idle · 0 tok");
     }
 
-    /// A cap is the only time the step count is shown against a limit: with no
-    /// cap a counter with nothing to count to is noise.
+    /// A step counter is not ambient: neither the count nor a cap belongs in
+    /// the facts row.
     #[test]
-    fn the_facts_row_shows_steps_used_and_limit_only_when_a_cap_is_set() {
-        let mut status = Status {
+    fn the_facts_row_never_shows_a_step_count_even_with_a_cap() {
+        let status = Status {
             model: "m".into(),
+            step: 7,
             turn_steps: 2,
             limit: Some(5),
             phase: Phase::Working,
             ..Status::default()
         };
         assert!(
-            status_text(&status).contains(" · step 2/5 · "),
-            "{}",
-            status_text(&status)
-        );
-        status.limit = None;
-        status.step = 7;
-        assert!(
-            status_text(&status).contains(" · step 7 · "),
+            !status_text(&status).contains("step"),
             "{}",
             status_text(&status)
         );
@@ -2688,11 +2640,12 @@ mod tests {
             ..Status::default()
         };
         let wide = facts_for_width(&status, 120);
-        assert!(wide.contains("cache"), "{wide}");
-        assert!(wide.contains("$0.0028"), "{wide}");
+        assert!(wide.contains("deepseek/deepseek-v4.1-flash-1017"), "{wide}");
+        assert!(!wide.contains("cache"), "{wide}");
+        assert!(!wide.contains('$'), "{wide}");
         let narrow = facts_for_width(&status, 30);
         assert!(narrow.contains("tok"), "{narrow}");
-        assert!(!narrow.contains("cache"), "{narrow}");
+        assert!(!narrow.contains("deepseek"), "{narrow}");
         for width in [60usize, 40, 30, 20, 12] {
             let text = facts_for_width(&status, width);
             assert!(
@@ -2917,10 +2870,7 @@ mod tests {
             text: "Done.".into(),
         });
         let rows: Vec<String> = app.take_scroll().iter().map(line_text).collect();
-        let fold = rows
-            .iter()
-            .position(|r| r.contains("ran 3 commands"))
-            .unwrap();
+        let fold = rows.iter().position(|r| r.contains("3 calls")).unwrap();
         let prose = rows.iter().position(|r| r.contains("Done.")).unwrap();
         assert!(fold < prose, "{rows:?}");
     }
@@ -3175,10 +3125,7 @@ mod tests {
         });
         let rows = app.take_scroll();
         let texts: Vec<String> = rows.iter().map(line_text).collect();
-        assert!(
-            texts.iter().any(|row| row.contains("ran 3 commands")),
-            "{texts:?}"
-        );
+        assert!(texts.iter().any(|row| row.contains("3 calls")), "{texts:?}");
     }
 
     #[test]
@@ -3274,7 +3221,7 @@ mod tests {
     }
 
     #[test]
-    fn the_turn_summary_line_lands_before_the_row_goes_idle() {
+    fn a_done_turn_ends_on_its_prose_without_a_summary_line() {
         let mut app = app_of_width(80);
         app.apply(UiEvent::TurnStarted {
             turn: 1,
@@ -3303,13 +3250,52 @@ mod tests {
         assert_eq!(app.activity.kind, Kind::Idle);
         assert_eq!(app.status.phase, Phase::Done);
         let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
-        let summary = texts
+        assert!(
+            texts.iter().any(|row| row == "hi"),
+            "the prose is the last word: {texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|row| row.contains("steps") || row.contains('$')),
+            "no checkmark line, no cost: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_paused_turn_still_says_so_in_one_line() {
+        let mut app = app_of_width(80);
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: None,
+        });
+        app.apply(UiEvent::Step {
+            step: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            turn_steps: 1,
+            limit: None,
+        });
+        app.apply(UiEvent::Usage {
+            prompt: 1000,
+            completion: 200,
+            cached: 900,
+            cost: 0.001,
+        });
+        app.apply(UiEvent::TurnEnded {
+            outcome: "paused".into(),
+            final_text: "paused: step cap 1 reached".into(),
+        });
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let line = texts
             .iter()
-            .find(|row| row.contains("tok") && row.contains("$0.0010"))
-            .expect("the summary line");
-        assert!(summary.contains("✓"), "{summary:?}");
-        assert!(summary.contains("1 step"), "{summary:?}");
-        assert!(!summary.contains("1 steps"), "{summary:?}");
+            .find(|row| row.contains("1 step"))
+            .expect("the outcome line");
+        assert!(line.starts_with('⏸'), "{line:?}");
+        assert!(line.contains("1.2k tok"), "{line:?}");
+        assert!(!line.contains('$'), "{line:?}");
     }
 
     #[test]

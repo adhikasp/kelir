@@ -19,8 +19,8 @@ image chips).
 |---|---|
 | live (3) | the tail of the streaming answer (markdown) or the open tool group |
 | state (1) | `● idle · ready`, `⠹ thinking 12s · waiting for the provider · esc stops`, … |
-| editor (3) | `› your message`; the prompt dims while the agent works |
-| facts (1) | `kelir working · model · step · 1.5k tok · 75% cache · $0.0004` |
+| editor (3) | `› your message` in the user colour (cyan); the prompt dims while the agent works |
+| facts (1) | `kelir working · model · 1.5k tok` — steps, cache and cost are not ambient |
 
 A shorter terminal gives rows up in this order: the facts row, live rows, the
 editor down to one row; the state row is the last to go.
@@ -54,11 +54,12 @@ the next boundary or during the wait.
 | error | `✗` | `✗ error · provider 401 · say to retry` |
 
 A turn that ends **paused** or **in error** keeps its row after it ends (with
-the step cap or the provider's reason and the next action); `done` and
-`stopped` go back to `● idle · ready`, and the one-line summary above the row
-says which of the two it was. The facts row says `kelir idle` for a finished
-turn, `kelir paused`/`kelir error` for the two that need a human: one word for
-one state.
+the step cap or the provider's reason and the next action) and writes one
+outcome line (`⏸ paused · 3 steps · 4.8k tok`, no cost or timing); `done` ends
+on its prose and goes back to `● idle · ready`, and `stopped` writes one line
+and does the same. The facts row says `kelir idle` for a finished turn,
+`kelir paused`/`kelir error` for the two that need a human: one word for one
+state.
 
 Spinner and elapsed time exist only while working. Herdr's OSC 7501 word comes
 from the same state: thinking/writing/running/rate limited → `working`,
@@ -99,17 +100,20 @@ expands, and saying either one twice changes nothing.
 
 ## Spacing
 
-A prompt echo, a tool group, prose and the end-of-turn summary are separate
-blocks with **one** blank row between them and never two.
+A prompt echo, a tool group, prose and the outcome line (paused, stopped,
+error) are separate blocks with **one** blank row between them and never two.
+The human's own words in the scrollback are cyan, so a long session can be
+scanned for what was asked.
 
 ## Tool lines
 
 A settled call is one dim line with a right-aligned verdict:
-`  $ cargo test            ✗ exit 101 · 4.1 KB · 4.1s`. A failure is red, keeps
-its line and gains one dim tail line with the last output line. Three or more
-shell calls in one group fold into `  ran 3 commands · 3.2s`; a failed call, an
-`edit` and a `write` always keep their own line. Prose is the only
-default-weight text.
+`  $ cargo test            ✗ exit 101 · 4.1 KB` (no duration: the transcript
+is not a profiler). A failure is red, keeps its line and gains one dim tail
+line with the last output line. Three or more calls in one group (a run of
+calls between two pieces of prose) collapse into one checked line, `  ✓ 3
+calls`, with every failed call still on its own line below; one or two calls
+keep one line each. Prose is the only default-weight text.
 
 ## Markdown
 
