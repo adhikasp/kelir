@@ -25,6 +25,23 @@ image chips).
 A shorter terminal gives rows up in this order: the facts row, live rows, the
 editor down to one row; the state row is the last to go.
 
+## The banner
+
+The banner above the viewport is `kelir · provider · model`, `session <id>`,
+`cwd <path>`, the help line, the step cap when one is set, and a `resumed …`
+line after a resume. It carries **no** window line: the window compaction
+measures against is not ambient, and `state` (every `kelir ctl` verb's answer)
+reports `window`, `window_source` and `window_note` for anyone who asks.
+
+The one exception is a window that is **not** the provider's, because that
+silently changes when the session compacts: a default fallback (an offline
+endpoint, a 401, a list that never landed) adds one dim line under `cwd`,
+`window 128000 tokens (default) · the model list: offline`. It is said once:
+when the start already knows, the banner carries it; otherwise the line appears
+when the answer that failed lands (`» window 128000 tokens (default) · …`). A
+`/model` swap that changes the window says so the same way, once, because the
+banner has no window line to update: `» window 200000 tokens (api)`.
+
 While the session waits before trying the provider again (a retryable HTTP
 status) or for a concurrency-governor slot, the facts row shows the wait
 instead of the usual summary: `kelir working · rate limited (429): retrying in
@@ -103,17 +120,37 @@ expands, and saying either one twice changes nothing.
 A prompt echo, a tool group, prose and the outcome line (paused, stopped,
 error) are separate blocks with **one** blank row between them and never two.
 The human's own words in the scrollback are cyan, so a long session can be
-scanned for what was asked.
+scanned for what was asked. Cyan is the terminal's ANSI 6: a terminal whose
+palette remaps it light loses contrast on a light background. Change the
+palette, not the transcript.
 
 ## Tool lines
 
 A settled call is one dim line with a right-aligned verdict:
 `  $ cargo test            ✗ exit 101 · 4.1 KB` (no duration: the transcript
 is not a profiler). A failure is red, keeps its line and gains one dim tail
-line with the last output line. Three or more calls in one group (a run of
-calls between two pieces of prose) collapse into one checked line, `  ✓ 3
-calls`, with every failed call still on its own line below; one or two calls
-keep one line each. Prose is the only default-weight text.
+line with the last output line. One or two calls in a group (a run of calls
+between two pieces of prose) keep one line each.
+
+Three or more calls collapse into one checked line, and that line names what
+it does **not** stand in for:
+
+```
+  ✓ 2 calls · 1 failed · 1 stopped
+    $ cargo test                    ✗ exit 101 · 4.1 KB
+    error[E0432]: unresolved import `foo`
+    $ sleep 20                      ⏹ cancelled
+    edit src/lib.rs                 ok · 1.2 KB
+```
+
+The checked count covers only the calls the fold hides: a `bash` call that
+finished cleanly. A failure, a call a human stopped (Esc) and a call that
+changed a file all keep their own line below — a stopped call is never counted
+as checked, and the count adds up (`2 calls · 1 failed · 1 stopped`), so a
+reader can trust the arithmetic. `edit` (and any tool that is not `bash`) never
+folds away for a reason of its own: which file an agent touched is what a
+reader wants from the transcript. A run with nothing cleanly finished has no
+`✓` line at all. Prose is the only default-weight text.
 
 ## Markdown
 
