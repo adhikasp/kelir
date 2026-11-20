@@ -277,3 +277,13 @@ implementer pauses; the retro/introspective passes keep reading the transcripts 
 - 2026-11-20 14:10: **tui3 merged** (68943bb). Running (Claude): steer7fix2 (STEER-7 round 3: authenticated status files, t15g), steer11 review (t15j). Waiting
   to merge: steer11 (gate 903 green, review running). Next after those: steer8 (cost/status), steer9 (de-flake), M5-B (Herdr line, hint, memory, attachments,
   observe), M6 MCP, M7 children, M8 gates, M9, M10, M11, M12 (publish prep, push needs the maintainer's yes).
+
+## Update (2026-11-20 14:40) — status (all new agent work on Claude Code)
+
+- Landed today: STEER-4, M5-A (+fixes), STEER-6, STEER-5, STEER-2, STEER-1 fixes, BUILD-INFRA (+fixes, +core dumps), TUI v2, tui3, STEER-12, STEER-11. Main gate green.
+- **STEER-7** (socket hardening) is on its 4th pass: reviews FAIL x3 (impersonation, then forged status files, then key disclosure via bg-spawn/bg-claim);
+  steer7fix3 running (Claude) with the principle "no secret ever leaves the session or the shim".
+- **M6 (MCP as CLI)** running (Claude implementer, kelir-wt/m6).
+- Pending: steer8 (cost/status), steer9 (de-flake e2e; flakes now named in every gate summary), M5-B (Herdr line, hint, memory, attachments, observe), M7 (children as CLI),
+  M8, M9, M10, M11, M12 (publish prep; push needs the maintainer's yes).
+- The steer12 AFTER metrics need kelir runs on the new prompt (kelir implementer runs are paused by the directive): collect one data point from a kelir gate/dogfood run.
