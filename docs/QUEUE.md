@@ -269,3 +269,7 @@ No new `--provider opencode-go` kelir runs (if a kelir run is needed for a gate,
 anthropic/claude-sonnet-4.5`). Already-running opencode-go kelir workers (steer7fix, steer11, tui3fix at this time) finish their current pass;
 nothing new starts on them. Discipline unchanged (briefs, gates, fresh reviewer, PROGRESS/QUEUE), keep driving to M11. Note: dogfooding kelir as
 implementer pauses; the retro/introspective passes keep reading the transcripts already recorded.
+
+- 2026-11-20 13:30: **steer12 merged** (89e23d6). The AFTER measurement needs kelir sessions on the new prompt; agent work moved to Claude Code (directive), so it is
+  deferred until kelir runs again (a gate-run/dogfood session on the OpenRouter fallback can supply a data point). steer7: merge resolved (steer7m, gate 897 green),
+  adversarial re-review running (Claude). tui3fix and steer11 (kelir/opencode-go) finish their current pass.
