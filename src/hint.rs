@@ -513,7 +513,7 @@ mod tests {
     fn the_scorer_cap_leaves_room_to_think() {
         let body = Chat::body("m", "p", &catalogue_of_three());
         assert_eq!(body["max_tokens"], SCORER_MAX_TOKENS);
-        assert!(SCORER_MAX_TOKENS >= 400);
+        const { assert!(SCORER_MAX_TOKENS >= 400) };
     }
 
     #[tokio::test]
