@@ -57,6 +57,11 @@ keys come from the environment, `key_cmd`, or opencode's store.
 | `max_children` | integer | `10` | — | live children one agent may have at once (a settled child frees its slot); the root's registry decides | `src/config.rs:load` |
 | `max_live_descendants` | integer | `16` | — | live descendants one root may have at once, however deep; a child whose process is gone is reaped and frees its slot | `src/config.rs:load` |
 | `prices` | table of tables `[prices."<model>"]` with `input`, `output`, `cached_input`                (dollars per million tokens) | empty: the built-in table (`src/spend.rs`, stamped with its date) applies | — | overrides and extends the built-in price table. Used only when the provider                  reports no cost; a model with no price anywhere gets no estimate                  (`cost_source: "unknown"`). `cached_input` defaults to `input` | `src/config.rs:prices` |
+| `channel_max_active` | integer | `4` | — | the largest number of channel conversations answering at once; the rest wait | `src/config.rs:load` |
+| `channel_per_conversation_rpm` | integer | `20` | — | at most this many messages per conversation in a 60-second window | `src/config.rs:load` |
+| `channel_global_rpm` | integer | `120` | — | at most this many messages across all conversations in a 60-second window | `src/config.rs:load` |
+| `channel_fallback` | string | `Sorry — I couldn't finish that. Please try again.` | — | the single fallback reply sent when a channel turn errors, pauses or times out | `src/config.rs:load` |
+| `channel_spool_limit` | integer (bytes) | `8388608` | — | compact the append-only channel spool once it grows past this size | `src/config.rs:load` |
 
 ### Per provider (`[providers.<name>]`)
 

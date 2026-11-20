@@ -50,6 +50,8 @@ pub enum Command {
     Job(JobArgs),
     /// Named sessions: ls, rename, forget.
     Sessions(SessionsArgs),
+    /// Headless channel bridge: serve conversations from channel MCP servers.
+    Channel(ChannelArgs),
     /// Show which key each provider would use (never the key itself).
     Doctor(DoctorArgs),
     /// Read kelir's own reference (config, CLI, verbs, files, …).
@@ -304,6 +306,21 @@ pub struct JobHistoryArgs {
 }
 
 /// `kelir sessions …`.
+#[derive(Debug, Args, Clone)]
+pub struct ChannelArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Serve only these channel servers (default: every `channel = true` server).
+    #[arg(long, value_name = "NAME")]
+    pub server: Vec<String>,
+    /// Stop after this many inbound messages have been answered (tests; default: forever).
+    #[arg(long, value_name = "N")]
+    pub max_messages: Option<u32>,
+    /// Dump one JSON status line at startup, then serve (for `ctl status` tests).
+    #[arg(long)]
+    pub status_once: bool,
+}
+
 #[derive(Debug, Args, Clone)]
 pub struct SessionsArgs {
     #[command(subcommand)]

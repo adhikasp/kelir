@@ -60,6 +60,7 @@ async fn main() -> ExitCode {
             kelir::cli::SessionsCommand::Rename(args) => kelir::names::sessions_rename(&args),
             kelir::cli::SessionsCommand::Forget(args) => kelir::names::sessions_forget(&args),
         },
+        Some(Command::Channel(args)) => kelir::channel::run(args).await,
         Some(Command::ChildHost) => kelir::session::child_host().await,
         Some(Command::Doctor(args)) => kelir::doctor::doctor(args),
         Some(Command::Docs(args)) => kelir::docs::cli(&args),

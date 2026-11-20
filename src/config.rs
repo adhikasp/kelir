@@ -138,6 +138,9 @@ pub struct Config {
     pub project_gates: Vec<crate::gates::GateDef>,
     /// `trusted_projects`: directories whose project-layer gates may run.
     pub trusted_projects: Vec<PathBuf>,
+    /// Channel mode (M10): the conversation concurrency, rate limits, fallback
+    /// text and spool bound. Every field has a safe default.
+    pub channel: crate::channel::Config,
 }
 
 /// The pushed hint, configured: which model scores, and where.
@@ -211,6 +214,16 @@ struct RawConfig {
     /// Directories whose project-layer gates may run (machine layer only).
     #[serde(default)]
     trusted_projects: Vec<PathBuf>,
+    /// Channel mode (M10): how many conversations may answer at once.
+    channel_max_active: Option<usize>,
+    /// Channel mode: messages per conversation per minute.
+    channel_per_conversation_rpm: Option<u32>,
+    /// Channel mode: messages across all conversations per minute.
+    channel_global_rpm: Option<u32>,
+    /// Channel mode: fallback reply text when a turn fails, pauses or times out.
+    channel_fallback: Option<String>,
+    /// Channel mode: spool bytes before done records are compacted.
+    channel_spool_limit: Option<u64>,
 }
 
 /// One `[prices."<model>"]` table: dollars per million tokens.
@@ -527,6 +540,23 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             .iter()
             .map(|path| expand_home(&path.to_string_lossy()))
             .collect(),
+        channel: crate::channel::Config {
+            max_active: raw
+                .channel_max_active
+                .unwrap_or(crate::channel::DEFAULT_MAX_ACTIVE),
+            per_conversation_rpm: raw
+                .channel_per_conversation_rpm
+                .unwrap_or(crate::channel::DEFAULT_PER_CONVERSATION_RPM),
+            global_rpm: raw
+                .channel_global_rpm
+                .unwrap_or(crate::channel::DEFAULT_GLOBAL_RPM),
+            fallback: raw
+                .channel_fallback
+                .unwrap_or_else(|| crate::channel::DEFAULT_FALLBACK.into()),
+            spool_limit: raw
+                .channel_spool_limit
+                .unwrap_or(crate::channel::DEFAULT_SPOOL_LIMIT),
+        },
     })
 }
 

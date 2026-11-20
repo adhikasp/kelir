@@ -8,6 +8,7 @@ pub mod activity;
 pub mod atomic;
 pub mod attachments;
 pub mod bg;
+pub mod channel;
 pub mod chat;
 pub mod child;
 pub mod childcli;

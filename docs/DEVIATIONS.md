@@ -1752,6 +1752,22 @@ side). Where the code had to choose:
 - **Run numbers are the run's own** (steps, tokens, cost are the deltas since the run began), not
   the session's cumulative ones.
 
+## M10: channel mode
+
+- **A bridge is configuration, not a bundled client.** The milestone names Telegram, but no
+  credential or bridge exists here. The public repo ships the generic MCP channel mechanism and
+  a fake bridge under `tests/support/channel_server.py`; a real bridge needs the maintainer's
+  credentials and infrastructure. This is a report, not a hidden dependency.
+- **The declare capability is configurable.** The bridge's MCP spec decides which capability
+  starts inbound delivery; `declare_capabilities` defaults to `claude/channel`. Kelir refuses
+  every `claude/channel/permission*` capability because it has no approval relay.
+- **At-most-once reply with a server-side idempotency key.** The driver sends `message_id` on
+  every reply so a bridge can dedupe a replay after a crash. A bridge that ignores it can still
+  get a second reply after a crash between the send and the `done` record; this is an at-least-once
+  spool with an idempotency hint, not a transaction across the process boundary.
+- **The embedded reference budget is 140 KB** (was 128 KB): M10 adds a channel topic and five
+  config keys. The binary footprint budget is unchanged (20 MB).
+
 ## m8m: merging main (M7 children, M6 mcp, M5-B, STEER-8) into the gates branch
 
 - **Gates in child sessions.** A child (`kelir run --child`, `kelir brief`) runs the same gates as

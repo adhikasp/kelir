@@ -52,11 +52,32 @@ pub struct Plan {
 impl Plan {
     /// Where the run's task message says it came from, if not the command line.
     pub fn task_from_for(&self, resumed: bool) -> Option<&'static str> {
+        if CHANNEL_MODE.load(std::sync::atomic::Ordering::SeqCst) {
+            return Some("channel");
+        }
         self.task_from.filter(|_| resumed || self.on_new)
     }
 }
 
 static PLAN: OnceLock<Plan> = OnceLock::new();
+
+/// Channel mode: the task of every session in this process comes from a remote
+/// chat user, not a job. Set once by `kelir channel`; a CLI run never sets it.
+static CHANNEL_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_channel_mode() {
+    CHANNEL_MODE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The id of the next session a channel turn starts. Sessions in the channel
+/// driver run one at a time, so a single slot is enough; `planned_id` takes it.
+static NEXT_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_next_id(id: String) {
+    if let Ok(mut slot) = NEXT_ID.lock() {
+        *slot = Some(id);
+    }
+}
 
 /// Install the plan. `false` if one was installed already (one run per process).
 pub fn install(plan: Plan) -> bool {
@@ -69,7 +90,10 @@ pub fn plan() -> Option<&'static Plan> {
 
 /// The id a new session must take, when a name decided it.
 pub fn planned_id() -> Option<String> {
-    plan().and_then(|plan| plan.planned_id.clone())
+    if let Some(id) = plan().and_then(|plan| plan.planned_id.clone()) {
+        return Some(id);
+    }
+    NEXT_ID.lock().ok().and_then(|mut slot| slot.take())
 }
 
 /// The run was stopped by its deadline.

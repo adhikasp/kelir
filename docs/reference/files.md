@@ -50,6 +50,8 @@ Session ids are ULIDs, so the directory names sort into creation order and
 <state>/
   sessions/<id>/…         # above
   names/<name>            # a named session: {"session","created","updated"} (owner-only dir)
+  spool/<server>.jsonl    # channel mode's fsync'd, append-only inbound queue (src/channel.rs)
+  channel-status/status.json # live channel driver status snapshot
   jobs/<job>/             # lock, STATUS.json, STATUS.md, runs.jsonl, notes/ (`docs/reference/jobs.md`)
   models-<endpoint>.json  # one endpoint's model list, cached for a day, written temp-then-rename
   locks/<provider>-<slot> # the concurrency governor's advisory locks
@@ -92,6 +94,8 @@ name (`docs/reference/mcp.md`).
 | `models-*.json` | `src/models.rs` | the provider's model metadata |
 | `locks/` | `src/governor.rs` | at most N requests in flight per provider |
 | `names/` | `src/names.rs` | named sessions; the session `owner` file |
+| `spool/` | `src/channel.rs` | channel mode's durable inbound queue, one file per server |
+| `channel-status/` | `src/channel.rs` | the live `kelir channel` status snapshot |
 | `jobs/<job>/` | `src/jobrun.rs`, `src/jobs.rs`, `src/joblock.rs` | the job lock, STATUS, run history, notes |
 
 ## Cleaning up, safely
