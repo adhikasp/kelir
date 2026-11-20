@@ -1607,7 +1607,10 @@ side). Where the code had to choose:
   settlement never wakes the root.
 - **A killed or crashed subtree settles by liveness.** The root checks registered pids once a
   second and at every admission (`process_alive`: start time must match, a zombie is gone) and
-  settles what is gone `lost` (`killed` if a `kill` was aimed at it). `kill` signals the pid the
+  settles what is gone `lost` (`killed` if a `kill` was aimed at it, at once). A child that
+  exited on its own is first given 5 s to be settled by whoever started it with its real outcome:
+  reaping it at once called a finished grandchild `lost` when the reaper's tick fell between its
+  exit and its starter's report. `kill` signals the pid the
   registry recorded (`killpg` on Unix, `terminate_tree` on Windows) after re-checking its start
   time; a caller never names a pid.
 - **Unix parents that die hard.** Windows children die with the parent's Job Object at once. On

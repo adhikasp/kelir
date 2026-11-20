@@ -103,7 +103,12 @@ struct Plan {
     snapshot: Option<(PathBuf, Vec<LogEvent>)>,
 }
 
+/// How long a child process seen gone may wait to be settled by its starter
+/// with its real outcome before the root's reaper calls it `lost`.
+const DEAD_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The most task or result text one request to the root carries.
+
 const REMOTE_TEXT: usize = 16 * 1024;
 
 fn internal(key: &str, mut args: Value) -> Request {
@@ -263,10 +268,10 @@ impl Session {
     /// Settle the children whose process is gone (a crashed child must not keep
     /// its slot) and write `child_settled` for each.
     pub(super) fn reap_children(&mut self) {
-        let reaped = self
-            .kids
-            .registry
-            .reap(&|entry| child::process_alive(entry.pid.unwrap_or(0), entry.started_ms));
+        let reaped = self.kids.registry.reap(
+            &|entry| child::process_alive(entry.pid.unwrap_or(0), entry.started_ms),
+            DEAD_GRACE,
+        );
         for entry in reaped {
             let outcome = entry.outcome.clone().unwrap_or_else(|| "lost".into());
             let why = if outcome == "killed" {

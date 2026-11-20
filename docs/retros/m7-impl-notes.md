@@ -45,6 +45,11 @@ in, under that session's token). The session's loop hands the work to a task:
   the session is a child.
 - Killing a subtree from above leaves the grandchild's spawner dead, so nobody reports its
   settlement: the root's once-a-second reap settles it (`killed` if a kill was aimed at it).
+- The reaper settled a child whose process had exited a moment before its starter reported it,
+  as `lost` (a finished grandchild, once, under load). A process seen gone now gets 5 s to be
+  settled properly; a child a `kill` was aimed at is reaped at once.
+- Fixed sleeps in e2e scripts flaked under the gate's load (the 17th-descendant test was
+  retried): the scripts poll `kelir ls` for the state they need instead.
 - A brief's copied log starts with the parent's task, so a test (or a reader) that finds a root
   by its task text must also look at `parent`.
 - Windows hardening works: a hardened child host's command line cannot be read even by its

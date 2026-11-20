@@ -144,6 +144,8 @@ pub struct Entry {
     /// never returned to a caller, never printed.
     link: String,
     admitted: Instant,
+    /// When the process was first seen gone without having been settled.
+    dead_since: Option<Instant>,
 }
 
 impl Entry {
@@ -266,6 +268,7 @@ impl Registry {
             killed: false,
             link: link.clone(),
             admitted: Instant::now(),
+            dead_since: None,
         });
         Ok(Admission {
             child_id,
@@ -301,14 +304,27 @@ impl Registry {
 
     /// Settle every live child `alive` says is gone (or never got a pid in
     /// time): a crashed child must not leak its slot. Returns what was reaped.
-    pub fn reap(&mut self, alive: &dyn Fn(&Entry) -> bool) -> Vec<Entry> {
+    ///
+    /// A child that exited normally is settled by whoever started it a moment
+    /// later, with its real outcome; reaping it first would call a finished
+    /// child `lost`. So a process seen gone is given `grace` to be settled the
+    /// proper way before it is reaped. A child a `kill` was aimed at has no
+    /// outcome to wait for and is reaped at once.
+    pub fn reap(&mut self, alive: &dyn Fn(&Entry) -> bool, grace: Duration) -> Vec<Entry> {
         let mut reaped = Vec::new();
         for entry in &mut self.entries {
             if !entry.live() {
                 continue;
             }
             let gone = match entry.pid {
-                Some(_) => !alive(entry),
+                Some(_) if alive(entry) => {
+                    entry.dead_since = None;
+                    false
+                }
+                Some(_) => {
+                    let since = *entry.dead_since.get_or_insert_with(Instant::now);
+                    entry.killed || since.elapsed() >= grace
+                }
                 None => entry.admitted.elapsed() > NO_PID_GRACE,
             };
             if gone {
@@ -405,6 +421,7 @@ impl Registry {
                     killed: false,
                     link: String::new(),
                     admitted: Instant::now(),
+                    dead_since: None,
                 }),
                 EventBody::ChildSettled { child_id, .. } => {
                     open.retain(|entry| &entry.child_id != child_id);
@@ -963,11 +980,40 @@ mod tests {
         });
         let first = registry.admit(new("root", "c1")).unwrap();
         registry.up(&first.child_id, 4242, Some(1));
-        assert!(registry.reap(&|_| true).is_empty());
-        let reaped = registry.reap(&|_| false);
+        assert!(registry.reap(&|_| true, Duration::ZERO).is_empty());
+        // Seen gone, but not for long enough: its starter may still settle it.
+        assert!(
+            registry
+                .reap(&|_| false, Duration::from_secs(60))
+                .is_empty()
+        );
+        let reaped = registry.reap(&|_| false, Duration::ZERO);
         assert_eq!(reaped.len(), 1);
         assert_eq!(reaped[0].outcome.as_deref(), Some("lost"));
         registry.admit(new("root", "c2")).unwrap();
+    }
+
+    #[test]
+    fn a_killed_child_is_reaped_at_once_but_a_finished_one_gets_its_grace() {
+        let mut registry = registry(Caps::default());
+        let finished = registry.admit(new("root", "c1")).unwrap();
+        let killed = registry.admit(new("root", "c2")).unwrap();
+        registry.up(&finished.child_id, 1, None);
+        registry.up(&killed.child_id, 2, None);
+        registry.mark_killed(&killed.child_id).unwrap();
+        let reaped = registry.reap(&|_| false, Duration::from_secs(60));
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].child_id, killed.child_id);
+        assert_eq!(reaped[0].outcome.as_deref(), Some("killed"));
+        // Its starter settles it with the real outcome inside the grace.
+        assert_eq!(
+            registry
+                .settle(&finished.child_id, "done")
+                .unwrap()
+                .outcome
+                .as_deref(),
+            Some("done")
+        );
     }
 
     #[test]

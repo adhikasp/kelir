@@ -283,7 +283,10 @@ async fn a_background_child_returns_a_handle_and_wakes_the_parent() {
         let results = tool_results(request).len();
         Some(match (task.as_str(), results) {
             ("ROOT", 0) => bash("call_bg", &child_cmd("--background", "CHILD-BG look")),
-            ("ROOT", 1) => bash("call_wait", "sleep 4; echo waited"),
+            ("ROOT", 1) => bash(
+                "call_wait",
+                "for i in $(seq 1 90); do \"$KELIR_BIN\" ls | grep 'CHILD-BG' | grep -q ' done ' && break; sleep 1; done; echo waited",
+            ),
             ("ROOT", _) => say("root done"),
             (c, _) if c.starts_with("CHILD-BG") => say("bg answer"),
             _ => return None,
@@ -450,7 +453,10 @@ async fn the_seventeenth_live_descendant_is_refused() {
                 "call_loop",
                 "for i in 1 2 3 4 5 6 7 8 9; do \"$KELIR_BIN\" run --child --background \"SLEEP $i\" >/dev/null 2>&1; done; \"$KELIR_BIN\" run --child --background \"NEST all\"",
             ),
-            ("ROOT", 1) => bash("call_wait", "sleep 8; echo waited"),
+            ("ROOT", 1) => bash(
+                "call_wait",
+                "for i in $(seq 1 90); do \"$KELIR_BIN\" ls | grep 'NEST all' | grep -q ' done ' && break; sleep 1; done; echo waited",
+            ),
             ("ROOT", _) => say("root done"),
             (nest, 0) if nest.starts_with("NEST") => bash(
                 "call_nest",
@@ -632,10 +638,10 @@ async fn ls_shows_the_tree_and_kill_takes_a_subtree_but_only_from_above() {
         Some(match (task.as_str(), results) {
             ("ROOT", 0) => bash(
                 "call_main",
-                "for t in NESTK SIB ATTACK; do \"$KELIR_BIN\" run --child --background \"$t x\" >/dev/null; done; sleep 6; \
+                "for t in NESTK SIB ATTACK; do \"$KELIR_BIN\" run --child --background \"$t x\" >/dev/null; done; for i in $(seq 1 90); do \"$KELIR_BIN\" ls | grep -q 'SLEEP deep' && break; sleep 1; done; \
                  \"$KELIR_BIN\" ls --json; \
                  nk=$(\"$KELIR_BIN\" ls | grep NESTK | grep -o 'ses_[a-z0-9]*' | head -1); \
-                 \"$KELIR_BIN\" kill $nk; echo killrc=$?; sleep 2; \"$KELIR_BIN\" ls",
+                 \"$KELIR_BIN\" kill $nk; echo killrc=$?; sleep 2; \"$KELIR_BIN\" ls; for i in $(seq 1 90); do \"$KELIR_BIN\" ls | grep 'ATTACK x' | grep -q ' done ' && break; sleep 1; done",
             ),
             ("ROOT", _) => say("root done"),
             (nest, 0) if nest.starts_with("NESTK") => bash(
