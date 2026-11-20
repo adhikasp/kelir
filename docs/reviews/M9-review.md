@@ -4,6 +4,33 @@ Reviewer: fresh QA (kelir session, opencode-go/hy4-flash-free). Branch `job/m9re
 `3e4d1cb..9f0a223` (`git diff` read in full; 27 files, ~4590 insertions). Windows 11 dev box
 (Git Bash) + Linux gate through a private work dir (`kelir-verify-m9rev`).
 
+## Fix status (M9fix, branch `job/m9fix`)
+
+The reviewer's findings were addressed on `job/m9fix` (commits `8115f17`, `468d68b`,
+`4ed6796`):
+
+- **B1 closed.** The reviewer's diagnosis of the root cause was incomplete: `def.max_steps`
+  *was* passed through `CommonArgs` and applied to `cfg.max_steps` by `prepare()`. The failing
+  outcome came from STEER-4's rule that a final answer on the cap-th step is `done`. A job's
+  declared cap is now also recorded in the Plan (`job_step_cap`), and a job reaching it is
+  `paused` even on an answer at the last step — the cap is a boundary between scheduled runs.
+  `tests/review_m9.rs::task_file_and_max_steps_are_honoured` now passes (`paused`), and
+  `tests/e2e_m9.rs::a_jobs_max_steps_pauses_the_run_at_the_cap` plus
+  `a_zero_max_steps_flag_lifts_a_jobs_cap` cover the job-specific rule and the `0` override.
+  Interactive `--max-steps` keeps STEER-4's `done` on a cap-th answer (all `e2e_steer4` /
+  `review_steer4` tests still pass).
+- **S1 closed (documented).** `docs/reference/jobs.md` now states precisely that a rotating
+  run adds a second tail `carry` source before the `job` line, that both are appended after the
+  frozen prefix (cached prefix untouched), and why they stay separate.
+- **S2 closed.** `Holder` has a `reason`; a skip on a young unreadable lock now prints the reason
+  on stderr and records it in the skipped `error`, while a young lock is still never taken over
+  (pid-reuse safety untouched). New unit test `an_unreadable_young_lock_names_no_pid_but_says_why`.
+- **n1/n2 closed (documented).** The leading letter-or-digit rule and the bind-before-start
+  `new` state are now in `docs/reference/jobs.md`; the job-cap deviation is in
+  `docs/DEVIATIONS.md`.
+- **S3** (live 75/124) remains a live-drive gap; the mock e2e still proves both exit codes with
+  real processes. No product change made for it.
+
 ## Verdict: PASS WITH FIXES — 1 blocker, 3 should-fix, 2 nits
 
 One blocker: a documented `jobs.toml` key (`max_steps`) is parsed and then dropped before the
