@@ -295,7 +295,7 @@ pub fn new_id() -> String {
 /// Where jobs live: this session's `bg/` inside a bash call, otherwise the
 /// state dir's own `bg/`.
 pub fn root() -> PathBuf {
-    if let Some(dir) = std::env::var_os("KELIR_SESSION_DIR")
+    if let Some(dir) = crate::envs::var_os("KELIR_SESSION_DIR")
         .map(PathBuf::from)
         .filter(|dir| !dir.as_os_str().is_empty())
     {
@@ -1165,8 +1165,7 @@ async fn run(args: BgRunArgs) -> u8 {
     let dir = root();
     let id = new_id();
     let out = out_path(&dir, &id);
-    let call = std::env::var("KELIR_CALL_ID")
-        .ok()
+    let call = crate::envs::var("KELIR_CALL_ID")
         .map(|call| call.trim().to_string())
         .filter(|call| !call.is_empty());
     // A job command takes the same route as a bash call: a file beside the
@@ -1198,8 +1197,7 @@ async fn run(args: BgRunArgs) -> u8 {
         // own environment; a job started by hand has no session to talk to. The
         // shim passes it on to the command, and the session uses it when the
         // job has to be started from outside a call's Job Object.
-        sock: std::env::var("KELIR_SOCK")
-            .ok()
+        sock: crate::envs::var("KELIR_SOCK")
             .map(|sock| sock.trim().to_string())
             .filter(|sock| !sock.is_empty()),
         // A job runs where the caller was, exactly like a call does (M4 review
@@ -1257,7 +1255,7 @@ async fn run(args: BgRunArgs) -> u8 {
 /// a session that is gone, busy or not there is what the poller and `resume`
 /// are for.
 async fn notify(status: &Status) {
-    let Ok(sock) = std::env::var("KELIR_SOCK") else {
+    let Some(sock) = crate::envs::var("KELIR_SOCK") else {
         return;
     };
     if sock.trim().is_empty() {

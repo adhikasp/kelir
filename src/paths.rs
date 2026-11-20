@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 fn env_path(var: &str) -> Option<PathBuf> {
-    std::env::var_os(var)
+    crate::envs::var_os(var)
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
 }
@@ -208,7 +208,7 @@ mod tests {
         assert!(dir.is_absolute() || dir.starts_with("."));
         // Every platform puts kelir in a directory of that name unless the
         // caller overrode it via the environment (tests do, at times).
-        if std::env::var_os("KELIR_STATE_DIR").is_none() {
+        if crate::envs::var_os("KELIR_STATE_DIR").is_none() {
             assert_eq!(dir.file_name().unwrap(), "kelir");
         }
     }

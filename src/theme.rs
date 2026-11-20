@@ -171,12 +171,12 @@ impl Default for Theme {
 impl Theme {
     /// The theme a process gets from its environment.
     pub fn from_env() -> Self {
-        let color = match std::env::var_os("NO_COLOR") {
+        let color = match crate::envs::var_os("NO_COLOR") {
             Some(value) => value.is_empty(),
             None => true,
         };
-        let ascii = std::env::var_os("KELIR_ASCII").is_some_and(|value| !value.is_empty())
-            || std::env::var("TERM")
+        let ascii = crate::envs::var_os("KELIR_ASCII").is_some_and(|value| !value.is_empty())
+            || crate::envs::var("TERM")
                 .map(|term| term == "dumb")
                 .unwrap_or(false);
         Self {

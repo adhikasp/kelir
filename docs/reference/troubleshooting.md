@@ -1,0 +1,99 @@
+# Troubleshooting
+
+**Summary:** the failures that actually happen — a 429 that will not go away, a
+turn paused with no error, a socket left by a dead process, a job nobody is
+watching, a Windows console that eats a keystroke — and what each one means.
+**Read this when:** something is stuck, slow, or "did nothing", and you want the
+short list of causes before reading source.
+
+Start with two commands: `kelir doctor` (which key each provider would use, never
+the key) and the session's own log (`<state>/sessions/<id>/events.jsonl`, or
+`kelir run --json`). Almost every question below is answered by one `error`,
+`turn_ended` or `tool_settled` event.
+
+## "It says rate limited and waits"
+
+`429` (and any other retryable status) is retried with backoff, honouring the
+provider's `Retry-After`, inside a 30-minute budget per request
+(`docs/reference/providers.md`). While it waits: the TUI's facts row counts down,
+a dim line goes to the scrollback, `kelir run` prints it on stderr, and each
+attempt is an `error` event with `status`, `attempt` and `retry_in_ms`. When the
+budget runs out the turn **pauses** rather than failing: `turn_ended` with
+`reason: "provider"`, exit code 0. `say continue` (or a new message) starts a new
+turn. `stop` ends the wait now.
+
+## "The turn stopped at N steps and calls it paused"
+
+That is `max_steps` (or `--max-steps`) doing its job: the turn is capped, not
+failed. `turn_ended` carries `reason: "steps"`; the next message starts a new
+turn with a fresh count. Remove the key if you did not mean to cap it (`0` and
+unset both mean no cap).
+
+## "There is a sock but no session"
+
+The session socket is a file on Unix and a pipe name on Windows; a session that
+was killed leaves the file behind. `kelir ctl` says the session is not running
+and exits 1 — it does not wait. Pick the session up with `kelir resume <id>`: it
+binds the socket afresh and replaces a stale one. The log will hold one
+`resumed` event naming any call that was started and never settled; such a call
+is reported to the model as an unknown outcome and **never re-run**.
+
+## "A background job I started is gone"
+
+A job outlives the session on purpose: its shim writes `bg/<id>.status`, and
+nothing wakes a stopped session. `kelir bg ls` (inside a session) and
+`kelir bg out <id>` read it; the next `resume` folds the settled job into the log
+as `bg_settled` plus the wake-up message. A job killed with the machine is the
+one case with no status file: `bg ls` shows it as missing and the log has a
+`bg_started` with no settle.
+
+## "The model does not know a rule I wrote in AGENTS.md"
+
+Three causes, in order: the file is above the repository root or above home (the
+walk stops at both, `docs/reference/sources-and-skills.md`); the 256 KB total
+instruction budget was spent, which is one `error` event per skipped file, with
+the numbers; or the rule arrived *after* the session started, in which case it is
+a `source` message at the tail and the frozen system prompt genuinely does not
+contain it — that is the cache working as intended.
+
+## "A tool call's output was cut"
+
+It was not: the whole output is `commands/<call-id>/out` from the first byte, and
+what the model saw is `tool_settled.result`, which is a head/tail excerpt once the
+output passes `spill_limit` (10 KB). `spilled: true` and `out_path` in the same
+event say so. The model is told the path; a `bash` call can read the rest.
+
+## Windows
+
+- **A console window flashes.** No spawn path may create one: every child of a
+  console-less parent is started with `CREATE_NO_WINDOW`. A visible window is a
+  bug, not a setting.
+- **Ctrl-C is not the TUI's.** A tool call runs in its own process group; a
+  console control event sent to a group shared with the session would kill the
+  session itself (that happened, twice, on 2026-11-19). Nothing kelir ships sends
+  one; tests signal an exact pid or process group.
+- **A `.cmd`/`.bat` helper needs `cmd.exe`.** `opencode` on an npm install is a
+  `.cmd` shim, which `CreateProcess` cannot run directly: `COMSPEC` is used to
+  invoke it, with the path quoted twice so `cmd /C` does not eat the first word.
+- **A long command line is not passed on the command line.** A `bash` call's
+  script goes to a file beside the output (always, on Windows), because the limit
+  is 32 KB and MSYS rewrites backslashes in argv. That is why a 40 KB heredoc
+  runs.
+
+## Secrets
+
+- A provider key is read, handed to the request builder and recorded as its
+  *source* — never printed, logged or put on a command line. `kelir doctor`,
+  `session_started.key_origin` and the one-line notice all name the source.
+- A literal `key` in a config file is refused with a warning: it goes stale,
+  shadows a live one, and puts a secret where it gets copied around.
+- A provider (or a gateway) can echo a request; a 4xx that quotes the
+  `Authorization` header is redacted before it reaches the log.
+- `key_cmd` is named by its file name only, so a private path stays private.
+
+## "The docs are stale"
+
+`kelir docs --check` fails when a generated block is stale; `kelir docs
+--generate` rewrites it from the code. `cargo test --lib docs` is the stricter
+version: it also reads the code, so a key, flag, verb, variable or event that
+exists in one place and not the other fails there.

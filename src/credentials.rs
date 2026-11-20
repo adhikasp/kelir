@@ -175,7 +175,7 @@ pub const REFRESH_FIX: &str =
 /// caller wraps it in `spawn_blocking` and a sync caller (a `model` verb that
 /// swaps provider) may simply pay the bounded wait.
 pub fn resolve(provider: &mut ProviderConfig) -> Result<Credential, String> {
-    let env = |name: &str| std::env::var(name).ok();
+    let env = |name: &str| crate::envs::named(name);
     let run = |argv: &[String]| run_command(argv, AUTH_TIMEOUT);
     let credential = resolve_with(provider, &env, &run)?;
     // The one place the secret lands: memory, on the config the client holds.
@@ -536,7 +536,7 @@ fn process_command(path: &Path) -> std::process::Command {
             .unwrap_or_default();
         if extension == "cmd" || extension == "bat" {
             use std::os::windows::process::CommandExt as _;
-            let shell = std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
+            let shell = crate::envs::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
             let mut command = std::process::Command::new(shell);
             command.arg("/C");
             // `raw_arg` so the program's own quoting survives: `cmd /C` treats
@@ -559,7 +559,7 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
         // An explicit path: use it as given (the `.cmd` wrapping still applies).
         return path.is_file().then(|| path.to_path_buf());
     }
-    let dirs = std::env::var_os("PATH")?;
+    let dirs = crate::envs::var_os("PATH")?;
     for dir in std::env::split_paths(&dirs) {
         for candidate in candidates(name) {
             let full = dir.join(candidate);

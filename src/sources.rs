@@ -98,6 +98,9 @@ pub enum SourcePath {
     /// The base prompt compiled into the binary (`src/prompt.md`): no file.
     #[default]
     Embedded,
+    /// A skill compiled into the binary (`src/docs/skill-kelir.md`): no file, so
+    /// it is never watched, re-read or announced as changed.
+    Builtin,
     File(PathBuf),
 }
 
@@ -106,7 +109,7 @@ impl SourcePath {
     /// otherwise.
     pub fn log_path(&self) -> String {
         match self {
-            SourcePath::Embedded => String::new(),
+            SourcePath::Embedded | SourcePath::Builtin => String::new(),
             SourcePath::File(path) => crate::util::path_string(path),
         }
     }
@@ -127,7 +130,7 @@ impl SourcePath {
 
     pub fn file(&self) -> Option<&Path> {
         match self {
-            SourcePath::Embedded => None,
+            SourcePath::Embedded | SourcePath::Builtin => None,
             SourcePath::File(path) => Some(path),
         }
     }
@@ -137,6 +140,7 @@ impl SourcePath {
     pub fn describe(&self) -> String {
         match self {
             SourcePath::Embedded => "the embedded base prompt".to_string(),
+            SourcePath::Builtin => "a skill embedded in the kelir binary".to_string(),
             SourcePath::File(path) => crate::util::path_string(path),
         }
     }
@@ -157,6 +161,9 @@ pub struct Found {
     pub path: PathBuf,
     pub text: String,
     pub layer: Layer,
+    /// Compiled into the binary (`src/docs/skill-kelir.md`) rather than read
+    /// from `path`: there is nothing on disk to watch, re-read or announce.
+    pub builtin: bool,
 }
 
 /// Where sources come from: every directory a session looks in.
@@ -247,6 +254,31 @@ impl Places {
 /// The instruction file names, in the order they render within one directory.
 const INSTRUCTION_FILES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 
+/// The skill kelir ships about itself (`src/docs/skill-kelir.md`, Agent Skills
+/// format). It is discovered like any other skill and named in `sources[]`, but
+/// it is compiled in: it works in a session with no checkout on disk, and a
+/// skills directory that happens to hold a `kelir/` entry replaces it rather
+/// than duplicating it (a *directory* is a file source, and a file wins over
+/// what the binary carries).
+pub const BUILTIN_SKILL_NAME: &str = "kelir";
+pub const BUILTIN_SKILL: &str = include_str!("docs/skill-kelir.md");
+
+/// The builtin skill, if it is a valid Agent Skill (a broken one would be a
+/// build-time typo, and the drift test proves it is not).
+fn builtin_skill() -> Option<Found> {
+    // A broken builtin is a build-time typo, not a skipped skill: the drift test
+    // parses it too, so this is the assertion and not a silent `None`.
+    parse_skill(BUILTIN_SKILL).ok()?;
+    Some(Found {
+        kind: SourceKind::Skill,
+        name: BUILTIN_SKILL_NAME.to_string(),
+        path: PathBuf::new(),
+        text: BUILTIN_SKILL.to_string(),
+        layer: Layer::Machine,
+        builtin: true,
+    })
+}
+
 /// Discover every machine and project source for `places`, dropping the notes.
 pub fn discover(places: &Places) -> Vec<Found> {
     let mut notes = Vec::new();
@@ -297,6 +329,11 @@ pub fn discover_with_notes(places: &Places, notes: &mut Vec<String>) -> Vec<Foun
                 Layer::Project,
             );
         }
+    }
+    // The skill kelir ships about itself: machine layer, so a project (or
+    // machine) skill directory of the same name replaces it.
+    if let Some(skill) = builtin_skill() {
+        found.push(skill);
     }
     // Skills directories, machine layer then project. A skill's name is its
     // directory's name; a project skill of that name wins.
@@ -356,6 +393,7 @@ fn push_source(
         path,
         text,
         layer,
+        builtin: false,
     };
     if layer == Layer::Project {
         // A project file replaces the machine one of its name, wherever the
@@ -747,7 +785,7 @@ pub fn render_system(inputs: &Inputs) -> Rendered {
     for found in &instructions {
         sources.push(info(
             &found.name,
-            &SourcePath::File(found.path.clone()),
+            &found_path(found),
             found.kind,
             &found.text,
         ));
@@ -763,7 +801,7 @@ pub fn render_system(inputs: &Inputs) -> Rendered {
     for found in skills {
         sources.push(info(
             &found.name,
-            &SourcePath::File(found.path.clone()),
+            &found_path(found),
             found.kind,
             &found.text,
         ));
@@ -773,6 +811,16 @@ pub fn render_system(inputs: &Inputs) -> Rendered {
         text,
         sources,
         warnings,
+    }
+}
+
+/// The [`SourcePath`] a discovered source stands for: none at all for the
+/// builtin skill (it has no file), the file it was read from otherwise.
+fn found_path(found: &Found) -> SourcePath {
+    if found.builtin {
+        SourcePath::Builtin
+    } else {
+        SourcePath::File(found.path.clone())
     }
 }
 
@@ -1217,16 +1265,25 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         // The file further up renders after it: nearest first.
         assert_eq!(instructions[1].name, "CLAUDE.md");
         assert_eq!(instructions[1].text, "FAR CLAUDE");
-        // One skill survives the clash, and it is the project's.
+        // One skill of that name survives the clash, and it is the project's;
+        // `kelir` is always there too, and it has no file.
         let skills: Vec<&Found> = found
             .iter()
             .filter(|item| item.kind == SourceKind::Skill)
             .collect();
-        assert_eq!(skills.len(), 1, "{skills:?}");
+        assert_eq!(skills.len(), 2, "{skills:?}");
+        let builtin = skills
+            .iter()
+            .find(|skill| skill.builtin)
+            .expect("the embedded `kelir` skill is always discovered");
+        assert_eq!(builtin.name, BUILTIN_SKILL_NAME);
+        assert!(builtin.path.as_os_str().is_empty());
+        assert_eq!(parse_skill(&builtin.text).unwrap().name, "kelir");
+        let mine = skills.iter().find(|skill| skill.name == "mine").unwrap();
         // The watcher hashes the file it read, front matter included.
-        assert!(skills[0].text.ends_with("PROJECT BODY"), "{skills:?}");
-        assert_eq!(parse_skill(&skills[0].text).unwrap().name, "mine");
-        assert_eq!(skills[0].layer, Layer::Project);
+        assert!(mine.text.ends_with("PROJECT BODY"), "{skills:?}");
+        assert_eq!(parse_skill(&mine.text).unwrap().name, "mine");
+        assert_eq!(mine.layer, Layer::Project);
     }
 
     #[test]
@@ -1295,7 +1352,12 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             home: None,
             repo_root: None,
         };
-        assert!(discover(&places).is_empty());
+        // Nothing on disk is a source: the only one is the skill the binary
+        // carries, and it has no file to read or watch.
+        let found = discover(&places);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].builtin, "{found:?}");
+        assert!(found[0].path.as_os_str().is_empty());
         let rendered = render_system(&Inputs {
             base: "BASE",
             base_path: None,
@@ -1483,7 +1545,9 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         );
         assert!(rendered.text.contains("cwd: "), "{}", rendered.text);
         let names: Vec<&str> = rendered.sources.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["prompt.md", "AGENTS.md"]);
+        // The base prompt, the instruction file, and the builtin skill: a
+        // skill's body is pull, so only its name and hash are here.
+        assert_eq!(names, vec!["prompt.md", "AGENTS.md", "kelir"]);
         // The embedded default records an empty path and its kind, never a
         // sentinel a reader could mistake for a file (F2, F2b).
         assert_eq!(rendered.sources[0].path, "");

@@ -235,7 +235,7 @@ fn keep_switch(switch: Option<&Switch>) -> Option<String> {
 
 /// `KELIR_SHELL_RAW=cr`: send a POSIX script raw, keeping CRLF terminators.
 fn raw_cr() -> bool {
-    std::env::var_os("KELIR_SHELL_RAW").is_some_and(|value| value == "cr")
+    crate::envs::var_os("KELIR_SHELL_RAW").is_some_and(|value| value == "cr")
 }
 
 /// The first line of every `.bat`: without it `cmd.exe` echoes the prompt and
