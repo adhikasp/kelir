@@ -95,6 +95,10 @@ pub struct Holder {
     pub pid: Option<u32>,
     pub cmd: String,
     pub started: String,
+    /// Why the lock could not be taken when there is no readable record.
+    /// A young, unreadable lock is respected (pid-reuse safety), but the skip
+    /// still needs to say what was seen rather than an empty holder.
+    pub reason: String,
 }
 
 #[derive(Debug)]
@@ -254,11 +258,15 @@ fn holder_of(record: Option<Record>) -> Holder {
             pid: Some(record.pid),
             cmd: record.cmd,
             started: record.started,
+            reason: String::new(),
         },
         None => Holder {
             pid: None,
             cmd: String::new(),
             started: String::new(),
+            reason: "the lock file is unreadable or holds no record; it is young \
+                     and respected (it cannot be proven safe to take over)"
+                .into(),
         },
     }
 }
@@ -357,6 +365,21 @@ mod tests {
             judge(Some(&r), Duration::from_secs(5), false),
             Verdict::Stale(_)
         ));
+    }
+
+    #[test]
+    fn an_unreadable_young_lock_names_no_pid_but_says_why() {
+        let holder = holder_of(None);
+        assert_eq!(holder.pid, None);
+        assert!(holder.cmd.is_empty() && holder.started.is_empty());
+        assert!(
+            holder.reason.contains("unreadable"),
+            "a skip must explain the empty holder: {holder:?}"
+        );
+        // A readable holder keeps its identity and needs no reason (S2).
+        let named = holder_of(Some(record(42)));
+        assert_eq!(named.pid, Some(42));
+        assert!(named.reason.is_empty());
     }
 
     #[test]
