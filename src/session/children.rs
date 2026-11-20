@@ -1080,7 +1080,11 @@ impl Session {
     /// parent that started this child, or the parent asking a brief.
     pub(super) fn task_from(&self) -> &'static str {
         if self.kids.link.is_none() {
-            "cli"
+            // A job's task (or a named run's resumed task) is not a person
+            // typing: the plan says so.
+            crate::jobs::plan()
+                .and_then(|plan| plan.task_from_for(self.resumed))
+                .unwrap_or("cli")
         } else if self.kids.brief {
             "brief"
         } else {

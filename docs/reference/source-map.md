@@ -27,6 +27,18 @@ The tree is flat on purpose: a file is a subject.
 | `src/event.rs` | `EventBody`, `LogEvent`, the writer, spill to `blobs/`, torn-tail repair |
 | `src/resume.rs` | reopening a log: cwd, model, unsettled calls |
 
+## Jobs
+
+| file | owns |
+|---|---|
+| `src/names.rs` | named sessions (`names/<name>`), the session `owner` file, `kelir sessions` |
+| `src/jobs.rs` | `jobs.toml`, durations, `new_session_every`, the date-change source, STATUS and `runs.jsonl` |
+| `src/jobrun.rs` | `kelir job run|status|history`: one run from the lock to the notify hook |
+| `src/joblock.rs` | the single-flight lock: atomic create-and-own, pid + start time, checked takeover |
+| `src/notify.rs` | notify hooks: scrubbed environment, 30 s, tree kill, never changes the exit code |
+| `src/atomic.rs` | publish-new and replace-atomically file writes |
+| `src/session/jobhooks.rs` | the two calls the session loop makes for a named or job run |
+
 ## Steering
 
 | file | owns |

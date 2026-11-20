@@ -21,7 +21,7 @@ resume: `src/fold.rs` renders the frozen system message, then `user`,
 |---|---|---|
 | `session_started` | `id`, `parent?`, `depth`, `cwd`, `os`, `kelir_version`, `provider`, `model`, `system{text,hash}`, `sources[]`, `tools[]`, `reasoning_effort?`, `key_origin?` | the first event of a session: the frozen request prefix |
 | `user` | `text`, `from`, `delivery`, `attachments[]` | a human message: the TUI, `kelir ctl say`, a job's wake-up, a channel |
-| `source` | `kind`, `name`, `text?`, `path?` | context that arrived after the start: a `hint`, a skill, an instruction or memory edit, an `attachment` or `attachment-note`, a channel message |
+| `source` | `kind`, `name`, `text?`, `path?` | context that arrived after the start: a `hint`, a skill, an instruction or memory edit, an `attachment` or `attachment-note`, a channel message, and for named sessions and jobs a `clock` (the new date on a later day), a `job` (the one status line) or a `carry` (what a replaced session left) |
 | `step_started` | `step`, `provider`, `model`, `request_hash` | just before one provider request |
 | `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]`, `finish_reason?` | the model's answer to one step |
 | `usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `cost`, `cost_source?`, `allowance?`, `kind?` | the final stream chunk; `cost_source` says whether `cost` is the provider's own (`provider`), tokens times a known price (`table`) or not known (`unknown`, cost 0.0); `kind: "compact"` marks the summarising request and `kind: "hint"` the hint scorer's own call |

@@ -422,6 +422,38 @@ variable. A report with the token but not the job's capability, a status file th
 sign, and a `cancel` for an id this session did not create are all refused (see *Who may drive a
 session*).
 
+## Jobs: named sessions, single-flight, STATUS
+
+kelir has no daemon and no scheduler; `kelir job run <name>` is what a scheduler (cron, a
+systemd timer, Task Scheduler, any trigger) calls. Reference: `docs/reference/jobs.md`.
+
+- **Named sessions.** `kelir run --name <n>` binds `names/<n>` (`[a-z0-9._-]{1,64}`) to a
+  session id, published create-or-fail and replaced by rename. An existing name **resumes** that
+  session (M3 resume) and appends the task as a `user` event `from: "job"`; a name whose session
+  is running is refused with the holder's pid (the session's `owner` file: pid + start time).
+  `kelir sessions ls|rename|forget`.
+- **Jobs.** `jobs.toml` (config dir, then the project's `.kelir/jobs.toml`): `task`/`task_file`,
+  `provider`, `model`, `max_steps`, `timeout`, `session` (default: the job name), `new_session_every`
+  (`never` or a duration: a fresh session when the old one is older or its context is large,
+  carrying a summary as a `carry` source), `notify`, and `schedule`, a string for humans.
+- **Single flight.** One lock per job (`jobs/<name>/lock`): a record (token, pid, process start
+  time, command) published atomically, so an ownerless lock is never observed; taken over only when
+  the holder is provably gone (pid reuse is a different start time), never from a young lock, only
+  after two agreeing looks, and only if the record moved aside is the one judged; released only by
+  its holder. A second run exits 75 at once (`--wait` queues), appends `skipped` to `runs.jsonl` and
+  does not touch the holder's STATUS.
+- **STATUS.** `STATUS.json` + `STATUS.md` written atomically at run start (`running`) and end:
+  job, session, run, started/finished, outcome (`done|error|stopped|timeout|skipped|paused`),
+  steps, tokens, cost (STEER-8), cache hit ratio, the first lines of the answer, the last error and the
+  job's `schedule`. Exit codes: 0 done, 1 error/stopped, 2 usage, 75 skipped, 124 timeout.
+- **The next day.** The system prompt is frozen at session start and holds the date, never the
+  time. A resume on a later UTC day appends a `clock` source ("it is now <date>") at the tail; the
+  cached prefix is not touched. Under `kelir job run` one `job` source line tells the model where
+  STATUS and `notes/` are.
+- **Trust.** `names/` and `jobs/` are owner-only directories; no key or token is written to
+  either; notify hooks run gate-style (scrubbed environment, 30 s, tree kill, never change the exit
+  code) and a project's hooks only in a trusted project.
+
 ## Scriptable, TUI and Herdr status
 
 - `kelir run --json` streams the events as NDJSON on stdout and ends with a `result` event and

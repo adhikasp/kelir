@@ -213,6 +213,34 @@ pub const VARS: &[Var] = &[
         "set for a gate only: a token unique to this gate run, so kelir can find and kill what the gate left behind (a `setsid` daemon); do not clear it",
     ),
     // ------------------------------------------------------------- test hooks
+    set(
+        "KELIR_JOB",
+        "set for a job's notify hook only: the job's name",
+    ),
+    set(
+        "KELIR_JOB_OUTCOME",
+        "set for a notify hook only: `done`, `error`, `stopped`, `timeout` or `paused`",
+    ),
+    set(
+        "KELIR_JOB_RUN",
+        "set for a notify hook only: the run's id (`run_…`)",
+    ),
+    set(
+        "KELIR_JOB_SESSION",
+        "set for a notify hook only: the id of the session the run used",
+    ),
+    set(
+        "KELIR_JOB_STATUS",
+        "set for a notify hook only: the path of the job's `STATUS.json`",
+    ),
+    hook(
+        "KELIR_NOTIFY_TIMEOUT_MS",
+        "shorten the 30 s notify-hook timeout (the job tests)",
+    ),
+    hook(
+        "KELIR_TODAY",
+        "`YYYY-MM-DD` replaces today's UTC date: a new session's system prompt and the date-change source of a resume (the job tests)",
+    ),
     hook(
         "KELIR_GATE_TIMEOUT_MS",
         "shorten the 30 s gate timeout (the gate tests; a timed-out gate fails open)",

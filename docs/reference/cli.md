@@ -112,6 +112,7 @@ Run a task to completion
 | `--resume` | `<ID>` | Continue a session from its log instead of starting one |
 | `--child` | nothing | Start the task as a child of the session this tool call runs in (it needs `KELIR_SOCK`): the child's final text is this command's stdout |
 | `--background` | nothing | With `--child`: return a handle at once; the child's completion wakes the parent at its next boundary |
+| `--name` | `<NAME>` | Run in the named session: create it, or resume it and add the task as a new message (`a-z`, `0-9`, `.`, `_`, `-`; up to 64 characters) |
 
 ### `kelir ask`
 
@@ -233,6 +234,20 @@ Stop a child (and everything below it): `kill <session>` or `kill --tree`
 |---|---|---|
 | `<SESSION>` | `<SESSION>` | The child (session id or a unique prefix) to stop, with everything below it |
 | `--tree` | nothing | Stop every descendant of this session (from a tool call), or of the session named |
+
+### `kelir job`
+
+Jobs for a scheduler to call: run, status, history
+
+| flag | takes | what it does |
+|---|---|---|
+
+### `kelir sessions`
+
+Named sessions: ls, rename, forget
+
+| flag | takes | what it does |
+|---|---|---|
 
 ### `kelir doctor`
 

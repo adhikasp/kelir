@@ -398,7 +398,7 @@ impl Tally {
     }
 
     /// `provider`, `table`, `mixed` or `unknown`.
-    fn cost_source(&self) -> &'static str {
+    pub fn cost_source(&self) -> &'static str {
         match (self.by_provider > 0, self.by_table > 0) {
             (true, true) => "mixed",
             (true, false) => "provider",

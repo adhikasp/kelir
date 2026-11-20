@@ -561,7 +561,7 @@ pub const EVENTS: &[EventDoc] = &[
         name: "source",
         fields: "`kind`, `name`, `text?`, `path?`",
         written_by: "context that arrived after the start: a `hint`, a skill, an instruction or \
-                     memory edit, an `attachment` or `attachment-note`, a channel message",
+                     memory edit, an `attachment` or `attachment-note`, a channel message, and for named sessions and jobs a `clock` (the new date on a later day), a `job` (the one status line) or a `carry` (what a replaced session left)",
     },
     EventDoc {
         name: "step_started",

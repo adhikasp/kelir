@@ -61,6 +61,7 @@ const CONTINUE_NOTE: &str = "[kelir] the session was interrupted between turns; 
                              from where it stopped.";
 
 mod children;
+mod jobhooks;
 
 type Inbox = mpsc::UnboundedReceiver<Incoming>;
 
@@ -89,6 +90,16 @@ pub async fn run(args: RunArgs) -> u8 {
             return 2;
         }
     }
+    let mut resume = args.resume;
+    if let Some(name) = &args.name {
+        match crate::jobrun::plan_for_name(name) {
+            Ok(id) => resume = id,
+            Err(message) => {
+                eprintln!("kelir: {message}");
+                return 1;
+            }
+        }
+    }
     drive(Options {
         json: args.json,
         ask: false,
@@ -96,7 +107,22 @@ pub async fn run(args: RunArgs) -> u8 {
         tui: false,
         common: args.common,
         task: args.task,
-        resume: args.resume,
+        resume,
+        child: None,
+    })
+    .await
+}
+
+/// `kelir job run`: one turn of a named session, its final text on stdout.
+pub async fn run_as_job(common: CommonArgs, task: String, resume: Option<String>) -> u8 {
+    drive(Options {
+        json: false,
+        ask: true,
+        keep: false,
+        tui: false,
+        common,
+        task: vec![task],
+        resume,
         child: None,
     })
     .await
@@ -771,6 +797,7 @@ async fn drive(opts: Options) -> u8 {
         Ok(prepared) => prepared,
         Err(failure) => {
             eprintln!("kelir: {}", failure.message());
+            crate::jobs::note_error(failure.message());
             // A scripted caller reads the result line, even for a usage error.
             if opts.json {
                 print_result_event(
@@ -801,6 +828,8 @@ async fn drive(opts: Options) -> u8 {
             return 1;
         }
     };
+
+    crate::names::write_owner(&prepared.dir);
 
     // Bind before `session_started` is written, so a client that sees the event
     // can connect.
@@ -870,6 +899,12 @@ async fn drive(opts: Options) -> u8 {
     // A child leaves with its parent: a hard-killed parent cannot signal it.
     if let Some(handoff) = opts.child.clone() {
         watch_parent(handoff, tx.clone(), trust.token().to_string());
+    }
+
+    // A job's wall clock: at the deadline the turn is told to stop; if the loop
+    // is still there after a grace period, the process is forced out.
+    if let Some(deadline) = crate::jobs::plan().and_then(|plan| plan.deadline) {
+        watch_deadline(deadline, tx.clone(), trust.token().to_string());
     }
 
     // The interactive session: the TUI runs as a task beside the loop, and all
@@ -1027,6 +1062,34 @@ fn watch_parent(
             tokio::time::sleep(Duration::from_secs(5)).await;
             std::process::exit(143);
         }
+    });
+}
+
+/// A job's timeout: stop the turn at the deadline, force the process out if the
+/// loop does not end by itself.
+fn watch_deadline(deadline: Duration, tx: mpsc::UnboundedSender<Incoming>, token: String) {
+    tokio::spawn(async move {
+        tokio::time::sleep(deadline).await;
+        if let Some(plan) = crate::jobs::plan() {
+            plan.timed_out.store(true, Ordering::SeqCst);
+        }
+        let (reply, _answer) = oneshot::channel();
+        let _ = tx.send(Incoming {
+            request: Request::new("stop", json!({"reason": "job timeout"}), "job-timeout")
+                .with_token(Some(token.clone())),
+            reply,
+            action: None,
+        });
+        // Then end the session: a stop only ends the turn.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let (reply, _answer) = oneshot::channel();
+        let _ = tx.send(Incoming {
+            request: Request::new("end", json!({}), "job-timeout").with_token(Some(token)),
+            reply,
+            action: None,
+        });
+        tokio::time::sleep(crate::jobrun::FORCE_AFTER).await;
+        crate::jobrun::force_timeout().await;
     });
 }
 
@@ -1399,7 +1462,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     // A child's id was minted by the root, which already named it in its log.
     let id = match &opts.child {
         Some(child) => child.session.clone(),
-        None => new_session_id(),
+        None => crate::jobs::planned_id().unwrap_or_else(new_session_id),
     };
     // The key is resolved here, at session start, and held in memory only
     // (STEER-2). `config::load` stays pure: reading opencode's store is a
@@ -1838,6 +1901,7 @@ impl Session {
             })?;
         }
         if session.has_task {
+            session.record_plan_sources(false)?;
             session.submit_task(prepared.task.clone(), "now")?;
         }
         session.sync();
@@ -2005,6 +2069,9 @@ impl Session {
                 "kelir: resumed · a background job settled while this session was not running"
                     .to_string(),
             ));
+        }
+        if !self.pending_task.trim().is_empty() || read.in_flight {
+            self.record_plan_sources(true)?;
         }
         if !self.pending_task.trim().is_empty() {
             // `kelir resume <id> <task>`: a new message on the existing log.
@@ -5027,6 +5094,17 @@ impl Session {
                 if applied.messages > 0 {
                     continue;
                 }
+                // A job's declared `max_steps` caps the run itself: if this was
+                // the last allowed step, the job is `paused` even when the model
+                // answered on it, so the scheduler's next invocation resumes it.
+                // Interactive `--max-steps` keeps STEER-4's `done` on an answer
+                // that lands on the cap-th step.
+                if let Some(cap) = crate::jobs::plan().and_then(|p| p.job_step_cap)
+                    && self.turn_steps >= cap
+                {
+                    self.emit(UiEvent::Paused { steps: cap });
+                    return Ok(TurnEnd::Paused(PauseReport::steps(cap)));
+                }
                 return Ok(TurnEnd::Done);
             }
 
@@ -6263,6 +6341,13 @@ fn render_system(cfg: &Config, cwd: &Path, herdr: Option<&str>) -> crate::source
 /// The date goes in, never the time: the system prefix must be stable for the
 /// life of a session (and across a resume).
 fn today() -> String {
+    // `KELIR_TODAY=YYYY-MM-DD` stands in for the clock (the date-change tests).
+    if let Some(day) = crate::envs::var("KELIR_TODAY") {
+        let day = day.trim();
+        if day.len() == 10 && day.as_bytes()[4] == b'-' && day.as_bytes()[7] == b'-' {
+            return day.to_string();
+        }
+    }
     time::OffsetDateTime::now_utc().date().to_string()
 }
 
