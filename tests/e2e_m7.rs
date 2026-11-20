@@ -1014,7 +1014,7 @@ async fn registry_operations_need_the_childs_link_and_no_secret_travels() {
         let session = kid["session"].as_str().unwrap();
         let dir = root.state.join("sessions").join(session);
         if let Ok(token) = std::fs::read_to_string(dir.join("token")) {
-            child_tokens.push(token.trim().to_string());
+            child_tokens.push((session.to_string(), token.trim().to_string()));
         }
         if kid["state"] != "running" {
             continue;
@@ -1032,7 +1032,12 @@ async fn registry_operations_need_the_childs_link_and_no_secret_travels() {
         assert!(!line.contains(&root_token), "{line}");
     }
     // The env dump finished: its tool result is in its own log.
+    let waiting = Instant::now();
     let envdump = loop {
+        assert!(
+            waiting.elapsed() < Duration::from_secs(30),
+            "the env dump child never finished"
+        );
         let list = child_list(&root).await;
         let kid = list.iter().find(|kid| kid["state"] == "done").cloned();
         if let Some(kid) = kid {
@@ -1082,8 +1087,17 @@ async fn registry_operations_need_the_childs_link_and_no_secret_travels() {
                 "root token in {}",
                 path.display()
             );
-            for token in &child_tokens {
-                assert!(!text.contains(token), "a child token in {}", path.display());
+            // A child's own token is its tool calls' by design (`env` shows
+            // it in its own directory); it must not appear in anyone else's.
+            for (owner, token) in &child_tokens {
+                let inside = path
+                    .components()
+                    .any(|part| part.as_os_str().to_string_lossy() == owner.as_str());
+                assert!(
+                    inside || !text.contains(token),
+                    "child {owner}'s token in {}",
+                    path.display()
+                );
             }
         }
         assert!(
