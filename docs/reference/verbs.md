@@ -23,6 +23,7 @@ applied at **one named boundary** — never between a tool call and its result.
 | `compact` | `[focus]` | `next_step` | summarises the earlier context at the next boundary and writes a `compacted` event; the task and the messages a human typed stay verbatim |
 | `view` | `<path>` | `now` | queues an image for the next message: a `source` event of kind `attachment` at the tail, so the cached prefix is untouched |
 | `bg` | one job status object, as `kelir bg run` sends it | `now` | a job reported itself or changed state; the session writes `bg_started`/`bg_settled` and, for a settled job, the wake-up `user` message |
+| `cancel` | `<job id>` | `now` | kills one of this session's background jobs and records it `cancelled`; a job id                  the session did not start is refused |
 | `end` | none | `now` | ends the session (`session_ended`); running calls are stopped first |
 <!-- /generated -->
 

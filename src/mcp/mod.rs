@@ -117,3 +117,36 @@ pub async fn run_call(
     }
     output
 }
+
+/// What `mcp_started` records of a call's arguments: their shape, never their
+/// values. A tool argument can be a secret (a token, a key); the log, the NDJSON
+/// stream and `observe` must not hold one (STEER-7). The values the model chose
+/// are already in the `tool_started` of the bash call that carried them.
+pub fn loggable_args(args: &Value) -> Value {
+    match args {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), loggable_args(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(loggable_args).collect()),
+        Value::String(text) => Value::String(format!("<string, {} bytes>", text.len())),
+        Value::Null => Value::Null,
+        Value::Bool(_) => Value::String("<bool>".into()),
+        Value::Number(_) => Value::String("<number>".into()),
+    }
+}
+
+#[cfg(test)]
+mod loggable_args_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn values_are_replaced_and_keys_kept() {
+        let logged =
+            loggable_args(&json!({"q": "CANARY", "n": [1, "CANARY"], "o": {"k": "CANARY"}}));
+        assert!(!logged.to_string().contains("CANARY"));
+        assert!(logged["o"]["k"].is_string() && logged["n"].as_array().unwrap().len() == 2);
+    }
+}

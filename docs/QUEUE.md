@@ -287,3 +287,6 @@ implementer pauses; the retro/introspective passes keep reading the transcripts 
 - Pending: steer8 (cost/status), steer9 (de-flake e2e; flakes now named in every gate summary), M5-B (Herdr line, hint, memory, attachments, observe), M7 (children as CLI),
   M8, M9, M10, M11, M12 (publish prep; push needs the maintainer's yes).
 - The steer12 AFTER metrics need kelir runs on the new prompt (kelir implementer runs are paused by the directive): collect one data point from a kelir gate/dogfood run.
+
+- 2026-11-20 16:40: **STEER-7 merged** after four review rounds (accepted with the documented same-user boundary). M6 must now merge main and put the MCP broker requests under the
+  session token (the m6fix worker was told to keep the request path in one function). Next: M6 review fixes (m6fix running), then merge M6 + token integration; steer8, steer9, M5-B, M7...

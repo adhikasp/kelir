@@ -19,8 +19,12 @@ that appends an event; the loop applies verbs at named boundaries.
 <state>/sessions/<id>/
   events.jsonl            # append-only, fsync'd per batch, monotonic seq; the only source of truth
   commands/<call-id>/out  # full tool output, never truncated; also the >10 KB spill file
-  bg/<bg-id>.status       # written by the bg shim; survives kelir exiting
+  bg/<bg-id>.status       # written by the bg shim; survives kelir exiting; the dir is 0700
   sock                    # the session socket (a named pipe on Windows)
+  token                   # this session's secret, owner-only (0600), removed when the session ends;
+                          # `kelir ctl` reads it while it lives
+  bg/<bg-id>.cancel       # exists only while a `cancel` is in flight (so a reader says
+                          # "running", not "lost", between the kill and the status write)
 ```
 
 - **Session id:** `ses_<ulid>`. It is also the provider cache/session key (see *Prompt caching*).
@@ -46,6 +50,97 @@ that appends an event; the loop applies verbs at named boundaries.
   `kelir brief`; there is no spawn tool), each owning its own session dir. They live inside the parent's process group (Unix) or Job Object (Windows), so
   killing the parent leaves no orphans.
 
+### Who may drive a session
+
+Reaching the socket is **not** authorisation. Two things gate every request:
+
+- **A per-session token.** At start the session makes 32 random bytes (hex), keeps them in
+  memory, writes them to `<session dir>/token` with owner-only permissions (`0600` on Unix; on
+  Windows a protected DACL with one ACE for this user) and exports them to its own tool children
+  as `KELIR_TOKEN`. Every request that arrives on the socket must carry the token; the listener
+  answers and closes a request that does not, **before** the session sees it, so an unauthenticated
+  caller cannot even write a `verb` event. The token never appears in a log line, an event or an
+  argv (a bg shim gets it in its environment, not on its command line). `kelir ctl` from a human
+  terminal reads `<session dir>/token` itself, so it keeps working; a bare socket client reads
+  `$KELIR_TOKEN` from the environment it inherited. **A process that can read the session's
+  environment or its token file already runs as the user, in the session, and is trusted** — the
+  token stops a *different* session's child, a stray process and a script that found the pipe by
+  name, not the user or the model's own tools. The token file is removed when the session ends: a
+  token nobody serves is only something to find.
+- **A registry of the jobs this session created, a capability per job, and a signing key per
+  job.** The session is the only issuer of ids for explicit jobs (`bg_<32 random hex>`, minted on
+  `bg-claim`/`bg-spawn`); a bash call's `bg/` id is the deterministic `<seq>-<step>-<n>` its
+  output directory is named after, so two sessions can share those names (each has its own `bg/`,
+  and every id is checked against *this* session's registry and keys). An id is recorded in an
+  in-memory registry *and* in the log (`bg_started`, and `tool_started.dir` for a call), and
+  rebuilt from the log on resume. `bg` reports, `cancel` and `bg-spawn` name an id, and the
+  session answers only for one in the registry. A `bg` report must *also* carry **that job's
+  capability** (32 random bytes the session generates and hands only to that job's shim), because
+  every tool child holds the session token by design. A request that names an unknown id, an id that is not
+  a job (a call's own id, a job adopted by a resume) or the wrong capability is refused with a
+  clear error and a `verb` event with boundary `rejected`, rate-limited to `32` such events per
+  session. **No secret ever leaves the session or the job's own shim:** neither the capability nor
+  the signing key is returned by any verb. `kelir bg run` sends the internal `bg-spawn` verb with
+  its command, working directory and environment, and the **session** mints the id, starts the
+  shim and hands it the key and capability on the shim's stdin pipe; the answer is the id and
+  nothing else. From a `bg-spawn` request the session honours only `cmd`, `shell`, `cwd` and
+  `env` (filtered: well-formed names, bounded, and without `KELIR_TOKEN`/`KELIR_SOCK`); the shim's
+  kind, the socket it reports to, the token and the Windows job name are the session's own, and
+  a `call` is kept only if that call is running. No verb writes its request wholesale to the log:
+  each verb logs a fixed set of fields, and a `bg-spawn` logs only its `dir`, `cwd` and the
+  number of environment variables (never the environment, the token or the command). Tool
+  children (every `bash` call and job) do not inherit `OPENROUTER_API_KEY` or `KELIR_GO_API_KEY`;
+  a command that needs a provider key must be given one explicitly. A key under a custom
+  `key_env` name is the user's own variable and is passed through. A `bg-spawn` that names a job id (owned or not) is refused, and `bg-claim` (retired) is an
+  acknowledgement (an id) only, from a budget of `16` of its own. No verb reads or echoes a caller-named path: a settled job's `out`
+  must lie inside the session's own `bg/`. The number of ids one session mints on request is
+  bounded (`256`). Every job directory and
+  status/out path in a request must resolve **inside the session's own `bg/` or `commands/`**,
+  canonicalised: `..`, a symlink out of it and, on Windows, a UNC or another drive's path are all
+  refused.
+- **A status file is evidence only if the job's shim signed it.** Writing `bg/<id>.status` is
+  within every tool child's rights, so the file's existence or contents prove nothing. The
+  session mints an Ed25519 key pair per job (per bash call too); the private key goes to the
+  session's memory and to that job's shim **over an inherited pipe** (the only copy outside the
+  session, and never returned to a caller) (not argv, not the
+  environment, which a same-user process reads through `/proc/<pid>/environ` or the PEB, not a
+  file), and the shim does not pass it to the command it runs. The shim signs every status record
+  (`sig`, hex, over the record without it); the session verifies every record it folds into the
+  log (the watcher, the resume pass, a `bg` report, a promotion) under the job's public key,
+  which `bg_started` records (`pubkey`) so a resume can verify a shim that outlived its session.
+  An unsigned or badly signed record is ignored and recorded once per id as a refused `verb`
+  event. After a resume, a job whose public key the log does not hold cannot be authenticated and
+  is reported `lost`. Every signed record carries a **sequence number** (covered by the signature,
+  with the job id) that only goes up; the session refuses a record older than one it has believed,
+  and a settled job's final record is also kept in `bg/<id>.final`, which wins over the status
+  file, so putting an older `running` record back cannot un-settle a job (a replay can withhold a
+  result, never change one).
+  **What this does not cover.** `kelir bg ls|out|wait|cancel` run in a tool child or a terminal,
+  hold no key, and read the files as a view; they never write the log. A process of the same user
+  that can read another process's memory can read a shim's key. A job's shim narrows this as far
+  as the platform lets an unprivileged process: on Windows it removes `PROCESS_VM_READ` and
+  friends (and `WRITE_DAC`) for its own user with an Owner Rights DACL, and on Linux it clears
+  `PR_SET_DUMPABLE`; it holds the key only for its lifetime and overwrites its own copy when it
+  exits. That stops a sibling tool child's ordinary `ReadProcessMemory`/`/proc/<pid>/mem` read. It
+  does **not** stop an elevated administrator enabling `SeDebugPrivilege`, root or a debugger run
+  by the same user as the shim's parent, so those stay outside the boundary. The **session
+  process** holds every job's key, so it gets the same treatment at startup, before the first key
+  exists: on Windows the Owner Rights DACL (terminate, set-quota, query-information and synchronize
+  remain, so `taskkill`, the harness and the liveness checks still work; memory read/write,
+  thread creation, handle duplication and `WRITE_DAC` do not); on Linux
+  `PR_SET_DUMPABLE=0`. On Linux that is what protects the keys against a same-user process where
+  `kernel.yama.ptrace_scope=0`; with Yama at 1 or more the kernel already refuses it. Every shim
+  that holds a key is hardened, whatever its `--kind`. And `events.jsonl` and the session directory
+  are writable by any same-user process, so code that deliberately rewrites the log (a forged
+  `bg_started.pubkey` or `tool_started.dir`) is inside the boundary. The boundary is other users,
+  other sessions, stray processes and **the model's own tools acting through the files and the
+  socket the design exposes**; it is not same-user code that attacks the session's memory or
+  rewrites its log on purpose. A signature cannot stop a child from deleting or rolling back a
+  status file (the shim's next write restores it; a job that never writes again reads as `lost`).
+- **The socket and the pipe are owner-only too.** The Unix socket is `0600` in a directory only
+  the user can enter; the Windows pipe's DACL grants this user and no one else. Both are read
+  back at start: a session that cannot prove its socket is private says so and refuses to serve.
+
 ## What the model gets
 
 ### Native tools (the whole tool list; fixed for the life of a session)
@@ -66,13 +161,15 @@ deterministic.
 
 ### Verbs (what a human, a script or a gate can do to a session)
 
-Every verb works the same from the TUI, `kelir ctl <session> <verb> [json]` and the socket.
+Every verb works the same from the TUI, `kelir ctl <session> <verb> [json]` and the socket, and
+every one of them carries the session's token (*Who may drive a session*, above).
 
 | verb | what it does | applies |
 |---|---|---|
 | `say` | inject a user message; `--now` = stop the running calls first | next boundary / now |
 | `later` | queue a message for the end of the turn | turn end |
 | `stop` | stop the turn: signal the tool process trees, keep partial work, `[Skipped]` results for unrun calls. `stop --call <id>` stops one running call; it returns `stopped by user: <reason>` and the turn continues | now |
+| `cancel` | `<id>`: kill one of this session's background jobs with its process tree and record it settled `cancelled`; applies at once, even in an idle `--keep` session. A job id this session did not create is refused (a `verb` event with boundary `rejected`) | now |
 | `resume` | continue a stopped, paused or crashed session from its log | now |
 | `model` | swap provider/model for the rest of the session | next step |
 | `tools` | disable/enable a native tool or an MCP server; the tool list sent to the provider never changes, a disabled tool's call returns `disabled by user` | next step |
@@ -99,12 +196,12 @@ are never inline: the event holds the path.
 | `step_started` | `step`, `provider`, `model`, `request_hash` | one per provider request |
 | `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]` (`id`, `name`, `args`), `finish_reason` | |
 | `usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `cost`, `allowance?` | from the final stream chunk |
-| `tool_started` | `call_id`, `name`, `input`, `pid?` | intent; written before the process starts |
+| `tool_started` | `call_id`, `name`, `input`, `pid?`, `dir?` | intent; written before the process starts. `dir` is the call's own `commands/<dir>` name (its job id), so a resume adopts it from the log rather than from a directory |
 | `tool_settled` | `call_id`, `outcome` (`ok`, `error`, `stopped`, `skipped`, `denied`, `disabled`, `promoted`, `unknown`), `exit_code?`, `bytes`, `lines`, `out_path`, `spilled`, `result` | commit; `result` is what the model sees (≤10 KB or the spill notice) |
 | `mcp_started` / `mcp_settled` | `mcp_id`, `server`, `tool`, `args`, `outcome`, `out_path`, `parent_call_id` | a `kelir mcp` call made from inside a bash call |
 | `bg_started` / `bg_settled` | `bg_id`, `call_id`, `cmd`, `pid`, `exit_code?`, `out_path` | `promoted` tool calls and explicit `kelir bg` jobs |
 | `child_started` / `child_settled` | `child_id`, `depth`, `task`, `background`, `outcome`, `result` | the child's own log is in its own dir |
-| `verb` | `name`, `args`, `from` | every verb received, applied or not |
+| `verb` | `name`, `args`, `from`, `boundary`, `error?` | every verb received, applied or not; `boundary: "rejected"` is a refusal (a foreign job id, a path outside the session's own `bg/`, an unparsable verb), with `error` saying why |
 | `gate` | `gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?` | every gate run, including fail-open ones |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by` (`user`, `agent`, `auto`), `tokens_before`, `tokens_after` | the fold replaces everything up to `through_seq` except the pins |
 | `turn_ended` | `outcome` (`done`, `stopped`, `paused`, `error`), `final_text`, `reason?` | `paused` covers two cases, distinguished by `reason`: `steps` (an explicit `max_steps` cap) and `provider` (the retry budget was exhausted). Neither is a failure: `--keep` stays alive and the next message opens a new turn |
@@ -181,6 +278,7 @@ Per provider (OpenRouter's caching page read 2026-11-18):
 | shell (`shell` in config) | `bash -c` (falls back to `$SHELL`); a command over 6 KB runs from a file | Git for Windows `bash.exe`; `agshell` or `pwsh` by config. Every command runs from a file (switch kept: `/C`, `-File`) — see DEVIATIONS |
 | process tree | own process group (`setsid`), `killpg` on stop | Job Object per call (kill-on-close), `CREATE_NEW_PROCESS_GROUP` |
 | session socket | Unix socket | named pipe (both via the `interprocess` crate) |
+| socket permissions | `0600`, re-read at start | owner-only DACL, re-read from the handle at start |
 | detached bg job | `setsid`, outside the session's group | `DETACHED_PROCESS`, outside the session's Job Object |
 
 No shell reimplementation. **A call running past 10 minutes is promoted to the background, not
@@ -293,9 +391,9 @@ answers ("do 1,4") resolved at `prompt_submit` against the last numbered list in
 
 A child is a kelir process the model starts from `bash`: `kelir run --child "<task>" [--background]`
 or `kelir brief "<question>"`. There is **no `spawn` tool**; the native tool list is `bash`, `edit`,
-`compact`. `KELIR_ROOT`, `KELIR_PARENT` and `KELIR_DEPTH` ride along with `KELIR_SOCK` (exported to
-every bash child), so the CLI registers `child_started`/`child_settled` with the **root session's
-socket** (the root stays the only writer of the registry and of its own log; each child still owns
+`compact`. `KELIR_ROOT`, `KELIR_PARENT` and `KELIR_DEPTH` ride along with `KELIR_SOCK` and
+`KELIR_TOKEN` (exported to every bash child), so the CLI registers `child_started`/`child_settled`
+with the **root session's socket** (the root stays the only writer of the registry and of its own log; each child still owns
 its own session dir with `parent`/`depth` in `session_started`). A foreground child's result is the
 bash call's stdout; a background child's `child_settled` arrives at the next boundary and wakes the
 parent. Because a child is a session, `stop`, `resume`, `observe`, `attach` and `kelir ls`/kill work
@@ -312,6 +410,12 @@ snapshot of the parent's context, `edit`/`compact` refused, history untouched. D
 binary) that waits for the command, tees its output and writes `bg/<id>.status`, so it outlives
 the session. Completion while the session runs appends `bg_settled` and admits a message at the
 next boundary so the agent wakes; while it does not, see *Process model*.
+
+A job's shim inherits `KELIR_SOCK` and `KELIR_TOKEN` from the session that started it (its
+command line carries neither) and receives its signing key over a pipe, never in an environment
+variable. A report with the token but not the job's capability, a status file the shim did not
+sign, and a `cancel` for an id this session did not create are all refused (see *Who may drive a
+session*).
 
 ## Scriptable, TUI and Herdr status
 

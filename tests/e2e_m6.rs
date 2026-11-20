@@ -429,7 +429,8 @@ async fn a_call_inside_a_bash_call_is_logged_between_its_start_and_settle() {
     let started = run.one_event("mcp_started");
     assert_eq!(started["server"], "demo");
     assert_eq!(started["tool"], "echo");
-    assert_eq!(started["args"], json!({"text": "from-the-model"}));
+    // The shape, never the values (m6m): the text is in the bash call's tool_started.
+    assert_eq!(started["args"], json!({"text": "<string, 14 bytes>"}));
     assert_eq!(started["parent_call_id"], "call_m");
     let settled = run.one_event("mcp_settled");
     assert_eq!(settled["mcp_id"], started["mcp_id"]);
@@ -600,7 +601,9 @@ async fn a_socket_client_cannot_forge_a_settlement() {
         "mcp-settle",
         json!({"mcp_id": "mcp_x", "key": "guess", "output": {}}),
         "mcp-internal",
-    );
+    )
+    // With the real token, so it is the key that stops it, not the socket.
+    .with_token(kelir::trust::read_token(&live.session_dir));
     let answer = kelir::ipc::request_value(&address, &forged).await.unwrap();
     assert!(!answer.ok, "{answer:?}");
     let (code, stderr) = live.end().await;
@@ -810,7 +813,8 @@ async fn a_lost_session_after_the_send_is_exit_4_and_not_run_again() {
     let id = "ses_fake_m6fix";
     let listener = kelir::ipc::bind(&dir, id).unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<kelir::ipc::Incoming>();
-    kelir::ipc::serve(listener, tx);
+    let trust = std::sync::Arc::new(kelir::trust::Trust::new(dir.clone(), "fake-token".into()));
+    kelir::ipc::serve(listener, trust, tx);
     tokio::spawn(async move {
         while let Some(incoming) = rx.recv().await {
             match incoming.request.args["op"].as_str() {
@@ -833,7 +837,10 @@ async fn a_lost_session_after_the_send_is_exit_4_and_not_run_again() {
         &files,
         &toml,
         &["demo", "echo", "text=a"],
-        &[("KELIR_SOCK", address.as_str())],
+        &[
+            ("KELIR_SOCK", address.as_str()),
+            ("KELIR_TOKEN", "fake-token"),
+        ],
     )
     .await;
     assert_eq!(out.code, 4, "stdout {} stderr {}", out.stdout, out.stderr);
@@ -894,4 +901,111 @@ async fn resume_settles_an_orphaned_mcp_call_as_unknown() {
     assert_eq!(settlements, 1, "exactly one settlement");
     drop(resumed);
     drop(live);
+}
+
+// -------------------------------------------------------------------- m6m
+
+/// One raw line to the session socket, answered as JSON.
+async fn raw_request(live: &LiveSession, request: Value) -> Value {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let stream = kelir::ipc::connect(&live.session_dir, &live.id)
+        .await
+        .expect("connect");
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read);
+    let mut line = request.to_string();
+    line.push('\n');
+    write.write_all(line.as_bytes()).await.unwrap();
+    write.flush().await.unwrap();
+    let mut answer = String::new();
+    lines.read_line(&mut answer).await.unwrap();
+    serde_json::from_str(answer.trim()).unwrap_or(json!({"unparsed": answer}))
+}
+
+/// The broker is a socket verb like any other: without the session token a
+/// request is refused before it can start a server or write into the log; with
+/// it the call works. A canary in the `env` block and in the tool arguments
+/// reaches no event, no stdout, no stderr, no answer and no session file.
+#[tokio::test]
+async fn broker_requests_need_the_session_token_and_no_canary_leaks() {
+    let env_canary = "sk-CANARY-m6m-env-91b";
+    let arg_canary = "sk-CANARY-m6m-arg-47c";
+    let toml = server(&format!("env = {{ API_TOKEN = \"{env_canary}\" }}"));
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("idle", 0)))]).await;
+    let mut live =
+        LiveSession::start_with_mcp(&mock, &["run", "--keep", "--json", "go"], "", &toml).await;
+    live.wait_for("turn_ended").await;
+    let token = kelir::trust::read_token(&live.session_dir).unwrap();
+    let call = json!({"op": "call", "server": "demo", "tool": "pid",
+                      "args": {"secret": arg_canary, "nested": [arg_canary]}});
+    let mut answers = Vec::new();
+    // No token, and a wrong one: refused, nothing logged, no server started.
+    for request in [
+        json!({"verb": "mcp", "from": "mcp", "args": call}),
+        json!({"verb": "mcp", "from": "mcp", "token": "not-the-token", "args": call}),
+        json!({"verb": "mcp", "from": "mcp", "args": {"op": "ls"}}),
+    ] {
+        let answer = raw_request(&live, request).await;
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert!(
+            answer["error"].as_str().unwrap_or("").contains("token"),
+            "{answer}"
+        );
+        answers.push(answer.to_string());
+    }
+    let before = std::fs::read_to_string(live.session_dir.join("events.jsonl")).unwrap();
+    assert!(
+        !before.contains("mcp_started"),
+        "a refused request was logged"
+    );
+    // With the token: the call runs.
+    let answer = raw_request(
+        &live,
+        json!({"verb": "mcp", "from": "mcp", "token": token, "args": call}),
+    )
+    .await;
+    assert_eq!(answer["ok"], true, "{answer}");
+    answers.push(answer.to_string());
+    let log = std::fs::read_to_string(live.session_dir.join("events.jsonl")).unwrap();
+    assert!(
+        log.contains("mcp_started") && log.contains("mcp_settled"),
+        "{log}"
+    );
+    let files = tree_text(&live.session_dir);
+    let stderr = live.stderr();
+    let (_, stdout) = live.end().await;
+    for (label, text) in [
+        ("events.jsonl", log),
+        ("session files", files),
+        ("stdout", stdout),
+        ("stderr", stderr),
+        ("answers", answers.join("\n")),
+    ] {
+        assert!(!text.contains(env_canary), "{label}: the env canary leaked");
+        assert!(
+            !text.contains(arg_canary),
+            "{label}: the argument canary leaked"
+        );
+    }
+}
+
+/// The CLI in a bash child reads the token the way `kelir bg` does: with
+/// `KELIR_TOKEN` removed from its environment the broker refuses it (exit 3,
+/// never a silent one-shot fallback that would run the call unlogged).
+#[tokio::test]
+async fn the_cli_without_the_token_is_refused_by_the_session() {
+    let files = Files::new();
+    let toml = server("");
+    let run = session_run(
+        &files,
+        &toml,
+        "env -u KELIR_TOKEN \"$KELIR_BIN\" mcp demo pid; echo \"code=$?\"",
+    )
+    .await;
+    let result = payload_text(&run.one_event("tool_settled")["result"]);
+    assert!(
+        result.contains("refused") && result.contains("token"),
+        "{result}"
+    );
+    assert!(run.events_of("mcp_started").is_empty());
 }

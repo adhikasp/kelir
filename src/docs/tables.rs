@@ -87,6 +87,12 @@ pub const VERBS: &[VerbDoc] = &[
                  `bg_settled` and, for a settled job, the wake-up `user` message",
     },
     VerbDoc {
+        name: "cancel",
+        args: "`<job id>`",
+        applies: "`now`",
+        effect: "kills one of this session's background jobs and records it `cancelled`; a job id                  the session did not start is refused",
+    },
+    VerbDoc {
         name: "end",
         args: "none",
         applies: "`now`",
@@ -469,7 +475,7 @@ pub const EVENTS: &[EventDoc] = &[
     },
     EventDoc {
         name: "tool_started",
-        fields: "`call_id`, `name`, `input`, `pid?`",
+        fields: "`call_id`, `name`, `input`, `pid?`, `dir?`",
         written_by: "intent: written before the tool's process starts",
     },
     EventDoc {
@@ -486,7 +492,7 @@ pub const EVENTS: &[EventDoc] = &[
     EventDoc {
         name: "mcp_started",
         fields: "`mcp_id`, `server`, `tool`, `args`, `parent_call_id?`",
-        written_by: "a `kelir mcp <server> <tool>` call reached the session broker (intent: written before the server is asked)",
+        written_by: "a `kelir mcp <server> <tool>` call reached the session broker with the session token (intent: written before the server is asked); `args` is the arguments' shape (keys kept, each string replaced by `<string, N bytes>`), never their values",
     },
     EventDoc {
         name: "mcp_settled",
@@ -495,7 +501,7 @@ pub const EVENTS: &[EventDoc] = &[
     },
     EventDoc {
         name: "bg_started",
-        fields: "`bg_id`, `call_id?`, `cmd`, `pid?`, `out_path`",
+        fields: "`bg_id`, `call_id?`, `cmd`, `pid?`, `out_path`, `pubkey?`",
         written_by: "a promoted bash call or an explicit `kelir bg run`",
     },
     EventDoc {

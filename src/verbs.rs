@@ -87,6 +87,12 @@ pub enum Verb {
     /// boundary it can get (and immediately when the session is idle); the wake
     /// message it records is the one that starts a turn.
     Bg(Box<crate::bg::Status>),
+    /// `cancel <id>`: kill one of this session's background jobs and record it
+    /// `cancelled` (STEER-7). A job id the session did not start is refused
+    /// before it gets here.
+    Cancel {
+        id: String,
+    },
     End,
 }
 
@@ -94,8 +100,12 @@ impl Verb {
     /// Where the verb is meant to apply; this is what the `verb` event says.
     pub fn scope(&self) -> &'static str {
         match self {
-            Verb::Say { now: true, .. } | Verb::Stop { .. } | Verb::End | Verb::Bg(..) => "now",
-            Verb::View { .. } => "now",
+            Verb::Say { now: true, .. }
+            | Verb::Stop { .. }
+            | Verb::End
+            | Verb::Bg(..)
+            | Verb::Cancel { .. }
+            | Verb::View { .. } => "now",
             Verb::Say { .. } => "queued",
             Verb::Later { .. } => "turn_end",
             Verb::Model { .. }
@@ -105,12 +115,24 @@ impl Verb {
         }
     }
 
+    /// Is this verb an *action* rather than a message? An action does its work
+    /// and starts nothing: a `cancel` kills a job and must still be applied when
+    /// no boundary will ever come (an idle session), and it must never be
+    /// dropped where messages are taken out of the queue (STEER-7).
+    pub fn is_action(&self) -> bool {
+        matches!(self, Verb::Cancel { .. })
+    }
+
     /// Does it apply at this boundary?
     pub fn applies_at(&self, boundary: Boundary) -> bool {
         match self {
-            // `say`, `stop` and a job's own report take the first boundary they
-            // can get.
-            Verb::Say { .. } | Verb::Stop { .. } | Verb::End | Verb::Bg(..) => true,
+            // `say`, `stop`, `cancel` and a job's own report take the first
+            // boundary they can get.
+            Verb::Say { .. }
+            | Verb::Stop { .. }
+            | Verb::End
+            | Verb::Bg(..)
+            | Verb::Cancel { .. } => true,
             // An attachment applies at the next boundary, like a `say` that
             // opens a turn: it is a message, and it must not land in a tool
             // batch.
@@ -172,6 +194,25 @@ impl Scheduler {
     /// The verbs still pending (for a reply or a test).
     pub fn peek(&self) -> &[Pending] {
         &self.pending
+    }
+
+    /// Take the pending verbs `keep` selects, leaving the rest in order.
+    ///
+    /// A `cancel` is an action, not a message: it must not start a turn and it
+    /// must not be dropped where verbs leave the queue without a boundary
+    /// (STEER-7).
+    pub fn take_where(&mut self, mut keep: impl FnMut(&Verb) -> bool) -> Vec<Pending> {
+        let mut taken = Vec::new();
+        let mut rest = Vec::with_capacity(self.pending.len());
+        for pending in self.pending.drain(..) {
+            if keep(&pending.verb) {
+                taken.push(pending);
+            } else {
+                rest.push(pending);
+            }
+        }
+        self.pending = rest;
+        taken
     }
 }
 
@@ -285,10 +326,85 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             }
             Ok(Verb::Bg(Box::new(status)))
         }
+        // `cancel <id>`: kill one of this session's jobs. Whether the id is
+        // this session's own is checked before parsing (`trust::check_job`), so
+        // a refusal is recorded with its reason.
+        "cancel" => Ok(Verb::Cancel {
+            id: cancel_id(args)?,
+        }),
         other => Err(format!(
-            "unknown verb `{other}` (say, later, stop, model, tools, compact, skills, view, end)"
+            "unknown verb `{other}` (say, later, stop, model, tools, compact, skills, view, end, cancel)"
         )),
     }
+}
+
+/// The part of a request's `args` that may be written to the log. A whitelist
+/// per verb, never "whatever came in": a request is written by a process that
+/// holds the session token, and an unknown field (or an `env`, a `token`, a
+/// `key`) must not reach `events.jsonl`, which is quoted, resumed and shared
+/// (STEER-7 review round 4, B1). `bg-spawn` is logged as a count and two
+/// directories ([`spawn_log_args`]); an unknown verb logs no arguments.
+pub fn loggable_args(name: &str, args: &Value) -> Value {
+    let keep: &[&str] = match name {
+        "say" => &["text", "now"],
+        "later" => &["text"],
+        "stop" => &["call", "reason"],
+        "model" => &["model", "target"],
+        "tools" => &["disable", "enable"],
+        "skills" => &["name", "path", "text", "kind"],
+        "view" => &["path"],
+        "compact" => &["focus"],
+        "cancel" => &["id", "job"],
+        "bg" => {
+            // A job status, re-serialised: only the fields the type knows.
+            return serde_json::from_value::<crate::bg::Status>(args.clone())
+                .ok()
+                .and_then(|status| serde_json::to_value(status).ok())
+                .unwrap_or_else(|| json!({}));
+        }
+        "bg-spawn" => return spawn_log_args(args),
+        _ => &[],
+    };
+    match args {
+        Value::String(_)
+            if matches!(
+                name,
+                "say" | "later" | "model" | "skills" | "view" | "cancel"
+            ) =>
+        {
+            args.clone()
+        }
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(key, _)| keep.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
+        _ => json!({}),
+    }
+}
+
+/// What a `bg-spawn` leaves in the log: the verb's shape, never its content.
+/// No `env`, no `token`, no `cmd` (a command line can carry a secret), only
+/// where the job would live, where it would run and how many variables came.
+pub fn spawn_log_args(args: &Value) -> Value {
+    let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("");
+    json!({
+        "dir": text("dir"),
+        "cwd": text("cwd"),
+        "env_vars": args.get("env").and_then(Value::as_array).map_or(0, Vec::len),
+    })
+}
+
+/// The job id of a `cancel` request: the argument itself, or `{"id": …}`.
+pub fn cancel_id(args: &Value) -> Result<String, String> {
+    let id = string_arg(args, "id")
+        .or_else(|| string_arg(args, "job"))
+        .or_else(|| args.as_str().map(str::to_string))
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "cancel: missing the job id".to_string())?;
+    Ok(id)
 }
 
 /// The flags `kelir ctl` accepts, whatever the verb. Each one becomes the
@@ -326,6 +442,9 @@ pub fn cli_args(verb: &str, words: &[String], flags: &CliFlags) -> Result<Value,
                     args
                 }
                 "model" if !text.trim().is_empty() => json!({"model": text}),
+                // `kelir ctl <session> cancel <id>` (STEER-7): the id is the
+                // one positional word.
+                "cancel" if !text.trim().is_empty() => json!({"id": text}),
                 "compact" if !text.trim().is_empty() => json!({"focus": text}),
                 _ => json!({}),
             }
@@ -573,6 +692,8 @@ mod tests {
             call: None,
             job: None,
             error: None,
+            sig: None,
+            seq: 0,
         };
         let args = serde_json::to_value(&status).unwrap();
         let verb = parse("bg", &args).unwrap();
@@ -815,5 +936,49 @@ mod tests {
     #[test]
     fn an_empty_say_from_the_cli_is_rejected() {
         assert!(cli_args("say", &[], &CliFlags::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod log_args_tests {
+    use super::*;
+
+    const CANARY: &str = "CANARY-LOG-ARGS-4f1a";
+
+    #[test]
+    fn an_unknown_field_never_reaches_the_log_whatever_the_verb() {
+        for name in [
+            "say", "later", "stop", "model", "tools", "skills", "view", "compact", "cancel", "end",
+            "bg", "bg-spawn", "bg-claim", "nonsense",
+        ] {
+            let args = json!({
+                "text": "t", "env": [["K", CANARY]], "token": CANARY, "key": CANARY,
+                "capability": CANARY, "extra": CANARY, "id": "bg_1", "state": "running",
+                "started": "x", "dir": "d", "cwd": "c"
+            });
+            let logged = loggable_args(name, &args).to_string();
+            assert!(!logged.contains(CANARY), "{name}: {logged}");
+        }
+    }
+
+    #[test]
+    fn a_verbs_own_fields_are_still_logged() {
+        assert_eq!(
+            loggable_args("say", &json!({"text": "hi", "now": true})),
+            json!({"text": "hi", "now": true})
+        );
+        assert_eq!(loggable_args("cancel", &json!("bg_1")), json!("bg_1"));
+        assert_eq!(
+            loggable_args("stop", &json!({"call": "c1", "x": 1})),
+            json!({"call": "c1"})
+        );
+    }
+
+    #[test]
+    fn a_spawn_is_logged_as_directories_and_a_count() {
+        let args = json!({"dir": "/s/bg", "cwd": "/w", "cmd": CANARY, "token": CANARY,
+                          "env": [["A", CANARY], ["B", "2"]]});
+        let logged = loggable_args("bg-spawn", &args);
+        assert_eq!(logged, json!({"dir": "/s/bg", "cwd": "/w", "env_vars": 2}));
     }
 }

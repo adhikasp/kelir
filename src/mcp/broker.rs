@@ -155,6 +155,7 @@ impl Broker {
                 let sent = forward.send(Incoming {
                     request: Request::new(VERB_NOTIFY, args, FROM_INTERNAL),
                     reply,
+                    action: None,
                 });
                 if sent.is_err() {
                     return;
@@ -181,6 +182,7 @@ impl Broker {
                     let _ = inbox.send(Incoming {
                         request: Request::new(VERB_NOTIFY, args, FROM_INTERNAL),
                         reply,
+                        action: None,
                     });
                 }
             });

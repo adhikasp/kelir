@@ -124,12 +124,21 @@ Inside a session `KELIR_SOCK` is set, and `kelir mcp` sends every request to the
   random key, so a socket client cannot forge a settlement.
 - **Verb authentication (STEER-7).** Every request the CLI sends is the one
   verb `mcp` (`op` = `servers`, `tools` or `call`), built and sent in one place
-  (`Backend::ask` in `cli.rs`, served by `Session::mcp_verb`). When the session
-  token lands, all three ops must carry it like `view` and `bg`: `call` runs a
-  tool, and `servers`/`tools` start servers. `mcp-settle` and `mcp-notify`
-  travel in-process, not through the listener, and keep their key as the
-  second layer. The token variable must also stay out of the servers'
-  environment (it is not on the allow-list).
+  (`Backend::ask` in `cli.rs`, served by `Session::mcp_verb`). All three ops
+  carry the session token, which the CLI reads from `KELIR_TOKEN` exactly as
+  `kelir bg` does (a bash child gets it from the session); the listener refuses
+  a request without it before anything is logged or any server is started, and
+  the CLI reports exit 3 ("the session refused the request") rather than
+  falling back to an unlogged one-shot call. Outside a session (no `KELIR_SOCK`)
+  there is no token and none is needed. `mcp-settle` and `mcp-notify` travel
+  in-process, not through the listener, and keep their key as the second layer.
+- **Secrets.** The `env` table of `mcp.toml` goes to the server child only; it
+  is never printed, logged or echoed in an error. `mcp_started.args` records the
+  *shape* of the arguments (keys kept, strings replaced by `<string, N bytes>`),
+  never their values: the values are in the `tool_started` of the bash call that
+  carried them. A server is started with an allow-listed environment (no
+  `KELIR_*`, so no token or socket), no secret on its command line, and dies
+  with the session.
 - `kelir ctl <session> tools '{"disable":"mcp:<server>.<tool>"}'` (or
   `mcp:<server>`) switches calls off: they are logged and answered
   `disabled by user` (exit 1).

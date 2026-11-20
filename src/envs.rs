@@ -170,6 +170,10 @@ pub const VARS: &[Var] = &[
         "KELIR_SOCK",
         "the session socket (a Unix socket path or a pipe name), so `kelir ctl`/`view`/`bg` reach the session",
     ),
+    set(
+        "KELIR_TOKEN",
+        "the session's socket token: a tool child sends it with every request to the session",
+    ),
     set("KELIR_SESSION_DIR", "the session's directory"),
     set("KELIR_CALL_ID", "the provider call id of the bash call"),
     set(
@@ -222,6 +226,12 @@ pub fn var_os(name: &str) -> Option<OsString> {
     std::env::var_os(name)
 }
 
+/// The whole environment as (name, value) pairs, for a job that must run in
+/// exactly its starter's environment (`kelir bg run` hands it to the session).
+pub fn all() -> Vec<(String, String)> {
+    std::env::vars().collect()
+}
+
 /// A variable someone else named: a provider's `key_env` from the config, which
 /// can be any name kelir did not choose. Never documented, because it is not
 /// kelir's to document.
@@ -231,7 +241,7 @@ pub fn named(name: &str) -> Option<String> {
 
 /// The whole environment, for a child that gets a filtered copy of it (the MCP
 /// servers' allow-list). Not a kelir knob, so nothing here is documented.
-pub fn all() -> impl Iterator<Item = (OsString, OsString)> {
+pub fn all_os() -> impl Iterator<Item = (OsString, OsString)> {
     std::env::vars_os()
 }
 

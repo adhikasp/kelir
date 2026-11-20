@@ -530,6 +530,62 @@ pub mod win {
         TerminateProcess, WaitForSingleObject,
     };
 
+    /// Close this process to the rest of its user: no `PROCESS_VM_READ`,
+    /// `VM_WRITE`, `CREATE_THREAD`, `DUP_HANDLE` or `QUERY_INFORMATION`, and no
+    /// `WRITE_DAC` to take them back. The DACL names `SYSTEM` (everything) and
+    /// *Owner Rights* with only terminate / set-quota / query-information /
+    /// synchronize (`taskkill` is refused without query-information), which is what `cancel` and the liveness checks use; an
+    /// explicit Owner Rights entry is what removes the owner's implicit
+    /// `READ_CONTROL | WRITE_DAC`.
+    ///
+    /// This closes the plain `ReadProcessMemory` read of a shim's signing key by
+    /// a sibling tool child. It does not close an elevated administrator that
+    /// enables `SeDebugPrivilege`, a kernel debugger, or the user's own
+    /// ability to log in as `SYSTEM`: those are outside the boundary (SPEC,
+    /// STEER-7).
+    pub fn deny_same_user_memory_access() -> Result<(), String> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SetKernelObjectSecurity};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let sddl: Vec<u16> = "D:P(A;;GA;;;SY)(A;;0x101501;;;OW)"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut descriptor: *mut c_void = std::ptr::null_mut();
+        // SAFETY: NUL-terminated string, out pointer ours; freed below.
+        let built = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if built == 0 {
+            return Err(format!(
+                "cannot build the process DACL: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: the pseudo handle for this process always has WRITE_DAC; the
+        // descriptor is the self-relative one built above.
+        let set = unsafe {
+            SetKernelObjectSecurity(GetCurrentProcess(), DACL_SECURITY_INFORMATION, descriptor)
+        };
+        let error = io::Error::last_os_error();
+        // SAFETY: allocated by the conversion above.
+        unsafe {
+            LocalFree(descriptor);
+        }
+        if set == 0 {
+            return Err(format!("cannot restrict this process: {error}"));
+        }
+        Ok(())
+    }
+
     pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
     pub const DETACHED_PROCESS: u32 = 0x0000_0008;

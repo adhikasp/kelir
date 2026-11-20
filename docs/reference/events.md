@@ -26,12 +26,12 @@ resume: `src/fold.rs` renders the frozen system message, then `user`,
 | `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]`, `finish_reason?` | the model's answer to one step |
 | `usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `cost`, `allowance?`, `kind?` | the final stream chunk; `kind: "compact"` marks the summarising request |
 | `verb` | `name`, `args`, `from`, `boundary`, `error?` | every verb received, applied or not (`boundary: "rejected"` for a refusal) |
-| `tool_started` | `call_id`, `name`, `input`, `pid?` | intent: written before the tool's process starts |
+| `tool_started` | `call_id`, `name`, `input`, `pid?`, `dir?` | intent: written before the tool's process starts |
 | `tool_settled` | `call_id`, `outcome`, `exit_code?`, `bytes`, `lines`, `out_path`, `spilled`, `result` | the call's one commit; `result` is what the model sees |
 | `turn_ended` | `outcome`, `reason?`, `final_text` | the end of a turn; `reason` distinguishes `steps` from `provider` pausing |
-| `mcp_started` | `mcp_id`, `server`, `tool`, `args`, `parent_call_id?` | a `kelir mcp <server> <tool>` call reached the session broker (intent: written before the server is asked) |
+| `mcp_started` | `mcp_id`, `server`, `tool`, `args`, `parent_call_id?` | a `kelir mcp <server> <tool>` call reached the session broker with the session token (intent: written before the server is asked); `args` is the arguments' shape (keys kept, each string replaced by `<string, N bytes>`), never their values |
 | `mcp_settled` | `mcp_id`, `server`, `tool`, `outcome`, `exit_code`, `bytes`, `out_path`, `parent_call_id?` | the call's one commit; `outcome` is `ok`, `error`, `timeout`, `unavailable`, `disabled`, or `unknown` (a resume found no settlement), and the result is in the file `out_path` names |
-| `bg_started` | `bg_id`, `call_id?`, `cmd`, `pid?`, `out_path` | a promoted bash call or an explicit `kelir bg run` |
+| `bg_started` | `bg_id`, `call_id?`, `cmd`, `pid?`, `out_path`, `pubkey?` | a promoted bash call or an explicit `kelir bg run` |
 | `bg_settled` | `bg_id`, `call_id?`, `cmd`, `exit_code?`, `state`, `out_path` | a job that settled while this session owned its log (`state`: `exited` or `cancelled`) |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by`, `tokens_before`, `tokens_after`, `cache_restart` | a compaction; the fold replaces everything up to `through_seq` except the pins |
 | `resumed` | `from_seq`, `unsettled[]` | a session reopened from its log |

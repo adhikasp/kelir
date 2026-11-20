@@ -2,6 +2,59 @@
 
 Small, deliberate differences, with the reason. Everything else tracks the spec.
 
+## Session-socket hardening (STEER-7, 2026-11-19)
+
+The brief is `docs/tasks/STEER-7.md`; the trust boundary lives in `src/trust.rs`, the
+permissions in `src/perm.rs`, and the two are wired in `src/ipc.rs` (the socket) and
+`src/session.rs` (where a refusal becomes an event). Where the code had to choose:
+
+- **The token is checked at the listener, and a refusal is not logged.** An unauthenticated
+  request is answered with a clear error and its connection closed *before* it reaches the
+  session's channel, so it cannot write a `verb` event (the brief asks for a `verb` event on a
+  refusal, which is the right record for a caller that *is* this session's — a foreign or
+  missing job id — and the wrong thing to give a stranger: it would be a log-write primitive for
+  anyone who finds the pipe). Both kinds of refusal look the same to the caller: an error, no
+  state change.
+- **The token rides in an environment variable, never in an argv.** The brief suggests
+  `KELIR_TOKEN` for tool children, which is what happens; the bg shim also needs it to report
+  itself, and an argv is world-readable (`ps`, `wmic process`) while an environment is not, so
+  the shim is started with `Command::env` and the `--token` flag was removed rather than kept for
+  symmetry. The Windows pipe and the Unix socket are also the client's route to `KELIR_TOKEN`
+  for a process that only inherited `KELIR_SOCK`: `ipc::request_value` fills it in.
+- **`<session dir>/token` is owner-only, and the session checks it again at start.** On Unix
+  that is `0600`; on Windows a *protected* DACL with one `FILE_ALL_ACCESS` ACE for this user,
+  written with `SetNamedSecurityInfoW` **by name** (opening the file with `WRITE_DAC` and passing
+  the handle gave `ERROR_ACCESS_DENIED` for a file this process had just created — the handle has
+  to be opened with `WRITE_DAC`, which is not what a plain create returns). `trust::owner_only`
+  reads the result back (`stat` mode on Unix, `GetNamedSecurityInfoW` on Windows) and the session
+  refuses to start on a token file others can read; `perm.rs` has a Windows test that an
+  inherited-ACL file reads as too wide and a restricted one as owner-only.
+- **`cancel` is a verb with its own row, not a `bg` report.** `kelir ctl <session> cancel <id>`
+  sent `{"id": id}` before it parsed (there was no `cancel` arm in `verbs::cli_args`, so the
+  positional id was dropped and the request refused) — it is now a first-class verb, applied at
+  once, and it is an *action*: `Scheduler::take_where` leaves actions in the queue where
+  `take_turn_messages` used to take everything, and the idle loop applies a pending `cancel`
+  itself, so a `cancel` against an idle `--keep` session kills the job instead of waiting for a
+  boundary that never comes.
+- **A job id is `owns`-checked against three things**: the in-memory registry (what this process
+  started), `bg/<id>.status` in this session's own `bg/`, and `commands/<id>/` (a promoted
+  call's id is its output dir name). The `bg/` directory is created at session start, so an
+  empty session has an empty registry rather than a missing directory.
+- **Reachability, not identity, is what the token proves.** Documented rather than defended
+  against (see `docs/SPEC.md`, *Who may drive a session*): a process that can read this session's
+  environment or token file runs as the user, in the session, and is trusted. The token stops a
+  different session's child, a stray script and a pipe found by name.
+- **`cancel` writes `bg/<id>.cancel` while it works, and readers honour it for 30 s.** A cancel
+  kills the shim first and writes the `cancelled` status last (up to `CANCEL_WAIT`, 2 s), so in
+  between the status file says `running` and the shim behind it is dead — which every reader is
+  built to report as `lost`, and which the session's own watcher did: the e2e test that cancels a
+  job got a `bg_settled` of `lost` roughly half the time, and so would a real session. Two
+  changes close it: the marker file (`bg::observed_in`) tells readers a cancel is in flight, and
+  `Session::note_bg` re-reads the status file when it records a report instead of trusting the
+  watcher's snapshot, which may predate the cancel. The marker expires
+  (`CANCEL_MARKER_TTL`), because a cancel killed mid-flight would otherwise leave a dead job
+  `running` for ever, and is removed on every way out of `cancel_at`, including refusals.
+
 ## Retrying provider errors (STEER-5, 2026-11-19)
 
 The brief is `docs/tasks/STEER-5.md`; the policy lives in `src/retry.rs` and the
@@ -1282,6 +1335,79 @@ this differs from the spec text, or needed a call the brief left open:
   precedence list starts with *when set*; the store is the default that answers when it is not.
   `config::load` therefore stays pure (no process read, so `kelir doctor` and a unit test can load a
   config without starting a helper) and the resolution happens exactly once, at session start.
+- **The session socket's trust boundary is the token, a per-job capability, and a signature on
+  every status record.** SPEC said a request must carry the session token and that the session
+  answers `bg`/`cancel`/`bg-spawn` only for jobs "it started or registered", where a
+  `bg/<id>.status` file or a `commands/<id>/` directory counted as registration. That is not a
+  boundary: every bash child holds the token by design (`KELIR_TOKEN`), and it can create either
+  path itself (M5-A retro F8, STEER-7 review B1). Round 1 closed the socket (random ids, an
+  in-memory registry, a capability per job); round 2 (steer7b review B1') found that the
+  session's own `bg/` watcher still folded any `bg/<id>.status` for a registered id into the log,
+  so a child could forge `bg_started`/`bg_settled` and a wake message from `job`, and could name
+  any file in `out`. The earlier claims "files are never evidence" and "the model's own tools
+  cannot impersonate a shim" were false and are withdrawn. Now **a status file is believed only if
+  it carries an Ed25519 signature that verifies under the job's public key**: the session mints a
+  key pair per job and per bash call, gives the private half to that job's shim over an inherited
+  pipe (the capability and key are no longer in the shim's environment, which a same-user process
+  reads: steer7b S-A), and records the public half in `bg_started.pubkey`. A bash call's id is
+  `<seq>-<step>-<n>`, not a random id (steer7b S-B2): two sessions share those names, which is
+  harmless because each session has its own `bg/`, registry and keys.
+- **No secret ever leaves the session or the job's own shim (steer7fix3, steer7c review B1/B2).**
+  Round 2 handed the per-job capability and signing key to the process that claimed the job, and
+  `bg-spawn` for an existing id answered any token holder with them; both let a tool child sign
+  records the session believed. Now the session starts every job's shim itself (`bg-spawn`, with
+  the client's environment, cwd and command), gives it the key and capability on its stdin pipe
+  and answers with the id only; `bg-spawn` naming an id is refused, `bg-claim` returns an
+  acknowledgement, and `out` must be inside `bg/`. Costs: a job started by `kelir bg run` is
+  parented to the session (not the tool child), and the shim reports itself (it holds the
+  capability). Signed records carry a monotonic sequence number and a final copy in
+  `bg/<id>.final`, which beats a replayed older record. The Windows shim also closes its process to
+  same-user memory reads (Owner Rights DACL) and clears the key on exit; an elevated administrator
+  with `SeDebugPrivilege`, or root, is still outside the boundary. Per-id refusal budgets
+  (review nit) are not done: the budget stays shared (32 events per session).
+- **No verb logs request args wholesale; the session pins what a spawn may choose (steer7fix4,
+  steer7d review B1/S1/S2).** A refused `bg-spawn` wrote the caller's whole environment and the
+  session token into `events.jsonl`. Now every verb logs a per-verb whitelist of fields
+  (`verbs::loggable_args`) and a `bg-spawn` logs `dir`, `cwd` and a count of environment
+  variables only. The session takes only `cmd`, `shell`, `cwd` and a filtered `env` from a spawn
+  and sets the kind, the socket, the token and the job name itself, so a child cannot redirect the
+  shim's report or ask for an unhardened shim; every shim that holds a key is hardened. The
+  session process is hardened too (Windows Owner Rights DACL keeping terminate/set-quota/query/synchronize, because `taskkill` is refused without query;
+  Linux `PR_SET_DUMPABLE=0`), which closes the same-user read of all job keys on Windows; on
+  Linux it matters only where Yama is off. Still outside the boundary: SeDebugPrivilege, root,
+  kernel debuggers, and rewriting `events.jsonl`. Tool children no longer inherit
+  `OPENROUTER_API_KEY`/`KELIR_GO_API_KEY` (so a nested `kelir run` started from a bash call needs
+  the key given on its command line; git, cargo and `kelir bg/ctl/view` are unaffected); a custom
+  `key_env` variable is not scrubbed. `bg-claim` stays as a retired acknowledgement with its own
+  budget (16) so it cannot starve `bg-spawn`. Deviation from the committed test
+  `a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose`: its "something must
+  connect to the caller's listener" guard could only hold on the unfixed code, so it now asks
+  that the spawned job really started and that nothing leaked.
+- **What the boundary is, honestly.** It is other users, other sessions, stray processes and the
+  model's own tools acting through the files and the socket kelir exposes. It is not same-user
+  code that reads another process's memory (a debugger, `ReadProcessMemory`) or rewrites
+  `events.jsonl`/the session directory on purpose: the session directory is the user's, the log
+  is a plain file, and a forged `bg_started.pubkey` would be adopted by a resume. The token file
+  is still written (`kelir ctl` needs it) and removed when the session ends.
+- **`kelir bg ls|out|wait|cancel` do not verify.** They run in a terminal or a tool child, hold
+  no key, and read files as a view; they never write the log, so a forged file can only mislead a
+  reader that already had the rights to forge it. `kelir bg cancel` from a terminal writes an
+  unsigned `cancelled`, which the session ignores; the cancelled job is then reported `lost` (the
+  `cancel` verb through the session writes a signed status).
+- **A resume adopts jobs from the log only, and an adopted job has no capability and no
+  secret.** The registry is memory, so a resumed session rebuilds it from `bg_started` (which now
+  carries the job's public key) and from the optional `tool_started.dir` (the call's `commands/`
+  name). An adopted job answers `cancel` but never a `bg` report, and its status is verified under
+  the logged public key, so a shim that outlived its session still settles with its real exit
+  code. A job the log holds no key for (an older log, or a call that was never promoted) is
+  reported `lost` once its file says it stopped. A status file left behind by a job nobody logged
+  is still listed by `kelir bg ls` but never becomes an event.
+- **`tool_started` grew an optional `dir`, and request lines are bounded.** A `tool_started` written
+  by an older kelir has no `dir` and is read as a call whose job id a resume does not adopt (its
+  `commands/` dir is still there; a `cancel` for it is refused after a resume, which is the safe
+  side). The listener reads at most 64 KB and waits at most 10 s for a request line, so an
+  unauthenticated peer cannot make the session hold a megabyte or a connection for as long as it
+  likes (STEER-7 review N3).
 
 ## tui3 and its fixes: the calm transcript (2026-11-20)
 
@@ -1413,3 +1539,8 @@ follow-up commit series that restores three things the first pass lost.
   for the project layer and `channel = true` autostart; a cloned repo's `.kelir/mcp.toml` can name
   any `command`. Documented in `docs/reference/mcp.md`; the trust gate belongs with STEER-7
   (`src/trust.rs`) and is not built here.
+- **`mcp_started.args` records the shape of the arguments, not their values (m6m, STEER-7).** The
+  spec lists `args` in the event; a tool argument can be a secret, and STEER-7 forbids a secret in
+  the log, the NDJSON stream and `observe`. Keys are kept and every string becomes
+  `<string, N bytes>`. The values are in the `tool_started` of the bash call that carried them, and
+  the broker requests are authenticated with the session token like every other verb.
