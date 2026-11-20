@@ -542,6 +542,39 @@ fn drive_in_a_pty(
     preamble: &[u8],
     expect: Vec<String>,
 ) -> PtyRun {
+    drive_pty_in_idle_or_turn(
+        cwd,
+        config,
+        state,
+        base_url,
+        Some(b"hello there"),
+        preamble,
+        expect,
+    )
+}
+
+/// The same, but the session only idles: nothing is typed except `preamble`, so
+/// the turn machinery never runs and whatever the session says on its own (the
+/// banner, an idle metadata fetch landing) is all that reaches the screen.
+fn drive_idle_in_a_pty(
+    cwd: std::path::PathBuf,
+    config: std::path::PathBuf,
+    state: std::path::PathBuf,
+    base_url: String,
+    expect: Vec<String>,
+) -> PtyRun {
+    drive_pty_in_idle_or_turn(cwd, config, state, base_url, None, b"", expect)
+}
+
+fn drive_pty_in_idle_or_turn(
+    cwd: std::path::PathBuf,
+    config: std::path::PathBuf,
+    state: std::path::PathBuf,
+    base_url: String,
+    message: Option<&[u8]>,
+    preamble: &[u8],
+    expect: Vec<String>,
+) -> PtyRun {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         .openpty(portable_pty::PtySize {
@@ -632,9 +665,11 @@ fn drive_in_a_pty(
             send(preamble);
             std::thread::sleep(Duration::from_millis(200));
         }
-        send(b"hello there");
-        let _ = wait_for(&screen, "hello there", Duration::from_secs(5));
-        send(b"\r");
+        if let Some(message) = message {
+            send(message);
+            let _ = wait_for(&screen, "hello there", Duration::from_secs(5));
+            send(b"\r");
+        }
         typed = true;
     }
     assert!(typed, "the TUI never drew: {:?}", text(&screen));
@@ -1634,6 +1669,101 @@ async fn the_tui_banner_is_silent_about_the_providers_own_window() {
         !run.screen.contains("tokens ("),
         "the banner carries no window line when the list answered: {:?}",
         run.screen
+    );
+}
+
+/// A metadata fetch that lands after the start's grace must still be applied to
+/// an *idle* session: an idle `--keep`/TUI session used to poll the fetch once
+/// and then block on the verb channel, so a slow answer was never applied until
+/// a turn began — `state`, and the banner's note about a fallback, stayed on
+/// "fetching" for as long as nobody typed. The list here answers 503 after 1.5 s
+/// (well past the 250 ms start grace), so the only way its line reaches the
+/// screen is the idle loop applying it by itself.
+#[tokio::test]
+async fn a_slow_list_is_applied_to_an_idle_tui_session() {
+    let mock = Mock::start_with_models(
+        Vec::new(),
+        support::ModelsAnswer::http(503, "later").slow(Duration::from_millis(1500)),
+    )
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        // Nothing is typed but `/quit`: the session only idles.
+        drive_idle_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            vec![
+                "» window 128000 tokens (default)".into(),
+                "the model list: http 503".into(),
+            ],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    let screen = &run.screen;
+    assert!(
+        screen.matches("window 128000 tokens").count() == 1,
+        "the late answer is applied once, while idle: {screen:?}"
+    );
+}
+
+/// F-window: the brief's offline case, without a mock at all — a base URL on a
+/// dead port. The list cannot answer, the window falls back to the default, and
+/// the banner says so with the reason instead of staying quiet about a number
+/// that decides when the session compacts (STEER-1 review N4).
+#[tokio::test]
+async fn an_offline_start_says_the_window_it_fell_back_to() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    // Port 9 is the discard port: nothing listens on it, so a connect is
+    // refused and the fetch fails. An idle session applies the answer as soon
+    // as it lands (it does not wait for a turn), so this test needs no mock and
+    // no message: the banner line appears while the session sits at the prompt.
+    let base_url = "http://127.0.0.1:9".to_string();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_idle_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            vec![
+                "» window 128000 tokens (default)".into(),
+                "the model list: offline".into(),
+            ],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    let screen = &run.screen;
+    assert!(
+        screen.matches("window 128000 tokens").count() == 1,
+        "one fallback line, not two: {screen:?}"
+    );
+    assert!(
+        screen.contains("the model list: offline"),
+        "the reason reaches the screen, not just the log: {screen:?}"
     );
 }
 

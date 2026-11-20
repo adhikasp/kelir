@@ -42,10 +42,18 @@ Left (each is pre-existing and outside this brief; none hides an action):
   `a_cancelled_call_is_not_counted_as_a_checked_call` lost its `#[ignore]` and gained the positive assertions
   (`2 calls`, `1 stopped`, the stopped line). Both assert the fixed behaviour, not a weakened one.
 - New e2e (pty, real binary, scripted mock): `the_tui_banner_names_a_window_only_when_it_fell_back` (a `/models`
-  that answers 503), `the_tui_banner_is_silent_about_the_providers_own_window`, and
-  `a_model_swap_announces_the_new_window`. New in-crate unit tests:
-  `the_banner_names_a_window_only_when_it_is_not_the_providers` and
+  that answers 503), `the_tui_banner_is_silent_about_the_providers_own_window`,
+  `a_model_swap_announces_the_new_window`, `an_offline_start_says_the_window_it_fell_back_to` (the brief's
+  dead-port case, no mock at all) and `a_slow_list_is_applied_to_an_idle_tui_session`. New in-crate unit
+  tests: `the_banner_names_a_window_only_when_it_is_not_the_providers` and
   `a_window_that_changes_after_a_swap_is_announced_once` (needed `Session`'s privacy, as the review said).
+- **A real bug the offline test found.** `Session::idle` polled the metadata fetch once for
+  `IDLE_MODELS_WAIT` (100 ms) and then blocked on the verb channel, so an answer that took longer than that
+  — a dead port here takes ~2 s to refuse — was never applied until a turn started. `state` and the banner's
+  note stayed on `fetching` for as long as nobody typed, which is exactly the window F-window is about. The
+  idle loop now `select!`s the verb channel against the next look at the fetch while one is running. Both
+  new pty tests were checked against the un-fixed loop (they fail there, pass here), so they pin the fix
+  rather than the symptom.
 - One judgement call: the banner suppresses the `"the model list: fetching"` note. It is not a degradation,
   it is "not known yet", and the real reason follows from `apply_list` a moment later; showing both would put
   two window lines on the same screen for a start that turns out fine.
