@@ -42,3 +42,5 @@ All suites ran through a count watchdog (`sh.exe` +20 or `bash.exe` +80 over the
 kills it by PID). It never fired in the final runs. The first run did fire, on `bash.exe`, with a threshold of
 +20 that was too tight for a box with other panes; `sh.exe` stayed flat. Nothing was killed by image name.
 The Unix half (F2, F3, the guard) cannot compile on this machine: it is verified only by the Linux gate.
+
+Gate result: Windows + Linux PASS at f68d6de (1247 passed, 3 skipped). The first Linux run caught an `Ordering` import that was Windows-only and a prompt format clash with the Herdr-line tests; both fixed, and `e2e_steer11` now asserts "description listed, body pull" (DEVIATIONS).
