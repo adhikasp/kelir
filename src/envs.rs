@@ -89,6 +89,10 @@ pub const VARS: &[Var] = &[
         "the machine config directory (`config.toml`, `prompt.md`, `skills/`)",
     ),
     read(
+        "KELIR_MCP_CONFIG",
+        "the machine `mcp.toml` to use instead of `<config dir>/mcp.toml` (the project's `.kelir/mcp.toml` still layers on top)",
+    ),
+    read(
         "KELIR_STATE_DIR",
         "the state root (sessions, model caches, bg jobs, locks)",
     ),
@@ -233,6 +237,12 @@ pub fn all() -> Vec<(String, String)> {
 /// kelir's to document.
 pub fn named(name: &str) -> Option<String> {
     std::env::var(name).ok()
+}
+
+/// The whole environment, for a child that gets a filtered copy of it (the MCP
+/// servers' allow-list). Not a kelir knob, so nothing here is documented.
+pub fn all_os() -> impl Iterator<Item = (OsString, OsString)> {
+    std::env::vars_os()
 }
 
 #[cfg(test)]

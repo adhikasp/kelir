@@ -1489,6 +1489,71 @@ follow-up commit series that restores three things the first pass lost.
   because a line number is stale after the next edit and the drift test checks that the named
   function exists. Top-level config keys share `load`; that is a known coarse pointer.
 
+## M6
+
+- **No `rmcp`; the JSON-RPC subset is hand-rolled (`src/mcp/rpc.rs`).** The spec says "built on
+  `rmcp` (client features only)" and the brief allows hand-rolling when it is too heavy. The client
+  needs `initialize`, `tools/list` (with `nextCursor`), `tools/call`, `notifications/cancelled`, a
+  `ping` answer and inbound notifications over newline-delimited stdio JSON; that is ~400 lines on
+  crates already linked. `rmcp` brings a server half, procedural macros, schema generation and its
+  own dependency tree for none of that, against the footprint rules (binary <= 20 MB, no daemon) and
+  the build-time budget. HTTP/SSE transport (a stretch in the brief) is not built: it is the part
+  `rmcp` would have made cheap. Nothing in the CLI or the log depends on the choice.
+- **`kelir mcp` prints the whole result even when it is over 10 KB.** The brief says a result over
+  10 KB "spills to the session dir like any output". The full text is always written to
+  `commands/mcp_<id>/out` and `mcp_settled.out_path` names it (the log never holds the result), but
+  the CLI's stdout carries every byte, because `kelir mcp srv tool | jq` has to work on a big
+  result. The model still gets the spill notice: when the output is not piped, the enclosing bash
+  call's own 10 KB rule spills it. Spilling in the CLI instead would have broken the pipe use.
+- **A `tool_error` text goes to stderr, structured content to stdout.** The spec says "stdout is
+  `structuredContent` as JSON or the text blocks joined"; an `isError` result (exit 1) prints its
+  text on stderr so a downstream `jq` never parses an error message as data. In a bash call the
+  model sees both streams in the same output.
+- **`mcp_started` carries `args`, `mcp_settled` carries `exit_code`/`bytes` instead.** The spec's
+  table lists the same six fields for both events; `args` is only meaningful (and only able to be
+  large) at the start, and the exit code is only known at the end. `docs/reference/events.md` is
+  generated from the code and says exactly which event has which.
+- **The socket is not token-authenticated yet.** The brief says every state-changing verb is
+  authenticated since STEER-7; STEER-7 has not landed on this branch's base. The `mcp` verb takes
+  the same unauthenticated path as `view` and `bg`, and the broker's two internal verbs
+  (`mcp-settle`, `mcp-notify`) are protected by their own per-session random key. When STEER-7
+  merges, the `mcp` verb needs the session token on the same path as `view`.
+- **The hint and `observe` do not list the servers yet.** Neither exists on this base (M5-B owns
+  them). `Broker::descriptions()` returns `(name, description)` for every configured server, ready
+  for whoever builds the hint; `kelir mcp ls` is the pull route today.
+- **A new env var, `KELIR_MCP_CONFIG`,** replaces the machine `mcp.toml` path (the way
+  `KELIR_CONFIG` does for `config.toml`). The brief did not ask for it; the e2e tests need a way to
+  hand a session a server list without writing into the real config dir.
+- **A server gets an allow-listed environment, not the session's (m6fix, review F6).** The spec
+  says nothing about it; inheriting everything handed `KELIR_OPENROUTER_API_KEY` and `HC_*` to
+  third-party `npx` packages. `src/mcp/rpc.rs` passes `PATH`, home/temp/system variables, locale,
+  proxy and CA variables, then the server's own `env` table, and nothing else.
+- **`kelir mcp <server> call <tool>` exists (m6fix, review N3).** The spec's three shapes make a
+  tool named `ls` unreachable; `call` is the escape hatch (a tool named `call` is `call call`).
+- **A lost session after the send is exit 4, and the session reads `mcp.toml` once (m6fix).** The
+  spec says exit 4 is "unknown outcome, never retried"; a transport failure after the request
+  reached the session is exactly that, so it no longer falls back to a one-shot run. Editing
+  `mcp.toml` during a session has no effect until the next start/resume (documented in
+  `docs/reference/mcp.md`).
+- **Project-defined servers start without a trust prompt (m6fix, review S1, open).** The spec asks
+  for the project layer and `channel = true` autostart; a cloned repo's `.kelir/mcp.toml` can name
+  any `command`. Documented in `docs/reference/mcp.md`; the trust gate belongs with STEER-7
+  (`src/trust.rs`) and is not built here.
+- **`mcp_started.args` records the shape of the arguments, not their values (m6m, STEER-7).** The
+  spec lists `args` in the event; a tool argument can be a secret, and STEER-7 forbids a secret in
+  the log, the NDJSON stream and `observe`. Keys are kept and every string becomes
+  `<string, N bytes>`. The values are in the `tool_started` of the bash call that carried them, and
+  the broker requests are authenticated with the session token like every other verb.
+- **Unix MCP servers run under a `sh` watcher (m6fix2, review F2).** `killpg` on drop does not run
+  when the session is `kill -9`ed. The server starts as `sh -c '<watcher> & exec server'`: the
+  watcher polls the session's pid once a second and kills the process group when it is gone (or
+  when the server exits). Worst case a killed session's server lives about a second. Windows keeps
+  its Job Object.
+- **A server's stderr hint is redacted (m6fix2, review F1).** `env` values of 6+ bytes become `***`
+  in the hint. A shorter value, or one the server transforms (encoded, split), is not caught;
+  secrets belong in `env` and servers should not echo them. An unknown TOML *key* is still echoed
+  by name (review N1, accepted).
+
 - **Status is a `ctl` verb, not a TUI panel (STEER-8).** The brief says status is "also shown in
   the TUI"; the TUI shows only the threshold warning line and its existing facts row, which
   stays lean (tui3). `kelir ctl <session> status [--json]` is the one surface. A `/status` TUI

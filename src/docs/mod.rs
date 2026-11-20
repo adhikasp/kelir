@@ -61,6 +61,11 @@ pub const TOPICS: &[Topic] = &[
         body: include_str!("../../docs/reference/verbs.md"),
     },
     Topic {
+        name: "mcp",
+        summary: "`mcp.toml` and `kelir mcp`: servers, commands, exit codes, the session broker, channels",
+        body: include_str!("../../docs/reference/mcp.md"),
+    },
+    Topic {
         name: "providers",
         summary: "the two providers: keys, retries, limits, model metadata",
         body: include_str!("../../docs/reference/providers.md"),

@@ -36,6 +36,8 @@ pub enum Command {
     View(ViewArgs),
     /// Background jobs: run, ls, out, wait, cancel.
     Bg(BgArgs),
+    /// MCP servers as a CLI: `ls`, `<server> ls`, `<server> <tool> [k=v …]`.
+    Mcp(McpArgs),
     /// Show which key each provider would use (never the key itself).
     Doctor(DoctorArgs),
     /// Read kelir's own reference (config, CLI, verbs, files, …).
@@ -230,6 +232,26 @@ pub struct DoctorArgs {
     /// One JSON object instead of the text report.
     #[arg(long)]
     pub json: bool,
+}
+
+/// `kelir mcp …`: the words are parsed by `mcp::args` (after `<server> <tool>`
+/// the flags belong to the call), so clap only collects them.
+#[derive(Debug, Args, Clone)]
+#[command(
+    override_usage = "kelir mcp ls [--json]
+       kelir mcp <SERVER> ls [--detail name|desc|full]
+       kelir mcp <SERVER> <TOOL> [k=v ...] [--json '{...}'] [--schema] [--envelope]
+       kelir mcp <SERVER> call <TOOL> ...   (a tool named ls or call)",
+    after_help = "Exit codes: 0 ok, 1 the tool reported isError, 2 usage, 3 server unavailable, 4 timeout (unknown outcome, never retried)."
+)]
+pub struct McpArgs {
+    /// `ls`, `<server> ls`, or `<server> <tool>` and their flags.
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "WORDS"
+    )]
+    pub words: Vec<String>,
 }
 
 /// `kelir bg …` inside a bash call (or standalone): jobs live in the session's

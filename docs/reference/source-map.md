@@ -57,6 +57,7 @@ The tree is flat on purpose: a file is a subject.
 | `src/spill.rs` | the head/tail excerpt and the spill notice |
 | `src/proc.rs` | process trees: Job Objects on Windows, process groups on Unix |
 | `src/bg.rs` | background jobs: the shim, status files, `bg` verbs, settle |
+| `src/mcp/` | `kelir mcp`: `config.rs` (`mcp.toml`), `rpc.rs` (stdio JSON-RPC client), `args.rs` (words, `k=v`, schema check), `render.rs` (result, exit codes), `broker.rs` (session side), `cli.rs` (client side) |
 
 ## The face
 

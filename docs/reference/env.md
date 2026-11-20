@@ -23,6 +23,7 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_GO_API_KEY` | the OpenCode Go key, an override for opencode's own store |
 | `KELIR_CONFIG` | the config file to use instead of the machine/project search |
 | `KELIR_CONFIG_DIR` | the machine config directory (`config.toml`, `prompt.md`, `skills/`) |
+| `KELIR_MCP_CONFIG` | the machine `mcp.toml` to use instead of `<config dir>/mcp.toml` (the project's `.kelir/mcp.toml` still layers on top) |
 | `KELIR_STATE_DIR` | the state root (sessions, model caches, bg jobs, locks) |
 | `KELIR_HOME` | replaces `$HOME`/`USERPROFILE` only (user skills, `~`); it does NOT move state or config, set `KELIR_STATE_DIR` and `KELIR_CONFIG_DIR` for that |
 | `KELIR_DOCS_ROOT` | the `docs/reference` directory `kelir docs --generate` and `--check` read (a checkout, or a copy) |

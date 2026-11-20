@@ -45,6 +45,7 @@ async fn main() -> ExitCode {
         Some(Command::Ctl(args)) => kelir::ctl::ctl(args).await,
         Some(Command::View(args)) => kelir::session::view(args).await,
         Some(Command::Bg(args)) => kelir::bg::cli(args.command).await,
+        Some(Command::Mcp(args)) => kelir::mcp::cli::run(args.words).await,
         Some(Command::Doctor(args)) => kelir::doctor::doctor(args),
         Some(Command::Docs(args)) => kelir::docs::cli(&args),
         Some(Command::BgShim(args)) => kelir::bg::shim_main(args).await,

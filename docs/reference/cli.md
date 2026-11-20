@@ -188,6 +188,14 @@ Background jobs: run, ls, out, wait, cancel
 | flag | takes | what it does |
 |---|---|---|
 
+### `kelir mcp`
+
+MCP servers as a CLI: `ls`, `<server> ls`, `<server> <tool> [k=v …]`
+
+| flag | takes | what it does |
+|---|---|---|
+| `<WORDS>` | `<WORDS>` | `ls`, `<server> ls`, or `<server> <tool>` and their flags |
+
 ### `kelir doctor`
 
 Show which key each provider would use (never the key itself)
@@ -217,7 +225,21 @@ Read kelir's own reference (config, CLI, verbs, files, …)
 
 ## `kelir mcp …`
 
-MCP servers as a CLI (M6).
+MCP servers as a CLI. clap only collects the words; `src/mcp/args.rs` parses
+them, because after `kelir mcp <server> <tool>` the flags belong to the call
+(`--json` means "the arguments, as a JSON object" there and "machine-readable"
+after `kelir mcp ls`).
+
+```text
+kelir mcp ls [--json]
+kelir mcp <server> ls [--detail name|desc|full]
+kelir mcp <server> <tool> [k=v ...] [--json '{...}'] [--schema] [--envelope]
+kelir mcp <server> call <tool> ...   (a tool named ls or call)
+```
+
+Exit codes: 0 ok, 1 the tool reported `isError`, 2 usage, 3 server
+unavailable, 4 timeout (unknown outcome, never retried). The whole story —
+`mcp.toml`, typing of `k=v`, the broker, channel servers — is `kelir docs mcp`.
 
 ## `kelir bg-shim`
 

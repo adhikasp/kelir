@@ -62,6 +62,15 @@ const CONTINUE_NOTE: &str = "[kelir] the session was interrupted between turns; 
 
 type Inbox = mpsc::UnboundedReceiver<Incoming>;
 
+/// A `kelir mcp` call that is logged (`mcp_started`) and running on a broker
+/// task; its client is answered when `mcp_settled` is written.
+struct McpPending {
+    reply: oneshot::Sender<Response>,
+    server: String,
+    tool: String,
+    parent: Option<String>,
+}
+
 pub async fn run(args: RunArgs) -> u8 {
     drive(Options {
         json: args.json,
@@ -307,6 +316,17 @@ struct Session {
     /// Tools turned off for the rest of the session. The list sent to the
     /// provider never changes.
     disabled: BTreeSet<String>,
+    /// The MCP broker: servers started lazily, kept for the session, and the
+    /// only thing that writes `mcp_started`/`mcp_settled` (M6).
+    mcp: crate::mcp::broker::Broker,
+    /// The loop's own inbox sender, so broker tasks can hand a finished call
+    /// back to the loop that owns the log writer.
+    mcp_inbox: Option<mpsc::UnboundedSender<Incoming>>,
+    /// Calls registered in the log and still running on a broker task.
+    mcp_pending: std::collections::HashMap<String, McpPending>,
+    /// Channel messages that arrived while a tool batch was settling; the next
+    /// boundary writes them, so a call's results stay contiguous.
+    mcp_channel_queue: Vec<(String, String)>,
     /// The provider call ids of this batch that have **not** settled yet, so a
     /// `stop --call` for a call that is done is refused (M1 review F2).
     live_calls: Vec<String>,
@@ -758,6 +778,10 @@ async fn drive(opts: Options) -> u8 {
     // watcher is the safety net that also catches a promoted call settling
     // while the session runs. Both arrive as one `bg` verb (see [`Session::note_bg`]).
     watch_bg(session.dir.join("bg"), tx.clone());
+    // MCP: broker tasks report back through the same channel, and channel
+    // servers connect now.
+    session.mcp_inbox = Some(tx.clone());
+    session.mcp.attach(tx.clone());
 
     // The interactive session: the TUI runs as a task beside the loop, and all
     // it can do is send verbs into the same channel the socket feeds.
@@ -850,6 +874,7 @@ async fn drive(opts: Options) -> u8 {
     }
 
     let code = session.run(&mut rx).await;
+    session.mcp.shutdown().await;
     if let Some((watchdog, to_tui)) = tui {
         // One last paint, then the terminal goes back to the shell.
         let _ = to_tui.send(UiEvent::Quit);
@@ -1511,6 +1536,14 @@ impl Session {
             turn: prepared.resume.as_ref().map(|read| read.turns).unwrap_or(0),
             turn_steps: 0,
             disabled: BTreeSet::new(),
+            mcp: crate::mcp::broker::Broker::new(
+                prepared.cwd.clone(),
+                prepared.dir.clone(),
+                prepared.id.clone(),
+            ),
+            mcp_inbox: None,
+            mcp_pending: std::collections::HashMap::new(),
+            mcp_channel_queue: Vec::new(),
             refused_fields: BTreeSet::new(),
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
@@ -1676,6 +1709,49 @@ impl Session {
                 out_path,
                 spilled: false,
                 result: Payload::text(result),
+            })?;
+            unknown += 1;
+        }
+        // The same for `kelir mcp` calls: `mcp_started` with no `mcp_settled`
+        // means the session died while the server was running the tool. The
+        // outcome is unknown (exit 4) and the call is not run again.
+        let settled: std::collections::HashSet<String> = self
+            .events
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::McpSettled { mcp_id, .. } => Some(mcp_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let orphans: Vec<(String, String, String, Option<String>)> = self
+            .events
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::McpStarted {
+                    mcp_id,
+                    server,
+                    tool,
+                    parent_call_id,
+                    ..
+                } if !settled.contains(mcp_id) => Some((
+                    mcp_id.clone(),
+                    server.clone(),
+                    tool.clone(),
+                    parent_call_id.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        for (mcp_id, server, tool, parent_call_id) in orphans {
+            self.record(EventBody::McpSettled {
+                mcp_id,
+                server,
+                tool,
+                outcome: "unknown".into(),
+                exit_code: crate::mcp::render::EXIT_TIMEOUT,
+                bytes: 0,
+                out_path: String::new(),
+                parent_call_id,
             })?;
             unknown += 1;
         }
@@ -1910,12 +1986,23 @@ impl Session {
             retry,
             warn: self.warn(),
         };
-        Response::ok(
-            "status",
-            0,
-            "now",
-            crate::spend::status_json(&self.tally, &live),
-        )
+        let mut state = crate::spend::status_json(&self.tally, &live);
+        // MCP servers: name, state, tool count and channel flag only. Never
+        // config, env, descriptions or server stderr (those can hold secrets).
+        let servers = self.mcp.servers();
+        let mcp: Vec<Value> = servers["servers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| {
+                let state = s["state"].as_str().unwrap_or("");
+                // A `failed: ...` state carries server text; keep the word only.
+                let state = if state.starts_with("failed") { "failed" } else { state };
+                json!({"name": s["name"], "state": state, "tools": s["tools"], "channel": s["channel"]})
+            })
+            .collect();
+        state["mcp"] = Value::Array(mcp);
+        Response::ok("status", 0, "now", state)
     }
 
     fn sync(&mut self) {
@@ -2074,10 +2161,12 @@ impl Session {
         }
         let from = request.from.clone();
         let name = request.verb.clone();
-        // `status` is read-only: answered where it is read, in any state (mid
-        // request, in a retry wait, paused), and never logged or queued.
         if name == "status" {
             let _ = reply.send(self.status_answer());
+            return None;
+        }
+        if crate::mcp::broker::is_mcp_verb(&name) {
+            self.mcp_verb(request, reply);
             return None;
         }
         // `bg-spawn` is the one thing a job cannot do itself: on Windows a
@@ -2153,6 +2242,10 @@ impl Session {
             let _ = reply.send(self.status_answer());
             return AtOnce::Rejected;
         }
+        if crate::mcp::broker::is_mcp_verb(&name) {
+            self.mcp_verb(request, reply);
+            return AtOnce::Rejected;
+        }
         if name == "bg-spawn" {
             let answer = self.bg_spawn_answer(&from, &request);
             let _ = reply.send(answer);
@@ -2198,6 +2291,232 @@ impl Session {
         // why it could not), and a client must not wait on a reply nobody kept.
         let _ = reply.send(answer);
         AtOnce::Applied(end.map(Box::new))
+    }
+
+    // ----------------------------------------------------------------- MCP
+
+    /// The broker's verbs (`mcp`, and the internal `mcp-settle`/`mcp-notify`).
+    /// A `call` is logged here (`mcp_started`), run on a task, and settled by
+    /// the task's `mcp-settle` coming back through the inbox, so the log has
+    /// one writer and the client's answer never outruns `mcp_settled`.
+    fn mcp_verb(&mut self, request: Request, reply: oneshot::Sender<Response>) {
+        match request.verb.as_str() {
+            crate::mcp::broker::VERB_SETTLE | crate::mcp::broker::VERB_NOTIFY => {
+                let internal = request.from == crate::mcp::broker::FROM_INTERNAL
+                    && request.args.get("key").and_then(Value::as_str) == Some(self.mcp.key());
+                if !internal {
+                    let _ = reply.send(Response::error(format!(
+                        "{}: an internal verb",
+                        request.verb
+                    )));
+                } else if request.verb == crate::mcp::broker::VERB_SETTLE {
+                    self.mcp_settle(&request.args);
+                    let _ = reply.send(Response::error("settled"));
+                } else {
+                    self.mcp_notify(&request.args);
+                    let _ = reply.send(Response::error("noted"));
+                }
+            }
+            _ => self.mcp_request(request, reply),
+        }
+    }
+
+    fn mcp_request(&mut self, request: Request, reply: oneshot::Sender<Response>) {
+        use crate::mcp::broker as broker_mod;
+        let args = request.args;
+        if args.get("op").and_then(Value::as_str) != Some("call") {
+            let broker = self.mcp.clone();
+            tokio::spawn(async move {
+                let _ = reply.send(broker.read_op(&args).await);
+            });
+            return;
+        }
+        let text = |key: &str| {
+            args.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        let (server, tool) = (text("server"), text("tool"));
+        if !self.mcp.has_server(&server) {
+            let _ = reply.send(Response::ok(
+                broker_mod::VERB,
+                0,
+                "now",
+                self.mcp.unknown_server(&server),
+            ));
+            return;
+        }
+        let arguments = args.get("args").cloned().unwrap_or_else(|| json!({}));
+        let envelope = args.get("envelope").and_then(Value::as_bool) == Some(true);
+        let parent = args
+            .get("parent_call_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let mcp_id = format!("mcp_{}", ulid::Ulid::new().to_string().to_lowercase());
+        if let Err(message) = self.record(EventBody::McpStarted {
+            mcp_id: mcp_id.clone(),
+            server: server.clone(),
+            tool: tool.clone(),
+            // The shape only: a tool argument can be a secret (STEER-7).
+            args: Payload::value(crate::mcp::loggable_args(&arguments)),
+            parent_call_id: parent.clone(),
+        }) {
+            let _ = reply.send(Response::error(message));
+            return;
+        }
+        self.sync();
+        self.mcp_pending.insert(
+            mcp_id.clone(),
+            McpPending {
+                reply,
+                server: server.clone(),
+                tool: tool.clone(),
+                parent,
+            },
+        );
+        let Some(inbox) = self.mcp_inbox.clone() else {
+            let output = crate::mcp::CallOutput::failed(
+                crate::mcp::render::EXIT_UNAVAILABLE,
+                "unavailable",
+                "kelir mcp: the session is not serving MCP calls",
+            );
+            self.mcp_settle(&json!({"mcp_id": mcp_id, "output": output}));
+            return;
+        };
+        // `tools` can turn off one tool (`mcp:<server>.<tool>`) or a whole
+        // server (`mcp:<server>`); the call is still logged, and refused.
+        if self.disabled.contains(&format!("mcp:{server}.{tool}"))
+            || self.disabled.contains(&format!("mcp:{server}"))
+        {
+            let output = crate::mcp::CallOutput::failed(
+                crate::mcp::render::EXIT_TOOL_ERROR,
+                "disabled",
+                format!("kelir mcp: {server}.{tool}: disabled by user"),
+            );
+            self.mcp_settle(&json!({"mcp_id": mcp_id, "output": output}));
+            return;
+        }
+        let broker = self.mcp.clone();
+        tokio::spawn(async move {
+            let output = broker
+                .call(&server, &tool, arguments, envelope, &mcp_id)
+                .await;
+            let args = json!({"key": broker.key(), "mcp_id": mcp_id, "output": output});
+            let (settle_reply, _dropped) = oneshot::channel();
+            let _ = inbox.send(Incoming {
+                request: Request::new(
+                    crate::mcp::broker::VERB_SETTLE,
+                    args,
+                    crate::mcp::broker::FROM_INTERNAL,
+                ),
+                reply: settle_reply,
+                action: None,
+            });
+        });
+    }
+
+    /// Record `mcp_settled` and only then answer the client.
+    fn mcp_settle(&mut self, args: &Value) {
+        let Some(id) = args.get("mcp_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(pending) = self.mcp_pending.remove(id) else {
+            return;
+        };
+        let output: crate::mcp::CallOutput = args
+            .get("output")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_else(|| {
+                crate::mcp::CallOutput::failed(
+                    crate::mcp::render::EXIT_UNAVAILABLE,
+                    "unavailable",
+                    "kelir mcp: the broker lost the result",
+                )
+            });
+        let recorded = self.record(EventBody::McpSettled {
+            mcp_id: id.to_string(),
+            server: pending.server,
+            tool: pending.tool,
+            outcome: output.outcome.clone(),
+            exit_code: output.exit_code,
+            bytes: output.bytes,
+            out_path: output.out_path.clone(),
+            parent_call_id: pending.parent,
+        });
+        self.sync();
+        let answer = match recorded {
+            Ok(_) => Response::ok(
+                crate::mcp::broker::VERB,
+                0,
+                "now",
+                serde_json::to_value(&output).unwrap_or(Value::Null),
+            ),
+            Err(message) => Response::error(message),
+        };
+        let _ = pending.reply.send(answer);
+    }
+
+    /// An inbound notification from a server. A channel message becomes a
+    /// `source` event (kind `channel`) at the next safe boundary; handling
+    /// policy (waking the model) is M10's.
+    fn mcp_notify(&mut self, args: &Value) {
+        let server = args
+            .get("server")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let method = args.get("method").and_then(Value::as_str).unwrap_or("");
+        let params = args.get("params").cloned().unwrap_or(Value::Null);
+        if method == "kelir/unavailable" {
+            let why = params
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let _ = self.record(EventBody::Error {
+                location: "mcp".into(),
+                message: format!("channel server `{server}` is unavailable: {why}"),
+                retryable: false,
+                status: None,
+                attempt: None,
+                retry_in_ms: None,
+            });
+            self.sync();
+            return;
+        }
+        if !method.starts_with("notifications/claude/channel") {
+            return;
+        }
+        let mut text = match params.get("content").and_then(Value::as_str) {
+            Some(text) => text.to_string(),
+            None => params.to_string(),
+        };
+        if let Some(meta) = params.get("meta").filter(|meta| !meta.is_null()) {
+            text.push_str(&format!("\n[meta {meta}]"));
+        }
+        self.mcp_channel_queue.push((server, text));
+        // Mid-batch the queue waits (a call's results stay contiguous); any
+        // other time it is written now.
+        if self.live_calls.is_empty() {
+            self.flush_channel_queue();
+        }
+    }
+
+    fn flush_channel_queue(&mut self) {
+        if self.mcp_channel_queue.is_empty() {
+            return;
+        }
+        for (server, text) in std::mem::take(&mut self.mcp_channel_queue) {
+            let _ = self.record(EventBody::Source {
+                kind: "channel".into(),
+                name: server,
+                text: Some(Payload::text(text)),
+                path: None,
+            });
+        }
+        self.sync();
     }
 
     /// The `bg-spawn` answer: the shim only ever answers a job, and a job is
@@ -2316,6 +2635,7 @@ impl Session {
 
     /// Apply the verbs due at `boundary`.
     async fn apply(&mut self, boundary: Boundary) -> Result<Applied, String> {
+        self.flush_channel_queue();
         let mut applied = Applied::default();
         for pending in self.scheduler.due(boundary) {
             self.apply_pending(pending, &mut applied).await?;
@@ -5185,6 +5505,16 @@ mod tests {
             turn: 0,
             turn_steps: 0,
             disabled: BTreeSet::new(),
+            mcp: crate::mcp::broker::Broker::with_servers(
+                Default::default(),
+                None,
+                std::env::temp_dir(),
+                std::env::temp_dir(),
+                "ses_1".into(),
+            ),
+            mcp_inbox: None,
+            mcp_pending: std::collections::HashMap::new(),
+            mcp_channel_queue: Vec::new(),
             refused_fields: BTreeSet::new(),
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
