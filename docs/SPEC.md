@@ -83,8 +83,16 @@ Reaching the socket is **not** authorisation. Two things gate every request:
   the signing key is returned by any verb. `kelir bg run` sends the internal `bg-spawn` verb with
   its command, working directory and environment, and the **session** mints the id, starts the
   shim and hands it the key and capability on the shim's stdin pipe; the answer is the id and
-  nothing else. A `bg-spawn` that names a job id (owned or not) is refused, and `bg-claim` is an
-  acknowledgement (an id) only. No verb reads or echoes a caller-named path: a settled job's `out`
+  nothing else. From a `bg-spawn` request the session honours only `cmd`, `shell`, `cwd` and
+  `env` (filtered: well-formed names, bounded, and without `KELIR_TOKEN`/`KELIR_SOCK`); the shim's
+  kind, the socket it reports to, the token and the Windows job name are the session's own, and
+  a `call` is kept only if that call is running. No verb writes its request wholesale to the log:
+  each verb logs a fixed set of fields, and a `bg-spawn` logs only its `dir`, `cwd` and the
+  number of environment variables (never the environment, the token or the command). Tool
+  children (every `bash` call and job) do not inherit `OPENROUTER_API_KEY` or `KELIR_GO_API_KEY`;
+  a command that needs a provider key must be given one explicitly. A key under a custom
+  `key_env` name is the user's own variable and is passed through. A `bg-spawn` that names a job id (owned or not) is refused, and `bg-claim` (retired) is an
+  acknowledgement (an id) only, from a budget of `16` of its own. No verb reads or echoes a caller-named path: a settled job's `out`
   must lie inside the session's own `bg/`. The number of ids one session mints on request is
   bounded (`256`). Every job directory and
   status/out path in a request must resolve **inside the session's own `bg/` or `commands/`**,
@@ -114,9 +122,14 @@ Reaching the socket is **not** authorisation. Two things gate every request:
   friends (and `WRITE_DAC`) for its own user with an Owner Rights DACL, and on Linux it clears
   `PR_SET_DUMPABLE`; it holds the key only for its lifetime and overwrites its own copy when it
   exits. That stops a sibling tool child's ordinary `ReadProcessMemory`/`/proc/<pid>/mem` read. It
-  does **not** stop an elevated administrator enabling `SeDebugPrivilege`, root, a debugger run
-  by the same user as the shim's parent, or a read of the session's own memory, which holds every
-  key, so those stay outside the boundary; and `events.jsonl` and the session directory
+  does **not** stop an elevated administrator enabling `SeDebugPrivilege`, root or a debugger run
+  by the same user as the shim's parent, so those stay outside the boundary. The **session
+  process** holds every job's key, so it gets the same treatment at startup, before the first key
+  exists: on Windows the Owner Rights DACL (terminate, set-quota, limited query and synchronize
+  remain, so the harness can still kill it and `cancel`/liveness checks still work); on Linux
+  `PR_SET_DUMPABLE=0`. On Linux that is what protects the keys against a same-user process where
+  `kernel.yama.ptrace_scope=0`; with Yama at 1 or more the kernel already refuses it. Every shim
+  that holds a key is hardened, whatever its `--kind`. And `events.jsonl` and the session directory
   are writable by any same-user process, so code that deliberately rewrites the log (a forged
   `bg_started.pubkey` or `tool_started.dir`) is inside the boundary. The boundary is other users,
   other sessions, stray processes and **the model's own tools acting through the files and the

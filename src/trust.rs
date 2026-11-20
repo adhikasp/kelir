@@ -88,6 +88,11 @@ pub const REFUSAL_BUDGET: u32 = 32;
 /// the session mint for ever. Past it, a claim is refused (and the refusal is
 /// logged at most [`REFUSAL_BUDGET`] times).
 pub const CLAIM_BUDGET: u32 = 256;
+/// How many acknowledgement ids `bg-claim` will hand out. The verb is retired
+/// (`kelir bg run` asks `bg-spawn`), but still answers; it has a budget of its
+/// own so a token holder cannot spend [`CLAIM_BUDGET`] through it and block the
+/// model's own `bg run` (STEER-7 review round 4).
+pub const ACK_BUDGET: u32 = 16;
 
 // ------------------------------------------------------------------ the token
 
@@ -506,6 +511,8 @@ pub struct Trust {
     refusals: Mutex<u32>,
     /// Ids this session may still mint on request (see [`CLAIM_BUDGET`]).
     claims: Mutex<u32>,
+    /// What `bg-claim` may still acknowledge (see [`ACK_BUDGET`]).
+    acks: Mutex<u32>,
 }
 
 impl Trust {
@@ -516,6 +523,7 @@ impl Trust {
             jobs: Mutex::new(HashMap::new()),
             refusals: Mutex::new(REFUSAL_BUDGET),
             claims: Mutex::new(CLAIM_BUDGET),
+            acks: Mutex::new(ACK_BUDGET),
         }
     }
 
@@ -671,6 +679,17 @@ impl Trust {
             Err(_) => return Err("the job registry is unusable".to_string()),
         }
         self.mint_for("bg", call_id.map(str::trim).filter(|call| !call.is_empty()))
+    }
+
+    /// `bg-claim`, the retired verb: an id for an acknowledgement, from a
+    /// budget of its own ([`ACK_BUDGET`]) so it can never starve [`Trust::claim`].
+    pub fn claim_ack(&self) -> Result<String, String> {
+        match self.acks.lock() {
+            Ok(mut left) if *left > 0 => *left -= 1,
+            Ok(_) => return Err("bg-claim: retired, and its small allowance is spent".to_string()),
+            Err(_) => return Err("the job registry is unusable".to_string()),
+        }
+        self.mint_for("bg", None).map(|(id, _)| id)
     }
 
     /// Is `id` a job this session minted? The only ownership there is.
@@ -1521,6 +1540,27 @@ mod tests {
         assert!(trust.key("3-1-1").is_some());
         assert!(trust.capability("3-1-1").is_none());
         assert!(!trust.proves("3-1-1", Some("anything")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod ack_budget_tests {
+    use super::*;
+
+    #[test]
+    fn the_retired_claim_verb_cannot_spend_the_spawn_budget() {
+        let dir = std::env::temp_dir().join(format!("kelir-ack-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let trust = Trust::new(dir.clone(), "t".into());
+        let mut granted = 0;
+        for _ in 0..(CLAIM_BUDGET * 2) {
+            if trust.claim_ack().is_ok() {
+                granted += 1;
+            }
+        }
+        assert_eq!(granted, ACK_BUDGET);
+        assert!(trust.claim(None).is_ok(), "a spawn can still mint an id");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

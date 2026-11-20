@@ -1365,6 +1365,24 @@ this differs from the spec text, or needed a call the brief left open:
   same-user memory reads (Owner Rights DACL) and clears the key on exit; an elevated administrator
   with `SeDebugPrivilege`, or root, is still outside the boundary. Per-id refusal budgets
   (review nit) are not done: the budget stays shared (32 events per session).
+- **No verb logs request args wholesale; the session pins what a spawn may choose (steer7fix4,
+  steer7d review B1/S1/S2).** A refused `bg-spawn` wrote the caller's whole environment and the
+  session token into `events.jsonl`. Now every verb logs a per-verb whitelist of fields
+  (`verbs::loggable_args`) and a `bg-spawn` logs `dir`, `cwd` and a count of environment
+  variables only. The session takes only `cmd`, `shell`, `cwd` and a filtered `env` from a spawn
+  and sets the kind, the socket, the token and the job name itself, so a child cannot redirect the
+  shim's report or ask for an unhardened shim; every shim that holds a key is hardened. The
+  session process is hardened too (Windows Owner Rights DACL keeping terminate/limited query;
+  Linux `PR_SET_DUMPABLE=0`), which closes the same-user read of all job keys on Windows; on
+  Linux it matters only where Yama is off. Still outside the boundary: SeDebugPrivilege, root,
+  kernel debuggers, and rewriting `events.jsonl`. Tool children no longer inherit
+  `OPENROUTER_API_KEY`/`KELIR_GO_API_KEY` (so a nested `kelir run` started from a bash call needs
+  the key given on its command line; git, cargo and `kelir bg/ctl/view` are unaffected); a custom
+  `key_env` variable is not scrubbed. `bg-claim` stays as a retired acknowledgement with its own
+  budget (16) so it cannot starve `bg-spawn`. Deviation from the committed test
+  `a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose`: its "something must
+  connect to the caller's listener" guard could only hold on the unfixed code, so it now asks
+  that the spawned job really started and that nothing leaked.
 - **What the boundary is, honestly.** It is other users, other sessions, stray processes and the
   model's own tools acting through the files and the socket kelir exposes. It is not same-user
   code that reads another process's memory (a debugger, `ReadProcessMemory`) or rewrites

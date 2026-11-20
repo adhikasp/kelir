@@ -48,6 +48,11 @@ pub const OPENROUTER_ENV: &str = "OPENROUTER_API_KEY";
 /// opencode's own store. It is also the `key_env` a config leaves unset.
 pub const GO_ENV: &str = "KELIR_GO_API_KEY";
 
+/// The variables a tool child (a `bash` call, a `kelir bg run` job) does not
+/// inherit: the built-in providers' keys. A key set through a provider's own
+/// `key_env` under another name is the user's variable and is not touched.
+pub const PROVIDER_KEY_ENVS: [&str; 2] = [OPENROUTER_ENV, GO_ENV];
+
 /// How long to wait before re-reading a store entry that is already expired:
 /// opencode rotates a token as a side effect of running, and the CLI call that
 /// produced the parse may have been racing exactly that write.

@@ -172,6 +172,17 @@ async fn a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose(
         json!({"verb": "bg-spawn", "from": "job", "token": token, "args": args}),
     )
     .await;
+    let spawned_job_id = answer["state"]["id"].as_str().map(str::to_string);
+    let mut spawned_job_started = false;
+    if let Some(id) = &spawned_job_id {
+        for _ in 0..50 {
+            if status_path(&session, id).exists() {
+                spawned_job_started = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
     let heard = heard.await.unwrap();
     eprintln!(
         "sock-redirect: spawn answer ok={} heard={}",
@@ -232,9 +243,13 @@ async fn a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose(
         json!(true),
         "the spawn was refused, so this proved nothing: {answer}"
     );
+    // Not vacuous: the spawn was accepted and the job it made is a real one that the
+    // session knows (its status file exists). Nothing may connect to the caller's endpoint
+    // at all now that the session pins `sock` to its own (round-4 fix; the original
+    // guard demanded a connection, which only the unfixed code made).
     assert!(
-        heard.is_some(),
-        "nothing connected to the caller's endpoint: the test is vacuous"
+        spawned_job_started,
+        "the spawn was accepted but its job never wrote a status file: nothing was proved"
     );
     assert!(
         leaked == 0,

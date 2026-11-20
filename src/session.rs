@@ -711,6 +711,14 @@ async fn drive(opts: Options) -> u8 {
     // The trust boundary (STEER-7): a token for this session, and the registry
     // of the jobs it may be told about. Made before anything can connect, so
     // there is no window in which the socket answers without one.
+    // The session holds every job's signing key for as long as it lives, so it
+    // is closed to its own user's memory reads before the first key exists
+    // (Windows: a DACL that keeps terminate/limited-query for the owner;
+    // Linux: not dumpable). Best effort, said on stderr, never fatal
+    // (STEER-7 review round 4, S2).
+    if let Err(error) = crate::bg::harden_process() {
+        eprintln!("kelir: warning: {error}");
+    }
     let trust = match crate::trust::Trust::create(prepared.dir.clone()) {
         Ok(trust) => std::sync::Arc::new(trust),
         Err(message) => {
@@ -2089,7 +2097,7 @@ impl Session {
             return Response::error("bg-spawn: an internal verb; jobs report themselves");
         }
         if request.verb == "bg-claim" {
-            return self.bg_claim_answer(request);
+            return self.bg_claim_answer();
         }
         if let Err(error) = self.trust.check_spawn(request) {
             return match self.refuse_verb("bg-spawn", &request.args, from, &error) {
@@ -2097,33 +2105,25 @@ impl Session {
                 Err(message) => Response::error(message),
             };
         }
-        match crate::trust::spawn_request(request)
-            .and_then(|spawn| crate::bg::spawn_shim_for_client(&self.trust, &spawn))
-        {
+        // Only `cmd`, `shell`, `cwd` and a filtered `env` are the caller's; the
+        // kind, the socket, the token, the job name and the call are the
+        // session's own (STEER-7 review round 4, S1).
+        let call_is_live = |call: &str| self.live_calls.iter().any(|live| live == call);
+        match crate::trust::spawn_request(request).and_then(|spawn| {
+            let spawn = spawn.pinned(&self.ctx.sock, &self.ctx.token, call_is_live);
+            crate::bg::spawn_shim_for_client(&self.trust, &spawn)
+        }) {
             Ok(spawned) => Response::ok("bg-spawn", 0, "now", json!({"id": spawned.id})),
             Err(error) => Response::error(error),
         }
     }
 
-    /// `bg-claim`: reserve one job id, and answer with that id only (an
-    /// acknowledgement). `kelir bg run` no longer uses it — it asks `bg-spawn`,
-    /// and the session starts the shim.
-    fn bg_claim_answer(&mut self, request: &Request) -> Response {
-        let call = request
-            .args
-            .get("call")
-            .and_then(|call| call.as_str())
-            .map(str::trim)
-            .filter(|call| !call.is_empty())
-            // A claim may only name a call this session is running: the call
-            // id is public, but the claim budget is what keeps an authenticated
-            // flood finite either way.
-            .filter(|call| self.live_calls.iter().any(|live| live == call));
-        match self.trust.claim(call) {
-            // An acknowledgement: the id is not a secret, the capability and
-            // the signing key are the session's and the shim's alone, and no
-            // verb returns either.
-            Ok((id, _capability)) => Response::ok("bg-claim", 0, "now", json!({"id": id})),
+    /// `bg-claim`, retired: nothing sends it, so it answers an id and nothing
+    /// else, from a small budget of its own (it must not spend the one
+    /// `bg-spawn` mints from).
+    fn bg_claim_answer(&mut self) -> Response {
+        match self.trust.claim_ack() {
+            Ok(id) => Response::ok("bg-claim", 0, "now", json!({"id": id})),
             Err(error) => Response::error(error),
         }
     }
@@ -2188,7 +2188,9 @@ impl Session {
     ) -> Result<crate::event::LogEvent, String> {
         self.record(EventBody::Verb {
             name: name.to_string(),
-            args: Payload::value(args.clone()),
+            // Never the request's args wholesale: a whitelist per verb
+            // (STEER-7 review round 4, B1).
+            args: Payload::value(verbs::loggable_args(name, args)),
             from: from.to_string(),
             boundary: boundary.to_string(),
             error,

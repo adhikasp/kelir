@@ -734,6 +734,27 @@ impl SpawnRequest {
         }
     }
 
+    /// The request as the session will honour it. Only `cmd`, `shell`, `cwd` and
+    /// `env` are the caller's: the kind, the socket the shim reports to, the
+    /// token, the Windows job name and the call are the session's own, so a
+    /// tool child cannot aim the shim's report at its own listener or ask for a
+    /// shim that skips hardening (STEER-7 review round 4, S1). `call` survives
+    /// only when `call_is_live` says the session is running that call.
+    pub fn pinned(mut self, sock: &str, token: &str, call_is_live: impl Fn(&str) -> bool) -> Self {
+        self.kind = KIND_JOB.to_string();
+        self.sock = Some(sock.to_string()).filter(|sock| !sock.trim().is_empty());
+        self.token = Some(token.to_string()).filter(|token| !token.is_empty());
+        self.job = None;
+        self.id = None;
+        self.call = self
+            .call
+            .take()
+            .map(|call| call.trim().to_string())
+            .filter(|call| !call.is_empty() && call_is_live(call));
+        self.env = filter_spawn_env(std::mem::take(&mut self.env));
+        self
+    }
+
     pub fn launch(&self, id: &str) -> Launch<'_> {
         // A spawn request never carries a capability in: the session mints the
         // job's capability itself and starts the shim with it
@@ -759,6 +780,30 @@ impl SpawnRequest {
             cwd: self.cwd.as_ref().map(PathBuf::from),
         }
     }
+}
+
+/// How many variables, and how many bytes of them, a spawn request may bring.
+const SPAWN_ENV_MAX_VARS: usize = 4096;
+const SPAWN_ENV_MAX_BYTES: usize = 512 * 1024;
+
+/// The caller's environment as the session will pass it on: well-formed names
+/// only, bounded, and without the variables the session sets itself.
+fn filter_spawn_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut total = 0usize;
+    let mut out = Vec::new();
+    for (name, value) in env {
+        let sound = !name.is_empty()
+            && !name.contains(['=', '\0'])
+            && !value.contains('\0')
+            && !name.eq_ignore_ascii_case(crate::trust::TOKEN_ENV)
+            && !name.eq_ignore_ascii_case("KELIR_SOCK");
+        total += name.len() + value.len();
+        if !sound || out.len() >= SPAWN_ENV_MAX_VARS || total > SPAWN_ENV_MAX_BYTES {
+            continue;
+        }
+        out.push((name, value));
+    }
+    out
 }
 
 /// Start the shim for `kelir bg run`.
@@ -988,8 +1033,11 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     // the process to its own user's ordinary memory reads (Windows; on Unix
     // `/proc/<pid>/mem` is closed to a non-ptrace-capable sibling by the
     // kernel's ptrace rules where Yama is on, and by dumpable below).
-    if key.is_some() && args.kind == KIND_JOB {
-        harden_process();
+    // Every shim that holds a key, whatever `--kind` it was started with.
+    if key.is_some()
+        && let Err(error) = harden_process()
+    {
+        eprintln!("kelir bg-shim: {error}");
     }
     if let Err(error) = std::fs::create_dir_all(&dir) {
         eprintln!("kelir bg-shim: cannot create {}: {error}", dir.display());
@@ -1136,6 +1184,11 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
         // The same binary this shim is: `kelir bg run` inside a call works even
         // when kelir is not on PATH.
         command.env("KELIR_BIN", binary);
+    }
+    // The model's tools do not get the provider's keys: the shim and the
+    // session keep them, a command that needs one says so in its own command.
+    for name in crate::credentials::PROVIDER_KEY_ENVS {
+        command.env_remove(name);
     }
     if let Some(call) = &args.call {
         command.env("KELIR_CALL_ID", call);
@@ -1286,15 +1339,25 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
 /// Make this process's memory unreadable to other processes of the same user,
 /// as far as the platform allows. Best effort: a failure is a note on stderr,
 /// not a reason to not run the job.
-fn harden_process() {
+pub fn harden_process() -> Result<(), String> {
     #[cfg(windows)]
-    if let Err(error) = crate::proc::win::deny_same_user_memory_access() {
-        eprintln!("kelir bg-shim: {error}");
+    {
+        crate::proc::win::deny_same_user_memory_access()
     }
     #[cfg(target_os = "linux")]
-    // SAFETY: prctl(PR_SET_DUMPABLE, 0) only changes this process's flag.
-    unsafe {
-        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+    {
+        // SAFETY: prctl(PR_SET_DUMPABLE, 0) only changes this process's flag.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+            return Err(format!(
+                "cannot make this process non-dumpable: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        Ok(())
     }
 }
 
@@ -2600,5 +2663,53 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod pinned_spawn_tests {
+    use super::*;
+
+    fn request() -> SpawnRequest {
+        SpawnRequest {
+            dir: "bg".into(),
+            id: Some("bg_x".into()),
+            out: String::new(),
+            cmd: "echo".into(),
+            shell: vec!["bash".into(), "-c".into()],
+            kind: "x".into(),
+            call: Some("call_1".into()),
+            job: Some("evil-job".into()),
+            sock: Some("evil-sock".into()),
+            token: Some("evil-token".into()),
+            cwd: Some("w".into()),
+            env: vec![
+                ("KELIR_TOKEN".into(), "evil-token".into()),
+                ("kelir_sock".into(), "evil-sock".into()),
+                ("A".into(), "1".into()),
+                ("B=C".into(), "x".into()),
+                (String::new(), "x".into()),
+                ("N".into(), "a\0b".into()),
+            ],
+        }
+    }
+
+    #[test]
+    fn only_cmd_shell_cwd_and_env_stay_the_callers() {
+        let pinned = request().pinned("the-sock", "the-token", |call| call == "call_1");
+        assert_eq!(pinned.kind, KIND_JOB);
+        assert_eq!(pinned.sock.as_deref(), Some("the-sock"));
+        assert_eq!(pinned.token.as_deref(), Some("the-token"));
+        assert_eq!(pinned.job, None);
+        assert_eq!(pinned.id, None);
+        assert_eq!(pinned.call.as_deref(), Some("call_1"));
+        assert_eq!(pinned.cwd.as_deref(), Some("w"));
+        assert_eq!(pinned.env, vec![("A".to_string(), "1".to_string())]);
+    }
+
+    #[test]
+    fn a_call_the_session_is_not_running_is_dropped() {
+        let pinned = request().pinned("s", "t", |_| false);
+        assert_eq!(pinned.call, None);
     }
 }

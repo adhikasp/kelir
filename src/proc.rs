@@ -550,8 +550,9 @@ pub mod win {
         };
         use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SetKernelObjectSecurity};
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
-        let sddl: Vec<u16> = "D:P(A;;GA;;;SY)(A;;0x101101;;;OW) "
+        let sddl: Vec<u16> = "D:P(A;;GA;;;SY)(A;;0x101101;;;OW)"
             .encode_utf16()
+            .chain(std::iter::once(0))
             .collect();
         let mut descriptor: *mut c_void = std::ptr::null_mut();
         // SAFETY: NUL-terminated string, out pointer ours; freed below.
