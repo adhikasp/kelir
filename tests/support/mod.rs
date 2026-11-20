@@ -724,6 +724,18 @@ impl LiveSession {
         Self::start_in(Some(state), mock, args, extra_config, 0).await
     }
 
+    /// A session on a state dir of the caller's own and a base URL that is not
+    /// the mock's (an unreachable endpoint, a second gateway), so one box's
+    /// metadata cache can be tested against another endpoint (STEER-1 S1).
+    pub async fn start_with_env(
+        state: PathBuf,
+        base_url: &str,
+        args: &[&str],
+        extra_config: &str,
+    ) -> LiveSession {
+        Self::start_in_base(Some(state), base_url, args, extra_config, 0).await
+    }
+
     /// The same, with creation flags of the caller's own: a test that needs a
     /// session without a console (a tool shell, a service) passes
     /// `DETACHED_PROCESS` (M4 review round 2, G3).
@@ -743,6 +755,17 @@ impl LiveSession {
         extra_config: &str,
         extra_flags: u32,
     ) -> LiveSession {
+        let base = mock.base_url();
+        Self::start_in_base(reuse_state, &base, args, extra_config, extra_flags).await
+    }
+
+    async fn start_in_base(
+        reuse_state: Option<PathBuf>,
+        base_url: &str,
+        args: &[&str],
+        extra_config: &str,
+        extra_flags: u32,
+    ) -> LiveSession {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().join("work");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -750,7 +773,7 @@ impl LiveSession {
         std::fs::write(&config, test_config(extra_config)).unwrap();
         let state = reuse_state.unwrap_or_else(|| temp.path().join("state"));
 
-        let mut command = live_command(&cwd, &config, &state, &mock.base_url());
+        let mut command = live_command(&cwd, &config, &state, base_url);
         command
             .args(args)
             .stdout(Stdio::piped())
