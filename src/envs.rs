@@ -229,6 +229,12 @@ pub fn named(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
+/// The whole environment, for a child that gets a filtered copy of it (the MCP
+/// servers' allow-list). Not a kelir knob, so nothing here is documented.
+pub fn all() -> impl Iterator<Item = (OsString, OsString)> {
+    std::env::vars_os()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

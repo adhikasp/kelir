@@ -314,10 +314,8 @@ async fn a_huge_integer_is_not_rounded() {
 #[tokio::test]
 async fn a_bad_mcp_toml_does_not_print_the_env_block() {
     let files = Files::new();
-    let toml = format!(
-        "[servers.s]\ncommand = 'x'\nenv = {{ API_TOKEN = \"sk-SECRET-VALUE-123\" , }} oops\n"
-    );
-    let out = one_shot(&files, &toml, &["ls"], &[]).await;
+    let toml = "[servers.s]\ncommand = 'x'\nenv = { API_TOKEN = \"sk-SECRET-VALUE-123\" , } oops\n";
+    let out = one_shot(&files, toml, &["ls"], &[]).await;
     let all = format!("{}{}", out.stdout, out.stderr);
     assert!(!all.contains("sk-SECRET-VALUE-123"), "leaked: {all}");
 }

@@ -184,7 +184,7 @@ impl Client {
         // key (`KELIR_*`), the session's socket, or anything else ambient.
         // What it needs beyond that goes in its `env` table.
         command.env_clear();
-        for (key, value) in std::env::vars_os() {
+        for (key, value) in crate::envs::all() {
             if inherited(&key.to_string_lossy()) {
                 command.env(key, value);
             }
