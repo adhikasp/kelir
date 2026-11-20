@@ -28,12 +28,17 @@ editor down to one row; the state row is the last to go.
 While the session waits before trying the provider again (a retryable HTTP
 status) or for a concurrency-governor slot, the facts row shows the wait
 instead of the usual summary: `kelir working · rate limited (429): retrying in
-34 s, attempt 5, say stop to cancel · 33 s left`. The countdown is read from the
+34 s, attempt 5, esc stops · 33 s left`. The countdown is read from the
 wall clock on each tick, so it moves; a slot wait has no deadline worth reading
 and shows its words only. A provider retry also turns the state row `rate
 limited` (see below); a slot wait leaves the state row on the work it was doing.
-The same wait is one dim line in the scrollback (`» rate limited (429): …`) and
-an `error` event in the log, so NDJSON, the pane and the transcript agree.
+The same wait is one dim line in the scrollback (`» rate limited (429): …`,
+with the same `esc stops` hint) and an `error` event in the log, so NDJSON, the
+pane and the transcript agree. The log and the CLI keep STEER-5's sentence
+(`say stop to cancel`), which is true for `kelir` driven from a shell: only the
+pane's rows name the key, because plain text typed into the prompt is a `say`
+the model receives, while Esc and Ctrl-C stop the turn and `/stop` ends it at
+the next boundary or during the wait.
 
 ## States (the state row)
 
@@ -44,7 +49,7 @@ an `error` event in the log, so NDJSON, the pane and the transcript agree.
 | writing | spinner | `⠹ writing 7s · ~214 tok · esc stops` |
 | running a tool | spinner | `⠹ running bash 12s · sleep 45 && echo done` |
 | several tools | spinner | `⠹ running 3 tools 12s · bash: cargo test` |
-| rate limited | spinner | `⠹ rate limited · 429 · retrying in 34 s · attempt 5 · say stop` |
+| rate limited | spinner | `⠹ rate limited · 429 · retrying in 34 s · attempt 5 · esc stops` |
 | paused | `⏸` | `⏸ paused · step cap 50 reached · say continue` |
 | error | `✗` | `✗ error · provider 401 · say to retry` |
 
@@ -121,16 +126,29 @@ separators stay Unicode in both sets: they are decoration, not state, and
 `NO_COLOR`/`KELIR_ASCII` exist to keep the *state* readable rather than to make
 every byte ASCII.
 
-Markdown is rendered **block by block as it streams**: a closed block (a
-paragraph, a fence, a table) goes straight into the scrollback, and only the
-block still growing is live. So a 60-line code block scrolls into history as it
-arrives instead of becoming a three-row ticker, nothing that was shown ever
-vanishes, and a loose list item's continuation paragraph keeps its indent
-(the block splitter joins it back to its item).
+Markdown is rendered **block by block as it streams**, and within a block **row
+by row** wherever a row is already final:
+
+- A fence commits every line that has ended, keeping the last three lines in
+  the live area, so a 60-line code block scrolls into history as it arrives
+  instead of becoming a three-row ticker.
+- A top-level list commits every item that has ended (the cut is just before a
+  new top-level item), keeping three lines live, so a long list fills the
+  scrollback too. A fence *inside* an item is held with the item, because its
+  indent belongs to that item's render.
+- A paragraph and a table commit when the block closes: a paragraph's wrap
+  depends on all of it, and a boxed table's column widths on every row it has.
+
+A closed block is rendered once, when it closes, and its rows are cached, so
+the work per delta does not grow with the message: the open block is the only
+thing re-rendered, and it holds at most the last three live lines. Nothing that
+was shown ever vanishes, and a loose list item's continuation paragraph keeps
+its indent (the block splitter joins it back to its item) with one blank row
+between the item's paragraphs.
 
 ## Images
 
-Paste or drag a path to a `.png/.jpg/.jpeg/.gif/.webp`: it becomes a chip
+Paste or drag a path to an image file: it becomes a chip
 `[image 1]` in the editor and the prompt carries
 `[image: attachments/1-shot.png, 1280x720, 312 KB — run: kelir view attachments/1-shot.png]`.
 The bytes are copied to `<session>/attachments/<n>-<name>.<ext>` (numbered in
@@ -150,6 +168,11 @@ Three ingresses, one result:
    its reversed label and its one-Backspace removal behave the same on every
    platform. A partial path stays text until it is a file.
 3. **`kelir view <path>`** from any shell for an image the prompt did not name.
+
+The format is read from the bytes, not the name (`png`, `jpg`, `gif`, `webp`),
+so a text file named `fake.png` makes no chip — nothing promises an image the
+tool would refuse. Also, when the image is sent, its `data:` media type is the
+sniffed format, never the extension.
 
 Backspace on a chip removes the chip and its saved file; a chip that was sent is
 the model's pointer and its file stays. `kelir view` refuses a file whose bytes

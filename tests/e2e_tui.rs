@@ -1261,9 +1261,10 @@ async fn the_tui_shows_the_retry_countdown_and_recovers() {
             b"",
             vec![
                 // The facts row carries the whole wait line, the state row the
-                // countdown and the attempt.
+                // countdown and the attempt. Both name this pane's key: `stop`
+                // typed here is a `say` the model receives (`R5`).
                 "rate limited (429): retrying in".into(),
-                "say stop to cancel".into(),
+                "esc stops".into(),
                 // The facts row's own countdown, read from the wall clock.
                 "s left".into(),
                 "attempt 1".into(),

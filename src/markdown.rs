@@ -289,6 +289,9 @@ struct Renderer {
     pending_prefix: Option<(Vec<Run>, Vec<Run>)>,
     /// The quote bar and indent a fenced block inside a list item carries.
     code_prefix: Option<(Vec<Run>, Vec<Run>)>,
+    /// A chunk cut out of the middle of a long list counts on from where the
+    /// items before it left off, so `3.` still reads `3.`.
+    first_number: Option<u64>,
 }
 
 struct Code {
@@ -329,6 +332,7 @@ impl Renderer {
             in_item: false,
             pending_prefix: None,
             code_prefix: None,
+            first_number: None,
         }
     }
 
@@ -352,6 +356,15 @@ impl Renderer {
     /// separator, not the end of the item, and CommonMark keeps the
     /// continuation inside it). The TUI joins such a block with the next one
     /// before rendering, so the indent survives.
+    /// Render `text` as a chunk of a longer list: its first ordered item takes
+    /// `first`, so the numbers read as they do in the whole list.
+    pub fn render_with(text: &str, layout: Layout, first: Option<u64>) -> Vec<Row> {
+        let mut renderer = Renderer::new(layout);
+        renderer.first_number = first;
+        renderer.document(text);
+        renderer.finish()
+    }
+
     pub fn render_with_open(text: &str, layout: Layout) -> (Vec<Row>, bool) {
         let mut renderer = Renderer::new(layout);
         renderer.document(text);
@@ -457,6 +470,20 @@ impl Renderer {
     /// blocks (so streaming and one-shot join them identically).
     fn start_block(&mut self) {}
 
+    /// A paragraph starts inside a list item. CommonMark's *loose* list puts a
+    /// blank line between the item's own paragraphs, and the join `S7` keeps
+    /// them in one block; the renderer restores it as one blank row (`N-para`).
+    /// A tight list's items are not separated, so a paragraph after an `Item`
+    /// (its marker, `pending_prefix` cleared) gets no gap.
+    fn paragraph_start(&mut self) {
+        self.start_block();
+        let continues_item = self.in_item && self.pending_prefix.is_some();
+        let last_is_blank = self.rows.last().is_none_or(Row::is_empty);
+        if continues_item && !last_is_blank {
+            self.rows.push(Row::default());
+        }
+    }
+
     fn end_block(&mut self) {
         self.flush_line();
     }
@@ -556,7 +583,7 @@ impl Renderer {
 
     fn start(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::Paragraph => self.start_block(),
+            Tag::Paragraph => self.paragraph_start(),
             Tag::Heading { level, .. } => {
                 self.start_block();
                 self.heading = Some(match level {
@@ -578,7 +605,13 @@ impl Renderer {
                 }
                 let level = self.lists.len();
                 self.lists.push(match start {
-                    Some(next) => ListKind::Ordered { next, level },
+                    Some(next) => ListKind::Ordered {
+                        next: match self.first_number.take() {
+                            Some(first) if self.lists.is_empty() => first,
+                            _ => next,
+                        },
+                        level,
+                    },
                     None => ListKind::Bullet { level },
                 });
             }
@@ -763,8 +796,11 @@ impl Renderer {
         }
         let prefix_width = text_width(&prefix);
         if !code.language.trim().is_empty() {
+            // The label sits at the item's indent too, like the code under it
+            // (review N-label): a fence inside a list item is the item's, not
+            // the document's.
             self.rows.push(Row::plain(
-                format!("{bar}{}", code.language.trim()),
+                format!("{bar}{indent}{}", code.language.trim()),
                 Tone::Label,
             ));
         }
@@ -1102,22 +1138,35 @@ fn plain_table(table: &TableState, width: usize, glyphs: crate::theme::Glyphs) -
 }
 
 fn plain_table_rows(table: &TableState, width: usize, glyphs: crate::theme::Glyphs) -> Vec<Row> {
-    let columns = table
+    // The cells and the ` | ` between them must fit the pane, not the other way
+    // round: a fixed minimum cell width made a 3-column table one column too
+    // wide at width 8 and 5 (review N-table8).
+    let separators = 3usize;
+    let mut columns = table
         .body
         .iter()
         .chain(std::iter::once(&table.head))
         .map(Vec::len)
         .max()
-        .unwrap_or(0);
-    let separators = columns.saturating_sub(1) * 3;
-    let budget = width.saturating_sub(separators).max(columns);
-    let each = (budget / columns.max(1)).max(1);
+        .unwrap_or(0)
+        .max(1);
+    // As many columns as fit with at least two columns of text each; one when
+    // even that is too wide.
+    while columns > 1 && columns * 2 + (columns - 1) * separators > width {
+        columns -= 1;
+    }
+    let budget = width
+        .saturating_sub((columns - 1) * separators)
+        .max(columns);
+    let each = (budget / columns).max(1);
+    let cells =
+        |cells: &[Vec<Run>]| -> Vec<Vec<Run>> { cells.iter().take(columns).cloned().collect() };
     let mut rows = Vec::new();
     if !table.head.is_empty() {
-        rows.push(plain_row(&table.head, each, true, glyphs));
+        rows.push(plain_row(&cells(&table.head), each, true, glyphs));
     }
     for row in &table.body {
-        rows.push(plain_row(row, each, false, glyphs));
+        rows.push(plain_row(&cells(row), each, false, glyphs));
     }
     rows
 }
@@ -1145,6 +1194,21 @@ fn plain_row(cells: &[Vec<Run>], each: usize, strong: bool, glyphs: crate::theme
 
 // ---------------------------------------------------------------- streaming
 
+/// A block the splitter has finished, and how many of its rows were already
+/// committed while it streamed (`S1b`): the TUI continues the block from there
+/// instead of writing those rows again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Closed {
+    pub text: String,
+    pub delivered: usize,
+}
+
+impl From<Closed> for String {
+    fn from(closed: Closed) -> Self {
+        closed.text
+    }
+}
+
 /// Splits streamed markdown into complete blocks.
 ///
 /// A block ends at a blank line that is *outside* a fence and outside a table;
@@ -1168,6 +1232,13 @@ pub struct Stream {
     /// newline): the block's structure is decided from this, never from the
     /// whole block.
     line: String,
+    /// What the open block is (fence, list, prose): decided once its first line
+    /// is complete, and what decides which of its rows are final early (`S1b`).
+    shape: Option<Shape>,
+    /// How many bytes of `open` are already out, and in how many rows: what the
+    /// block is continued from when it closes, so no row is written twice.
+    delivered_bytes: usize,
+    delivered_rows: usize,
 }
 
 impl Stream {
@@ -1177,6 +1248,22 @@ impl Stream {
 
     /// Feed a delta; returns the blocks it completed, in order.
     pub fn push(&mut self, delta: &str) -> Vec<String> {
+        let mut done: Vec<String> = Vec::new();
+        for line in delta.split_inclusive('\n') {
+            let newline = line.ends_with('\n');
+            let text = line.trim_end_matches('\n');
+            self.open.push_str(text);
+            self.line.push_str(text);
+            if newline {
+                self.line_ended(&mut done);
+            }
+        }
+        done
+    }
+
+    /// Feed a delta; returns the blocks it completed, each with the rows of it
+    /// that were already delivered while it streamed.
+    pub fn push_blocks(&mut self, delta: &str) -> Vec<Closed> {
         let mut done = Vec::new();
         for line in delta.split_inclusive('\n') {
             let newline = line.ends_with('\n');
@@ -1190,13 +1277,13 @@ impl Stream {
         done
     }
 
-    fn line_ended(&mut self, done: &mut Vec<String>) {
+    fn line_ended<T: From<Closed>>(&mut self, done: &mut Vec<T>) {
         let line = std::mem::take(&mut self.line);
         if let Some(fence) = self.in_fence.clone() {
             if opens_or_closes(&line, &fence) {
                 self.in_fence = None;
                 // The closing fence belongs to this block.
-                done.push(std::mem::take(&mut self.open));
+                self.hand_over(done);
                 self.in_table = false;
             } else {
                 self.open.push('\n');
@@ -1213,14 +1300,84 @@ impl Stream {
             // too: the table is complete, and its widths need every row it
             // has, which it now has.
             if !self.open.trim().is_empty() {
-                done.push(std::mem::take(&mut self.open));
+                self.hand_over(done);
             }
             self.open.clear();
+            self.reset_block();
             self.in_table = false;
             return;
         }
         self.in_table = is_table_row(&line);
         self.open.push('\n');
+    }
+
+    /// The open block's text, exactly as it arrived (no synthetic closer).
+    pub fn open(&self) -> &str {
+        &self.open
+    }
+
+    /// The block that just closed: its text, and the rows of it that are already
+    /// out (committed while it streamed).
+    fn hand_over<T: From<Closed>>(&mut self, done: &mut Vec<T>) {
+        let rows = self.delivered_rows;
+        self.delivered_bytes = 0;
+        self.delivered_rows = 0;
+        let text = std::mem::take(&mut self.open);
+        self.reset_block();
+        done.push(T::from(Closed {
+            text,
+            delivered: rows,
+        }));
+    }
+
+    /// A new block starts: nothing of the previous one carries over.
+    fn reset_block(&mut self) {
+        self.shape = None;
+        self.delivered_bytes = 0;
+        self.delivered_rows = 0;
+    }
+
+    /// What the open block is, once its first line is complete.
+    pub fn shape(&self) -> Option<&Shape> {
+        self.shape.as_ref()
+    }
+
+    /// How many bytes of the open block are already out.
+    pub fn delivered_bytes(&self) -> usize {
+        self.delivered_bytes
+    }
+
+    /// The rows of the open block that can be committed now (`S1b`): a fence's
+    /// finished lines and a top-level list's finished items, keeping `keep`
+    /// complete lines behind for the live area. The shape is decided from the
+    /// block's first line, so this costs what just arrived, not what the block
+    /// now holds (`P1`).
+    ///
+    /// The returned rows are a prefix of the rows the finished block will
+    /// render, so they are written once and never re-rendered.
+    pub fn settle(&mut self, layout: Layout, keep: usize) -> Vec<Row> {
+        if self.shape.is_none() {
+            self.shape = Shape::of(&self.open);
+        }
+        let Some(shape) = self.shape.clone() else {
+            return Vec::new();
+        };
+        let in_fence = self.in_fence.is_some();
+        let Some(cut) = stable_cut(&self.open, self.delivered_bytes, &shape, in_fence, keep) else {
+            return Vec::new();
+        };
+        if cut <= self.delivered_bytes {
+            return Vec::new();
+        }
+        let rows = piece_rows(&self.open, self.delivered_bytes, cut, &shape, layout);
+        self.delivered_bytes = cut;
+        self.delivered_rows += rows.len();
+        rows
+    }
+
+    /// How many rows of the open block its delivered bytes stand for.
+    pub fn delivered_rows(&self) -> usize {
+        self.delivered_rows
     }
 
     /// The block being streamed: rendered tolerantly (an unclosed fence shows
@@ -1246,14 +1403,27 @@ impl Stream {
 
     /// The stream is complete: whatever is left is the last block.
     pub fn finish(&mut self) -> Option<String> {
-        let text = std::mem::take(&mut self.open);
+        self.finish_block().map(|closed| closed.text)
+    }
+
+    /// The stream is complete: the last block, with the rows of it that already
+    /// went out while it streamed.
+    pub fn finish_block(&mut self) -> Option<Closed> {
         self.in_fence = None;
         self.in_table = false;
-        if text.trim().is_empty() {
-            None
-        } else {
-            Some(text)
+        self.shape = None;
+        if self.open.trim().is_empty() {
+            self.open.clear();
+            self.reset_block();
+            return None;
         }
+        let rows = self.delivered_rows;
+        self.delivered_bytes = 0;
+        self.delivered_rows = 0;
+        Some(Closed {
+            text: std::mem::take(&mut self.open),
+            delivered: rows,
+        })
     }
 }
 
@@ -1326,6 +1496,201 @@ pub fn opens_item(block: &str) -> bool {
 fn is_table_row(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.len() > 1 && trimmed.starts_with('|') && trimmed.ends_with('|')
+}
+
+/// Is this text a table, or the start of one? A boxed table's column widths are
+/// the widest cell of every column, so no row of it is final before its last
+/// row has arrived.
+pub fn looks_like_table(text: &str) -> bool {
+    text.lines().any(is_table_row)
+}
+
+/// Does this line open a list item at column 0? An item's own continuation (an
+/// indented line) is not one: its rows depend on the item it belongs to.
+fn is_top_item(line: &str) -> bool {
+    !line.starts_with([' ', '\t']) && opens_item(line)
+}
+
+/// The shape of a block being streamed: which of its rows are final before the
+/// block ends (`S1b`), and how a piece of it renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Shape {
+    /// A fence. Every completed line is one row (code is clipped, never
+    /// wrapped), so a line that ended can go out before the closing fence.
+    Fence { marker: String, label: String },
+    /// A top-level list. An item that ended cannot change: its wrapping and its
+    /// hanging indent depend on that item alone.
+    List,
+    /// Prose or a table: no row is final until the block ends (a paragraph's
+    /// wrap depends on all of it, a table's widths on every row it has).
+    Whole,
+}
+
+impl Shape {
+    /// The shape of a block from its lines so far. `None` while the block's
+    /// first line is still arriving: a half-typed ```` ``ru ```` could still
+    /// become a fence, and a row committed before that would be wrong.
+    pub fn of(text: &str) -> Option<Shape> {
+        let head = text.split_inclusive('\n').next().unwrap_or_default();
+        let line = head.strip_suffix('\n')?;
+        if let Some(marker) = fence_at(line) {
+            let marker: String = marker.chars().take(3).collect();
+            let trimmed = line.trim_start();
+            let label = trimmed[marker.len()..].trim().to_string();
+            return Some(Shape::Fence { marker, label });
+        }
+        if is_top_item(line) {
+            return Some(Shape::List);
+        }
+        Some(Shape::Whole)
+    }
+}
+
+/// The bytes of a fence's opening line, marker and label: the block's first
+/// line is a label row, not code.
+fn opening_len(text: &str) -> usize {
+    text.find('\n').map_or(0, |at| at + 1)
+}
+
+/// How many of the `text`'s completed lines are whole, and where each of them
+/// ends.
+fn complete_lines(text: &str) -> Vec<usize> {
+    let mut ends = Vec::new();
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        offset += line.len();
+        if line.ends_with('\n') {
+            ends.push(offset);
+        }
+    }
+    ends
+}
+
+/// How much of `text` (an open block, from `from` on) is final, keeping at least
+/// `keep` complete lines after the cut for the live area.
+///
+/// `in_fence` says whether the block is *currently* inside a fence: a fence can
+/// open inside a list item, and then nothing is cut, because those lines are
+/// code inside an item whose indent only that item's own render knows.
+pub fn stable_cut(
+    text: &str,
+    from: usize,
+    shape: &Shape,
+    in_fence: bool,
+    keep: usize,
+) -> Option<usize> {
+    let rest = text.get(from..)?;
+    if !in_fence && looks_like_table(rest) {
+        return None;
+    }
+    let ends = complete_lines(rest);
+    let keep = keep.max(1);
+    match shape {
+        Shape::Fence { .. } => {
+            // Every complete line but the last `keep` (the one being typed is
+            // not final, and a couple of rows stay for the live area).
+            let index = ends.len().checked_sub(keep + 1)?;
+            Some(from + ends[index])
+        }
+        Shape::List if !in_fence => {
+            // The cut is just before a top-level item, with `keep` complete
+            // lines after it: every item before that one can never change.
+            let lines: Vec<&str> = rest.split_inclusive('\n').collect();
+            let mut cut = None;
+            for (index, end) in ends.iter().enumerate() {
+                if ends.len() - 1 - index < keep {
+                    break;
+                }
+                if lines
+                    .get(index + 1)
+                    .is_some_and(|next| next.strip_suffix('\n').is_some_and(is_top_item))
+                {
+                    cut = Some(from + end);
+                }
+            }
+            cut
+        }
+        _ => None,
+    }
+}
+
+/// How many top-level ordered items `text` holds: the numbering a piece cut out
+/// of the middle of a long list counts on from.
+pub fn ordered_items(text: &str) -> u64 {
+    text.lines()
+        .filter(|line| !line.starts_with([' ', '\t']))
+        .filter(|line| {
+            let digits: String = line.chars().take_while(char::is_ascii_digit).collect();
+            !digits.is_empty()
+                && line[digits.len()..].starts_with(['.', ')'])
+                && line[digits.len() + 1..].starts_with(' ')
+        })
+        .count() as u64
+}
+
+/// The number a list's first ordered item carries (`3. x` → 3, `- x` → 1).
+fn list_start(text: &str) -> u64 {
+    let line = text.lines().next().unwrap_or_default();
+    let digits: String = line.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().unwrap_or(1)
+}
+
+/// The rows of the block `text[from..to]` — a piece of a block that is being
+/// streamed (`to` a cut), or all of what is left when the block closes
+/// (`to == text.len()`).
+///
+/// The rows are the corresponding slice of what the whole block renders:
+/// rendering a piece on its own is only safe where that holds (a fence's lines,
+/// a list's items), which is exactly where [`stable_cut`] cuts. A piece that
+/// starts mid-block carries no language label and continues the list's
+/// numbering, so the two renders agree row for row.
+pub fn piece_rows(text: &str, from: usize, to: usize, shape: &Shape, layout: Layout) -> Vec<Row> {
+    let Some(piece) = text.get(from.min(text.len())..to.min(text.len())) else {
+        return Vec::new();
+    };
+    match shape {
+        Shape::Fence { marker, label } => {
+            let (label, body) = if from == 0 {
+                (
+                    label.as_str(),
+                    &piece[opening_len(piece).min(piece.len())..],
+                )
+            } else {
+                ("", piece)
+            };
+            let mut text = String::with_capacity(marker.len() + label.len() + body.len() + 4);
+            text.push_str(marker);
+            text.push_str(label);
+            text.push('\n');
+            text.push_str(body);
+            if !body.is_empty() && !body.ends_with('\n') {
+                text.push('\n');
+            }
+            // A fence that has not closed yet still renders as code: give the
+            // renderer the closing line the model has not sent, so the rows are
+            // the ones the block will have.
+            text.push_str(marker);
+            render_block(&text, layout)
+        }
+        Shape::List if from > 0 => {
+            let first = list_start(text) + ordered_items(&text[..from]);
+            Renderer::render_with(piece, layout, Some(first))
+        }
+        _ => render_block(piece, layout),
+    }
+}
+
+/// The rows of the open block that are not out yet: what the live area shows
+/// while a block streams. Starts at the bytes already delivered, so a block
+/// that streams row by row costs what is left of it, not all of it (`S1b`,
+/// `P1`).
+pub fn open_rows(text: &str, shape: Option<&Shape>, delivered: usize, layout: Layout) -> Vec<Row> {
+    let from = delivered.min(text.len());
+    match shape {
+        Some(shape) => piece_rows(text, from, text.len(), shape, layout),
+        // The block's first line is still arriving: render it tolerantly.
+        None => render_block(text.trim_end_matches('\n'), layout),
+    }
 }
 
 #[cfg(test)]
@@ -1610,6 +1975,118 @@ mod tests {
             assert!(blocks[0].contains("cargo fmt"));
             assert!(blocks[1].contains("| 1 | 2 |"));
         }
+    }
+
+    #[test]
+    fn a_shape_is_decided_from_the_blocks_first_complete_line() {
+        // Nothing is decided while the first line is still arriving: it could
+        // become a fence.
+        assert_eq!(Shape::of("``"), None);
+        assert_eq!(Shape::of("- item without a newline yet"), None);
+        assert_eq!(
+            Shape::of("```rust\nlet x = 1;\n"),
+            Some(Shape::Fence {
+                marker: "```".into(),
+                label: "rust".into()
+            })
+        );
+        assert_eq!(
+            Shape::of("```\n"),
+            Some(Shape::Fence {
+                marker: "```".into(),
+                label: String::new()
+            })
+        );
+        assert_eq!(Shape::of("- a\n- b\n"), Some(Shape::List));
+        assert_eq!(Shape::of("1. a\n2. b\n"), Some(Shape::List));
+        // An indented line is an item's continuation, not a new item.
+        assert_eq!(Shape::of("  - nested\n"), Some(Shape::Whole));
+        assert_eq!(Shape::of("A paragraph.\n"), Some(Shape::Whole));
+        assert_eq!(Shape::of("| a | b |\n|---|---|\n"), Some(Shape::Whole));
+    }
+
+    #[test]
+    fn a_fence_and_a_list_stream_rows_and_prose_does_not() {
+        let fence = Shape::of("```\n").unwrap();
+        // Every complete line but the last few is final: `keep` lines stay for
+        // the live area, so with 5 complete lines and keep 2 the cut is after
+        // the third.
+        assert_eq!(
+            stable_cut("```\na\nb\nc\nd\ne\n", 0, &fence, true, 2),
+            Some(10)
+        );
+        assert_eq!(stable_cut("```\na\nb\n", 0, &fence, true, 3), None);
+
+        let list = Shape::of("- a\n- b\n- c\n- d\n- e\n").unwrap();
+        // The cut lands before an item, keeping `keep` complete lines after it.
+        assert_eq!(
+            stable_cut("- a\n- b\n- c\n- d\n- e\n", 0, &list, false, 1),
+            Some(16)
+        );
+        // A table never cuts: its column widths need every row.
+        let table = Shape::of("| a | b |\n").unwrap();
+        assert_eq!(
+            stable_cut("| a | b |\n|---|---|\n", 0, &table, false, 1),
+            None
+        );
+        // Prose never cuts either: a paragraph re-wraps as it grows.
+        let prose = Shape::of("A long paragraph\n").unwrap();
+        assert_eq!(
+            stable_cut("A long paragraph\nmore\n", 0, &prose, false, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn a_streamed_piece_renders_exactly_the_rows_the_block_renders() {
+        // A fence: the language label is on the first piece only, and the rows
+        // are the whole block's rows, in order.
+        let open = "```rust\nlet a = 1;\nlet b = 2;\n";
+        let shape = Shape::of(open).unwrap();
+        let whole: Vec<String> = render_block(&format!("{open}```\n"), Layout::new(40))
+            .iter()
+            .map(Row::text)
+            .collect();
+        let first = piece_rows(open, 0, 19, &shape, Layout::new(40));
+        let second = piece_rows(open, 19, open.len(), &shape, Layout::new(40));
+        let streamed: Vec<String> = first.iter().chain(second.iter()).map(Row::text).collect();
+        assert_eq!(streamed, whole);
+
+        // A list cut in the middle keeps its numbering: the second piece reads
+        // `3.` and `4.`, not `1.` and `2.`.
+        let list = "1. a\n2. b\n3. c\n4. d\n";
+        let shape = Shape::of(list).unwrap();
+        let whole: Vec<String> = render_block(list, Layout::new(40))
+            .iter()
+            .map(Row::text)
+            .collect();
+        let first: Vec<String> = piece_rows(list, 0, 10, &shape, Layout::new(40))
+            .iter()
+            .map(Row::text)
+            .collect();
+        let second: Vec<String> = piece_rows(list, 10, list.len(), &shape, Layout::new(40))
+            .iter()
+            .map(Row::text)
+            .collect();
+        assert_eq!(first, vec!["1. a", "2. b"]);
+        assert_eq!(second, vec!["3. c", "4. d"]);
+        assert_eq!([first, second].concat(), whole);
+    }
+
+    #[test]
+    fn settling_an_open_fence_hands_out_each_row_once() {
+        let mut stream = Stream::new();
+        let mut out: Vec<String> = Vec::new();
+        for delta in ["```text\n", "line-1\n", "line-2\n", "line-3\n", "line-4\n"] {
+            let blocks = stream.push_blocks(delta);
+            assert!(blocks.is_empty(), "a fence is one block: {delta:?}");
+            out.extend(stream.settle(Layout::new(40), 2).iter().map(Row::text));
+        }
+        // The label and the first two code rows are out; the rest is live.
+        assert_eq!(out, vec!["text", "│ line-1", "│ line-2"]);
+        let closed = stream.finish_block().expect("the last block");
+        assert_eq!(closed.text, "```text\nline-1\nline-2\nline-3\nline-4\n");
+        assert_eq!(closed.delivered, 3, "the label and two code rows went out");
     }
 
     #[test]

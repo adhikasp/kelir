@@ -1123,3 +1123,68 @@ consuming a scripted reply) so a session can start in a test.
   prefix of an existing conversation is unchanged: `to_wire` is the identity
   when `images` is empty (`src/chat.rs` tests, and the e2e asserts the second
   request's messages begin with the first request's byte-for-byte).
+
+### tui2 fixes, round 2 (docs/reviews/tui2b-review.md): deviations
+
+- **A block holding a fence inside a list item is committed when the item
+  ends, not row by row.** `S1b` asks for rows that cannot change to be
+  committed as they appear; a fence nested in a list item is the exception:
+  the item's indent, marker and hanging wrap all come from that item's own
+  render, so no line of it is final until the item is. The item still leaves
+  the live area when it ends — one item's latency, not the block's. The
+  alternative (rendering the item's prefix separately, then the code with a
+  guessed indent) would re-derive the renderer's list state outside the
+  renderer and disagree with the one-shot render on a nested item.
+- **A streamed block's blank separator rows are emitted with the block, not
+  when its first line arrives.** The round-2 pty drive showed `N-echo` was
+  still there: the spacing helpers asked `scroll.is_empty()`, and the event
+  loop drains `scroll` after every paint, so "nothing committed yet" was true
+  again between two events. The decision now reads a `last_row: Option<bool>`
+  that `take_scroll` updates, so it does not depend on whether a frame was
+  drawn in between. A unit test that never drains could not see this; the new
+  `the_spacing_rules_hold_when_every_event_is_painted` drains after every
+  event, and the pty replay of a long answer shows one blank row after the
+  echo at 80 and 40 columns. Same rule for the block separators inside a
+  streamed message: they now come from `Message::rows_after`/`live_rows`
+  (where the block index is known) instead of a `block_started` flag.
+- **`/stop` typed during a rate-limited wait still does not stop; Esc and
+  Ctrl-C do.** The brief (`R5`) suggested "consider also honouring a typed
+  `/stop`": `/stop` already ends the turn when the wait takes verbs
+  (`session.rs::wait_for`), so nothing new was added. What changed is the
+  *hint*: the state row and the facts row say `esc stops`, the CLI's
+  `say stop to cancel` sentence is unchanged for NDJSON and stderr, and a
+  plain `stop` remains a `say` that the model receives (documented, not
+  silently swallowed — turning arbitrary prose into a verb would be the
+  bigger deception).
+- **The facts row and the state row both still mention the wait** (`N-count`
+  is only half fixed). The state row keeps the countdown and the attempt, the
+  facts row keeps the full sentence, and both read the same clock
+  (`as_secs_f64().round()`), so they can no longer disagree by a second. The
+  duplication itself stays: the facts row is the only row that survives on a
+  short terminal, and a wait with no countdown at all would leave the person
+  without the reason. Merging them would mean either dropping the reason or
+  dropping the model/step/token summary for the whole wait.
+- **A table too wide for the pane drops columns instead of wrapping cells**
+  (`N-table8` fixed, `N-table` not). At width < 10 the old path still emitted
+  one cell more than the frame; now the box is built from the columns that fit
+  and never overflows (`a_table_at_extreme_widths_does_not_overflow`). Wrapping
+  a cell inside a boxed table is a different layout (a row becomes several
+  lines with the borders repeated), and the scrollback cannot reflow when the
+  pane is widened, so the wide cell still ends in `…`.
+- **`⏸` stays U+23F8.** The glyph is named by the design note (§10 state
+  glyphs); whether a terminal draws it double-width is the terminal's
+  `East Asian Width` table, and both `⏸` and the alternatives are two columns
+  in `unicode-width`, so switching would not make the width predictable — only
+  different. It is in the ASCII set (`KELIR_ASCII=1` / `TERM=dumb` renders
+  `||`), which is the escape hatch the reference documents.
+- **The base prompt is main's text again, with three trims to make room for the
+  image line, not the merge's rewording.** The merge had dropped main's
+  STEER-6 wording (`do not redesign after each tool result`, `prefer it to a
+  python/sed patch, which can fail with exit 0`, `AGENTS.md and CLAUDE.md are
+  already in this system prompt`, `Batch independent reads in one call set`);
+  `N-prompt` asked whether the STEER-6 bench measured those exact lines, and it
+  did. `src/prompt.md` is now main's file plus the one `kelir view` line the
+  previous job added: three short losses (`conversation` → `chat`, `in this
+  system prompt` → `here`, `in one call set` dropped) pay for it, 1015 bytes
+  inside the 1 KB budget, and the snapshot and the rule test moved in the same
+  commit. The rules the test pins are all still there word for word.

@@ -51,7 +51,8 @@ inside a kelir session; outside one it says so and exits 1.
     signature and header are read (`png`, `jpg`, `gif`, `webp`). A text file
     named `fake.png` and an empty `empty.png` are refused here rather than
     poisoning the conversation with a provider 400 that repeats on every later
-    request;
+    request. The `data:` URL's media type is the *sniffed* format too, not the
+    extension, so a GIF or a WebP saved as `x.png` is sent as what it is;
   - **a model the provider marks as text-only** (`capabilities.vision: false`,
     or OpenRouter's `architecture.input_modalities` without `image`). A model
     the provider says nothing about is tried: a missing flag is not a refusal.

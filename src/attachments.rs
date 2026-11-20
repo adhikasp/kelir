@@ -112,6 +112,13 @@ pub fn pasted_image(text: &str) -> Option<PastedImage> {
     if !extension_ok(path) || !path.is_file() {
         return None;
     }
+    // The extension is a claim: a text file named `fake.png` is not an image,
+    // and a chip that promises one is a chip the model cannot use (`N-chip`).
+    // The bytes decide, the same check `kelir view` makes (`S3`).
+    match sniff(path) {
+        Ok(Some(_)) => {}
+        _ => return None,
+    }
     Some(PastedImage {
         path: path.to_path_buf(),
     })
@@ -172,8 +179,37 @@ fn extension_ok(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The MIME type of a saved attachment, from its extension.
+/// The MIME type of a saved attachment.
+///
+/// The bytes decide it, never the file's name: an extension is a claim (a WebP
+/// saved as `shot.png` is what browsers produce, a GIF renamed `.png` is a
+/// rename), and a declared type that contradicts the bytes is what a provider
+/// that checks either of them against the other rejects — a 400 that repeats on
+/// every later request, because the `source` event stays in the log (`S3b`).
+///
+/// The extension is the fallback for a file that cannot be read, so a missing
+/// attachment is still named by what it claimed rather than as an opaque blob.
 pub fn mime_of(path: &Path) -> &'static str {
+    match sniff(path) {
+        Ok(Some((format, _))) => mime_of_format(format),
+        _ => mime_from_extension(path),
+    }
+}
+
+/// The media type of a format [`sniff`] names (`png`, `jpg`, `gif`, `webp`).
+pub fn mime_of_format(format: &str) -> &'static str {
+    match format {
+        "png" => "image/png",
+        "jpg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+/// The media type a file's extension claims: a fallback only, because the bytes
+/// are the truth (`S3b`).
+fn mime_from_extension(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|extension| extension.to_str())

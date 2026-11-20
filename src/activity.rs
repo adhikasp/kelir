@@ -307,9 +307,11 @@ impl Activity {
                 }
             }
             Kind::RateLimited => {
+                // The same clock the facts row reads (`retry::seconds_text`),
+                // so the two rows cannot disagree by a second (N-count).
                 let seconds = self
                     .retry_in
-                    .map(|left| left.as_secs() + u64::from(left.subsec_millis() > 0))
+                    .map(|left| left.as_secs_f64().round() as u64)
                     .unwrap_or(0);
                 let mut parts = Vec::new();
                 if !self.detail.is_empty() {
@@ -319,7 +321,11 @@ impl Activity {
                 if self.attempt > 0 {
                     parts.push(format!("attempt {}", self.attempt));
                 }
-                parts.push("say stop".to_string());
+                // The TUI's key, not a word to say: typing `stop` while the
+                // turn runs is a `say` the model receives as a message, and
+                // only Esc (or `/stop`) cancels (`R5`). Every other working
+                // state says the same thing.
+                parts.push("esc stops".to_string());
                 parts.join(" · ")
             }
             Kind::Paused => {
@@ -463,6 +469,10 @@ mod tests {
         assert!(row.contains("rate limited"), "{row}");
         assert!(row.contains("retrying in 12 s"), "{row}");
         assert!(row.contains("attempt 5"), "{row}");
+        // The TUI's own key: `say stop` is the CLI's sentence, and in this pane
+        // a typed `stop` would be a message to the model (`R5`).
+        assert!(row.contains("esc stops"), "{row}");
+        assert!(!row.contains("say stop"), "{row}");
         // A retry that succeeds goes back to thinking with a cleared countdown.
         activity.step_started(at(2000));
         assert_eq!(activity.kind, Kind::Thinking);

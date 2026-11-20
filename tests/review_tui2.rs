@@ -408,7 +408,15 @@ fn backspace_removes_a_pasted_image_chip_whole() {
     let mut app = app(80);
     app.set_session_dir(dir.path().to_path_buf());
     let image = dir.path().join("shot.png");
-    std::fs::write(&image, b"\x89PNG\r\n\x1a\nrest").unwrap();
+    // A real PNG header: the chip path sniffs the bytes now, so a text file
+    // with an image name is not a chip (review N-chip).
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend_from_slice(&13u32.to_be_bytes());
+    png.extend_from_slice(b"IHDR");
+    png.extend_from_slice(&64u32.to_be_bytes());
+    png.extend_from_slice(&48u32.to_be_bytes());
+    png.extend_from_slice(&[8, 6, 0, 0, 0]);
+    std::fs::write(&image, &png).unwrap();
     app.paste(&image.display().to_string());
     assert_eq!(app.editor.chips().len(), 1, "the paste became a chip");
     for _ in 0..3 {

@@ -66,6 +66,10 @@ pub const TAIL_BYTES: usize = 2048;
 pub const SPINNER_TICK: Duration = Duration::from_millis(100);
 /// Frames are coalesced to at most one per this interval.
 pub const FRAME_MIN: Duration = Duration::from_millis(33);
+/// How many complete lines of the block being streamed stay in the live area:
+/// rows behind them are final and go into the scrollback as they arrive, so a
+/// long fence is never a three-row ticker (`S1b`).
+const LIVE_KEEP: usize = 3;
 
 // ------------------------------------------------------------------ events
 
@@ -362,6 +366,22 @@ pub fn facts_for_width(status: &Status, width: usize) -> String {
     )
 }
 
+/// A retry line as the TUI's facts row shows it: the same facts, with the
+/// stop hint replaced by the key that actually stops the wait here (`R5`).
+///
+/// `retry::wait_line` is shared with the CLI and the event log, where the
+/// sentence `say stop to cancel` is true; in this pane it is not (plain text is
+/// a `say`), and every other working state says `esc stops`.
+pub fn tui_wait_line(line: &str) -> String {
+    line.replace("say stop to cancel", "esc stops")
+        .replace(", say stop", ", esc stops")
+}
+
+/// Is this row blank? The spacing rules ask before they write a separator.
+fn is_blank(line: &Line<'static>) -> bool {
+    line.spans.iter().all(|span| span.content.trim().is_empty())
+}
+
 /// Clip to `width` columns, with an ellipsis when something was cut.
 pub fn fit(text: &str, width: usize) -> String {
     if width == 0 {
@@ -481,12 +501,16 @@ pub fn last_line(text: &str) -> String {
 
 // --------------------------------------------------------------------- app
 
-/// One block of a streamed message: its text and how much of it is already in
-/// the scrollback.
+/// One block of a streamed message: its text and how many of its rendered rows
+/// are already in the scrollback.
 #[derive(Debug, Clone)]
 struct Block {
     text: String,
-    /// How many of the block's rendered rows are out.
+    /// The block's rows, rendered once at the width they were committed at.
+    /// `None` until the block's first row goes out; a resize clears it for the
+    /// blocks that have rows left.
+    rows: Option<Vec<Row>>,
+    /// How many of `rows` are out.
     committed: usize,
     /// The blank row that separates this block from the one before it is out.
     separated: bool,
@@ -495,23 +519,41 @@ struct Block {
     joins: bool,
 }
 
-/// The message being streamed, committed a block at a time.
+/// The message being streamed, committed as its rows settle.
 ///
-/// Two invariants this type exists for:
+/// Three invariants this type exists for:
 ///
 /// - **Every rendered row reaches the scrollback exactly once, in the order the
-///   model produced it.** Only the last block can still change (the open tail is
-///   re-rendered while it grows); every block before it is final and its rows go
-///   out at once. That is why a long fence streams into the scrollback instead
-///   of becoming a three-row ticker, why the previous block's rows cannot vanish
-///   while a later one streams (`S1`), and why prose can never be written before
-///   the tool lines that preceded it (`B1`: the group closes first).
+///   model produced it.** Only rows that can still change are held back: the
+///   open line of the block being streamed, and one block that a following,
+///   indented block might continue (`S7`). Everything else is out. That is why
+///   a long fence, list or table streams into the scrollback instead of
+///   becoming a three-row ticker (`S1b`), why the previous block's rows cannot
+///   vanish while a later one streams (`S1`), and why prose can never be
+///   written before the tool lines that preceded it (`B1`: the group closes
+///   first).
 /// - **A loose list item keeps its continuation inside it** (`S7`): a block that
 ///   a following, indented block continues is joined to it and rendered as one,
 ///   exactly as the one-shot render reads the same text.
+/// - **The work per delta does not grow with the message.** A closed block is
+///   rendered once, when it closes, and its rows are cached; the delta path
+///   only re-renders the open text, whose length is bounded by the two things it
+///   can hold (the last completed line and the partial line after it). The cost
+///   of a message is therefore linear in its size (`P1`).
+///
+/// What `Block::committed` holds once every row of the block is in the
+/// scrollback: its text will never be rendered again.
+const DELIVERED: usize = usize::MAX;
+
 #[derive(Debug, Default)]
 struct Message {
     blocks: Vec<Block>,
+    /// The index of the first block with a row still to deliver: the delta path
+    /// starts there instead of walking the blocks already out (`P1`).
+    next: usize,
+    /// The width `blocks`' cached rows were rendered at; a resize clears the
+    /// cache of every block that still has rows left.
+    width: usize,
 }
 
 /// Does this block start indented, so a list item open before it continues into
@@ -532,7 +574,12 @@ impl Message {
     /// A closed block arrived. It is joined to the previous block when CommonMark
     /// reads it as that block's continuation, and kept as its own block
     /// otherwise.
-    fn push_block(&mut self, text: &str) {
+    ///
+    /// `delivered` is how many of the block's rows already went out while it was
+    /// still streaming (a fence or a list streams row by row, `S1b`): its rows
+    /// are the same prefix at the same width, so the closed block continues from
+    /// there instead of writing those rows again.
+    fn push_block(&mut self, text: &str, delivered: usize) {
         if let Some(last) = self.blocks.last_mut()
             && last.committed == 0
             && !last.separated
@@ -542,35 +589,68 @@ impl Message {
             // The two texts, separated by the blank line the splitter cut.
             last.text.push_str("\n\n");
             last.text.push_str(text);
+            last.rows = None;
             last.joins = markdown::ends_in_item(&last.text);
             return;
         }
         self.blocks.push(Block {
             text: text.to_string(),
-            committed: 0,
-            separated: false,
+            rows: None,
+            committed: delivered,
+            separated: delivered > 0,
             joins: markdown::ends_in_item(text),
         });
+        self.next = self.next.min(self.blocks.len() - 1);
     }
 
-    /// The rows of block `index` that are not out yet: the separator, then the
-    /// text. `None` renders the open tail instead of the block's own text.
-    fn rows_after(&self, index: usize, text: &str, layout: Layout) -> Vec<Row> {
+    /// Forget what is cached but not out yet, at a new width. Rows already in
+    /// the terminal are final (the terminal owns them and cannot reflow):
+    /// only the blocks with rows left are rendered again, and only their rows.
+    fn restyle(&mut self, layout: Layout) {
+        if self.width == layout.width {
+            return;
+        }
+        self.width = layout.width;
+        for block in &mut self.blocks {
+            if block.committed != DELIVERED {
+                block.rows = None;
+            }
+        }
+    }
+
+    /// The rows of block `index`, rendered once at the message's width and
+    /// cached: a block whose rows are out is never rendered again (`P1`).
+    fn rows_of(&mut self, index: usize, layout: Layout) -> &[Row] {
+        let block = &mut self.blocks[index];
+        block
+            .rows
+            .get_or_insert_with(|| markdown::render_block(&block.text, layout))
+            .as_slice()
+    }
+
+    /// The rows of block `index` that are not out yet, separator first.
+    fn rows_after(&mut self, index: usize, layout: Layout) -> Vec<Row> {
+        if self.blocks[index].committed == DELIVERED {
+            return Vec::new();
+        }
+        let rows = self.rows_of(index, layout).to_vec();
         let block = &self.blocks[index];
-        let rows = markdown::render_block(text, layout);
         let mut out = Vec::new();
         if !block.separated && index > 0 && !rows.is_empty() {
             out.push(Row::default());
         }
-        out.extend(rows[block.committed.min(rows.len())..].to_vec());
+        out.extend_from_slice(&rows[block.committed.min(rows.len())..]);
         out
     }
 
-    /// Mark block `index` delivered, including its separator.
-    fn mark(&mut self, index: usize, count: usize) {
+    /// Mark every row of block `index` delivered, including its separator, and
+    /// free what will never be needed again.
+    fn mark(&mut self, index: usize, layout: Layout) {
+        let _ = self.rows_of(index, layout);
         let block = &mut self.blocks[index];
         block.separated = true;
-        block.committed = count;
+        block.committed = DELIVERED;
+        block.rows = None;
     }
 
     /// Every block is decided: nothing held may be joined to what comes next.
@@ -584,53 +664,75 @@ impl Message {
 
     /// The rows of every final block: all but the last, plus the last one when
     /// nothing is streaming any more. Handed out once each.
+    ///
+    /// Starts at the first block with a row left, so the delta path costs
+    /// nothing for what is already out: that first undelivered index (plus the
+    /// per-block row cache) is what keeps a long answer linear (`P1`). The one
+    /// block held back is the last one of a message that is still open, because
+    /// the next block may be its continuation (`S7`).
     fn settled_rows(&mut self, layout: Layout) -> Vec<Row> {
+        self.restyle(layout);
         let last = self.blocks.len().saturating_sub(1);
         let mut out = Vec::new();
-        for index in 0..self.blocks.len() {
-            // Every closed block is final, except the last one when a following
-            // block may continue it (a loose list item): its rows are held until
-            // the next block decides.
-            if index == last && self.blocks[index].joins {
-                break;
+        let mut index = self.next;
+        while index < self.blocks.len() {
+            if self.blocks[index].committed == DELIVERED {
+                index += 1;
+                continue;
             }
-            let text = self.blocks[index].text.clone();
-            let rows = self.rows_after(index, &text, layout);
-            let total = markdown::render_block(&text, layout).len();
+            if index == last && self.blocks[index].joins {
+                self.next = index;
+                return out;
+            }
+            let rows = self.rows_after(index, layout);
             if rows.is_empty() {
+                index += 1;
                 continue;
             }
             out.extend(rows);
-            self.mark(index, total);
+            self.mark(index, layout);
+            index += 1;
         }
+        self.next = index;
         out
     }
 
-    /// The live rows: what is not in the scrollback yet, at most `height` of
-    /// them — the last block's remaining rows, then the open tail.
-    fn live_rows(&self, layout: Layout, tail: &str, height: usize) -> Vec<Row> {
-        let mut rows = match self.blocks.len().checked_sub(1) {
-            Some(index) => {
-                let text = self.blocks[index].text.clone();
-                self.rows_after(index, &text, layout)
-            }
-            None => Vec::new(),
+    /// The rows of the held block that are not out yet: what the live area
+    /// shows above the open tail.
+    ///
+    /// At most one block is ever held (the last one of an open message, which
+    /// the next block may continue), so this renders one block, not the
+    /// message (`P1`).
+    fn live_rows(&self, layout: Layout) -> Vec<Row> {
+        let Some(index) = self.blocks.len().checked_sub(1) else {
+            return Vec::new();
         };
-        if !tail.trim().is_empty() {
-            if !rows.is_empty() {
-                rows.push(Row::default());
-            }
-            rows.extend(markdown::render_block(tail, layout));
+        if self.next > index {
+            return Vec::new();
         }
-        let start = rows.len().saturating_sub(height);
-        rows.drain(..start);
-        rows
+        let block = &self.blocks[index];
+        let rows = match &block.rows {
+            Some(rows) => rows.clone(),
+            None => markdown::render_block(&block.text, layout),
+        };
+        let mut out = Vec::new();
+        if !block.separated && index > 0 && !rows.is_empty() {
+            out.push(Row::default());
+        }
+        out.extend_from_slice(&rows[block.committed.min(rows.len())..]);
+        out
     }
 
     /// The stream is over: each block's remaining rows, once, then nothing.
     fn finish(&mut self, layout: Layout) -> Vec<Row> {
-        let rows = self.settled_rows(layout);
+        self.restyle(layout);
+        let mut rows = self.settled_rows(layout);
+        // The held last block goes out now: nothing will continue it.
+        if let Some(last) = self.blocks.len().checked_sub(1) {
+            rows.extend(self.rows_after(last, layout));
+        }
         self.blocks.clear();
+        self.next = 0;
         rows
     }
 }
@@ -648,6 +750,12 @@ pub struct App {
     /// Whether a message row has reached the scrollback in this message (so the
     /// blank row after it is not written twice).
     committed_message: bool,
+    /// Whether the last committed row was blank, and `None` before anything is
+    /// committed at all. Kept here because a paint drains `scroll` between two
+    /// events: a spacing rule must not depend on whether a frame was drawn in
+    /// between (that is how `N-echo` came back in a real pane while the unit
+    /// test, which never drains, was green).
+    last_row: Option<bool>,
     /// The streamed message, committed a block at a time as the blocks close:
     /// the text of every block, its rendered rows, and how many of those rows
     /// are already in the scrollback. Every row is written exactly once and
@@ -713,6 +821,7 @@ impl App {
             height,
             scroll: Vec::new(),
             committed_message: false,
+            last_row: None,
             message: Message::default(),
             stream: markdown::Stream::new(),
             tail: VecDeque::new(),
@@ -757,9 +866,10 @@ impl App {
         self.width = width;
         self.height = height;
         // Committed scrollback cannot reflow (the terminal owns those rows):
-        // only what has not been committed yet is re-rendered, which is what
-        // keeps a resize from emitting a row twice.
-        self.rerender_pending();
+        // only what has not been committed yet is re-rendered, and it picks up
+        // the new width when it is next committed (`Message::restyle`). What a
+        // resize does change here is the live area's own height, which is read
+        // at paint time.
     }
 
     fn layout(&self) -> Layout {
@@ -772,7 +882,24 @@ impl App {
 
     /// Rows to write above the viewport, in order.
     pub fn take_scroll(&mut self) -> Vec<Line<'static>> {
+        if let Some(last) = self.scroll.last() {
+            self.last_row = Some(is_blank(last));
+        }
         std::mem::take(&mut self.scroll)
+    }
+
+    /// Whether the last committed row was blank (`None`: nothing committed yet),
+    /// counted across a paint.
+    fn tail_blank(&self) -> Option<bool> {
+        match self.scroll.last() {
+            Some(line) => Some(is_blank(line)),
+            None => self.last_row,
+        }
+    }
+
+    /// Whether anything has reached the scrollback at all.
+    fn committed_any(&self) -> bool {
+        self.tail_blank().is_some()
     }
 
     /// Herdr records queued for the next write between two paints.
@@ -786,12 +913,28 @@ impl App {
 
     /// The live rows: what is still open. With nothing streaming that is the
     /// open tool group (below); otherwise it is the tail of the message — every
-    /// row the streamed text has produced that is not in the scrollback yet.
-    /// Nothing is held back for a later frame (`S1`).
+    /// row the streamed text has produced that is not in the scrollback yet,
+    /// trimmed to the live area's height.
     pub fn live_view(&self) -> Vec<Row> {
-        let tail = self.stream.tail();
-        self.message
-            .live_rows(self.layout(), &tail, self.live_height())
+        let layout = self.layout();
+        let mut rows = self.message.live_rows(layout);
+        if !self.stream.is_empty() {
+            if !rows.is_empty() {
+                rows.push(Row::default());
+            }
+            // Only what is not in the scrollback yet: a fence's delivered lines
+            // are history, and rendering them again every frame is what made a
+            // long block cost its whole length per delta (`P1`).
+            rows.extend(markdown::open_rows(
+                self.stream.open(),
+                self.stream.shape(),
+                self.stream.delivered_bytes(),
+                layout,
+            ));
+        }
+        let start = rows.len().saturating_sub(self.live_height());
+        rows.drain(..start);
+        rows
     }
 
     /// The live area as ratatui lines: the open call group (when nothing is
@@ -820,13 +963,17 @@ impl App {
         self.scroll.extend(lines);
     }
 
-    /// Commit every row that can no longer change and every finished block:
-    /// the open tail is re-rendered as it grows, so only the rows before it are
-    /// stable. Called after every delta and every block, so the scrollback
-    /// always holds everything the streamed text has produced up to its last
-    /// open block.
+    /// Commit every row that can no longer change and every finished block.
+    /// Called after every delta and every block, so the scrollback always holds
+    /// everything the streamed text has produced up to the rows that can still
+    /// change. It starts at the first block with a row left, so what is already
+    /// out costs nothing (`P1`).
     fn commit_settled(&mut self) {
         let rows = self.message.settled_rows(self.layout());
+        self.queue_rows(rows);
+    }
+
+    fn queue_rows(&mut self, rows: Vec<Row>) {
         if rows.is_empty() {
             return;
         }
@@ -837,14 +984,26 @@ impl App {
         self.committed_message = true;
     }
 
-    /// A resize re-renders what is still open for the new width. What the
-    /// scrollback already has is not re-rendered: the terminal owns those rows
-    /// and rewriting them would duplicate them.
-    fn rerender_pending(&mut self) {
-        // Nothing to do: the open tail is rendered from its text, the closed
-        // blocks are already committed, and what is held (one block, until a
-        // following block decides whether it continues it) is committed by the
-        // next delta, at the new width.
+    /// Commit the rows of the open block that can no longer change (`S1b`): a
+    /// fence's finished lines and a top-level list's finished items, keeping
+    /// `LIVE_KEEP` complete lines in the live area so the frame still shows the
+    /// text while it grows.
+    fn commit_streaming(&mut self) {
+        let rows = self.stream.settle(self.layout(), LIVE_KEEP);
+        self.queue_rows(rows);
+    }
+
+    /// Prose is starting: the tool group that preceded it closes, and the first
+    /// block of the message gets one blank row above it (the echo is its own
+    /// block, review N-echo).
+    fn begin_prose(&mut self) {
+        let closed = self.close_group();
+        if !self.committed_any() {
+            return;
+        }
+        if closed || !self.committed_message {
+            self.separate();
+        }
     }
 
     /// A tool call interrupts the message: the text that had streamed before it
@@ -859,10 +1018,10 @@ impl App {
             self.commit_settled();
             return false;
         }
-        let block = self.stream.finish();
+        let block = self.stream.finish_block();
         let flushed = block.is_some();
         if let Some(block) = block {
-            self.message.push_block(&block);
+            self.message.push_block(&block.text, block.delivered);
         }
         // A call is not a continuation: nothing in the message may swallow what
         // follows one, so the held block is decided here.
@@ -873,19 +1032,19 @@ impl App {
 
     /// A complete block arrived: it is held (it may still be continued by the
     /// next block), and everything before it is committed.
-    fn absorb_block(&mut self, block: &str) {
-        self.message.push_block(block);
+    fn absorb_block(&mut self, block: &markdown::Closed) {
+        self.message.push_block(&block.text, block.delivered);
         self.commit_settled();
     }
 
     /// Commit the streamed message: whatever is left of it, exactly once, then
     /// one blank row.
     pub fn commit_live(&mut self, fallback: &str) {
-        if let Some(block) = self.stream.finish() {
-            self.message.push_block(&block);
+        if let Some(block) = self.stream.finish_block() {
+            self.message.push_block(&block.text, block.delivered);
         }
         if self.message.is_empty() && !fallback.trim().is_empty() {
-            self.message.push_block(fallback);
+            self.message.push_block(fallback, 0);
         }
         let rows = self.message.finish(self.layout());
         let theme = self.theme;
@@ -896,7 +1055,7 @@ impl App {
         // One blank row after a message, never two at the tail of the
         // scrollback (a message that was fully committed already has it).
         let announced = !rows.is_empty() || self.committed_message;
-        if announced && !self.scroll.last().is_some_and(|line| line.spans.is_empty()) {
+        if announced && self.tail_blank() == Some(false) {
             self.scroll.push(Line::from(""));
         }
         self.committed_message = false;
@@ -941,11 +1100,8 @@ impl App {
     /// block, as does prose after tool lines. Nothing is written at the top of
     /// an empty scrollback.
     fn separate(&mut self) {
-        let blank =
-            |line: &Line<'static>| line.spans.iter().all(|span| span.content.trim().is_empty());
-        match self.scroll.last() {
-            Some(last) if !blank(last) => self.scroll.push(Line::from("")),
-            _ => {}
+        if self.tail_blank() == Some(false) {
+            self.scroll.push(Line::from(""));
         }
     }
 
@@ -1014,14 +1170,20 @@ impl App {
                 // prose between them stays open here, so consecutive calls
                 // still fold. (The stream was flushed when the call started:
                 // see `interrupt_prose`.)
-                if self.close_group() && !self.scroll.is_empty() {
-                    self.separate();
-                }
+                self.begin_prose();
                 self.status.phase = Phase::Working;
                 self.activity.text(now, text.chars().count());
-                for block in self.stream.push(&text) {
+                // Every closed block carries its own separator row
+                // (`Message::rows_after`), so nothing is written here: one
+                // blank row between blocks, exactly once, whether or not a
+                // frame was painted in between.
+                for block in self.stream.push_blocks(&text) {
                     self.absorb_block(&block);
                 }
+                // The rows of the block still open that can no longer change go
+                // out now, so a long fence, list or table fills the scrollback
+                // as it arrives instead of being a three-row ticker (`S1b`).
+                self.commit_streaming();
             }
             UiEvent::Usage {
                 prompt,
@@ -1039,9 +1201,7 @@ impl App {
             UiEvent::Assistant { text } => {
                 // The group closes first: its lines describe calls that ran
                 // before this message (`B1`).
-                if self.close_group() && !self.scroll.is_empty() {
-                    self.separate();
-                }
+                self.begin_prose();
                 self.commit_live(&text);
             }
             UiEvent::ToolStarted { name, input } => {
@@ -1049,7 +1209,7 @@ impl App {
                 // the prose that announced it is finished and goes into the
                 // scrollback now, so the call's line lands after it and before
                 // whatever the model says next (`B1`).
-                if self.interrupt_prose() && !self.scroll.is_empty() {
+                if self.interrupt_prose() && self.committed_any() {
                     self.separate();
                 }
                 self.status.running += 1;
@@ -1069,7 +1229,7 @@ impl App {
             } => {
                 // A session that resumes mid-turn can settle a call whose start
                 // this process never saw: the same rule holds, flush first.
-                if self.interrupt_prose() && !self.scroll.is_empty() {
+                if self.interrupt_prose() && self.committed_any() {
                     self.separate();
                 }
                 self.status.running = self.status.running.saturating_sub(1);
@@ -1124,6 +1284,15 @@ impl App {
                 // A notice is prose: what settled before it goes out first, or
                 // it lands between two tool lines of the older group (`B1`).
                 self.close_group();
+                // A wait's own line is the CLI's sentence, and in this pane
+                // `stop` typed is a `say` the model receives: the scrollback
+                // names the key that works here too (`R5`, the same rule the
+                // facts row follows).
+                let text = if text.contains("say stop") {
+                    tui_wait_line(&text)
+                } else {
+                    text
+                };
                 self.push_text(&text);
             }
             UiEvent::Retrying {
@@ -1145,7 +1314,11 @@ impl App {
                 if status.is_some() || attempt > 0 {
                     self.retry_deadline = Some(until);
                 }
-                self.status.retrying = Some((line.clone(), until));
+                // The facts row's wording is the TUI's, not the CLI's: the
+                // line the retry event carries ends `say stop to cancel`, and
+                // `stop` typed into this prompt is a message to the model, not
+                // a stop (`R5`). The key hint is the state row's job.
+                self.status.retrying = Some((tui_wait_line(&line), until));
                 // The facts row carries the line and the state row carries the
                 // countdown, so the transient note stays out of the way (it
                 // would repeat the line over the state row's own detail).
@@ -2329,7 +2502,7 @@ mod tests {
             ..Status::default()
         };
         status.retrying = Some((
-            "rate limited (429): retrying in 34 s, attempt 5, say stop to cancel".into(),
+            tui_wait_line("rate limited (429): retrying in 34 s, attempt 5, say stop to cancel"),
             Instant::now() + Duration::from_secs(34),
         ));
         let text = status_text(&status);
@@ -2337,7 +2510,10 @@ mod tests {
             text.starts_with("kelir working · rate limited (429)"),
             "{text}"
         );
-        assert!(text.contains("say stop to cancel"), "{text}");
+        // The facts row names this pane's key, never the CLI's sentence (`R5`):
+        // typing `stop` here is a message to the model.
+        assert!(text.contains("esc stops"), "{text}");
+        assert!(!text.contains("say stop"), "{text}");
         assert!(
             text.ends_with("33 s left") || text.ends_with("34 s left"),
             "{text}"
@@ -2749,7 +2925,78 @@ mod tests {
         assert!(fold < prose, "{rows:?}");
     }
 
-    /// A notice (a pause, a provider error, a verb reply) is prose too: the
+    /// The spacing rules hold across a *paint*, not only inside one buffer
+    /// (`N-echo`, round 2): a real pane drains the committed rows between two
+    /// events, and the rules must not depend on whether a frame was drawn in
+    /// between. Draining after every event is what the event loop does, and the
+    /// rows must still be exactly one blank apart.
+    #[test]
+    fn the_spacing_rules_hold_when_every_event_is_painted() {
+        fn drain(app: &mut App, out: &mut Vec<String>) {
+            out.extend(app.take_scroll().iter().map(line_text));
+        }
+        let mut app = app_of_width(60);
+        let mut rows: Vec<String> = Vec::new();
+        app.press(Press::Edit(Key::Char('h')));
+        app.press(Press::Edit(Key::Char('i')));
+        app.press(Press::Edit(Key::Enter));
+        drain(&mut app, &mut rows);
+        let md = "The answer starts here.\n\nA second paragraph follows it.\n";
+        for chunk in md.as_bytes().chunks(3) {
+            app.apply(UiEvent::Delta(String::from_utf8_lossy(chunk).into_owned()));
+            drain(&mut app, &mut rows);
+        }
+        app.apply(UiEvent::Assistant { text: md.into() });
+        drain(&mut app, &mut rows);
+        while rows.last().is_some_and(String::is_empty) {
+            rows.pop();
+        }
+        // The echo is its own block: exactly one blank row separates it from the
+        // first row of the reply.
+        let echo = rows.iter().position(|r| r.contains("› hi")).expect("echo");
+        assert_eq!(rows[echo + 1], "", "one blank row after the echo: {rows:?}");
+        assert!(
+            rows[echo + 2].contains("The answer starts here."),
+            "the reply starts two rows down: {rows:?}"
+        );
+        for pair in rows.windows(2) {
+            assert!(
+                !(pair[0].is_empty() && pair[1].is_empty()),
+                "two blank rows: {rows:?}"
+            );
+        }
+    }
+
+    /// A loose list item's paragraphs are separated by one blank row, as
+    /// CommonMark's loose list has them (`N-para`); a tight item is not.
+    #[test]
+    fn a_loose_list_item_keeps_one_blank_row_between_its_paragraphs() {
+        let rows: Vec<String> = markdown::render(
+            "1. First item of the list\n\n   Continuation paragraph.\n\n2. Second item\n",
+            Layout::new(40),
+        )
+        .iter()
+        .map(Row::text)
+        .collect();
+        assert_eq!(
+            rows,
+            vec![
+                "1. First item of the list".to_string(),
+                String::new(),
+                "   Continuation paragraph.".to_string(),
+                String::new(),
+                "2. Second item".to_string()
+            ]
+        );
+        // A tight list stays tight.
+        let tight: Vec<String> = markdown::render("- a\n- b\n", Layout::new(40))
+            .iter()
+            .map(Row::text)
+            .collect();
+        assert_eq!(tight, vec!["• a".to_string(), "• b".to_string()]);
+    }
+
+    /// A notice (a pause, a provider error, a verb reply) is prose too:
     /// calls that settled before it are history and must be written first, or
     /// the notice lands between two tool lines of the group it followed (`B1`
     /// in the paused drive).
@@ -2783,6 +3030,35 @@ mod tests {
         let call = rows.iter().position(|r| r.contains("echo one")).unwrap();
         let error = rows.iter().position(|r| r.contains("http 401")).unwrap();
         assert!(call < error, "{rows:?}");
+    }
+
+    /// The wait's own scrollback line names this pane's key (`R5`): the CLI's
+    /// `say stop to cancel` is false here, because `stop` typed into the prompt
+    /// is a `say` the model receives.
+    #[test]
+    fn the_wait_line_in_the_scrollback_names_the_key_that_stops_here() {
+        let mut app = app_of_width(100);
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "p".into(),
+            model: "m".into(),
+            limit: None,
+        });
+        app.apply(UiEvent::Info(
+            "» provider error (503): retrying in 674 ms, attempt 1, say stop to cancel".into(),
+        ));
+        let rows: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let wait = rows
+            .iter()
+            .find(|row| row.contains("retrying in"))
+            .unwrap_or_else(|| panic!("{rows:?}"));
+        assert!(wait.contains("esc stops"), "{wait}");
+        assert!(!wait.contains("say stop"), "{wait}");
+        // A notice that is not a wait is left exactly as it was.
+        let mut app = app_of_width(100);
+        app.apply(UiEvent::Info("» stop (Esc)".into()));
+        let rows: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        assert_eq!(rows, vec!["» stop (Esc)".to_string()]);
     }
 
     /// The design note's spacing rule (review N1): one blank row between a
@@ -3190,7 +3466,9 @@ mod tests {
         let mut app = app_of_width(80);
         app.set_session_dir(dir.path().to_path_buf());
         let image = dir.path().join("shot.png");
-        std::fs::write(&image, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        // Real bytes: the chip path sniffs the file, so a header-only stub is
+        // not an image any more (`N-chip`).
+        std::fs::write(&image, png_720()).unwrap();
         app.paste(&image.display().to_string());
         let saved = dir.path().join("attachments");
         assert!(saved.read_dir().unwrap().next().is_some());

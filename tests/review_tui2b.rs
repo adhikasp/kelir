@@ -197,7 +197,6 @@ fn b1_calls_then_pause_notice_in_order() {
 /// While a long fence streams line by line, every row the text has produced is
 /// in the scrollback or the live rows, once, in order, never in neither.
 #[test]
-#[ignore = "FINDING S1b: a long open block is a 3-row ticker; its earlier rows are in neither the scrollback nor the live rows until it closes"]
 fn s1_no_row_vanishes_and_none_repeats_while_a_fence_streams() {
     let mut app = app(60);
     turn(&mut app);
@@ -478,11 +477,79 @@ fn stream_cost(text: &str, delta: usize) -> (Duration, Duration) {
     (t0.elapsed(), worst)
 }
 
+/// The brief's regression: 1 MB of *mixed* markdown (paragraphs, fences,
+/// nested lists, tables, quotes) streamed in 4 KB deltas must cost what 100 KB
+/// costs times the size ratio, not its square (`P1`).
+///
+/// A ratio, never a wall clock: a slow machine makes both numbers big and their
+/// ratio the same, which is what "linear in the message" means.
+#[test]
+fn a_megabyte_of_mixed_markdown_scales_linearly() {
+    fn mixed(paragraphs: usize) -> String {
+        let unit = "A paragraph of **prose** with `code` and a [link](https://example.com).\n\
+                    It wraps at the pane's width, which is what a real answer does.\n\n\
+                    ```rust\nfn f(x: u32) -> u32 { x + 1 }\nlet y = f(2);\n```\n\n\
+                    1. first item\n2. second item\n   - nested bullet\n   - another one\n\n\
+                    | name | value |\n|---|---|\n| alpha | 1 |\n| beta | 2 |\n\n\
+                    > a quoted sentence that is long enough to wrap at eighty columns\n\n";
+        unit.repeat(paragraphs)
+    }
+    let (small, _) = stream_cost(&mixed(120), 4096);
+    let (large, _) = stream_cost(&mixed(2800), 4096);
+    let small_len = mixed(120).len();
+    let large_len = mixed(2800).len();
+    let ratio = large_len as f64 / small_len as f64;
+    eprintln!(
+        "{} KB in {small:?} ({:.1} MB/s), {} KB in {large:?} ({:.1} MB/s): ratio {ratio:.1}",
+        small_len / 1024,
+        small_len as f64 / 1e6 / small.as_secs_f64().max(1e-9),
+        large_len / 1024,
+        large_len as f64 / 1e6 / large.as_secs_f64().max(1e-9),
+    );
+    assert!(
+        large_len >= 1_000_000,
+        "the big case is 1 MB: {large_len} B"
+    );
+    // Linear is `ratio` (10x); quadratic is `ratio^2` (100x). Allow 3x the
+    // linear ratio plus a floor for timer noise on a mostly-idle machine.
+    let linear = Duration::from_secs_f64(small.as_secs_f64() * ratio * 3.0);
+    assert!(
+        large < linear + Duration::from_millis(250),
+        "{small_len} B {small:?} -> {large_len} B {large:?}: super-linear (ratio {ratio:.1})"
+    );
+    // And the 1 MB case is fast enough to be a stream, not a batch job.
+    assert!(large < Duration::from_secs(20), "1 MB took {large:?}");
+}
+
+/// The worst case for a row-at-a-time commit: one 1 MB fence streamed in 64-byte
+/// deltas. Every delta must cost what the delta holds, never what the block now
+/// holds (`S1b` + `P1` together).
+#[test]
+fn a_one_megabyte_fence_streams_row_by_row_in_bounded_time() {
+    let mut text = String::from("```text\n");
+    let mut i = 0usize;
+    while text.len() < 1_000_000 {
+        text.push_str(&format!("line {i} of a big code block\n"));
+        i += 1;
+    }
+    text.push_str("```\n");
+    let (total, worst) = stream_cost(&text, 64);
+    eprintln!("1 MB fence, 64-byte deltas: total {total:?}, worst delta {worst:?}");
+    assert!(
+        total < Duration::from_secs(20),
+        "a 1 MB fence took {total:?}"
+    );
+    // One delta can never cost a meaningful fraction of the whole message.
+    assert!(
+        worst < Duration::from_millis(500),
+        "one 64-byte delta cost {worst:?}: the delta path re-renders the block"
+    );
+}
+
 /// A message of many short paragraphs (the realistic big answer), streamed in
 /// 4 KB deltas: the cost per delta must not grow with the number of blocks
 /// already committed (that would make a long answer quadratic).
 #[test]
-#[ignore = "FINDING P1: committing block by block re-renders every earlier block on every delta (O(blocks) per delta, quadratic per message): 26 KB 0.46 s -> 104 KB 5.8 s in release; 1 MB takes minutes"]
 fn a_big_multi_paragraph_message_is_not_quadratic() {
     let para =
         "Lorem **ipsum** dolor `sit` amet, consectetur adipiscing elit, sed do eiusmod tempor.
@@ -513,7 +580,6 @@ fn one_megabyte_single_block_per_delta_cost_does_not_explode() {
 /// The same for the other long single blocks a model writes: a 40-line
 /// paragraph-free list (one block, no blank line) and a 30-row table.
 #[test]
-#[ignore = "FINDING S1b: a long list or table block is a 3-row ticker until it closes"]
 fn s1_a_long_list_block_reaches_history_while_it_streams() {
     let mut app = app(60);
     turn(&mut app);
@@ -539,7 +605,6 @@ fn s1_a_long_list_block_reaches_history_while_it_streams() {
 /// The fence's language label inside a list item sits at the item's indent,
 /// like the code under it.
 #[test]
-#[ignore = "FINDING N-label: a fence's language label inside a list item is flush left while its code is indented"]
 fn a_fence_label_in_a_list_item_is_indented_with_its_code() {
     let rows = render_md(
         "1. one
@@ -560,7 +625,6 @@ fn a_fence_label_in_a_list_item_is_indented_with_its_code() {
 }
 
 #[test]
-#[ignore = "FINDING N-table: a 3-column table at width 8 or 5 is wider than the pane (and every cell is an ellipsis)"]
 fn a_table_at_extreme_widths_does_not_overflow() {
     let md = "| a | b | c |
 |---|---|---|
@@ -582,7 +646,6 @@ fn a_table_at_extreme_widths_does_not_overflow() {
 /// `image/png`; providers that check the declared type against the bytes
 /// reject it, and the rejected `source` event then repeats on every request.
 #[test]
-#[ignore = "FINDING S3b: the data-URL media type comes from the extension, not from the sniffed bytes"]
 fn the_media_type_follows_the_bytes_not_the_extension() {
     let dir = std::env::temp_dir().join(format!("kelir-tui2b-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
