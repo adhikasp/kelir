@@ -327,3 +327,5 @@ Starting points (verify before designing):
 - Cap the label at a short length (suggest <= 120 chars); never put the full command in it.
 - Tests: extend the schema test in `src/tools/mod.rs`, the line tests in `src/tools_view.rs`, and an e2e asserting the description reaches both TUI head and NDJSON head.
 - Docs: `src/prompt.md` tool bullet, the closest `docs/reference/` tool topic, then `kelir docs --generate` and `cargo test --lib docs` (drift test must pass).
+
+- 2026-11-21: **M9 merged** (c73a11f, main gate 1349 green). M10 running (worktree m10, pane t18w; must merge main before its gate). steer9 (de-flake, worktree steer9) not yet started. Then M11, M12.
