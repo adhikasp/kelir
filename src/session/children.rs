@@ -108,7 +108,6 @@ struct Plan {
 const DEAD_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The most task or result text one request to the root carries.
-
 const REMOTE_TEXT: usize = 16 * 1024;
 
 fn internal(key: &str, mut args: Value) -> Request {
