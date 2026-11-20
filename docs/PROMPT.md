@@ -131,7 +131,7 @@ Three rules carry the change: one bash call per read round (the shell-level batc
 provider feature), the notes file (the plan is externalised before acting, because reasoning is
 dropped between steps), and the guardrails kept from the old text (never batch a build or a test
 with the reads, commands under 8 KB, exit codes still checked, the proving command named). The
-prompt stays under 1 KB (1018 bytes), pinned byte-for-byte by
+prompt stays under 1 KB (1015 bytes), pinned byte-for-byte by
 `tests/fixtures/prompt.md.snapshot` and line-by-line by the retro rule list in `src/sources.rs`.
 
 ## AFTER — to be filled by the first two jobs on the new prompt

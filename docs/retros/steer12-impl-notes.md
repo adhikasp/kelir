@@ -40,7 +40,7 @@ the move that does not need the capability — **one bash call carrying every re
 and labelled `echo === name`** — and mentions parallel calls nowhere. `tests/steer12.rs` asserts
 that it does not come back.
 
-## 3. The prompt (1018 bytes)
+## 3. The prompt (1015 bytes)
 
 `src/prompt.md` moved from "batch independent reads in one call set" to three rules: one `bash` call
 per read round (the shell-level batch, with `grep -A/-B` instead of `grep -n` then `sed -n`); plan
@@ -60,6 +60,14 @@ The brief's three prose bullets did not fit 1 KB alongside the existing ones; th
 trade, not an accident — the rules that survive are the ones a retro put there, and the ones that
 grew a word (`never \`cat\` a big file` -> `never \`cat\` a big file; no \`target/\``) kept their
 pin.
+
+**The skills line keeps the word `Directories:`.** The first draft shortened it to `Dirs:` and the
+gate caught it on both platforms: `tests/review_steer6.rs::f1_the_system_message_is_deterministic_
+and_the_prefix_is_stable` cuts the live system message at the literal `Directories:` to compare the
+head across two runs. The harness depends on that word, not on the sentence around it, so a prompt
+edit that renames it fails a reviewer's test from another milestone — which is the rule list doing
+its job one level out. Reverting one word (and one `when done` -> `what you did` to stay at 1015
+bytes) was the whole fix; `src/prompt.md` now pins `Directories:` through that test as well.
 
 ## 4. The metrics script's own defects, found by running it
 
