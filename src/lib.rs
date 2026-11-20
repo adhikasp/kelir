@@ -4,6 +4,8 @@
 //! request is rebuilt from `fold(events.jsonl)` so the loop is the same live
 //! and on resume.
 
+pub mod activity;
+pub mod attachments;
 pub mod bg;
 pub mod chat;
 pub mod cli;
@@ -19,6 +21,7 @@ pub mod fold;
 pub mod governor;
 pub mod herdr;
 pub mod ipc;
+pub mod markdown;
 pub mod models;
 pub mod paths;
 pub mod proc;
@@ -33,7 +36,9 @@ pub mod sources;
 pub mod spill;
 pub mod sse;
 pub mod stream;
+pub mod theme;
 pub mod tools;
+pub mod tools_view;
 pub mod tui;
 pub mod util;
 pub mod verbs;

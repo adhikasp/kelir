@@ -127,6 +127,41 @@ pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
     .await
 }
 
+/// `kelir view <path>`: queue an image for the model's next message.
+///
+/// The model reaches this through `bash` (so it costs no tool-schema text). It
+/// sends the `view` verb to the live session over the socket the bash call
+/// already carries (`KELIR_SOCK`); the session checks the model's vision
+/// metadata and records a `source` event (kind `attachment`) at the tail. That
+/// is what keeps the provider cache prefix byte-stable: earlier messages are
+/// never edited.
+pub async fn view(args: crate::cli::ViewArgs) -> u8 {
+    let Some(address) =
+        std::env::var_os("KELIR_SOCK").map(|value| value.to_string_lossy().into_owned())
+    else {
+        eprintln!("kelir: view: no session: run it from a kelir tool call (KELIR_SOCK is not set)");
+        return 1;
+    };
+    let request = Request::new("view", json!({"path": args.path}), "tool");
+    let response = match ipc::request_value(&address, &request).await {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("kelir: view: cannot reach the session: {error}");
+            return 1;
+        }
+    };
+    if response.ok {
+        println!("image queued: appears in your next message");
+        0
+    } else {
+        let message = response
+            .error
+            .unwrap_or_else(|| "the session refused the image".into());
+        eprintln!("kelir: {message}");
+        1
+    }
+}
+
 struct Options {
     json: bool,
     ask: bool,
@@ -493,8 +528,9 @@ impl PauseReport {
     fn message(&self) -> String {
         if self.reason == PauseReason::Steps {
             return format!(
-                "turn paused after {} steps; say continue to resume",
-                self.attempts
+                "turn paused after {} {}; say continue to resume",
+                self.attempts,
+                if self.attempts == 1 { "step" } else { "steps" }
             );
         }
         let mut text = format!(
@@ -724,8 +760,12 @@ async fn drive(opts: Options) -> u8 {
             tx.clone(),
             &banner,
             session.cfg.max_steps,
+            crate::theme::Theme::from_env(),
         ) {
-            Ok(handle) => {
+            Ok(mut handle) => {
+                // The session dir is where a pasted image is saved, and where
+                // `attachments/…` in a prompt resolves.
+                handle.app.set_session_dir(session.dir.clone());
                 session.ui = Some(to_tui.clone());
                 let task = tokio::spawn(handle.run());
                 // If the UI dies (a panic, a terminal error) the session ends
@@ -1905,6 +1945,14 @@ impl Session {
             return Err("bg: an internal verb; jobs report themselves".to_string());
         }
         let parsed = verbs::parse(name, &request.args)?;
+        // `view` is validated when it arrives, not when it applies: the CLI
+        // prints "image queued" from the ack, so a bad path must be refused in
+        // the ack and not a boundary later (where nobody is listening).
+        if let Verb::View { path } = &parsed
+            && let Err(message) = self.check_view(path)
+        {
+            return Err(message);
+        }
         if let Verb::Stop {
             call: Some(call), ..
         } = &parsed
@@ -1954,11 +2002,18 @@ impl Session {
                     if pending.from != "tui" {
                         self.emit(UiEvent::Info(format!("› {}", one_line(&text))));
                     }
+                    // The text carries the pointers; the list carries the paths
+                    // they name, so a reader (and a later tool) can see which
+                    // images a message was about without parsing prose (N5).
+                    let attachments = crate::attachments::paths_in(&text)
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect();
                     self.record(EventBody::User {
                         text: Payload::text(text),
                         from: pending.from,
                         delivery: if now { "now" } else { "next" }.to_string(),
-                        attachments: Vec::new(),
+                        attachments,
                     })?;
                     applied.messages += 1;
                 }
@@ -1989,6 +2044,31 @@ impl Session {
                     }
                     for name in enable {
                         self.disabled.remove(&name);
+                    }
+                }
+                Verb::View { path } => {
+                    // An image queued by `kelir view` from inside a call: it
+                    // becomes a `source` event at the tail, so the next request
+                    // carries an image part and every earlier message (and the
+                    // cached prefix) stays byte-identical.
+                    match self.apply_view(&path) {
+                        Ok((rel, bytes)) => {
+                            applied.messages += 1;
+                            self.emit(UiEvent::Attachment { rel, bytes });
+                            self.sync();
+                        }
+                        Err(message) => {
+                            self.emit(UiEvent::Error(message.clone()));
+                            self.record(EventBody::Error {
+                                location: "view".into(),
+                                message,
+                                retryable: false,
+                                status: None,
+                                attempt: None,
+                                retry_in_ms: None,
+                            })?;
+                            self.sync();
+                        }
                     }
                 }
                 Verb::End => applied.end = true,
@@ -2272,7 +2352,8 @@ impl Session {
                 | Verb::Model { .. }
                 | Verb::Tools { .. }
                 | Verb::Compact { .. }
-                | Verb::Skills { .. } => {}
+                | Verb::Skills { .. }
+                | Verb::View { .. } => {}
             }
         }
         if end {
@@ -2327,6 +2408,112 @@ impl Session {
         self.emit(UiEvent::Info(format!("» {}", one_line(&text))));
         self.sync();
         Ok(true)
+    }
+
+    /// One image queued by `kelir view`: resolve the path, record the `source`
+    /// event (kind `attachment`), and return what the TUI shows.
+    ///
+    /// The event carries the relative path (`attachments/1-x.png`) and it is
+    /// the fold that turns it into a data URL at request time, so the log stays
+    /// small and free of base64.
+    fn apply_view(&mut self, named: &str) -> Result<(String, u64), String> {
+        let path = self.check_view(named)?;
+        let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        // The image is copied into the session's attachments dir, so the
+        // request does not depend on a path outside the session (and a later
+        // resume still finds it).
+        let rel = self.import_attachment(&path)?;
+        self.record(EventBody::Source {
+            kind: "attachment".to_string(),
+            name: rel.clone(),
+            text: None,
+            path: Some(rel.clone()),
+        })?;
+        self.sync();
+        Ok((rel, bytes))
+    }
+
+    /// Resolve and validate a `view` path without side effects: the same check
+    /// the ack runs, so the CLI's answer is the truth.
+    fn check_view(&self, named: &str) -> Result<std::path::PathBuf, String> {
+        let path = crate::attachments::resolve(&self.dir, &self.ctx.cwd, named);
+        if !path.is_file() {
+            return Err(format!(
+                "view: no such image: {}",
+                crate::util::path_string(&path)
+            ));
+        }
+        let mime = crate::attachments::mime_of(&path);
+        if mime == "application/octet-stream" {
+            return Err(format!(
+                "view: {} is not an image kelir knows (png, jpg, gif, webp)",
+                crate::util::path_string(&path)
+            ));
+        }
+        let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        if bytes > crate::attachments::MAX_BYTES {
+            return Err(format!(
+                "view: {} is {} (the limit is {})",
+                crate::util::path_string(&path),
+                crate::attachments::bytes_label(bytes),
+                crate::attachments::bytes_label(crate::attachments::MAX_BYTES)
+            ));
+        }
+        // An extension is a claim, not proof: the bytes have to start with a
+        // format's signature and carry a header kelir can read a size from.
+        // Queueing garbage would put it in every later request (the shared
+        // conversation is poisoned by a provider 400 that repeats), so a file
+        // that is not really an image is refused here, before the log (`S3`).
+        match crate::attachments::sniff(&path) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(format!(
+                    "view: {} does not look like an image (empty, or not a png, jpg, gif or webp)",
+                    crate::util::path_string(&path)
+                ));
+            }
+            Err(message) => return Err(format!("view: {message}")),
+        }
+        // `None` (the provider did not state the model's vision support) is a
+        // "try it": refusing on a missing flag would block a model that works.
+        if self.vision_support() == Some(false) {
+            return Err(format!(
+                "view: {} cannot take images: it is a text-only model, so the image would be refused by the provider (pick a vision model with `/model`, or `--model`). The conversation is unchanged.",
+                self.model
+            ));
+        }
+        Ok(path)
+    }
+
+    /// Whether the provider says the current model takes images: `Some(true)`
+    /// and `Some(false)` are answers, `None` is "not stated" (the fetched or
+    /// cached model list has no entry, or the entry has no vision field).
+    fn vision_support(&self) -> Option<bool> {
+        self.models
+            .as_ref()
+            .and_then(|models| models.vision_for(&self.model))
+    }
+
+    /// Copy one image into `<session>/attachments/` and return its relative
+    /// path. Content that is already there is not copied twice.
+    fn import_attachment(&self, path: &Path) -> Result<String, String> {
+        let dir = crate::attachments::dir(&self.dir);
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("view: cannot create {}: {error}", dir.display()))?;
+        // Keep the file where it is when it already lives in the session's
+        // attachments (a prompt pointer names exactly that).
+        if let Ok(rest) = path.strip_prefix(&self.dir) {
+            return Ok(crate::util::path_string(rest));
+        }
+        // The sequence number counts the session's copies, so two different
+        // files get two numbers (review N6: they all used to be `1-…`). Names
+        // stay unique either way, but a human reading the session's
+        // `attachments/` should be able to count them.
+        let mut seen = std::collections::HashMap::new();
+        let seq = crate::attachments::next_seq(&self.dir);
+        let saved = crate::attachments::save(&self.dir, seq, path, &mut seen)
+            .map_err(|error| format!("view: {error}"))?;
+        Ok(saved.rel)
     }
 
     /// Record one `source` event: context that arrived after the start. It
@@ -2415,11 +2602,19 @@ impl Session {
             if message.from != "tui" {
                 self.emit(UiEvent::Info(format!("› {}", one_line(&message.text))));
             }
+            // A message deferred to the end of a turn (`/later`) is the same
+            // message: the list of the images its text points at goes with it
+            // (N5), or a queued prompt would be the one shape whose
+            // `attachments[]` lied.
+            let attachments = crate::attachments::paths_in(&message.text)
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect();
             self.record(EventBody::User {
                 text: Payload::text(message.text),
                 from: message.from,
                 delivery: message.delivery.to_string(),
-                attachments: Vec::new(),
+                attachments,
             })?;
         }
         self.sync();
@@ -3576,6 +3771,8 @@ impl Session {
         self.emit(UiEvent::Retrying {
             line,
             until: Instant::now() + wait,
+            status,
+            attempt,
         });
     }
 
@@ -3729,6 +3926,10 @@ impl Session {
                 self.emit(UiEvent::Retrying {
                     line,
                     until: Instant::now() + Duration::from_secs(86_400),
+                    // A slot wait is not a provider retry: no status, no attempt,
+                    // so the state row keeps saying what it was doing.
+                    status: None,
+                    attempt: 0,
                 });
             }
             match self.wait_for(rx, SLOT_POLL, inbox_open).await? {
@@ -4009,15 +4210,26 @@ impl Session {
                     elapsed.as_secs_f64()
                 );
             }
+            // A failed call's tail row: the last line it printed, so the
+            // transcript says *why* without unfolding anything.
+            let tail = if outcome.outcome == "ok" && outcome.exit_code.unwrap_or(0) == 0 {
+                String::new()
+            } else {
+                call_tail(&outcome)
+                    .or_else(|| last_result_line(&outcome.result))
+                    .unwrap_or_default()
+            };
             self.emit(UiEvent::ToolSettled {
                 name: call.name.clone(),
                 input: call.args.clone(),
                 outcome: outcome.outcome.clone(),
                 exit_code: outcome.exit_code,
+                elapsed_ms: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
                 bytes: outcome.bytes,
                 lines: outcome.lines,
                 spilled: outcome.spilled,
                 out_path: outcome.out_path.clone(),
+                tail,
             });
         }
         self.sync();
@@ -4164,6 +4376,24 @@ fn compact_input(args: &Value) -> String {
         .map(str::to_string)
         .unwrap_or_else(|| args.to_string());
     crate::util::truncate_chars(&text.replace('\n', " ↵ "), 60)
+}
+
+/// The last non-empty line of a call's output file: a failed call's tail row.
+/// Reads only the end of the file, so a 200 MB log stays cheap.
+fn call_tail(outcome: &ToolOutcome) -> Option<String> {
+    if outcome.out_path.is_empty() {
+        return None;
+    }
+    let text = crate::tui::read_tail(std::path::Path::new(&outcome.out_path), 4096).ok()?;
+    let line = crate::tui::last_line(&text);
+    (!line.is_empty()).then_some(line)
+}
+
+/// The last non-empty line of a result that never reached a file (a stopped or
+/// disabled call's message).
+fn last_result_line(result: &str) -> Option<String> {
+    let line = crate::tui::last_line(result);
+    (!line.is_empty()).then_some(line)
 }
 
 /// One line for the UI: newlines folded, length bounded.

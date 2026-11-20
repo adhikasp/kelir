@@ -32,6 +32,8 @@ pub enum Command {
     Resume(ResumeArgs),
     /// Send a verb to a running session and print its answer.
     Ctl(CtlArgs),
+    /// Queue an image for the model's next message (`view <path>`).
+    View(ViewArgs),
     /// Background jobs: run, ls, out, wait, cancel.
     Bg(BgArgs),
     /// Show which key each provider would use (never the key itself).
@@ -175,6 +177,21 @@ pub struct CtlArgs {
     pub kind: Option<String>,
 }
 
+/// `kelir view <path>`: make an image arrive in the model's next message.
+///
+/// The model reaches it through `bash`, like every other kelir CLI, so it costs
+/// no tool-schema text. It appends a `source` event (kind `attachment`) at the
+/// tail of the conversation, which renders as a user message holding one image
+/// part; every earlier message (and the provider's cached prefix) stays
+/// byte-identical.
+#[derive(Debug, Args, Clone)]
+pub struct ViewArgs {
+    /// The image: `attachments/1-x.png` (resolved against the session dir
+    /// first), or any path.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+}
+
 /// `kelir doctor`: what the two providers are wired to, and where each key
 /// comes from — the source, never the secret.
 #[derive(Debug, Args, Clone, Default)]
@@ -303,6 +320,15 @@ pub struct BgShimArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_takes_one_path() {
+        let cli = Cli::parse_from(["kelir", "view", "attachments/1-x.png"]);
+        match cli.command {
+            Some(Command::View(args)) => assert_eq!(args.path, "attachments/1-x.png"),
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn run_parses_flags_and_a_quoted_task() {
