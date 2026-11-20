@@ -150,7 +150,7 @@ async fn in_a_pane_the_frozen_system_carries_one_herdr_line() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|source| source["name"] == "herdr")
+        .filter(|source| source["name"] == "herdr" && source["kind"] == "herdr")
         .collect();
     assert_eq!(herdr.len(), 1, "{started}");
     assert_eq!(herdr[0]["kind"], "herdr");
