@@ -148,6 +148,16 @@ pub fn chat_completions_url(base_url: &str) -> String {
     }
 }
 
+/// The provider's model-list URL, derived from the same base as the completion
+/// URL: a `base_url` that already names a full path — `…/v1/chat/completions`,
+/// which [`chat_completions_url`] accepts, or a gateway's `/v1/responses` — must
+/// not have `/models` appended to it, or the request goes to
+/// `/v1/chat/completions/models` and the list silently never arrives
+/// (STEER-1 review N1).
+pub fn models_url(base_url: &str) -> String {
+    format!("{}/models", crate::models::normalise_base(base_url))
+}
+
 /// Build the request for one step. `messages` already starts with the frozen
 /// system message.
 ///
@@ -259,6 +269,12 @@ impl Client {
         self.cfg.kind
     }
 
+    /// The base URL this client talks to, as configured (`KELIR_BASE_URL`
+    /// included): the endpoint the metadata cache belongs to.
+    pub fn base_url(&self) -> String {
+        self.cfg.base_url.clone()
+    }
+
     /// What the `error` event and the screen say about a refused request.
     ///
     /// An outage (a retryable status) gets the status and its class and nothing
@@ -281,30 +297,32 @@ impl Client {
     }
 
     /// The provider's own model list, for the metadata kelir does not hardcode
-    /// (context window, tool support). Both providers serve `GET /models`;
-    /// OpenRouter's is public, Go's wants the same key as a completion.
+    /// (context window, tool support, the capability gates). Both providers
+    /// serve `GET /models`; OpenRouter's is public, Go's wants the same key as a
+    /// completion.
+    ///
+    /// No bound of its own: the list is fetched beside the session, and the
+    /// caller's budget ([`crate::models::FETCH_TIMEOUT`]) is the only one — a
+    /// ~1 MB catalogue must not be cut off by a second timeout
+    /// (STEER-1 review S2).
     pub async fn models(&self) -> Result<Vec<crate::models::ModelInfo>, String> {
-        let url = format!("{}/models", self.cfg.base_url.trim_end_matches('/'));
-        let mut request = self
-            .http
-            .get(&url)
-            .timeout(Duration::from_secs(5))
-            .header("accept", "application/json");
+        let url = models_url(&self.cfg.base_url);
+        let mut request = self.http.get(&url).header("accept", "application/json");
         if let Some(key) = self.cfg.key.as_deref() {
             request = request.bearer_auth(key);
         }
         let response = request
             .send()
             .await
-            .map_err(|error| format!("models: {error}"))?;
+            .map_err(|error| crate::models::short_reason(&error.to_string()))?;
         if !response.status().is_success() {
-            return Err(format!("models: HTTP {}", response.status()));
+            return Err(format!("http {}", response.status()));
         }
         let body = response
             .text()
             .await
-            .map_err(|error| format!("models: {error}"))?;
-        crate::models::parse(&body)
+            .map_err(|error| crate::models::short_reason(&error.to_string()))?;
+        crate::models::parse(&body).map_err(|error| crate::models::short_reason(&error))
     }
 
     pub fn build(&self, model: &str, messages: &[ChatMessage], tools: &[Value]) -> BuiltRequest {

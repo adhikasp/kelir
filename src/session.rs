@@ -48,6 +48,11 @@ const STOP_POLL: Duration = Duration::from_millis(25);
 /// appears when another process closes its handle; there is nothing to be told
 /// about, and a person watching sees a shorter delay rather than a poll rate.
 const SLOT_POLL: Duration = Duration::from_millis(100);
+/// How long an idle session sleeps between looks for a metadata fetch that
+/// started with the session, so `state` carries the provider's window as soon
+/// as it is there instead of at the next turn (STEER-1 review S2). Short,
+/// because a session with no turn running has nothing better to do.
+const IDLE_MODELS_WAIT: Duration = Duration::from_millis(100);
 
 /// What a resume says to a log whose last turn ended cleanly but was never
 /// closed: the model's last message is its own answer, and a request may not
@@ -187,9 +192,17 @@ struct Prepared {
     /// (`config`, `api`, `cache`, `default`).
     window: u64,
     window_source: &'static str,
+    /// Why the window is what it is, when that needs saying: the short reason the
+    /// provider's list did not answer, in words (STEER-1 review N4). `None` for
+    /// a configured window and for a list that answered.
+    window_note: Option<String>,
     /// The provider's model list as this process learned it, so a `model` swap
     /// resolves without the network.
     models: Option<crate::models::Cache>,
+    /// A metadata fetch still running (or its answer, waiting to be taken):
+    /// resolved at the next `before_step`, so a slow list never holds the first
+    /// request (STEER-1 review S2).
+    models_fetch: Option<Fetch>,
     /// The opt-in concurrency governor for the provider this session starts
     /// with (`max_concurrent_requests`); `None` when the provider config has no
     /// limit.
@@ -291,8 +304,13 @@ struct Session {
     /// from (`config`, `api`, `cache`, `default`).
     window: u64,
     window_source: &'static str,
+    /// See [`Prepared::window_note`].
+    window_note: Option<String>,
     /// The provider's model list as this process learned it.
     models: Option<crate::models::Cache>,
+    /// A metadata fetch still running (or its answer, waiting to be taken);
+    /// applied at the next `before_step`.
+    models_fetch: Option<Fetch>,
     /// Body fields a provider refused with a 400 during this session, by the
     /// field name: the retry leaves them out and the session remembers, so the
     /// same 400 is not paid twice (STEER-6 review S3). A provider that rejects
@@ -673,8 +691,14 @@ async fn drive(opts: Options) -> u8 {
                 "window {} tokens ({})",
                 session.window, session.window_source
             ),
-            "Enter sends · Alt-Enter adds a line · /help shows the commands".to_string(),
         ];
+        // A window that is not the provider's says why, on its own line, so a
+        // person sees a 401 or an offline endpoint without reading the log
+        // (STEER-1 review N4).
+        if let Some(note) = &session.window_note {
+            banner.push(format!("  ({note})"));
+        }
+        banner.push("Enter sends · Alt-Enter adds a line · /help shows the commands".to_string());
         // The cap is worth a banner line only when one is set: the status line
         // carries the count ("step 3/5") while a turn runs.
         if let Some(cap) = session.cfg.max_steps {
@@ -773,47 +797,198 @@ fn watch_bg(dir: PathBuf, tx: mpsc::UnboundedSender<Incoming>) {
     });
 }
 
-/// The provider's model list: the cache when it is fresh, a fetch when it is
-/// not, and the old list when the fetch fails. The fetch is bounded so an
-/// offline box pays it once an hour, not on every start.
+/// The provider's model list and how this process came by it.
 ///
-/// A first session on a machine used to leave the list empty for up to an hour
-/// after one slow fetch (STEER-6 review S2: a 480-model list through a
-/// forwarding proxy took more than the 1.5 s bound). So a fetch that times out
-/// is not remembered as a failure unless it *failed*: a slow list is retried at
-/// the next start, and the start after a real failure waits
-/// [`crate::models::RETRY_AFTER_MS`]. The batching and effort decisions no
-/// longer need the list at all (they fall back to the model's family and to
-/// the configured effort), so this is only about the window and the metadata.
-async fn load_models(client: &Client, provider: &str) -> (Option<crate::models::Cache>, bool) {
+/// `cache` is the list kelir is using now (a fresh one from disk, a list this
+/// process fetched, or a failed one kept for its `error`), `fetched` says it
+/// came off the wire in this process, and `why` is the short reason the window
+/// fell back to `default` — `None` when the list answered
+/// (STEER-1 review N4).
+struct ModelList {
+    cache: Option<crate::models::Cache>,
+    fetched: bool,
+    why: Option<String>,
+}
+
+impl ModelList {
+    fn from_cache(cache: Option<crate::models::Cache>) -> Self {
+        Self {
+            cache,
+            fetched: false,
+            why: None,
+        }
+    }
+
+    fn with_why(mut self, why: Option<String>) -> Self {
+        self.why = why;
+        self
+    }
+}
+
+/// A `GET /models` running beside the session, never on its critical path.
+///
+/// The task is spawned at session start (STEER-1 review S2) and sends its answer
+/// through a channel: the start takes the answer if it is there within
+/// [`crate::models::START_GRACE`] (so the first request carries the capability
+/// data when the endpoint is quick), and the first `before_step` — where the
+/// *window* is first read, after the first step — takes it otherwise. The
+/// channel is what makes the grace non-destructive: running out of grace does
+/// not cancel the fetch, it merely stops waiting for it.
+struct Fetch {
+    rx: Option<oneshot::Receiver<ModelList>>,
+}
+
+impl Fetch {
+    fn none() -> Self {
+        Self { rx: None }
+    }
+
+    fn pending(rx: oneshot::Receiver<ModelList>) -> Self {
+        Self { rx: Some(rx) }
+    }
+
+    fn is_running(&self) -> bool {
+        self.rx.is_some()
+    }
+
+    /// The answer, if the fetch has already finished. Never waits: a fetch that
+    /// is still running costs this call nothing at all.
+    fn take_ready(&mut self) -> Option<ModelList> {
+        let rx = self.rx.as_mut()?;
+        match rx.try_recv() {
+            Ok(list) => {
+                self.rx = None;
+                Some(list)
+            }
+            Err(oneshot::error::TryRecvError::Empty) => None,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                // The task ended without sending (it panicked): nothing to
+                // apply, and the cache on disk is what the session keeps using.
+                self.rx = None;
+                Some(ModelList::from_cache(None))
+            }
+        }
+    }
+
+    /// Wait at most `budget` for the answer. Running out of budget leaves the
+    /// fetch running for the next boundary.
+    async fn wait(&mut self, budget: std::time::Duration) -> Option<ModelList> {
+        let rx = self.rx.as_mut()?;
+        match tokio::time::timeout(budget, rx).await {
+            Ok(Ok(list)) => {
+                self.rx = None;
+                Some(list)
+            }
+            Ok(Err(_)) => {
+                self.rx = None;
+                Some(ModelList::from_cache(None))
+            }
+            // Not ready: keep the receiver, and the fetch keeps running.
+            Err(_) => None,
+        }
+    }
+}
+
+/// Spawn the fetch, unless the cache on disk already answers.
+fn start_fetch(client: &Client, provider: &str, endpoint: &str) -> Fetch {
     let now = crate::models::now_ms();
-    let cached = crate::models::load(provider);
+    let cached = crate::models::load(endpoint);
     if let Some(cache) = &cached
         && (cache.is_fresh(now) || cache.in_backoff(now))
     {
-        return (cached, false);
+        return Fetch::none();
     }
+    let client = client.clone();
+    let provider = provider.to_string();
+    let endpoint = endpoint.to_string();
+    let (tx, rx) = oneshot::channel();
+    // The task holds only the sender, so dropping the session (or the grace)
+    // never cancels it mid-write; a receiver that is gone just loses the send.
+    tokio::spawn(async move {
+        let list = fetch_models(&client, &provider, &endpoint, cached).await;
+        let _ = tx.send(list);
+    });
+    Fetch::pending(rx)
+}
+
+/// One fetch of `GET /models`, its result written beside the session state.
+///
+/// A failure is remembered for [`crate::models::RETRY_AFTER_MS`] so an offline
+/// box pays it once an hour, not on every start; a *timeout* is not a failure
+/// (the endpoint was slow, not wrong), so the next start asks again and the
+/// cached list keeps its own age. Every failure also records why, which is what
+/// `state` and the banner show instead of a silent `default` (N4).
+async fn fetch_models(
+    client: &Client,
+    provider: &str,
+    endpoint: &str,
+    cached: Option<crate::models::Cache>,
+) -> ModelList {
+    let now = crate::models::now_ms();
+    let base_url = client.base_url();
     match tokio::time::timeout(crate::models::FETCH_TIMEOUT, client.models()).await {
         Ok(Ok(models)) => {
-            let cache = crate::models::Cache::new(provider, models, now);
+            let cache = crate::models::Cache::new(provider, &base_url, models, now);
             let _ = crate::models::store(&cache);
-            (Some(cache), true)
+            ModelList {
+                cache: Some(cache),
+                fetched: true,
+                why: None,
+            }
         }
-        Ok(Err(error)) => {
-            // A real answer (`500`, no route, a broken body): back off, so an
-            // offline box or a dead endpoint is not asked on every start.
-            let mut cache =
-                cached.unwrap_or_else(|| crate::models::Cache::new(provider, Vec::new(), 0));
+        Ok(Err(reason)) => {
+            let mut cache = cached
+                .unwrap_or_else(|| crate::models::Cache::new(provider, &base_url, Vec::new(), 0));
+            cache.endpoint = endpoint.to_string();
             cache.failed_at_ms = Some(now);
+            cache.error = Some(reason.clone());
             let _ = crate::models::store(&cache);
-            eprintln!("kelir: models: {provider}: {error} (using what is cached)");
-            (Some(cache), false)
+            ModelList {
+                cache: Some(cache),
+                fetched: false,
+                why: Some(reason),
+            }
         }
-        Err(_) => {
-            // Slow, not wrong: keep whatever was cached (its own age decides
-            // when it is stale) and try again next start.
-            (cached, false)
-        }
+        // Slow, not wrong: the cached list keeps its age and the next start
+        // asks again. Nothing is remembered as a failure.
+        Err(_) => ModelList::from_cache(cached).with_why(Some("timeout".to_string())),
+    }
+}
+
+/// What a start uses before the fetch lands: the cached list (stale numbers
+/// beat the default) and the reason `state` gives for it.
+fn cached_list(provider: &str, base_url: &str) -> ModelList {
+    let endpoint = crate::models::endpoint_id(provider, base_url);
+    let flushed = crate::models::load(&endpoint);
+    let why = flushed
+        .as_ref()
+        .and_then(|cache| cache.error.clone())
+        .or_else(|| flushed.is_none().then(|| "fetching".to_string()));
+    ModelList::from_cache(flushed).with_why(why)
+}
+
+/// The list to start with, and the fetch still running for the rest.
+///
+/// A warm box answers from the cache before the session starts and fetches
+/// nothing; a cold one gives the list [`crate::models::START_GRACE`] — enough
+/// for a local mock or a fast gateway, so the first request carries the
+/// capability data the list answers — and leaves a slower fetch running for the
+/// first `before_step` (STEER-1 review S2).
+async fn begin_models(client: &Client, provider: &str, base_url: &str) -> (ModelList, Fetch) {
+    let endpoint = crate::models::endpoint_id(provider, base_url);
+    let mut fetch = start_fetch(client, provider, &endpoint);
+    if !fetch.is_running() {
+        // Fresh (or a failure still inside its backoff): read from disk.
+        let list = ModelList::from_cache(crate::models::load(&endpoint));
+        let why = list.cache.as_ref().and_then(|cache| cache.error.clone());
+        return (list.with_why(why), fetch);
+    }
+    let early = cached_list(provider, base_url);
+    match fetch.wait(crate::models::START_GRACE).await {
+        Some(list) => (list, fetch),
+        // Not a failure, a slow endpoint: use what is cached and let the fetch
+        // finish beside the session.
+        None => (early, fetch),
     }
 }
 
@@ -838,14 +1013,13 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             task_text(&opts.task).await.map_err(Failure::Usage)?
         };
         let herdr = Herdr::detect(opts.json);
-        let (models_cache, models_fetched) =
-            load_models(&reopened.client, &reopened.provider_name).await;
-        let (window, window_source) = crate::models::resolve(
-            cfg.override_window(&reopened.model),
-            models_cache.as_ref(),
-            models_fetched,
-            &reopened.model,
-        );
+        let base_url = reopened.client.base_url();
+        let (list, models_fetch) =
+            begin_models(&reopened.client, &reopened.provider_name, &base_url).await;
+        let over = cfg.override_window(&reopened.model);
+        let (window, window_source) =
+            crate::models::resolve(over, list.cache.as_ref(), list.fetched, &reopened.model);
+        let window_note = window_note(over, list.why.as_deref(), window_source);
         return Ok(Prepared {
             json: opts.json,
             ask: opts.ask,
@@ -877,7 +1051,9 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             resume: Some(reopened.reopened),
             window,
             window_source,
-            models: models_cache,
+            window_note,
+            models: list.cache,
+            models_fetch: Some(models_fetch),
             governor: governor_for(&reopened.cfg_provider),
         });
     }
@@ -920,15 +1096,15 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let credential = credentials::resolve(&mut provider_cfg).map_err(Failure::Usage)?;
     let client = Client::new(provider_cfg.clone(), &id, cfg.cache_ttl.clone())
         .map_err(|error| Failure::Usage(error.message))?;
-    // Model metadata from the provider, cached beside the session state; a
-    // `[model_windows]`/`window` setting still wins over it.
-    let (models_cache, models_fetched) = load_models(&client, &provider_name).await;
-    let (window, window_source) = crate::models::resolve(
-        cfg.override_window(&model),
-        models_cache.as_ref(),
-        models_fetched,
-        &model,
-    );
+    // Model metadata from the provider, cached beside the session state and
+    // fetched beside the session (never on the first request's critical path);
+    // a `[model_windows]`/`window` setting still wins over it.
+    let base_url = client.base_url();
+    let (list, models_fetch) = begin_models(&client, &provider_name, &base_url).await;
+    let over = cfg.override_window(&model);
+    let (window, window_source) =
+        crate::models::resolve(over, list.cache.as_ref(), list.fetched, &model);
+    let window_note = window_note(over, list.why.as_deref(), window_source);
     let dir = crate::paths::session_dir(&id);
     crate::paths::create_private_dir(&dir.join("commands")).map_err(|error| {
         Failure::Run(format!(
@@ -963,9 +1139,24 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         resume: None,
         window,
         window_source,
-        models: models_cache,
+        window_note,
+        models: list.cache,
+        models_fetch: Some(models_fetch),
         governor: governor_for(&provider_cfg),
     })
+}
+
+/// Why this start has the window it has, or `None` when the answer needs no
+/// explanation: a configured window is the person's own number, and a fetched
+/// or cached list needs nothing said. The one case worth a line is a fallback
+/// — the list could not be had, so the start used the default (or a stale
+/// cache) and [`crate::models::Cache::error`] says why (STEER-1 review N4).
+fn window_note(over: Option<u64>, why: Option<&str>, source: &str) -> Option<String> {
+    let why = why?;
+    if over.filter(|window| *window > 0).is_some() || source == "api" || source == "cache" {
+        return None;
+    }
+    Some(format!("the model list: {why}"))
 }
 
 /// The opt-in governor for one provider config: `max_concurrent_requests`
@@ -1135,6 +1326,7 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
 
 impl Session {
     fn open(prepared: Prepared) -> Result<Self, String> {
+        let mut prepared = prepared;
         let events_path = prepared.dir.join("events.jsonl");
         let writer = EventLog::open(&events_path)
             .map_err(|error| format!("cannot open {}: {error}", events_path.display()))?;
@@ -1200,7 +1392,9 @@ impl Session {
             pending_task: prepared.task.clone(),
             window: prepared.window,
             window_source: prepared.window_source,
-            models: prepared.models,
+            window_note: prepared.window_note.take(),
+            models: prepared.models.take(),
+            models_fetch: prepared.models_fetch.take(),
             watch: crate::sources::Watch::default(),
             governor: prepared.governor,
         };
@@ -1578,6 +1772,16 @@ impl Session {
             "model": self.model,
             "window": self.window,
             "window_source": self.window_source,
+            // Why this start does not have the provider's window, when it does
+            // not (STEER-1 review N4): `http 401`, `offline`, `timeout`,
+            // `malformed`, `fetching`. Absent when nothing needs saying.
+            "window_note": self.window_note,
+            // Whether the list is still being fetched beside the session.
+            "models_fetching": self
+                .models_fetch
+                .as_ref()
+                .map(Fetch::is_running)
+                .unwrap_or(false),
             "disabled": self.disabled.iter().cloned().collect::<Vec<_>>(),
         })
     }
@@ -1981,19 +2185,65 @@ impl Session {
         self.client = client;
         self.active_provider = provider_cfg;
         self.governor = governor;
-        // Another model, possibly another provider: resolve from the cached
-        // list (never the network mid-turn); a model the list does not know
-        // falls back to the default window and `state` says so.
-        self.models = crate::models::load(&self.provider_name);
-        let (window, source) = crate::models::resolve(
-            self.cfg.override_window(&self.model),
-            self.models.as_ref(),
-            false,
-            &self.model,
-        );
+        // Another model, possibly another provider: resolve from that
+        // endpoint's cache (never the network mid-turn) and start a fetch
+        // beside the session when it is stale, so the new provider's list
+        // arrives at the next `before_step` instead of waiting for another
+        // process to write it. A model no list knows falls back to the default
+        // window and `state` says why (STEER-1 review S2/S4).
+        let base_url = self.client.base_url();
+        let endpoint = crate::models::endpoint_id(&self.provider_name, &base_url);
+        self.models = crate::models::load(&endpoint);
+        self.models_fetch = Some(start_fetch(&self.client, &self.provider_name, &endpoint));
+        let over = self.cfg.override_window(&self.model);
+        let (window, source) =
+            crate::models::resolve(over, self.models.as_ref(), false, &self.model);
         self.window = window;
         self.window_source = source;
+        let why = self.models.as_ref().and_then(|cache| cache.error.clone());
+        self.window_note = window_note(over, why.as_deref(), source);
         Ok(())
+    }
+
+    /// Take the metadata fetch's answer if it has landed, and apply it: the
+    /// list a `model` swap or a later step will read, and the window if the
+    /// configuration does not override it.
+    ///
+    /// Called at `before_step`, which is the first place the window is read
+    /// (the auto-compaction trigger), so a slow `/models` never holds the first
+    /// request (STEER-1 review S2). Never waits: a fetch still running is
+    /// picked up at a later boundary.
+    async fn apply_models(&mut self) {
+        let ready = match self.models_fetch.as_mut() {
+            Some(fetch) => fetch.take_ready(),
+            None => None,
+        };
+        if let Some(list) = ready {
+            self.apply_list(list);
+        }
+    }
+
+    /// Apply one answer from the metadata fetch: the list every later step and
+    /// a `model` swap read, and the window when the configuration does not
+    /// override it.
+    fn apply_list(&mut self, list: ModelList) {
+        if let Some(cache) = list.cache {
+            self.models = Some(cache);
+        }
+        let over = self.cfg.override_window(&self.model);
+        let (window, source) =
+            crate::models::resolve(over, self.models.as_ref(), list.fetched, &self.model);
+        // Say so once, on the boundary that changed the number: a person
+        // watching should not have to read the cache file to learn that the
+        // window became the provider's (STEER-1 review N4).
+        if window != self.window || source != self.window_source {
+            self.emit(UiEvent::Info(format!(
+                "» window {window} tokens ({source})"
+            )));
+        }
+        self.window = window;
+        self.window_source = source;
+        self.window_note = window_note(over, list.why.as_deref(), source);
     }
 
     /// Messages that should start the next turn: `later` deliveries, and any
@@ -2690,6 +2940,18 @@ impl Session {
     /// `--keep` and no turn running: take verbs until one starts a turn.
     async fn idle(&mut self, rx: &mut Inbox) -> Idle {
         loop {
+            // A metadata fetch that started with the session lands here as well
+            // as at `before_step`: an idle session answers `state` too, and a
+            // list that arrived while nobody was asking should still be applied
+            // (STEER-1 review S2).
+            let landed = match self.models_fetch.as_mut() {
+                Some(fetch) if fetch.is_running() => fetch.wait(IDLE_MODELS_WAIT).await,
+                _ => None,
+            };
+            if let Some(list) = landed {
+                self.apply_list(list);
+                continue;
+            }
             let Some(incoming) = rx.recv().await else {
                 return Idle::End;
             };
@@ -2751,6 +3013,11 @@ impl Session {
             self.turn_steps += 1;
 
             // ---------------------------------------------------- before_step
+            // A metadata fetch that ran beside the session is applied here:
+            // this is the first boundary that reads the window, so the list
+            // has had the first step's worth of time to arrive (STEER-1
+            // review S2).
+            self.apply_models().await;
             let applied = self.apply(Boundary::BeforeStep)?;
             if applied.end {
                 return Ok(TurnEnd::End);
@@ -4092,7 +4359,9 @@ mod tests {
             pending_task: String::new(),
             window: 1_000,
             window_source: "default",
+            window_note: None,
             models: None,
+            models_fetch: None,
             watch: crate::sources::Watch::default(),
             governor: None,
         }

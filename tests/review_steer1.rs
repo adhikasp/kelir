@@ -4,9 +4,9 @@
 //! `GET /models`, the list is cached for a day and reused by the next start, a
 //! failing or odd answer never fails the session and falls back to the default
 //! window, a person's `window`/`[model_windows]` still wins, and the window
-//! never leaks into the request bytes. Two probes are `#[ignore]`d because they
-//! record findings that are real today (S1, S2 in the review): run them with
-//! `cargo test --test review_steer1 -- --ignored` to watch them fail.
+//! never leaks into the request bytes. The two probes that recorded findings
+//! (S1 endpoint keying, N2 clock skew) now run: they are the regression tests
+//! for the fixes.
 
 mod support;
 
@@ -14,6 +14,15 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use support::*;
+
+/// The cache file for a provider on a base URL, as the session names it: the
+/// endpoint id, not the provider name (STEER-1 review S1).
+fn cache_file(state: &std::path::Path, provider: &str, base_url: &str) -> PathBuf {
+    state.join(format!(
+        "models-{}.json",
+        kelir::models::endpoint_id(provider, base_url)
+    ))
+}
 
 /// The state a verb's answer reports.
 fn state_of(answer: &Ctl) -> Value {
@@ -49,14 +58,15 @@ async fn the_provider_list_is_fetched_once_and_the_next_start_uses_the_cache() {
         "the first start takes the window from the provider's list"
     );
     let state_dir: PathBuf = first.state.clone();
-    let cache_file = state_dir.join("models-openrouter.json");
-    let cached = std::fs::read_to_string(&cache_file).expect("the list is cached");
+    let file = cache_file(&state_dir, "openrouter", &mock.base_url());
+    let cached = std::fs::read_to_string(&file).expect("the list is cached");
     // The session's own temp holds its state dir: keep a copy of just the cache
     // so a second state dir can be seeded with it.
     let kept = tempfile::tempdir().unwrap();
     let warmed: PathBuf = kept.path().join("state");
     std::fs::create_dir_all(&warmed).unwrap();
-    std::fs::copy(&cache_file, warmed.join("models-openrouter.json")).unwrap();
+    let warmed_file = cache_file(&warmed, "openrouter", &mock.base_url());
+    std::fs::copy(&file, &warmed_file).unwrap();
     first.end().await;
     assert_eq!(mock.models_requests(), 1);
 
@@ -79,7 +89,7 @@ async fn the_provider_list_is_fetched_once_and_the_next_start_uses_the_cache() {
         "the second start must not ask the provider again"
     );
     assert_eq!(
-        std::fs::read_to_string(warmed.join("models-openrouter.json")).unwrap(),
+        std::fs::read_to_string(&warmed_file).unwrap(),
         cached,
         "a fresh cache is not rewritten"
     );
@@ -108,8 +118,8 @@ async fn a_failing_model_list_does_not_fail_the_session() {
         );
         let state_dir = session.state.clone();
         assert_eq!(mock.models_requests(), 1, "{label}: one try, no loop");
-        let cache =
-            std::fs::read_to_string(state_dir.join("models-openrouter.json")).unwrap_or_default();
+        let path = cache_file(&state_dir, "openrouter", &mock.base_url());
+        let cache = std::fs::read_to_string(path).unwrap_or_default();
         let cache: Value = serde_json::from_str(&cache).unwrap_or(Value::Null);
         assert!(
             cache["failed_at_ms"].as_u64().unwrap_or(0) > 0,
@@ -211,9 +221,9 @@ async fn the_window_does_not_change_the_request_bytes() {
     );
 }
 
-/// FINDING S1: the cache is keyed by the provider *name*, not its base URL, so
-/// a second endpoint that shares a state dir reuses the first one's numbers.
-#[ignore = "FINDING S1: models-<provider>.json ignores base_url"]
+/// S1 (fixed): the cache is keyed by the *endpoint*, not the provider name, so
+/// a second endpoint that shares a state dir gets its own numbers — and an
+/// unreachable one falls back to `default` instead of to the other's cache.
 #[tokio::test]
 async fn a_cache_from_another_endpoint_is_not_reused() {
     let first_mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
@@ -253,18 +263,181 @@ async fn a_cache_from_another_endpoint_is_not_reused() {
     assert_eq!(second_mock.models_requests(), 1);
 }
 
-/// FINDING S2: a cache written while the clock was ahead keeps the fetch locked
+/// S1, the other half: an *unreachable* endpoint falls back to `default` even
+/// on a box whose state dir holds another endpoint's cache. The session still
+/// runs (the step has a provider), and `state` says why the window is not the
+/// provider's.
+#[tokio::test]
+async fn an_unreachable_endpoint_does_not_use_another_endpoints_cache() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let kept = tempfile::tempdir().unwrap();
+    let state_dir = kept.path().join("state");
+
+    let mut first = LiveSession::start_reusing(
+        state_dir.clone(),
+        &mock,
+        &["run", "--keep", "--json", "go"],
+        "",
+    )
+    .await;
+    assert_eq!(window_of(&mut first).await, (262_144, "api".to_string()));
+    first.end().await;
+
+    // Same state dir, a base URL nothing listens on: the *cache* written for
+    // the mock must not answer, or auto-compaction would never fire against a
+    // provider whose real window is smaller.
+    let second = LiveSession::start_with_env(
+        state_dir.clone(),
+        "http://127.0.0.1:9/v1",
+        &["run", "--keep", "--json", "go"],
+        "",
+    )
+    .await;
+    // The fetch fails on its own (nothing listens there); give the session a
+    // moment to record it, then read the state.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let state = loop {
+        let state = state_of(&second.ctl(&["stop"]).await);
+        let note = state["window_note"].as_str().unwrap_or("").to_string();
+        if !state["models_fetching"].as_bool().unwrap_or(false)
+            || std::time::Instant::now() > deadline
+        {
+            break state;
+        }
+        let _ = note;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        state["window"], 128_000,
+        "an unreachable endpoint must fall back to the default, not reuse the other cache"
+    );
+    assert_eq!(state["window_source"], "default");
+    assert_eq!(
+        state["window_note"].as_str(),
+        Some("the model list: offline"),
+        "the fallback records why (N4): {state}"
+    );
+    second.end().await;
+}
+
+/// S2: the fetch no longer holds the first request. A list the endpoint holds
+/// for longer than the start's grace delays nothing — the step runs on the
+/// default or a stale cache and the answer is applied when it lands — and a
+/// list that never arrives at all is a session that still works and says why.
+#[tokio::test]
+async fn a_slow_list_does_not_hold_the_first_request() {
+    for (label, models, expected) in [
+        (
+            "a list slower than the start grace",
+            ModelsAnswer::ok(MODELS_JSON).slow(std::time::Duration::from_secs(3)),
+            "the list arrives while the turn runs",
+        ),
+        (
+            "a list endpoint that is down",
+            ModelsAnswer::http(503, "later"),
+            "a failure is not a wait",
+        ),
+        (
+            // The review's worst case: the body never comes at all.
+            "a list endpoint that never answers",
+            ModelsAnswer::ok(MODELS_JSON).slow(std::time::Duration::from_secs(120)),
+            "a hang is bounded by the background fetch, not by the turn",
+        ),
+    ] {
+        let mock = Mock::start_with_models(
+            vec![
+                Reply::Sse(sse(&tool_turn(
+                    "call_1",
+                    "bash",
+                    &serde_json::json!({"command": "printf 'ran\\n'"}),
+                ))),
+                Reply::Sse(sse(&text_turn("done", 0))),
+            ],
+            models,
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+        let first_step = started.elapsed();
+        session.wait_for("tool_settled").await;
+        assert_eq!(
+            mock.models_requests(),
+            1,
+            "{label}: one ask, and the session did not wait for it to start"
+        );
+        assert!(
+            first_step < std::time::Duration::from_secs(2),
+            "{label}: the first step waited {first_step:?} for the metadata"
+        );
+        session.wait_for("turn_ended").await;
+        let state = state_of(&session.ctl(&["stop"]).await);
+        assert_eq!(
+            state["window_source"], "default",
+            "{label}: nothing answered within the turn: {state}"
+        );
+        assert!(
+            state["window_note"].is_string(),
+            "{label}: {expected}; the fallback records why: {state}"
+        );
+        session.end().await;
+    }
+}
+
+/// S2: a list that lands after the start grace is applied at the next boundary,
+/// so a slow endpoint still ends the turn on the provider's window — just not
+/// the first request's.
+#[tokio::test]
+async fn a_list_that_lands_after_the_grace_is_applied_at_the_next_step() {
+    let mock = Mock::start_with_models(
+        vec![
+            Reply::Sse(sse(&tool_turn(
+                "call_1",
+                "bash",
+                &serde_json::json!({"command": "printf 'ran\\n'"}),
+            ))),
+            Reply::Sse(sse(&text_turn("done", 0))),
+        ],
+        ModelsAnswer::ok(MODELS_JSON).slow(std::time::Duration::from_millis(600)),
+    )
+    .await;
+    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+    // The tool result settles, the loop reaches `before_step`, and the list is
+    // there by then.
+    session.wait_for("tool_settled").await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let state = state_of(&session.ctl(&["stop"]).await);
+        if state["window"] == 262_144 {
+            assert_eq!(state["window_source"], "api", "{state}");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the list never landed: {state}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    session.wait_for("turn_ended").await;
+    session.end().await;
+}
+
+/// N2 (fixed): a cache written while the clock was ahead keeps the fetch locked
 /// out (`in_backoff`) until the clock catches up with the file.
-#[ignore = "FINDING S2: a future failed_at_ms locks the fetch out"]
 #[test]
 fn a_cache_dated_in_the_future_does_not_lock_the_fetch_out() {
     use kelir::models::Cache;
     let now = 1_800_000_000_000u64;
-    let mut cache = Cache::new("openrouter", Vec::new(), 0);
+    let mut cache = Cache::new("openrouter", "http://h/v1", Vec::new(), 0);
     cache.failed_at_ms = Some(now + 365 * 24 * 60 * 60 * 1000);
     assert!(
         !cache.in_backoff(now),
         "a failure stamped in the future is a clock skew, not an hour of backoff"
+    );
+    cache.failed_at_ms = None;
+    cache.fetched_at_ms = now + 365 * 24 * 60 * 60 * 1000;
+    assert!(
+        !cache.is_fresh(now),
+        "a list fetched in the future is stale, not fresh for a year"
     );
 }
 

@@ -339,22 +339,50 @@ wait itself in `session::stream`. Where this differs from the brief:
   with its reason (F6), and a tracked source deleted mid-session is one note, not a
   `source` event and not silence (N4).
 
-## Models metadata comes from the provider (2026-11-19)
+## Models metadata comes from the provider (2026-11-19, revised by STEER-1 fixes)
 
 The built-in window table is gone. It assumed 128k for every `deepseek` model, so the 1M-token
 model kelir now defaults to would have been compacted at a tenth of its real window (the maintainer,
 2026-11-19). `src/models.rs` parses `GET {base}/models` from both providers into one normalised
-list (`context`, `tools`), caches it at `<state>/models-<provider>.json` for 24 hours, and backs off
-for an hour after a failed fetch so an offline box does not pay the timeout on every start. The
-fetch happens at session start (and never mid-turn, including on a `model` swap, which resolves
-against the list already cached) and is bounded to 1.5 s, so a start with a stale cache can cost up
-to 1.5 s once and a start with a fresh cache costs nothing.
+list (`context`, `tools`, `parallel_calls`, `reasoning_effort`), caches it for 24 hours, and backs
+off for an hour after a failed fetch so an offline box does not pay the timeout on every start.
+
+The STEER-1 review (`docs/reviews/STEER-1-review.md`) found three should-fix defects and five nits
+in that first version; the fixes and their reasons:
+
+- **The cache belongs to an endpoint, not a provider name (S1/S5/N5).** The file is
+  `models-<endpoint>.json`, where the endpoint is a slug of the provider name plus a hash of the
+  normalised base URL (`http://h/v1`, `http://H/v1/` and `http://h/v1/chat/completions` are one
+  endpoint). A proxy, a gateway or a `KELIR_BASE_URL` stand-in therefore never inherits another
+  server's numbers, an unreachable endpoint falls back to `default` even on a warm box, and a config
+  provider key (`..\x`) never reaches a path — the slug keeps ASCII alphanumerics only.
+- **The fetch is off the critical path (S2).** It is spawned at session start and its answer
+  arrives through a channel. The start waits at most `START_GRACE` (250 ms) for it, so a local list
+  still gives the first request its capability data; a slower one is applied at the first
+  `before_step` (the only place the *window* is read, after the first step) or while the session is
+  idle. The background fetch's own bound is `FETCH_TIMEOUT` (30 s) instead of a per-request 5 s, and
+  a timeout inside it is not remembered as a failure. Until a list arrives the capability gates use
+  the built-in family table and the configured effort, which is what STEER-6 already does for a cold
+  start.
+- **The write is atomic (S3).** Temp file in the same directory, then a rename; no fsync, because
+  losing a cache write only costs one refetch.
+- **N1**: `/models` is derived from the same base as the completion URL (`provider::models_url`), so
+  a full-path `base_url` does not produce `/v1/chat/completions/models`.
+- **N2**: `is_fresh`/`in_backoff` require `stamp <= now`, so a clock that was once ahead cannot lock
+  the refresh out for the length of the skew.
+- **N3**: the last-segment lookup fallback stays inside the vendor: `deepseek/x` never matches
+  `fireworks/x`. An unqualified query (the Go shape) may match either.
+- **N4**: every failure records a short reason (`http 401`, `offline`, `timeout`, `malformed`,
+  `fetching`) on the cache and in the session, so `state.window_note` and the TUI banner say why a
+  start is not on the provider's window instead of a silent `default`. The provider's own message is
+  never carried: it can hold a URL or a body fragment.
 
 `[model_windows]` and `window` still win over the provider; a model the list does not name uses
-`DEFAULT_WINDOW` (128 000). Every verb's `state` carries `window` and `window_source`
-(`config`, `api`, `cache`, `default`), and the TUI banner shows it, so which source answered is
-visible without reading the code. The test mock now serves `/models` (canned, never recorded, never
-consuming a scripted reply) so a session can start in a test.
+`DEFAULT_WINDOW` (128 000). Every verb's `state` carries `window`, `window_source`
+(`config`, `api`, `cache`, `default`), `window_note` and `models_fetching`; the TUI banner shows the
+window, its source and the note, so which source answered is visible without reading the code. The
+test mock serves `/models` (canned, never recorded, never consuming a scripted reply) so a session
+can start in a test.
 
 ## M0
 
