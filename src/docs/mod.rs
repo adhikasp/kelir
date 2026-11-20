@@ -76,6 +76,11 @@ pub const TOPICS: &[Topic] = &[
         body: include_str!("../../docs/reference/children.md"),
     },
     Topic {
+        name: "jobs",
+        summary: "named sessions and jobs: `run --name`, `job run|status|history`, `jobs.toml`, single-flight, STATUS, cron/systemd/Task Scheduler recipes",
+        body: include_str!("../../docs/reference/jobs.md"),
+    },
+    Topic {
         name: "providers",
         summary: "the two providers: keys, retries, limits, model metadata",
         body: include_str!("../../docs/reference/providers.md"),

@@ -1731,6 +1731,27 @@ side). Where the code had to choose:
   `warn_cost` do not count the prefix twice. `ls` takes a brief's kind and task from that
   question, not from the copied first `user` event.
 
+## M9: named sessions, jobs, STATUS
+
+- **`stopped` exits 1, `paused` exits 0.** The brief lists 0/1/2/75/124 only. A job stopped by a
+  `stop`/`end` verb or a signal is not a success a scheduler should accept, so it is 1; a paused turn
+  (step cap, unavailable provider) exits 0 like `kelir run` does and STATUS says `paused`.
+- **`model` and `provider` in a job apply when a session starts.** A resumed session takes its model
+  from its log (M3), so a changed `model` takes effect with the next `new_session_every` rotation or
+  a new `session` name.
+- **A project's notify hooks need trust.** The brief says "gate-like"; a project `jobs.toml` is
+  repository content, so its hooks follow the project-gate rule (`trusted_projects` /
+  `KELIR_TRUST_PROJECT`). The machine file's hooks always run.
+- **The date source is on every resume, not only on jobs.** `kelir resume` and `run --name` add it
+  too (when a task or an in-flight turn follows), because the frozen prompt is stale the same way.
+  A child or brief never adds it.
+- **The `owner` file.** There was no record of which pid owns a session, so the name-collision
+  refusal could not name one; the session now writes `owner` (pid + start time) in its directory.
+- **"Large context" is 90 % of the window** (config override, else the provider's cached list, else
+  the 128k default), measured on the last request's prompt tokens.
+- **Run numbers are the run's own** (steps, tokens, cost are the deltas since the run began), not
+  the session's cumulative ones.
+
 ## m8m: merging main (M7 children, M6 mcp, M5-B, STEER-8) into the gates branch
 
 - **Gates in child sessions.** A child (`kelir run --child`, `kelir brief`) runs the same gates as

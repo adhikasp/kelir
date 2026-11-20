@@ -34,6 +34,7 @@ variables above still win when set. Isolate a run with the two `*_DIR` variables
   attachments/<n>-<name>  # an image `kelir view` queued
   bg/<bg-id>.status       # a job's state, written by its shim: survives kelir exiting
   bg/<bg-id>.out          # a job's output
+  owner                   # {"pid","start"} of the process that owns the session (who holds a name)
   host.err                # a child session only: its progress lines and errors (its stdout is its answer)
 ```
 
@@ -48,6 +49,8 @@ Session ids are ULIDs, so the directory names sort into creation order and
 ```text
 <state>/
   sessions/<id>/…         # above
+  names/<name>            # a named session: {"session","created","updated"} (owner-only dir)
+  jobs/<job>/             # lock, STATUS.json, STATUS.md, runs.jsonl, notes/ (`docs/reference/jobs.md`)
   models-<endpoint>.json  # one endpoint's model list, cached for a day, written temp-then-rename
   locks/<provider>-<slot> # the concurrency governor's advisory locks
   bg/<bg-id>.*            # jobs started outside a session (kelir bg run from a plain shell)
@@ -88,6 +91,8 @@ name (`docs/reference/mcp.md`).
 | `sock` | `src/ipc.rs` | verbs in, status out |
 | `models-*.json` | `src/models.rs` | the provider's model metadata |
 | `locks/` | `src/governor.rs` | at most N requests in flight per provider |
+| `names/` | `src/names.rs` | named sessions; the session `owner` file |
+| `jobs/<job>/` | `src/jobrun.rs`, `src/jobs.rs`, `src/joblock.rs` | the job lock, STATUS, run history, notes |
 
 ## Cleaning up, safely
 
