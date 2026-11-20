@@ -173,6 +173,11 @@ fn the_base_prompt_carries_the_batching_and_the_notes_file() {
         "three reads in a row is one command",
         "grep -A/-B",
         "notes file",
+        // Not a retro rule but a fixture another suite depends on: the live
+        // system message is cut at this word to compare the head across runs
+        // (`tests/review_steer6.rs`, F1). Renaming it fails that test, so it is
+        // pinned here as well as there.
+        "Directories:",
     ] {
         assert!(prompt.contains(rule), "no {rule:?} in:\n{prompt}");
     }
