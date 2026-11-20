@@ -640,7 +640,11 @@ async fn a_skill_script_bound_by_metadata_runs_as_a_gate() {
     )
     .unwrap();
     let out = sandbox
-        .kelir(&mock.base_url(), &["run", "--json", "go"], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "go"],
+            &[("KELIR_TRUST_PROJECT", "1")],
+        )
         .await;
     assert_eq!(out.code, 0, "{}", out.stderr);
     let log = sandbox.log(&sandbox.only_session());
@@ -772,10 +776,116 @@ fn git_sync_commits_but_does_not_push_when_told_not_to() {
     std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
     let doc =
         json!({"event":"session_end","session":"ses_x","cwd":fwd(dir.path()),"reason":"done"});
-    let answer = run_example("git_sync.py", &doc, &[("GIT_SYNC_PUSH", "0")]);
+    let answer = run_example(
+        "git_sync.py",
+        &doc,
+        &[("GIT_SYNC_PUSH", "0"), ("GIT_SYNC_ADD_NEW", "1")],
+    );
     assert_eq!(answer["decision"], "allow");
     let log = String::from_utf8_lossy(&git(&["log", "--oneline"]).stdout).to_string();
     assert!(log.contains("kelir: ses_x"), "{log}");
+}
+
+/// A scratch repo with one tracked file (`tracked.txt`) committed.
+fn git_scratch() -> Option<(tempfile::TempDir, impl Fn(&[&str]) -> std::process::Output)> {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let git = move |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap()
+    };
+    if git(&["init", "-q"]).status.code() != Some(0) {
+        return None;
+    }
+    git(&["config", "user.email", "t@example.invalid"]);
+    git(&["config", "user.name", "t"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.path().join("tracked.txt"), "one").unwrap();
+    git(&["add", "tracked.txt"]);
+    git(&["commit", "-q", "-m", "init"]);
+    Some((dir, git))
+}
+
+fn end_doc(dir: &std::path::Path) -> Value {
+    json!({"event":"session_end","session":"ses_y","cwd":fwd(dir),"reason":"done"})
+}
+
+/// F4: by default only tracked files are committed; a new file (here a `.env`)
+/// is not staged, so it can never be pushed.
+#[test]
+fn git_sync_by_default_commits_tracked_changes_only() {
+    let Some((dir, git)) = git_scratch() else {
+        return;
+    };
+    std::fs::write(dir.path().join("tracked.txt"), "two").unwrap();
+    std::fs::write(dir.path().join(".env"), "TOKEN=abc").unwrap();
+    std::fs::write(dir.path().join("new.txt"), "new").unwrap();
+    run_example(
+        "git_sync.py",
+        &end_doc(dir.path()),
+        &[("GIT_SYNC_PUSH", "0")],
+    );
+    let shown = String::from_utf8_lossy(&git(&["show", "--stat", "--format=%s", "HEAD"]).stdout)
+        .to_string();
+    assert!(
+        shown.contains("kelir: ses_y") && shown.contains("tracked.txt"),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains(".env") && !shown.contains("new.txt"),
+        "{shown}"
+    );
+}
+
+/// F4: even with `GIT_SYNC_ADD_NEW`, a secret-like name refuses the whole
+/// commit and leaves the index clean.
+#[test]
+fn git_sync_refuses_secret_like_names_even_when_adding_new_files() {
+    let Some((dir, git)) = git_scratch() else {
+        return;
+    };
+    std::fs::write(dir.path().join("tracked.txt"), "two").unwrap();
+    std::fs::write(dir.path().join(".env"), "TOKEN=abc").unwrap();
+    run_example(
+        "git_sync.py",
+        &end_doc(dir.path()),
+        &[("GIT_SYNC_PUSH", "0"), ("GIT_SYNC_ADD_NEW", "1")],
+    );
+    let log = String::from_utf8_lossy(&git(&["log", "--oneline"]).stdout).to_string();
+    assert_eq!(log.lines().count(), 1, "nothing may be committed: {log}");
+    let staged =
+        String::from_utf8_lossy(&git(&["diff", "--cached", "--name-only"]).stdout).to_string();
+    assert!(staged.trim().is_empty(), "index not reset: {staged}");
+}
+
+/// F4: a dry run changes nothing (no commit, nothing staged, no push).
+#[test]
+fn git_sync_dry_run_changes_nothing() {
+    let Some((dir, git)) = git_scratch() else {
+        return;
+    };
+    std::fs::write(dir.path().join("tracked.txt"), "two").unwrap();
+    std::fs::write(dir.path().join("new.txt"), "new").unwrap();
+    let answer = run_example(
+        "git_sync.py",
+        &end_doc(dir.path()),
+        &[("GIT_SYNC_DRY_RUN", "1"), ("GIT_SYNC_ADD_NEW", "1")],
+    );
+    assert_eq!(answer["decision"], "allow");
+    let log = String::from_utf8_lossy(&git(&["log", "--oneline"]).stdout).to_string();
+    assert_eq!(log.lines().count(), 1, "{log}");
+    let staged =
+        String::from_utf8_lossy(&git(&["diff", "--cached", "--name-only"]).stdout).to_string();
+    assert!(staged.trim().is_empty(), "{staged}");
+    let start = run_example(
+        "git_sync.py",
+        &json!({"event":"session_start","session":"s","cwd":fwd(dir.path())}),
+        &[("GIT_SYNC_DRY_RUN", "1")],
+    );
+    assert_eq!(start["decision"], "allow");
 }
 
 // ----------------------------------------------------------------------- MCP

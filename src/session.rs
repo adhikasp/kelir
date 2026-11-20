@@ -1934,6 +1934,9 @@ impl Session {
             return None;
         }
         let mut defs = self.cfg.gates.clone();
+        for def in self.cfg.project_gates.clone() {
+            crate::gates::push_unique(&mut defs, def);
+        }
         let places = crate::sources::places(
             &self.ctx.cwd,
             &self.cfg.skills_dirs,
@@ -1944,6 +1947,8 @@ impl Session {
         for def in crate::gates::from_skills(&found, &mut notes) {
             crate::gates::push_unique(&mut defs, def);
         }
+        let trusted = crate::gates::project_trusted(&self.ctx.cwd, &self.cfg.trusted_projects);
+        let defs = crate::gates::apply_trust(defs, trusted, &mut notes);
         self.gate_notes = notes;
         if defs.is_empty() {
             return None;
@@ -6165,6 +6170,8 @@ mod tests {
                 warn_cost: None,
                 prices: Default::default(),
                 gates: Vec::new(),
+                project_gates: Vec::new(),
+                trusted_projects: Vec::new(),
             },
             provider_name: "openrouter".into(),
             model: model.into(),
@@ -6281,6 +6288,8 @@ mod tests {
             warn_cost: None,
             prices: Default::default(),
             gates: Vec::new(),
+            project_gates: Vec::new(),
+            trusted_projects: Vec::new(),
         };
         let a = render_system(&cfg, Path::new("tmp"), None);
         let b = render_system(&cfg, Path::new("tmp"), None);

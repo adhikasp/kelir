@@ -619,6 +619,9 @@ pub fn cli(args: &crate::cli::DocsArgs) -> u8 {
         }
         return 1;
     }
+    if let Some(name) = &args.skill {
+        return print_skill(name);
+    }
     if let Some(words) = &args.find {
         return print_find(words);
     }
@@ -725,4 +728,32 @@ fn write_generated() -> u8 {
         println!("docs: nothing to generate");
     }
     0
+}
+
+/// `kelir docs --skill <name>`: a builtin skill's whole text (it has no file the
+/// model could read with `cat`).
+fn print_skill(name: &str) -> u8 {
+    match crate::sources::BUILTIN_SKILLS
+        .iter()
+        .find(|(skill, _)| *skill == name)
+    {
+        Some((_, text)) => {
+            print!("{text}");
+            if !text.ends_with('\n') {
+                println!();
+            }
+            0
+        }
+        None => {
+            let names: Vec<&str> = crate::sources::BUILTIN_SKILLS
+                .iter()
+                .map(|(skill, _)| *skill)
+                .collect();
+            eprintln!(
+                "kelir docs: no builtin skill `{name}` (they are: {})",
+                names.join(", ")
+            );
+            1
+        }
+    }
 }

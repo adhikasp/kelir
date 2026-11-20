@@ -43,6 +43,9 @@ use crate::proc::ProcessGroup;
 #[cfg(windows)]
 static JOBS: AtomicU64 = AtomicU64::new(0);
 
+/// Gate runs started by this process (part of each run's `KELIR_GATE_RUN` token).
+static RUNS: AtomicU64 = AtomicU64::new(0);
+
 /// At most this many gate processes are alive in one process at any moment. A
 /// gate that is slow, misbehaves or re-enters kelir cannot multiply: the run
 /// past the cap is skipped (fail open, logged) instead of started.
@@ -79,6 +82,182 @@ impl Slot {
 impl Drop for Slot {
     fn drop(&mut self) {
         LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The env var that marks every process of one gate run. A gate that detaches
+/// (`setsid`, a double fork) leaves the process group but keeps its environment,
+/// so the run can still find and kill it by this token.
+pub const RUN_ENV: &str = "KELIR_GATE_RUN";
+
+/// A token no other run shares: this process, a counter and the clock.
+fn run_token() -> String {
+    let n = RUNS.fetch_add(1, Ordering::SeqCst);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{n}-{nanos:x}", std::process::id())
+}
+
+/// Unix: after a gate run, nothing of it is left, even what left its process
+/// group, and a killed session cannot orphan it (F2, F3 of the M8 review).
+#[cfg(unix)]
+pub mod reap {
+    #[cfg(target_os = "linux")]
+    use super::RUN_ENV;
+
+    /// Kill the gate's descendants (by parent links) and every process that
+    /// carries the run's token in its environment, until none is left. The
+    /// token scan is Linux-only (`/proc`); elsewhere only the process group is
+    /// signalled by the caller, which `gates.md` states.
+    #[cfg(target_os = "linux")]
+    pub fn kill_run(root: u32, token: &str) {
+        let me = std::process::id();
+        let needle = format!("{RUN_ENV}={token}");
+        for _ in 0..5 {
+            let table = process_table();
+            let mut victims: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+            let mut frontier = vec![root];
+            while let Some(parent) = frontier.pop() {
+                for (pid, ppid) in &table {
+                    if *ppid == parent && *pid != me && victims.insert(*pid) {
+                        frontier.push(*pid);
+                    }
+                }
+            }
+            for (pid, _) in &table {
+                if *pid != me && !victims.contains(pid) && marked(*pid, needle.as_bytes()) {
+                    victims.insert(*pid);
+                }
+            }
+            if victims.is_empty() {
+                return;
+            }
+            for pid in victims {
+                // Safe: SIGKILL to a pid read from /proc a moment ago.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn kill_run(_root: u32, _token: &str) {}
+
+    /// `(pid, ppid)` of every process.
+    #[cfg(target_os = "linux")]
+    fn process_table() -> Vec<(u32, u32)> {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                // `pid (comm) S ppid …`: comm may hold spaces and parentheses.
+                let rest = &stat[stat.rfind(')')? + 1..];
+                let ppid: u32 = rest.split_whitespace().nth(1)?.parse().ok()?;
+                Some((pid, ppid))
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn marked(pid: u32, needle: &[u8]) -> bool {
+        std::fs::read(format!("/proc/{pid}/environ"))
+            .map(|bytes| bytes.split(|b| *b == 0).any(|entry| entry == needle))
+            .unwrap_or(false)
+    }
+
+    /// Owns the cleanup of one run: a guard process that outlives a killed
+    /// session, and the final sweep. Dropping it sweeps too (a cancelled run).
+    pub struct Reaper {
+        pid: u32,
+        token: String,
+        guard: Option<std::process::Child>,
+        done: bool,
+    }
+
+    impl Reaper {
+        /// `pid` is the gate shell (also its process group). The guard is a
+        /// hidden `kelir gate-guard` that polls this process and, when it is
+        /// gone, kills the gate's tree: PR_SET_PDEATHSIG would reach only the
+        /// shell, not its children.
+        pub fn start(pid: u32, token: &str, ttl: std::time::Duration) -> Self {
+            use std::os::unix::process::CommandExt as _;
+            let guard = std::env::current_exe().ok().and_then(|exe| {
+                let mut command = std::process::Command::new(exe);
+                command
+                    .arg("gate-guard")
+                    .args(["--parent", &std::process::id().to_string()])
+                    .args(["--group", &pid.to_string()])
+                    .args(["--token", token])
+                    .args(["--ttl", &ttl.as_secs().to_string()])
+                    .env_clear()
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .process_group(0);
+                command.spawn().ok()
+            });
+            Self {
+                pid,
+                token: token.to_string(),
+                guard,
+                done: false,
+            }
+        }
+
+        /// The sweep. `group` also signals the gate's process group (a run that
+        /// was cancelled rather than finished).
+        pub fn reap(&mut self, group: bool) {
+            if self.done {
+                return;
+            }
+            self.done = true;
+            if group {
+                // Safe: the group this run created.
+                unsafe {
+                    libc::killpg(self.pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            kill_run(self.pid, &self.token);
+            if let Some(mut guard) = self.guard.take() {
+                let _ = guard.kill();
+                let _ = guard.wait();
+            }
+        }
+    }
+
+    impl Drop for Reaper {
+        fn drop(&mut self) {
+            self.reap(true);
+        }
+    }
+
+    /// `kelir gate-guard`: wait for the session (the parent) to disappear, then
+    /// kill the gate's tree. Gives up after `ttl` seconds either way.
+    pub fn guard_main(parent: u32, group: u32, token: &str, ttl: u64) -> u8 {
+        let started = std::time::Instant::now();
+        while started.elapsed().as_secs() < ttl {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            // Safe: signal 0 only probes; getppid has no preconditions.
+            let alive = unsafe { libc::kill(parent as libc::pid_t, 0) } == 0
+                && unsafe { libc::getppid() } as u32 == parent;
+            if !alive {
+                // Safe: the gate's own group.
+                unsafe {
+                    libc::killpg(group as libc::pid_t, libc::SIGKILL);
+                }
+                kill_run(group, token);
+                return 0;
+            }
+        }
+        0
     }
 }
 
@@ -443,7 +622,11 @@ pub fn from_skills(found: &[crate::sources::Found], notes: &mut Vec<String>) -> 
                         command: script_command(&path),
                         tools: Vec::new(),
                         env: BTreeMap::new(),
-                        origin: format!("skill {}", skill.name),
+                        origin: if source.layer == crate::sources::Layer::Project {
+                            format!("project skill {}", skill.name)
+                        } else {
+                            format!("skill {}", skill.name)
+                        },
                     },
                 ),
                 Err(why) => notes.push(format!("skill {}: kelir-gate: {why}", skill.name)),
@@ -499,6 +682,45 @@ fn resolve_script(dir: &Path, event: Event, named: Option<&str>) -> Result<PathB
     }
 }
 
+/// A gate that came from the project's own files (its `.kelir/config.toml`, a
+/// skill under `.kelir/skills` or `.claude/skills`): code the repository's author
+/// chose, not the person running kelir.
+pub fn is_project_gate(def: &GateDef) -> bool {
+    def.origin.starts_with("project ")
+}
+
+/// Whether the project at `cwd` may run its own gates (M8 fix F6). kelir has no
+/// prompt, so trust is declared: `trusted_projects` in the machine config names a
+/// directory at or above `cwd`, or `KELIR_TRUST_PROJECT` is set for this run. The
+/// project's own config cannot declare itself trusted.
+pub fn project_trusted(cwd: &Path, trusted: &[PathBuf]) -> bool {
+    if crate::envs::var("KELIR_TRUST_PROJECT").is_some_and(|v| !matches!(v.trim(), "" | "0")) {
+        return true;
+    }
+    let canon = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let here = canon(cwd);
+    trusted.iter().any(|dir| here.starts_with(canon(dir)))
+}
+
+/// Drop the project-layer gates of an untrusted project, saying so once per gate.
+pub fn apply_trust(defs: Vec<GateDef>, trusted: bool, notes: &mut Vec<String>) -> Vec<GateDef> {
+    if trusted {
+        return defs;
+    }
+    defs.into_iter()
+        .filter(|def| {
+            let project = is_project_gate(def);
+            if project {
+                notes.push(format!(
+                    "gate {} ({}) not started: this project is not trusted (add its directory to `trusted_projects` in the machine config, or set KELIR_TRUST_PROJECT=1)",
+                    def.name, def.origin
+                ));
+            }
+            !project
+        })
+        .collect()
+}
+
 /// The shell command that runs a script file, chosen by extension.
 pub fn script_command(path: &Path) -> String {
     let shown = crate::util::path_string(path).replace('\\', "/");
@@ -515,6 +737,29 @@ pub fn script_command(path: &Path) -> String {
         "cmd" | "bat" => format!("cmd /C {quoted}"),
         _ => quoted,
     }
+}
+
+/// Adapt a `cmd /C …` command line to the shell that will run it. Under a POSIX
+/// shell on Windows (Git Bash, MSYS) `/C` is taken for a path and rewritten to
+/// `C:/`, so cmd starts its banner instead of the script; `//C` survives the
+/// conversion and means `/C` to cmd. Under cmd or PowerShell nothing changes.
+pub fn adapt_for_shell(command: &str, shell_program: &str) -> String {
+    let stem = Path::new(shell_program)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let posix = !matches!(stem.as_str(), "cmd" | "powershell" | "pwsh");
+    if !cfg!(windows) || !posix {
+        return command.to_string();
+    }
+    let trimmed = command.trim_start();
+    for head in ["cmd /c ", "cmd.exe /c "] {
+        if trimmed.len() >= head.len() && trimmed[..head.len()].eq_ignore_ascii_case(head) {
+            let program = &trimmed[..head.len() - 3];
+            return format!("{program}//C {}", &trimmed[head.len()..]);
+        }
+    }
+    command.to_string()
 }
 
 /// `python3` where it exists, else `python` (on Windows the `python3` on PATH
@@ -848,7 +1093,8 @@ impl Runner {
         let _slot = Slot::take()?;
         let shell_args: Vec<String> = self.shell.iter().skip(1).cloned().collect();
         let dir = self.session_dir.join("gates");
-        let input = crate::shellcmd::input(&def.command, &shell_args, &dir, &format!("g{index}"))?;
+        let line = adapt_for_shell(&def.command, program);
+        let input = crate::shellcmd::input(&line, &shell_args, &dir, &format!("g{index}"))?;
         let mut command = Command::new(program);
         match &input {
             crate::shellcmd::ShellInput::Argument(text) => {
@@ -868,7 +1114,8 @@ impl Runner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        self.scrub(&mut command, def);
+        let token = run_token();
+        self.scrub(&mut command, def, &token);
 
         let group = ProcessGroup::new();
         #[cfg(windows)]
@@ -891,6 +1138,8 @@ impl Runner {
         let Some(pid) = child.id() else {
             return Err("the gate exited at once".into());
         };
+        #[cfg(unix)]
+        let mut reaper = reap::Reaper::start(pid, &token, self.timeout + Duration::from_secs(15));
         if let Err(error) = group.spawned(pid) {
             let _ = child.kill().await;
             return Err(error);
@@ -915,6 +1164,10 @@ impl Runner {
         // The tree dies with the gate whatever happened: a gate that left a
         // background process behind leaves nothing.
         group.kill();
+        // Whatever left the group (setsid, a double fork) goes too; the guard
+        // that would have done it for a killed session is retired.
+        #[cfg(unix)]
+        reaper.reap(false);
         let status = match waited {
             Ok(Ok(status)) => status,
             Ok(Err(error)) => return Err(format!("cannot wait for the gate: {error}")),
@@ -959,7 +1212,7 @@ impl Runner {
 
     /// The gate's environment: the allow-list, kelir's three, then the gate's
     /// own `env`. Nothing else is inherited.
-    fn scrub(&self, command: &mut Command, def: &GateDef) {
+    fn scrub(&self, command: &mut Command, def: &GateDef, token: &str) {
         command.env_clear();
         for (key, value) in crate::envs::all_os() {
             if allowed_env(&key.to_string_lossy()) {
@@ -969,6 +1222,7 @@ impl Runner {
         command.env("KELIR_SESSION_DIR", &self.session_dir);
         command.env("KELIR_GATE_EVENT", def.event.name());
         command.env("KELIR_GATE_NAME", &def.name);
+        command.env(RUN_ENV, token);
         for (key, value) in &def.env {
             command.env(key, value);
         }
@@ -1689,6 +1943,83 @@ sleep 1
         assert!(
             !temp.path().join("flag.txt").exists(),
             "a descendant of the gate survived"
+        );
+    }
+
+    // ------------------------------------------------ M8 fix: F1, F6, F2/F3
+
+    /// F1: under a POSIX shell on Windows the `/C` of `cmd /C` must survive MSYS.
+    #[test]
+    fn a_cmd_line_is_adapted_to_a_posix_shell_on_windows_only() {
+        let line = script_command(Path::new("C:/g/turn_end.cmd"));
+        assert_eq!(line, "cmd /C \"C:/g/turn_end.cmd\"");
+        let bash = adapt_for_shell(&line, "C:/Program Files/Git/bin/bash.exe");
+        if cfg!(windows) {
+            assert_eq!(bash, "cmd //C \"C:/g/turn_end.cmd\"");
+            assert_eq!(
+                adapt_for_shell("CMD.EXE /c x.bat", "sh"),
+                "CMD.EXE //C x.bat"
+            );
+        } else {
+            assert_eq!(bash, line);
+        }
+        // cmd and PowerShell take `/C` as is; other commands are never touched.
+        assert_eq!(adapt_for_shell(&line, "C:/Windows/System32/cmd.exe"), line);
+        assert_eq!(adapt_for_shell(&line, "pwsh"), line);
+        assert_eq!(adapt_for_shell("python x.py /C", "bash"), "python x.py /C");
+    }
+
+    #[test]
+    fn project_gates_are_recognised_and_dropped_when_untrusted() {
+        let mut project = def(Event::TurnEnd, "echo a");
+        project.origin = "project config".into();
+        let mut skill = def(Event::TurnEnd, "echo b");
+        skill.origin = "project skill watch".into();
+        let machine = def(Event::TurnEnd, "echo c");
+        assert!(is_project_gate(&project) && is_project_gate(&skill) && !is_project_gate(&machine));
+        let all = vec![project, skill, machine];
+        let mut notes = Vec::new();
+        let kept = apply_trust(all.clone(), false, &mut notes);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let mut none = Vec::new();
+        assert_eq!(apply_trust(all, true, &mut none).len(), 3);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn a_trusted_directory_covers_what_is_under_it_and_nothing_beside_it() {
+        let root = tempfile::tempdir().unwrap();
+        let inside = root.path().join("a").join("b");
+        std::fs::create_dir_all(&inside).unwrap();
+        let beside = root.path().join("a-other");
+        std::fs::create_dir_all(&beside).unwrap();
+        let trusted = vec![root.path().join("a")];
+        assert!(project_trusted(&inside, &trusted));
+        assert!(project_trusted(&root.path().join("a"), &trusted));
+        assert!(!project_trusted(&beside, &trusted));
+        assert!(!project_trusted(&inside, &[]));
+    }
+
+    /// F2/F3 (Linux): the sweep finds a process that left the group by its token.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_sweep_kills_a_setsid_process_that_carries_the_token() {
+        use std::os::unix::process::CommandExt as _;
+        let token = run_token();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .env(RUN_ENV, &token)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        // Not a descendant of the (unrelated) root, not in any group we signal.
+        reap::kill_run(1_000_000, &token);
+        let status = child.wait().unwrap();
+        assert!(
+            !status.success(),
+            "the marked process survived the sweep ({pid})"
         );
     }
 }

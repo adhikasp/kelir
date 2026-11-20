@@ -56,12 +56,12 @@ Branch `job/m8`. What was built, what was decided, what to look at.
 
 - Live drive with a real cheap model and the example gates is the reviewer's layer.
 - `delegation` flags are unverified against a built M7.
-- `scripts/gate.sh --linux=the maintainer` result: see PROGRESS.
+- the Linux gate result: see PROGRESS.
 
 ## Incident: ~1000 `sh .../Cargo.toml` processes (2026-11-20, 20:26-20:29)
 
 What I believe happened: while debugging a Windows-only failure in the gate unit tests I ran, by
-hand in Git Bash, `sh "C:/Users/the maintainer/kelir-wt/m8/Cargo.toml"` (a careless experiment: I wanted to see
+hand in Git Bash, `sh "<worktree>/Cargo.toml"` (a careless experiment: I wanted to see
 whether `sh` accepts a Windows-style path and picked a file that was not a script). `sh` executed the manifest as a shell script; the call hit its 120 s limit and was moved to
 the background. The times and the exact command line match the report. I cannot prove the fork growth
 from the gate runner's side: it has no retry loop, and the gate tests had not started a `sh` on that

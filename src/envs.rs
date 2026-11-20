@@ -192,6 +192,14 @@ pub const VARS: &[Var] = &[
         "KELIR_GATE_NAME",
         "set for a gate only: the gate's name, as the `gate` event records it",
     ),
+    read(
+        "KELIR_TRUST_PROJECT",
+        "let this run start the project's own gates (`.kelir/config.toml` `[gates]`, project skills); the machine config's `trusted_projects` is the lasting form",
+    ),
+    set(
+        "KELIR_GATE_RUN",
+        "set for a gate only: a token unique to this gate run, so kelir can find and kill what the gate left behind (a `setsid` daemon); do not clear it",
+    ),
     // ------------------------------------------------------------- test hooks
     hook(
         "KELIR_GATE_TIMEOUT_MS",

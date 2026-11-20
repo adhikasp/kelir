@@ -1,6 +1,6 @@
 ---
 name: herdr
-description: inside a Herdr pane, see the other agents and terminals (hc ls --json, hc get/read/send/wait, hc machine ls) and count the agents sharing my space; never kill another agent's pane
+description: inside a Herdr pane, list the agents and terminals around you (hc ls --json) and count those sharing my space; never kill another agent's pane
 metadata:
   builtin: true
   body: kelir docs
@@ -51,7 +51,7 @@ connected; a disconnected machine's terminals may be missing, say so).
 hc read <t>             # its screen and history; start here before touching anything
 hc send <t> "text"      # paste text and press enter (to an agent: a new message)
 hc wait <t>             # block until it stops working (--output X: until it prints X)
-hc wait <t> --children  # until the helpers it started are done
+hc wait <t> --children all   # until none of <t>'s children is working (any: the next news)
 ```
 
 Use `hc wait`, not `sleep`. Read before you send; one message, not a stream.

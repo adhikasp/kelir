@@ -201,7 +201,6 @@ async fn a_timed_out_gate_that_ignores_sigterm_leaves_nothing() {
 /// the Unix process-group kill. Windows Job Objects catch it. Ignored by
 /// default so the suite stays green; run with `--ignored` on Linux.
 #[tokio::test]
-#[ignore = "F2: setsid daemon escapes the Unix process-group kill"]
 async fn a_gate_that_daemonizes_does_not_outlive_the_run() {
     let work = tempfile::tempdir().unwrap();
     let (out, _log, _sb) = one_turn(&rev_cmd("daemon", work.path()), "before_tool", &[]).await;
@@ -425,10 +424,6 @@ async fn session_end_fires_on_end_but_not_on_a_hard_kill() {
 /// Killing kelir while a gate is running must take the gate's tree with it
 /// (Windows: kill-on-close Job Object; Unix: nothing does this today, F3).
 #[tokio::test]
-#[cfg_attr(
-    unix,
-    ignore = "F3: Unix has no kill-on-parent-death for a gate's process group"
-)]
 async fn killing_the_session_mid_gate_kills_the_gate_tree() {
     let work = tempfile::tempdir().unwrap();
     let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("done", 0)))]).await;
@@ -495,8 +490,14 @@ async fn the_three_declarations_are_equivalent() {
             .unwrap();
             std::fs::copy(&script, skill.join("scripts").join("before_tool.py")).unwrap();
         }
+        // The skill lives under the project's `.kelir/skills`: project code, so
+        // the project is declared trusted (F6) for the skill variant.
         let out = sandbox
-            .kelir(&mock.base_url(), &["run", "--json", "go"], &[])
+            .kelir(
+                &mock.base_url(),
+                &["run", "--json", "go"],
+                &[("KELIR_TRUST_PROJECT", "1")],
+            )
             .await;
         assert_eq!(out.code, 0, "{how}: {}", out.stderr);
         let log = sandbox.log(&sandbox.only_session());
@@ -544,6 +545,7 @@ Body.
     let mut command = sandbox.kelir_command(&mock.base_url());
     command
         .args(["run", "--json", "go"])
+        .env("KELIR_TRUST_PROJECT", "1")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let child = sandbox
@@ -586,7 +588,6 @@ async fn a_ps1_gate_runs_from_a_console_less_parent() {
 /// starts its interactive banner instead of the script.
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "F1: cmd /C is mangled by MSYS path conversion under the default bash shell"]
 async fn a_cmd_gate_runs_from_a_console_less_parent() {
     let body = "@echo off & echo {\"decision\":\"allow\",\"reason\":\"cmd-saw\"}
 ";

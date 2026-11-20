@@ -50,7 +50,7 @@ model = "deepseek/deepseek-v4.1-flash-1017"
 ' >> "$cfg"
     task="How many agents share my Herdr space right now? Answer from live data, list them." ;;
   git)
-    printf '%s[gates]\nsession_start = "%s %s/git_sync.py"\nsession_end = "%s %s/git_sync.py"\n' "$base" "$py" "$ex" "$py" "$ex" > "$cfg"
+    printf '%s[gates]\nsession_start = "%s %s/git_sync.py"\nsession_end = { command = "%s %s/git_sync.py", env = { GIT_SYNC_ADD_NEW = "1" } }\n' "$base" "$py" "$ex" "$py" "$ex" > "$cfg"
     git init -q --bare "$w/remote.git"; git clone -q "$w/remote.git" "$w/cwd" 2>/dev/null
     ( cd "$w/cwd" && git config user.email r@example.com && git config user.name rev && git config commit.gpgsign false && echo base > base.txt && git add . && git commit -qm init && git push -q origin HEAD )
     task="Create a file hello.txt containing the word hi using your edit tool, then say done." ;;

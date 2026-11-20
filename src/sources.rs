@@ -627,17 +627,29 @@ pub fn render_base(base: &str, places: &Places) -> String {
         .iter()
         .map(|dir| format!("  - {}", crate::util::path_string(dir)))
         .collect();
+    // The builtin skills have no file to pull: they are named here, with what
+    // each is for and the one command that reads it (M8 fix F5).
+    let mut lines = directories;
+    lines.push(builtin_listing());
+    let listing = lines.join("\n");
     if base.contains(SKILLS_PLACEHOLDER) {
-        return base.replace(SKILLS_PLACEHOLDER, &directories.join("\n"));
+        return base.replace(SKILLS_PLACEHOLDER, &listing);
     }
-    if directories.is_empty() {
-        return base.to_string();
+    format!("{}\n\n# Skills\n{}", base.trim_end(), listing)
+}
+
+/// The builtin skills as the prompt shows them: `name: description`, and the
+/// command that prints one.
+pub fn builtin_listing() -> String {
+    let mut out =
+        String::from("  - built in (no file; read one with `kelir docs --skill <name>`):");
+    for (name, text) in BUILTIN_SKILLS {
+        let description = parse_skill(text)
+            .map(|skill| skill.description)
+            .unwrap_or_default();
+        out.push_str(&format!("\n    - {name}: {description}"));
     }
-    format!(
-        "{}\n\n# Skills\n{}",
-        base.trim_end(),
-        directories.join("\n")
-    )
+    out
 }
 
 /// Parse a `SKILL.md`: the Agent Skills front matter, and the body.
@@ -1243,6 +1255,26 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
                 path.display()
             );
         }
+    }
+
+    /// M8 fix F5: a builtin skill has no path, so the prompt itself must name
+    /// each one, say what it is for, and give the command that prints it.
+    #[test]
+    fn the_rendered_prompt_names_every_builtin_skill_and_how_to_read_it() {
+        let dir = temp_dir("builtin-listing");
+        let places = places_in(&dir);
+        let rendered = render_base(crate::config::DEFAULT_PROMPT, &places);
+        assert!(rendered.contains("kelir docs --skill <name>"), "{rendered}");
+        for (name, text) in BUILTIN_SKILLS {
+            let description = parse_skill(text).unwrap().description;
+            assert!(
+                rendered.contains(&format!("- {name}: {description}")),
+                "{name} is not advertised in:\n{rendered}"
+            );
+        }
+        // Also when a hand-written prompt has no placeholder.
+        let appended = render_base("BASE", &places);
+        assert!(appended.contains("- herdr: "), "{appended}");
     }
 
     /// The prompt is a contract with the model: a line that survives a retro

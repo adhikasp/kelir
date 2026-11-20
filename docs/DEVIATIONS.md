@@ -1600,7 +1600,7 @@ follow-up commit series that restores three things the first pass lost.
   trimmed stdout is parsed, as one JSON object (no last-line fallback). More than 1 MiB is garbage.
 - **`turn_end` fires on the model's final answer only (M8)**, not on a `stop`, a pause or an error: the
   deny/rewrite semantics need an answer. A second `deny` in one turn is logged as a `gate` event plus an
-  `error` event (`location` `gate`) and not enforced. The reason reaches the model as a `user` event
+  `error` event (`where` `gate`) and not enforced. The reason reaches the model as a `user` event
   `from: gate`, delivery `next`.
 - **A dropped command-line task ends a one-shot run with exit 1 (M8)** (`session_ended` reason `denied`,
   message on stderr even under `--json`); a TUI session just waits for the next message. `prompt_submit`
@@ -1612,11 +1612,37 @@ follow-up commit series that restores three things the first pass lost.
   `KELIR_SESSION_DIR`, `KELIR_GATE_EVENT`, `KELIR_GATE_NAME` and the gate's own `env` table. Not "the
   environment minus secrets": a user's custom `key_env` variable is withheld too. `KELIR_GATE_TIMEOUT_MS`
   (test hook) shortens the 30 s.
-- **Project-layer gates start without a trust prompt (M8, open; same as M6's project `mcp.toml`).** A cloned
-  repo's `.kelir/config.toml` `[gates]` or a `.kelir/skills/*` with `kelir-gate` runs code on the first event.
-  The trust gate belongs with STEER-7 (`src/trust.rs`).
+- **Project-layer gates need a trusted project (M8 fix, review F6).** kelir has no prompt, and
+  `src/trust.rs` is the session socket's boundary, not a project-trust store, so trust is *declared*:
+  `trusted_projects = [dirs]` in the machine config (a directory covers what is under it) or
+  `KELIR_TRUST_PROJECT=1`. A project's `.kelir/config.toml` `[gates]` and project-layer skills with `kelir-gate`
+  are skipped in any other project, with an `error` event (`where` `gate`) per skipped gate; `observe` marks
+  them `trusted: false`; a project config's own `trusted_projects` is ignored with a warning. Side effect: the
+  machine and project `[gates]` tables are no longer merged per key (the project's used to replace the
+  machine's `session_start`); both sets are kept. Project `mcp.toml` (M6) is untouched and still has no trust
+  step.
 - **The `gate` event has no `tool` field (M8).** The spec's field list is kept exactly; a gate's `reason`
   and the neighbouring `tool_started` identify the call.
-- **`delegation` describes M7's CLI from the spec (M8).** M7 (`kelir run --child`, `kelir brief`, `kelir ls`)
-  was in flight in another worktree when this skill was written; the flags are the SPEC's. If M7 lands with
-  different spellings, `src/docs/skill-delegation.md` is the one place to fix (a unit test pins the words).
+- **`delegation` describes what `main` has, not M7's CLI (M8 fix, review F7).** M7 (`kelir run --child`,
+  `kelir brief`, `kelir ls`, the depth/10/16 caps, `child_started`/`child_settled`) is on `job/m7`, not merged
+  when this was fixed, so the first version told the model to run commands that failed. The skill now teaches
+  plain `kelir run`, `kelir ask` and `kelir bg run`, with the limits (depth 1, three at a time) written as the
+  model's own discipline, since nothing enforces them. A unit test
+  (`builtin_skills_name_only_subcommands_and_flags_kelir_help_lists`) fails if any builtin skill shows a
+  `kelir <subcommand>` or `--flag` that `kelir --help` does not list. **Whoever merges M7 rewrites
+  `src/docs/skill-delegation.md` for `--child`/`brief` in the same commit**; the test then guards the new
+  spellings.
+- **Builtin skills are advertised in the prompt and read with `kelir docs --skill <name>` (M8 fix, review F5).**
+  The base prompt's skills block (rendered, outside the 1024-byte template budget) now lists each builtin as
+  `name: description` plus the command; `--skill` is a new `kelir docs` flag (`kelir docs herdr` stays "no
+  topic"). The `kelir` skill had the same gap and gains the same fix.
+- **Gates cannot outlive a run on Linux (M8 fix, review F2, F3).** Every gate gets `KELIR_GATE_RUN=<token>`.
+  After the gate ends (or times out) kelir kills the group, then every descendant and every process whose
+  environment carries the token (`/proc`), so a `setsid`/double-fork daemon goes too. A hidden
+  `kelir gate-guard` process, started beside each Unix gate, polls the session and does the same sweep if the
+  session is killed (`PR_SET_PDEATHSIG` was rejected: it reaches only the shell, not its children). Limits, in
+  `gates.md`: Linux only for the token sweep; a gate that clears its environment before detaching escapes it.
+- **`.cmd`/`.bat` gates under a POSIX shell on Windows (M8 fix, review F1).** `cmd /C x` becomes `cmd //C x`
+  when the configured shell is not cmd or PowerShell (MSYS would rewrite `/C` to `C:/`).
+- **`git_sync.py` stages tracked files only (M8 fix, review F4).** `git add -u` by default; `GIT_SYNC_ADD_NEW`
+  adds new files; a secret-like name refuses the commit; `GIT_SYNC_DRY_RUN` prints and does nothing.

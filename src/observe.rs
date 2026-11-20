@@ -157,7 +157,12 @@ fn effective_gates(events: &[LogEvent], cfg: &Config) -> Vec<Value> {
         _ => None,
     });
     let mut defs = cfg.gates.clone();
+    for def in cfg.project_gates.clone() {
+        crate::gates::push_unique(&mut defs, def);
+    }
+    let mut trusted = false;
     if let Some(cwd) = cwd {
+        trusted = crate::gates::project_trusted(&cwd, &cfg.trusted_projects);
         let places =
             crate::sources::places(&cwd, &cfg.skills_dirs, Some(crate::paths::config_dir()));
         let found = crate::sources::discover(&places);
@@ -165,7 +170,17 @@ fn effective_gates(events: &[LogEvent], cfg: &Config) -> Vec<Value> {
             crate::gates::push_unique(&mut defs, def);
         }
     }
-    crate::gates::describe(&defs)
+    // An untrusted project's gates are listed too, marked, so `observe` shows why
+    // nothing ran.
+    let mut out = crate::gates::describe(&defs);
+    if !trusted {
+        for (value, def) in out.iter_mut().zip(&defs) {
+            if crate::gates::is_project_gate(def) {
+                value["trusted"] = serde_json::json!(false);
+            }
+        }
+    }
+    out
 }
 
 /// Every `gate` event of the log, in order.

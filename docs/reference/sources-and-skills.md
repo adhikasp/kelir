@@ -46,9 +46,10 @@ directory's name; a project skill of that name replaces a machine one. A
 directory whose `SKILL.md` is missing, unreadable or malformed is skipped with a
 note (`error` event, `where: "source"`), never listed.
 
-**Skills are pull.** The base prompt names the directories and nothing else: the
-skill's body costs no token until a task needs it, and then it is `bash`
-(`cat <dir>/<name>/SKILL.md`). `sources[]` still records each skill (name, real
+**Skills are pull.** The base prompt names the directories, and the builtin skills
+by name and description (they have no file): the skill's body costs no token until
+a task needs it, and then it is `bash` (`cat <dir>/<name>/SKILL.md`, or
+`kelir docs --skill <name>` for a builtin). `sources[]` still records each skill (name, real
 path, hash), so editing one mid-session is noticed.
 
 ### The builtin `kelir` skill
@@ -70,9 +71,10 @@ still read how kelir works.
 
 Two more embedded skills, discovered exactly like `kelir` (machine layer, no file,
 replaced by a skills-directory entry of the same name): `delegation`
-(`src/docs/skill-delegation.md`: when and how to start children with
-`kelir run --child` / `kelir brief`, the caps, foreground vs background, what to
-put in the task, reading results) and `herdr` (`src/docs/skill-herdr.md`: inside
+(`src/docs/skill-delegation.md`: when and how to start another kelir with
+`kelir run` / `kelir ask` / `kelir bg run`, foreground vs background, what to put
+in the task, the limits the model keeps for itself, reading results; it names
+only commands `kelir --help` lists, and a test fails if that stops being true) and `herdr` (`src/docs/skill-herdr.md`: inside
 a pane, `hc ls --json` with state/status/agent/where/cwd across machines, counting
 the agents that share my space by the `where` prefix, `hc get/read/send/wait`,
 `hc machine ls`, and the rule never to kill another agent's pane; outside Herdr

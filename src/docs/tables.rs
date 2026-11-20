@@ -335,6 +335,15 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
     },
     KeyDoc {
         scope: KeyScope::Top,
+        name: "trusted_projects",
+        kind: "array of paths",
+        default: "empty: no project is trusted",
+        overrides: "`KELIR_TRUST_PROJECT`",
+        effect: "machine setting: directories (and everything under them) whose own gates may run; a                  project's `.kelir/config.toml` `[gates]` and its project skills' `kelir-gate` scripts                  are skipped, with a note in the log, in any other project; ignored in a project config",
+        field_fn: "load",
+    },
+    KeyDoc {
+        scope: KeyScope::Top,
         name: "promote_after",
         kind: "integer (seconds)",
         default: "`600`; `0` disables promotion",
