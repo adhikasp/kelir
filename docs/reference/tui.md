@@ -19,11 +19,28 @@ image chips).
 |---|---|
 | live (3) | the tail of the streaming answer (markdown) or the open tool group |
 | state (1) | `● idle · ready`, `⠹ thinking 12s · waiting for the provider · esc stops`, … |
-| editor (3) | `› your message`; the prompt dims while the agent works |
-| facts (1) | `kelir working · model · step · 1.5k tok · 75% cache · $0.0004` |
+| editor (3) | `› your message` in the user colour (cyan); the prompt dims while the agent works |
+| facts (1) | `kelir working · model · 1.5k tok` — steps, cache and cost are not ambient |
 
 A shorter terminal gives rows up in this order: the facts row, live rows, the
 editor down to one row; the state row is the last to go.
+
+## The banner
+
+The banner above the viewport is `kelir · provider · model`, `session <id>`,
+`cwd <path>`, the help line, the step cap when one is set, and a `resumed …`
+line after a resume. It carries **no** window line: the window compaction
+measures against is not ambient, and `state` (every `kelir ctl` verb's answer)
+reports `window`, `window_source` and `window_note` for anyone who asks.
+
+The one exception is a window that is **not** the provider's, because that
+silently changes when the session compacts: a default fallback (an offline
+endpoint, a 401, a list that never landed) adds one dim line under `cwd`,
+`window 128000 tokens (default) · the model list: offline`. It is said once:
+when the start already knows, the banner carries it; otherwise the line appears
+when the answer that failed lands (`» window 128000 tokens (default) · …`). A
+`/model` swap that changes the window says so the same way, once, because the
+banner has no window line to update: `» window 200000 tokens (api)`.
 
 While the session waits before trying the provider again (a retryable HTTP
 status) or for a concurrency-governor slot, the facts row shows the wait
@@ -54,11 +71,12 @@ the next boundary or during the wait.
 | error | `✗` | `✗ error · provider 401 · say to retry` |
 
 A turn that ends **paused** or **in error** keeps its row after it ends (with
-the step cap or the provider's reason and the next action); `done` and
-`stopped` go back to `● idle · ready`, and the one-line summary above the row
-says which of the two it was. The facts row says `kelir idle` for a finished
-turn, `kelir paused`/`kelir error` for the two that need a human: one word for
-one state.
+the step cap or the provider's reason and the next action) and writes one
+outcome line (`⏸ paused · 3 steps · 4.8k tok`, no cost or timing); `done` ends
+on its prose and goes back to `● idle · ready`, and `stopped` writes one line
+and does the same. The facts row says `kelir idle` for a finished turn,
+`kelir paused`/`kelir error` for the two that need a human: one word for one
+state.
 
 Spinner and elapsed time exist only while working. Herdr's OSC 7501 word comes
 from the same state: thinking/writing/running/rate limited → `working`,
@@ -99,17 +117,40 @@ expands, and saying either one twice changes nothing.
 
 ## Spacing
 
-A prompt echo, a tool group, prose and the end-of-turn summary are separate
-blocks with **one** blank row between them and never two.
+A prompt echo, a tool group, prose and the outcome line (paused, stopped,
+error) are separate blocks with **one** blank row between them and never two.
+The human's own words in the scrollback are cyan, so a long session can be
+scanned for what was asked. Cyan is the terminal's ANSI 6: a terminal whose
+palette remaps it light loses contrast on a light background. Change the
+palette, not the transcript.
 
 ## Tool lines
 
 A settled call is one dim line with a right-aligned verdict:
-`  $ cargo test            ✗ exit 101 · 4.1 KB · 4.1s`. A failure is red, keeps
-its line and gains one dim tail line with the last output line. Three or more
-shell calls in one group fold into `  ran 3 commands · 3.2s`; a failed call, an
-`edit` and a `write` always keep their own line. Prose is the only
-default-weight text.
+`  $ cargo test            ✗ exit 101 · 4.1 KB` (no duration: the transcript
+is not a profiler). A failure is red, keeps its line and gains one dim tail
+line with the last output line. One or two calls in a group (a run of calls
+between two pieces of prose) keep one line each.
+
+Three or more calls collapse into one checked line, and that line names what
+it does **not** stand in for:
+
+```
+  ✓ 2 calls · 1 failed · 1 stopped
+    $ cargo test                    ✗ exit 101 · 4.1 KB
+    error[E0432]: unresolved import `foo`
+    $ sleep 20                      ⏹ cancelled
+    edit src/lib.rs                 ok · 1.2 KB
+```
+
+The checked count covers only the calls the fold hides: a `bash` call that
+finished cleanly. A failure, a call a human stopped (Esc) and a call that
+changed a file all keep their own line below — a stopped call is never counted
+as checked, and the count adds up (`2 calls · 1 failed · 1 stopped`), so a
+reader can trust the arithmetic. `edit` (and any tool that is not `bash`) never
+folds away for a reason of its own: which file an agent touched is what a
+reader wants from the transcript. A run with nothing cleanly finished has no
+`✓` line at all. Prose is the only default-weight text.
 
 ## Markdown
 

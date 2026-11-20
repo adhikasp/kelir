@@ -173,7 +173,7 @@ fn snapshot_the_idle_viewport() {
     row_eq(&screen, 2, "");
     row_eq(&screen, 3, " ● idle · ready");
     row_eq(&screen, 4, "›");
-    row_eq(&screen, 7, "kelir idle · step 0 · 0 tok");
+    row_eq(&screen, 7, "kelir idle · 0 tok");
 }
 
 #[test]
@@ -212,10 +212,7 @@ fn snapshot_streaming_text_in_the_live_area() {
         "no literal markers: {committed:?}"
     );
     let facts = screen.lines().nth(7).unwrap_or_default();
-    assert!(
-        facts.starts_with("kelir working · test/model · step 1"),
-        "{facts:?}"
-    );
+    assert!(facts.starts_with("kelir working · test/model"), "{facts:?}");
 }
 
 #[test]
@@ -400,7 +397,7 @@ fn snapshot_a_tool_group_before_and_after_it_closes() {
     // Already three calls: the live area shows the same fold the scrollback
     // will get, so nobody sees it change shape when it commits.
     assert!(
-        live.iter().any(|row| row.contains("ran 3 commands")),
+        live.iter().any(|row| row.contains("3 calls")),
         "the open group is visible: {live:?}"
     );
     app.apply(UiEvent::Assistant {
@@ -408,7 +405,7 @@ fn snapshot_a_tool_group_before_and_after_it_closes() {
     });
     let committed: Vec<String> = app.take_scroll().iter().map(line_text).collect();
     assert!(
-        committed.iter().any(|row| row.contains("ran 3 commands")),
+        committed.iter().any(|row| row.contains("3 calls")),
         "{committed:?}"
     );
 }
@@ -545,6 +542,39 @@ fn drive_in_a_pty(
     preamble: &[u8],
     expect: Vec<String>,
 ) -> PtyRun {
+    drive_pty_in_idle_or_turn(
+        cwd,
+        config,
+        state,
+        base_url,
+        Some(b"hello there"),
+        preamble,
+        expect,
+    )
+}
+
+/// The same, but the session only idles: nothing is typed except `preamble`, so
+/// the turn machinery never runs and whatever the session says on its own (the
+/// banner, an idle metadata fetch landing) is all that reaches the screen.
+fn drive_idle_in_a_pty(
+    cwd: std::path::PathBuf,
+    config: std::path::PathBuf,
+    state: std::path::PathBuf,
+    base_url: String,
+    expect: Vec<String>,
+) -> PtyRun {
+    drive_pty_in_idle_or_turn(cwd, config, state, base_url, None, b"", expect)
+}
+
+fn drive_pty_in_idle_or_turn(
+    cwd: std::path::PathBuf,
+    config: std::path::PathBuf,
+    state: std::path::PathBuf,
+    base_url: String,
+    message: Option<&[u8]>,
+    preamble: &[u8],
+    expect: Vec<String>,
+) -> PtyRun {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         .openpty(portable_pty::PtySize {
@@ -635,9 +665,11 @@ fn drive_in_a_pty(
             send(preamble);
             std::thread::sleep(Duration::from_millis(200));
         }
-        send(b"hello there");
-        let _ = wait_for(&screen, "hello there", Duration::from_secs(5));
-        send(b"\r");
+        if let Some(message) = message {
+            send(message);
+            let _ = wait_for(&screen, "hello there", Duration::from_secs(5));
+            send(b"\r");
+        }
         typed = true;
     }
     assert!(typed, "the TUI never drew: {:?}", text(&screen));
@@ -722,11 +754,11 @@ async fn the_tui_runs_a_turn_in_a_pty() {
         "a sync frame is never closed: {:?}",
         run.screen
     );
-    // The banner names the window compaction measures against and where it came
-    // from (STEER-1: the provider's list, fetched before the first step).
+    // The banner no longer carries the window: the startup answer is silent
+    // (it is still in `state`, for anyone who asks).
     assert!(
-        run.screen.contains("window 262144 tokens (api)"),
-        "the banner must show the window and its source; screen: {:?}",
+        !run.screen.contains("window 262144 tokens"),
+        "the window is not ambient in the banner; screen: {:?}",
         run.screen
     );
     // Herdr's status: exactly one record per change, in the only form this
@@ -827,8 +859,8 @@ async fn the_tui_renders_a_markdown_answer_and_commits_it() {
     let text = plain(&run.screen);
     assert!(text.contains("Some bold words"), "{text:?}");
     assert!(text.contains("cargo test"), "{text:?}");
-    // The committed turn ends with the one-line summary.
-    assert!(text.contains("1 step"), "{text:?}");
+    // A done turn ends on its prose: no check mark, no dollar figure.
+    assert!(!text.contains('$'), "no cost in the pane: {text:?}");
     // (the state row's idle text is checked by the snapshot tests; the pty's
     // repaint diff only rewrites what changed, so it need not appear here)
 }
@@ -1467,10 +1499,10 @@ fn panic_in_a_pty(
     )
 }
 
-/// N1: with a cap configured, the status line says `step 0/N` while the session
-/// idles, not a bare `step 0` that hides the limit until a turn starts.
+/// The facts row stays calm even with a cap: no step counter is ambient, and
+/// the banner is where the cap is named.
 #[tokio::test]
-async fn the_idle_status_line_already_knows_the_cap() {
+async fn the_idle_status_line_stays_calm_even_with_a_cap() {
     let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("work");
@@ -1490,17 +1522,16 @@ async fn the_idle_status_line_already_knows_the_cap() {
             state,
             base_url,
             b"",
-            vec!["kelir idle · step 0/3 · 0 tok".into()],
+            vec!["kelir idle · 0 tok".into()],
         )
     })
     .await
     .expect("the pty driver");
 
     assert_eq!(run.code, 0, "screen: {:?}", run.screen);
-    // The bare form would be the same screen with the cap hidden.
     assert!(
-        run.screen.contains("kelir idle · step 0/3 · 0 tok"),
-        "the idle line must show the cap: {:?}",
+        run.screen.contains("kelir idle · 0 tok"),
+        "the idle line is phase, model and tokens: {:?}",
         run.screen
     );
     // And the banner names the cap too, so the two never disagree.
@@ -1560,4 +1591,231 @@ async fn the_tui_reports_a_pause_to_herdr_as_blocked() {
     // The session stayed up after the pause, so `/quit` is what ended it.
     let text = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
     assert!(text.contains("\"outcome\":\"paused\""), "{text}");
+}
+
+/// F-window: the banner stays silent about the window the provider answered,
+/// and says one dim line when the start could not read the list — because that
+/// fallback silently sets the compaction threshold (STEER-1 review N4). A list
+/// endpoint that answers 503 is the offline case, made deterministic here.
+#[tokio::test]
+async fn the_tui_banner_names_a_window_only_when_it_fell_back() {
+    let mock = Mock::start_with_models(
+        vec![Reply::Sse(sse(&text_turn("PARROT", 0)))],
+        support::ModelsAnswer::http(503, "later"),
+    )
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            b"",
+            vec![
+                "window 128000 tokens (default)".into(),
+                "the model list: http 503".into(),
+                "PARROT".into(),
+            ],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    // One line, not two: the same fallback is never announced twice.
+    assert_eq!(
+        run.screen.matches("window 128000 tokens").count(),
+        1,
+        "one fallback line: {:?}",
+        run.screen
+    );
+}
+
+/// F-window: the *normal* window is not in the banner. A start whose list
+/// answers must not print a window line at all, at any width.
+#[tokio::test]
+async fn the_tui_banner_is_silent_about_the_providers_own_window() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(cwd, config, state, base_url, b"", vec!["kelir".into()])
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    assert!(
+        !run.screen.contains("tokens ("),
+        "the banner carries no window line when the list answered: {:?}",
+        run.screen
+    );
+}
+
+/// A metadata fetch that lands after the start's grace must still be applied to
+/// an *idle* session: an idle `--keep`/TUI session used to poll the fetch once
+/// and then block on the verb channel, so a slow answer was never applied until
+/// a turn began — `state`, and the banner's note about a fallback, stayed on
+/// "fetching" for as long as nobody typed. The list here answers 503 after 1.5 s
+/// (well past the 250 ms start grace), so the only way its line reaches the
+/// screen is the idle loop applying it by itself.
+#[tokio::test]
+async fn a_slow_list_is_applied_to_an_idle_tui_session() {
+    let mock = Mock::start_with_models(
+        Vec::new(),
+        support::ModelsAnswer::http(503, "later").slow(Duration::from_millis(1500)),
+    )
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        // Nothing is typed but `/quit`: the session only idles. The line's form
+        // is not the point (the banner's if the answer beat the grace, the `»`
+        // one if it did not); that it appears at all while idle is.
+        drive_idle_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            vec![
+                "window 128000 tokens (default)".into(),
+                "the model list: http 503".into(),
+            ],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    let screen = &run.screen;
+    assert!(
+        screen.matches("window 128000 tokens").count() == 1,
+        "the late answer is applied once, while idle: {screen:?}"
+    );
+}
+
+/// F-window: the brief's offline case, without a mock at all — a base URL on a
+/// dead port. The list cannot answer, the window falls back to the default, and
+/// the banner says so with the reason instead of staying quiet about a number
+/// that decides when the session compacts (STEER-1 review N4).
+#[tokio::test]
+async fn an_offline_start_says_the_window_it_fell_back_to() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    // Port 9 is the discard port: nothing listens on it, so a connect is
+    // refused and the fetch fails. An idle session applies the answer as soon
+    // as it lands (it does not wait for a turn), so this test needs no mock and
+    // no message: the fallback line appears while the session sits at the
+    // prompt. Which of the two forms it takes depends on how fast the refusal
+    // is, and both are correct: refused inside the start's 250 ms grace and the
+    // *banner* carries the line; slower (Windows takes about 2 s) and the banner
+    // could only say "fetching", so `apply_list` writes the `»` line when the
+    // answer lands. The assertions below are the invariant, not the form: the
+    // number, its source and the reason, once.
+    let base_url = "http://127.0.0.1:9".to_string();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_idle_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            vec![
+                "window 128000 tokens (default)".into(),
+                "the model list: offline".into(),
+            ],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    let screen = &run.screen;
+    assert!(
+        screen.matches("window 128000 tokens").count() == 1,
+        "one fallback line, not two: {screen:?}"
+    );
+    assert!(
+        screen.contains("the model list: offline"),
+        "the reason reaches the screen, not just the log: {screen:?}"
+    );
+}
+
+/// F-window: a `/model` swap announces the window it moved to, once, on the
+/// line above the editor — the banner has no window line to update, so without
+/// this a person would never learn the compaction threshold changed.
+#[tokio::test]
+async fn a_model_swap_announces_the_new_window() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    // A configured window for the *start* model, so the swap has a number to
+    // move away from; the new model comes from the mock's list (200000).
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n[model_windows]\n\"test/model\" = 64000\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            b"/model anthropic/claude-sonnet-4.5\r",
+            vec![
+                "» model anthropic/claude-sonnet-4.5".into(),
+                "» window 200000 tokens (".into(),
+            ],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    let screen = &run.screen;
+    // The source is `cache` or `api` depending on whether the swap's fetch had
+    // landed; the point is that the number is said at all, once.
+    assert!(
+        screen.matches("» window 200000 tokens").count() == 1,
+        "the swap's window is announced, once: {screen:?}"
+    );
 }

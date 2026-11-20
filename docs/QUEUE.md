@@ -273,3 +273,7 @@ implementer pauses; the retro/introspective passes keep reading the transcripts 
 - 2026-11-20 13:30: **steer12 merged** (89e23d6). The AFTER measurement needs kelir sessions on the new prompt; agent work moved to Claude Code (directive), so it is
   deferred until kelir runs again (a gate-run/dogfood session on the OpenRouter fallback can supply a data point). steer7: merge resolved (steer7m, gate 897 green),
   adversarial re-review running (Claude). tui3fix and steer11 (kelir/opencode-go) finish their current pass.
+
+- 2026-11-20 14:10: **tui3 merged** (68943bb). Running (Claude): steer7fix2 (STEER-7 round 3: authenticated status files, t15g), steer11 review (t15j). Waiting
+  to merge: steer11 (gate 903 green, review running). Next after those: steer8 (cost/status), steer9 (de-flake), M5-B (Herdr line, hint, memory, attachments,
+  observe), M6 MCP, M7 children, M8 gates, M9, M10, M11, M12 (publish prep, push needs the maintainer's yes).
