@@ -1372,7 +1372,7 @@ this differs from the spec text, or needed a call the brief left open:
   variables only. The session takes only `cmd`, `shell`, `cwd` and a filtered `env` from a spawn
   and sets the kind, the socket, the token and the job name itself, so a child cannot redirect the
   shim's report or ask for an unhardened shim; every shim that holds a key is hardened. The
-  session process is hardened too (Windows Owner Rights DACL keeping terminate/limited query;
+  session process is hardened too (Windows Owner Rights DACL keeping terminate/set-quota/query/synchronize, because `taskkill` is refused without query;
   Linux `PR_SET_DUMPABLE=0`), which closes the same-user read of all job keys on Windows; on
   Linux it matters only where Yama is off. Still outside the boundary: SeDebugPrivilege, root,
   kernel debuggers, and rewriting `events.jsonl`. Tool children no longer inherit

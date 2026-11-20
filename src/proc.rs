@@ -533,8 +533,8 @@ pub mod win {
     /// Close this process to the rest of its user: no `PROCESS_VM_READ`,
     /// `VM_WRITE`, `CREATE_THREAD`, `DUP_HANDLE` or `QUERY_INFORMATION`, and no
     /// `WRITE_DAC` to take them back. The DACL names `SYSTEM` (everything) and
-    /// *Owner Rights* with only terminate / set-quota / limited-query /
-    /// synchronize, which is what `cancel` and the liveness checks use; an
+    /// *Owner Rights* with only terminate / set-quota / query-information /
+    /// synchronize (`taskkill` is refused without query-information), which is what `cancel` and the liveness checks use; an
     /// explicit Owner Rights entry is what removes the owner's implicit
     /// `READ_CONTROL | WRITE_DAC`.
     ///
@@ -550,7 +550,7 @@ pub mod win {
         };
         use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SetKernelObjectSecurity};
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
-        let sddl: Vec<u16> = "D:P(A;;GA;;;SY)(A;;0x101101;;;OW)"
+        let sddl: Vec<u16> = "D:P(A;;GA;;;SY)(A;;0x101501;;;OW)"
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();

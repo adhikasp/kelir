@@ -125,8 +125,9 @@ Reaching the socket is **not** authorisation. Two things gate every request:
   does **not** stop an elevated administrator enabling `SeDebugPrivilege`, root or a debugger run
   by the same user as the shim's parent, so those stay outside the boundary. The **session
   process** holds every job's key, so it gets the same treatment at startup, before the first key
-  exists: on Windows the Owner Rights DACL (terminate, set-quota, limited query and synchronize
-  remain, so the harness can still kill it and `cancel`/liveness checks still work); on Linux
+  exists: on Windows the Owner Rights DACL (terminate, set-quota, query-information and synchronize
+  remain, so `taskkill`, the harness and the liveness checks still work; memory read/write,
+  thread creation, handle duplication and `WRITE_DAC` do not); on Linux
   `PR_SET_DUMPABLE=0`. On Linux that is what protects the keys against a same-user process where
   `kernel.yama.ptrace_scope=0`; with Yama at 1 or more the kernel already refuses it. Every shim
   that holds a key is hardened, whatever its `--kind`. And `events.jsonl` and the session directory
