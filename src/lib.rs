@@ -36,6 +36,7 @@ pub mod session;
 pub mod shellcmd;
 pub mod signals;
 pub mod sources;
+pub mod spend;
 pub mod spill;
 pub mod sse;
 pub mod stream;

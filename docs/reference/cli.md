@@ -160,7 +160,7 @@ Send a verb to a running session and print its answer
 | flag | takes | what it does |
 |---|---|---|
 | `<SESSION>` | `<SESSION>` | Session id, a unique prefix, or `latest` (the newest session only; an error if it is not running) |
-| `<VERB>` | `<VERB>` | The verb: say, later, stop, model, tools, end |
+| `<VERB>` | `<VERB>` | The verb: say, later, stop, model, tools, compact, skills, view, cancel, status, end |
 | `<ARGS>` | `<ARGS>` | Text for `say`/`later`/`stop`, or one JSON object with the verb's args |
 | `--now` | nothing | `say --now`: stop the running tool calls first |
 | `--call` | `<CALL>` | `stop --call <id>`: stop one running call; the turn continues |
@@ -171,6 +171,7 @@ Send a verb to a running session and print its answer
 | `--text` | `<TEXT>` | `skills --text <body>`: the source's text, inline |
 | `--name` | `<NAME>` | `skills --name <name>`: the source's name (default: the path's) |
 | `--kind` | `<KIND>` | `skills --kind <skill\|instruction>` (default `skill`) |
+| `--json` | nothing | `status --json`: print the answer as one JSON line instead of text |
 
 ### `kelir view`
 
