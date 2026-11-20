@@ -32,6 +32,9 @@ pub const MAX_LABEL: usize = 80;
 /// The `name` the line has in `sources[]`.
 pub const SOURCE_NAME: &str = "herdr";
 
+/// How a helper is run: argv and a deadline in, its stdout (or why not) out.
+pub type Runner<'a> = dyn Fn(&[String], Duration) -> Result<String, String> + 'a;
+
 /// What probing the pane produced: the line (or none) and why, when it is none
 /// although a pane id was given.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -50,10 +53,7 @@ pub fn probe() -> Probe {
 
 /// [`probe`] with the helper runner spelled out, so every fail-open path is a
 /// unit test that starts no process.
-pub fn probe_with(
-    id: Option<&str>,
-    run: &dyn Fn(&[String], Duration) -> Result<String, String>,
-) -> Probe {
+pub fn probe_with(id: Option<&str>, run: &Runner<'_>) -> Probe {
     let Some(id) = id.map(str::trim).filter(|id| !id.is_empty()) else {
         return Probe::default();
     };
