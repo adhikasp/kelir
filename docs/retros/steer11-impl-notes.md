@@ -110,3 +110,16 @@ fixes found by deliberately breaking the tables.
   file do I open", and the reference says so.
 - The size budget is a test, not a gate: 128 KB for the embedded reference, with
   the binary's own 20 MB budget nowhere near it.
+
+## Gates on the branch tip
+
+- Windows `scripts/gate.sh` (lock held, nextest `-j 4`): `fmt: ok`, `clippy: ok`,
+  `nextest: 892 tests run: 892 passed, 3 skipped`, `doctest: ok`, `gate: PASS`.
+  `cargo test --lib` alone: 520 passed (18 of them in `docs`).
+- Linux `scripts/remote-check.sh <machine> kelir-verify-steer11` on the same
+  HEAD: rc=0, `FMT-OK`, `CLIPPY-OK`, `892 tests run: 892 passed`, `DOCTEST-OK`.
+  The first attempt failed for a reason worth keeping: it bundles committed
+  `HEAD`, and the prompt edit was still uncommitted, so the far side built a
+  tree whose prompt snapshot test could not pass.
+- `docs/PROGRESS.md` has the branch row with the reviewer slot empty;
+  `docs/QUEUE.md` is the orchestrator's file and is untouched by this branch.
