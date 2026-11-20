@@ -148,7 +148,11 @@ async fn a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose(
         while let Ok(Ok(accepted)) = tokio::time::timeout_at(deadline, listener.accept()).await {
             let mut lines = BufReader::new(accepted);
             let mut line = String::new();
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), lines.read_line(&mut line)).await;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                lines.read_line(&mut line),
+            )
+            .await;
             if !line.trim().is_empty() {
                 lines_seen.push(line);
                 break;
@@ -169,7 +173,11 @@ async fn a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose(
     )
     .await;
     let heard = heard.await.unwrap();
-    eprintln!("sock-redirect: spawn answer ok={} heard={}", answer["ok"], heard.is_some());
+    eprintln!(
+        "sock-redirect: spawn answer ok={} heard={}",
+        answer["ok"],
+        heard.is_some()
+    );
     let ids: Vec<String> = session
         .ctl(&["bg", "ls"])
         .await
@@ -183,26 +191,51 @@ async fn a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose(
     }
     let _ = session.end().await;
     let _ = std::fs::remove_dir_all(&evil_dir);
-    if let Some(line) = heard.as_deref().and_then(|l| serde_json::from_str::<Value>(l.trim()).ok()) {
+    if let Some(line) = heard
+        .as_deref()
+        .and_then(|l| serde_json::from_str::<Value>(l.trim()).ok())
+    {
         eprintln!(
             "heard verb={} keys={:?} capability_field={}",
             line["verb"],
-            line.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
+            line.as_object()
+                .map(|o| o.keys().cloned().collect::<Vec<_>>()),
             line["capability"].is_string()
         );
     }
-    eprintln!("heard line (scrubbed): {:?}", heard.as_deref().map(|l| {
-        let mut out = String::new(); let mut run = 0;
-        for c in l.chars().take(400) { if c.is_ascii_hexdigit() { run += 1; if run > 20 { continue; } } else { run = 0; } out.push(c); }
-        out
-    }));
+    eprintln!(
+        "heard line (scrubbed): {:?}",
+        heard.as_deref().map(|l| {
+            let mut out = String::new();
+            let mut run = 0;
+            for c in l.chars().take(400) {
+                if c.is_ascii_hexdigit() {
+                    run += 1;
+                    if run > 20 {
+                        continue;
+                    }
+                } else {
+                    run = 0;
+                }
+                out.push(c);
+            }
+            out
+        })
+    );
     let leaked = heard
         .as_deref()
         .and_then(|line| serde_json::from_str::<Value>(line.trim()).ok())
         .and_then(|request| request["capability"].as_str().map(str::len))
         .unwrap_or(0);
-    assert_eq!(answer["ok"], json!(true), "the spawn was refused, so this proved nothing: {answer}");
-    assert!(heard.is_some(), "nothing connected to the caller's endpoint: the test is vacuous");
+    assert_eq!(
+        answer["ok"],
+        json!(true),
+        "the spawn was refused, so this proved nothing: {answer}"
+    );
+    assert!(
+        heard.is_some(),
+        "nothing connected to the caller's endpoint: the test is vacuous"
+    );
     assert!(
         leaked == 0,
         "the shim sent a {leaked}-char capability to the caller's own listener"
@@ -264,7 +297,14 @@ async fn a_spawn_with_another_kind_still_gets_a_shim_closed_to_memory_reads() {
                 .output()
                 .unwrap();
             outcome = String::from_utf8_lossy(&scan.stdout).trim().to_string();
-            eprintln!("kind=x status: {}", std::fs::read_to_string(status_path(&session, id)).unwrap_or_default().chars().take(700).collect::<String>());
+            eprintln!(
+                "kind=x status: {}",
+                std::fs::read_to_string(status_path(&session, id))
+                    .unwrap_or_default()
+                    .chars()
+                    .take(700)
+                    .collect::<String>()
+            );
             found = keyfile.exists();
             let _ = std::fs::remove_file(&keyfile);
         } else {
@@ -284,7 +324,10 @@ async fn a_spawn_with_another_kind_still_gets_a_shim_closed_to_memory_reads() {
     }
     eprintln!("kind=x scan outcome: {outcome} found={found}");
     let _ = session.end().await;
-    assert!(id.is_some(), "the spawn was refused: this test proved nothing");
+    assert!(
+        id.is_some(),
+        "the spawn was refused: this test proved nothing"
+    );
     assert!(
         !found,
         "memory scan of a kind=x shim: {outcome} (the key is readable)"
@@ -368,10 +411,7 @@ async fn a_fifo_planted_as_the_final_sidecar_does_not_hang_the_session() {
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     session.wait_for("turn_ended").await;
     let id = start_job(&session, long_command()).await;
-    let fifo = session
-        .session_dir
-        .join("bg")
-        .join(format!("{id}.final"));
+    let fifo = session.session_dir.join("bg").join(format!("{id}.final"));
     let made = std::process::Command::new("mkfifo").arg(&fifo).status();
     let answered = tokio::time::timeout(
         std::time::Duration::from_secs(20),
