@@ -482,8 +482,9 @@ async fn status_files_are_always_parseable_while_the_run_is_live() {
     let sb = Sandbox::new("");
     confjobs(&sb, "[jobs.atomic_status]\ntask = \"t\"\n");
     let holder = start(&sb, &mock, &["job", "run", "atomic_status"], &[]).await;
-    until("status file", || {
-        jobdir(&sb, "atomic_status").join("STATUS.json").exists()
+    until("status files", || {
+        let dir = jobdir(&sb, "atomic_status");
+        dir.join("STATUS.json").exists() && dir.join("STATUS.md").exists()
     })
     .await;
     let mut saw_running = false;
