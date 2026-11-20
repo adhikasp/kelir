@@ -1366,3 +1366,21 @@ this differs from the spec text, or needed a call the brief left open:
   side). The listener reads at most 64 KB and waits at most 10 s for a request line, so an
   unauthenticated peer cannot make the session hold a megabyte or a connection for as long as it
   likes (STEER-7 review N3).
+
+## steer12fix
+
+- **A spilled output lists its `=== label` sections.** The spec says the model sees "the spill
+  notice" for output over 10 KB; STEER-12 asks for one `bash` call per read round, labelled with
+  `echo === name`, and a 40 KB batch used to come back as the first and last 1 KB with the other
+  sections gone and a tail that looked like a complete answer. The notice now adds one line,
+  `--- sections (=== label@byte offset); only the first 1024 and last 1024 bytes are shown, the
+  others are in the file: spec@0, deviations@10010, ...`, built while the output streams (a line
+  that starts with `=== `, at most 40 labels of 40 bytes), so the cost is a few hundred bytes and
+  the notice stays deterministic. Output without such a line is unchanged. The prompt also asks
+  for batches under 10 KB.
+- **`parallel_tool_calls` is sent for OpenRouter only.** `src/provider.rs` asks for it just when
+  the provider is OpenRouter and the model is capable; on opencode-go (the six BEFORE sessions)
+  the field is never in the request, so a calls-per-step figure from those sessions says nothing
+  about the flag. Enabling it for opencode-go was not tried: nothing shows the gateway honours it.
+  The base prompt makes no parallel-calls claim; it asks for the one-command batching that works
+  on every provider.
