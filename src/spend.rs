@@ -636,6 +636,20 @@ pub fn render_text(state: &Value) -> String {
         num(&["bg_jobs"]),
         num(&["children"]),
     ));
+    if let Some(kids) = get(&["child_list"]).as_array().filter(|a| !a.is_empty()) {
+        for kid in kids {
+            lines.push(format!(
+                "child     {} d{} {} {}{}",
+                kid["session"].as_str().unwrap_or("?"),
+                kid["depth"].as_u64().unwrap_or(0),
+                kid["kind"].as_str().unwrap_or("?"),
+                kid["state"].as_str().unwrap_or("?"),
+                kid["pid"]
+                    .as_u64()
+                    .map_or(String::new(), |pid| format!(" pid {pid}")),
+            ));
+        }
+    }
     if let Some(servers) = get(&["mcp"]).as_array().filter(|a| !a.is_empty()) {
         let parts: Vec<String> = servers
             .iter()

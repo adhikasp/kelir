@@ -67,7 +67,13 @@ impl Recorded {
     }
 }
 
+/// Picks the reply to a completion request by looking at it (M7: several
+/// sessions share one mock and their requests interleave, so a FIFO script
+/// cannot say who gets what). `None` falls back to the script.
+pub type Router = Arc<dyn Fn(&Recorded) -> Option<Reply> + Send + Sync>;
+
 struct State {
+    router: Option<Router>,
     script: VecDeque<Reply>,
     requests: Vec<Recorded>,
     /// What `GET /models` answers, and how often it was asked.
@@ -155,10 +161,22 @@ impl Mock {
 
     /// `start`, with `GET /models` answered by `models` instead of the normal
     /// list.
+    /// A mock whose replies are chosen per request by `router`; a request it
+    /// declines gets the next scripted reply.
+    pub async fn start_routed(
+        script: Vec<Reply>,
+        router: impl Fn(&Recorded) -> Option<Reply> + Send + Sync + 'static,
+    ) -> Mock {
+        let mock = Mock::start(script).await;
+        mock.state.lock().unwrap().router = Some(Arc::new(router));
+        mock
+    }
+
     pub async fn start_with_models(script: Vec<Reply>, models: ModelsAnswer) -> Mock {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let state = Arc::new(Mutex::new(State {
+            router: None,
             script: script.into(),
             requests: Vec::new(),
             models,
@@ -317,15 +335,21 @@ async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
         return;
     }
 
-    let reply = {
+    let (recorded, router) = {
         let mut state = state.lock().unwrap();
-        state.requests.push(Recorded {
+        let recorded = Recorded {
             method,
             path,
             headers,
             body,
-        });
-        state.script.pop_front()
+        };
+        state.requests.push(recorded.clone());
+        (recorded, state.router.clone())
+    };
+    let routed = router.and_then(|router| router(&recorded));
+    let reply = match routed {
+        Some(reply) => Some(reply),
+        None => state.lock().unwrap().script.pop_front(),
     };
 
     let _inflight = InFlight::new(state.clone());

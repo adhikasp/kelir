@@ -110,6 +110,8 @@ Run a task to completion
 | `--json` | nothing | Stream the event log as NDJSON on stdout |
 | `--keep` | nothing | Stay alive after the turn ends, accepting `say`, `later` and `end` |
 | `--resume` | `<ID>` | Continue a session from its log instead of starting one |
+| `--child` | nothing | Start the task as a child of the session this tool call runs in (it needs `KELIR_SOCK`): the child's final text is this command's stdout |
+| `--background` | nothing | With `--child`: return a handle at once; the child's completion wakes the parent at its next boundary |
 
 ### `kelir ask`
 
@@ -195,6 +197,32 @@ MCP servers as a CLI: `ls`, `<server> ls`, `<server> <tool> [k=v …]`
 | flag | takes | what it does |
 |---|---|---|
 | `<WORDS>` | `<WORDS>` | `ls`, `<server> ls`, or `<server> <tool>` and their flags |
+
+### `kelir brief`
+
+Ask a side question on a snapshot of this session (`brief "<question>"`)
+
+| flag | takes | what it does |
+|---|---|---|
+| `<QUESTION>` | `<QUESTION>` | The question. Read from stdin when omitted |
+
+### `kelir ls`
+
+List sessions as a tree: state, depth, model, cost, cache hits, task
+
+| flag | takes | what it does |
+|---|---|---|
+| `--json` | nothing | Print the tree as JSON |
+| `--all` | nothing | Every session on disk (the default: this session's tree, or the newest roots when run outside a session) |
+
+### `kelir kill`
+
+Stop a child (and everything below it): `kill <session>` or `kill --tree`
+
+| flag | takes | what it does |
+|---|---|---|
+| `<SESSION>` | `<SESSION>` | The child (session id or a unique prefix) to stop, with everything below it |
+| `--tree` | nothing | Stop every descendant of this session (from a tool call), or of the session named |
 
 ### `kelir doctor`
 

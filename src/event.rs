@@ -387,6 +387,42 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             args: spill_payload(blobs, seq, "mcp.args", args)?,
             parent_call_id,
         },
+        EventBody::ChildStarted {
+            child_id,
+            session,
+            parent,
+            depth,
+            kind,
+            task,
+            background,
+            model,
+        } => EventBody::ChildStarted {
+            child_id,
+            session,
+            parent,
+            depth,
+            kind,
+            task: spill_payload(blobs, seq, "child.task", task)?,
+            background,
+            model,
+        },
+        EventBody::ChildSettled {
+            child_id,
+            session,
+            parent,
+            depth,
+            outcome,
+            exit_code,
+            result,
+        } => EventBody::ChildSettled {
+            child_id,
+            session,
+            parent,
+            depth,
+            outcome,
+            exit_code,
+            result: spill_payload(blobs, seq, "child.result", result)?,
+        },
         EventBody::TurnEnded {
             outcome,
             reason,
@@ -665,6 +701,35 @@ pub enum EventBody {
         state: String,
         out_path: String,
     },
+    /// A child session was admitted to the root's registry (M7). The root
+    /// writes one for every descendant it admits (that is the registry); a
+    /// parent that is not the root writes the same event for its own direct
+    /// children, so its log holds what it must wake for and resume.
+    ChildStarted {
+        child_id: String,
+        /// The child's own session id (its log is in its own dir).
+        session: String,
+        /// The session that started it.
+        parent: String,
+        depth: u32,
+        /// `child` (`kelir run --child`) or `brief` (`kelir brief`).
+        kind: String,
+        task: Payload,
+        background: bool,
+        model: String,
+    },
+    /// A child settled: `outcome` is `done`, `paused`, `error`, `stopped`,
+    /// `killed` or `lost`; `result` is its final text (or the reason).
+    ChildSettled {
+        child_id: String,
+        session: String,
+        parent: String,
+        depth: u32,
+        outcome: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        result: Payload,
+    },
     /// A compaction: everything up to `through_seq` is replaced by `summary`,
     /// except the pinned messages. `by` is `user`, `agent` or `auto`; the cache
     /// restart is inherent (it is the reason the field is here) and recorded so
@@ -753,6 +818,8 @@ impl LogEvent {
             EventBody::McpSettled { .. } => "mcp_settled",
             EventBody::BgStarted { .. } => "bg_started",
             EventBody::BgSettled { .. } => "bg_settled",
+            EventBody::ChildStarted { .. } => "child_started",
+            EventBody::ChildSettled { .. } => "child_settled",
             EventBody::Compacted { .. } => "compacted",
             EventBody::Resumed { .. } => "resumed",
             EventBody::Error { .. } => "error",
@@ -1056,6 +1123,25 @@ mod tests {
                 exit_code: Some(0),
                 state: "exited".into(),
                 out_path: "bg/bg_01.out".into(),
+            },
+            EventBody::ChildStarted {
+                child_id: "chd_01".into(),
+                session: "ses_02".into(),
+                parent: "ses_01".into(),
+                depth: 1,
+                kind: "child".into(),
+                task: "look at the tests".into(),
+                background: true,
+                model: "test/model".into(),
+            },
+            EventBody::ChildSettled {
+                child_id: "chd_01".into(),
+                session: "ses_02".into(),
+                parent: "ses_01".into(),
+                depth: 1,
+                outcome: "done".into(),
+                exit_code: Some(0),
+                result: "found two".into(),
             },
             EventBody::Compacted {
                 through_seq: 7,
