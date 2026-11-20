@@ -16,7 +16,7 @@ Job `m7`: brief `docs/tasks/M7.md`. Worktree `kelir-wt/m7`, branch `job/m7`.
 | a long verb notices its client leaving | `src/ipc.rs` (`peer_gone`) |
 | `ctl status`: `children`, `child_list` | `src/session.rs`, `src/spend.rs` |
 | reference topic `children`, files/troubleshooting/source-map/README | `docs/reference/` |
-| tests | `tests/e2e_m7.rs` (12), `src/child.rs` (18 unit), `src/childcli.rs` (4 unit); the mock learned `Mock::start_routed` (`tests/support/mod.rs`) |
+| tests | `tests/e2e_m7.rs` (15), `src/child.rs` (18 unit), `src/childcli.rs` (4 unit); the mock learned `Mock::start_routed` (`tests/support/mod.rs`) |
 
 ## How a child travels
 

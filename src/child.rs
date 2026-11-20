@@ -812,6 +812,18 @@ fn truncate_bytes(text: &str, max: usize) -> (&str, bool) {
     (&text[..end], true)
 }
 
+/// `text` for a request line to the root, which reads at most 64 KB of one: cut
+/// on a character boundary with a marker. The root's registry keeps this much;
+/// the parent's own log keeps the whole text.
+pub fn clip(text: &str, max: usize) -> String {
+    let (kept, cut) = truncate_bytes(text, max);
+    if cut {
+        format!("{kept} … [cut]")
+    } else {
+        kept.to_string()
+    }
+}
+
 /// The outcome word for a child host's exit.
 pub fn outcome_of(exit_code: i32, signalled: bool) -> &'static str {
     if signalled {

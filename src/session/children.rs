@@ -103,6 +103,9 @@ struct Plan {
     snapshot: Option<(PathBuf, Vec<LogEvent>)>,
 }
 
+/// The most task or result text one request to the root carries.
+const REMOTE_TEXT: usize = 16 * 1024;
+
 fn internal(key: &str, mut args: Value) -> Request {
     args["key"] = json!(key);
     Request::new(child::VERB, args, child::FROM_INTERNAL)
@@ -779,10 +782,12 @@ async fn run_child(plan: Plan, reply: oneshot::Sender<Response>) {
     };
 
     // 1. A slot, from the root's registry.
+    // The root's line is at most 64 KB: its registry keeps a prefix of a long
+    // task (this session's own log keeps all of it).
     let admit_args = json!({
         "kind": plan.kind,
         "background": plan.background,
-        "task": plan.task,
+        "task": child::clip(&plan.task, REMOTE_TEXT),
         "model": plan.model,
     });
     let root_is_me = plan.link.is_none();
@@ -1025,7 +1030,7 @@ async fn settle_child(
 ) -> String {
     let body = json!({
         "child_id": child_id, "outcome": outcome,
-        "exit_code": exit_code, "result": result,
+        "exit_code": exit_code, "result": child::clip(result, REMOTE_TEXT),
     });
     let root_is_me = plan.link.is_none();
     let answered = if root_is_me {
