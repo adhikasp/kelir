@@ -3,3 +3,5 @@
 .env
 .env.*
 /scratch
+# Bytecode from scripts/metrics/trajectory.py, which tests/steer12.rs runs.
+__pycache__/

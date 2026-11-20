@@ -1128,10 +1128,25 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         for (rule, why) in [
             ("Plan once, briefly", "F1: design thrash"),
             ("reasoning is dropped", "F1: the plan has nowhere to live"),
+            (
+                "notes file",
+                "STEER-12: the plan is externalised, not re-derived",
+            ),
             ("edits", "F3: multi-hunk edits"),
             ("python/sed patch", "F3: a patch script fails with exit 0"),
             ("never chain", "F3: the exit code of each command"),
-            ("Batch independent reads", "F4: parallel read-only calls"),
+            (
+                "One `bash` call per read round",
+                "STEER-12: one command carries every read (F4 refined)",
+            ),
+            (
+                "echo === name",
+                "STEER-12: each read is labelled in the output",
+            ),
+            (
+                "grep -A/-B",
+                "STEER-12: one search instead of grep -n then sed -n",
+            ),
             ("git grep", "F7: search hygiene"),
             ("target/", "F7: do not walk the build directory"),
             ("never `cat` a big file", "F7: ranged reads"),
