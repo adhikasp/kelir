@@ -266,7 +266,7 @@ fn r8_drop_reason_never_echoes_the_payload() {
     assert!(result.is_ok());
     let bad = parse_notification(&note(
         INBOUND_METHOD,
-        json!({"content": format!("{canary}"), "message_id": "m"}),
+        json!({"content": canary.to_string(), "message_id": "m"}),
     ));
     match bad {
         Err(kelir::channel::Drop::Malformed(reason)) => {
@@ -470,8 +470,6 @@ async fn r14_max_active_should_allow_parallel_conversations() {
     let _ = driver.wait().await;
     assert!(shells().saturating_sub(before) <= 20, "leaked shells");
 }
-
-/// R11: `/stop` never inserts into `active`, so `process()` skips the spool's
 
 /// R11: `/stop` never inserts into `active`, so `process()` skips the spool's
 /// `done` record. On restart the message is replayed and answered again —
