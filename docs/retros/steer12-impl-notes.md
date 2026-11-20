@@ -23,10 +23,9 @@ gap is a definition: the brief counted only six read commands, this counts read-
 (2000 completion tokens), same direction, a smaller share. The difference is documented in
 `docs/PROMPT.md` rather than smoothed away: an AFTER table has to be compared with the same script.
 
-**The commit columns are `n/a` and stay that way.** All six sessions ran in worktrees
-(`C:/Users/the maintainer/kelir-wt/<job>`) that have since been removed; `git log` in the recorded cwd cannot
-answer, and a zero would be a lie dressed as a measurement. `--commits 0` makes the choice explicit
-and the per-commit columns print `n/a`.
+**The commit columns are `n/a` and stay that way.** All six sessions ran in per-job worktrees that have since been removed, so `git log` in the recorded
+cwd cannot answer, and a zero would be a lie dressed as a measurement. `--commits 0` makes the
+choice explicit and the per-commit columns print `n/a`.
 
 ## 2. The parallel-calls item was already true, and the prompt should not lean on it
 
