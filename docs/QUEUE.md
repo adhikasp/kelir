@@ -245,8 +245,27 @@ and the final config surface), before M5-B.
 - **steer2 merged** (bac8851). On the maintainer's machine: `%APPDATA%\kelir\config.toml` migrated (`[providers.kelir]` -> `[providers.openrouter]`,
   `key_env = "KELIR_OPENROUTER_API_KEY"`; backup `config.toml.bak-pre-steer2`); the `max_steps` stopgap line **deleted** (unlimited is the
   default since STEER-4); the copied `KELIR_GO_API_KEY` removed from the user environment and from the private `.env` (kelir reads
-  opencode's store directly; `kelir doctor` verified: expires 2026-11-24, read in 383 ms). NOTE: the maintainer's own installed
-  `~/.cargo/bin/kelir.exe` is an OLD build (default 100 steps, old provider rules): reinstall with `cargo install --path . --locked`
-  when no kelir pane is using it.
+  opencode's store directly; `kelir doctor` verified: expires 2026-11-24, read in 383 ms). The maintainer's own installed `~/.cargo/bin/kelir.exe` was reinstalled from main (bca5a61) on 2026-11-20 and verified (kelir doctor ok,
+  no step cap by default): nothing to do. (Earlier note saying it was an old build is obsolete.)
 - Pinned binary now kelir-s5.exe (steer2, steer5, steer6, steer4).
 - Running: steer7 (t145), buildinfrafix (t148), tui2fix2 (t14d). Next: steer1fix/steer8/steer9/steer11 as slots free; then merges of buildinfrafix, tui2.
+
+## Update (2026-11-20 10:20) — tui2, steer1fix, buildinfra merged; main gate 863 green
+
+- Merged: **tui2** (8e2a6b6, TUI v2), **steer1fix** (29f5c16), **buildinfra** (+fixes, +core-dump fix). Combined main passes `scripts/gate.sh --linux`
+  (863 tests, Linux ok). The maintainer's installed binary was reinstalled earlier (before TUI v2): reinstall from main HEAD to get the new TUI.
+- Linux box: 25 stale verify dirs removed (~90 GB); the new `remote-check.sh prune` only prunes marker-bearing dirs (new ones).
+- Running: **steer7fix** (socket hardening, branch job/steer7fix; first review FAIL), **steer12** (measured prompt change, from the admin route's
+  harness learning), launching **steer11** (self-docs; docs/reference now exists). Then steer8 (cost/status), steer9 (de-flake), M5-B, M6.
+
+- 2026-11-20 10:50: **tui3** (the maintainer's TUI calm-down pass, branch job/tui3, 1 commit 6d3d8a4, worktree kelir-wt/tui3): handed over via a
+  message file; gate PASS per the author (Windows 864, Linux ok). In review (fresh reviewer, emulator-render method); merge after PASS.
+  steer12 (measured prompt change) is done and awaiting gate/review; steer7fix and steer11 running.
+
+## Directive (maintainer, relayed 2026-11-20 ~13:00): agent work moves to Claude Code
+The OpenCode Go subscription is running low. **All new implementer, fixer and reviewer panes run on Claude Code** (`claude
+--dangerously-skip-permissions "<brief>"`, fresh pane/session per pass) through `kelir-scratch/launch-claude.sh <workdir> <prompt-file>`.
+No new `--provider opencode-go` kelir runs (if a kelir run is needed for a gate, use `--provider openrouter --model
+anthropic/claude-sonnet-4.5`). Already-running opencode-go kelir workers (steer7fix, steer11, tui3fix at this time) finish their current pass;
+nothing new starts on them. Discipline unchanged (briefs, gates, fresh reviewer, PROGRESS/QUEUE), keep driving to M11. Note: dogfooding kelir as
+implementer pauses; the retro/introspective passes keep reading the transcripts already recorded.

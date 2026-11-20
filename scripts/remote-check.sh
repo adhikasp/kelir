@@ -4,6 +4,8 @@
 #
 # usage: scripts/remote-check.sh [--linux-script <path>] <machine> [workdir-name] [-- <extra nextest args>]
 #        scripts/remote-check.sh prune <machine> [--keep N] [--job NAME] [--yes]
+#        scripts/remote-check.sh far-env | far-runner | far-argv [W [SHA [EXTRA]]]
+#                                         (the far side of the gate, printed)
 #
 # The gate: a git bundle of this checkout is copied over and fetched into a
 # persistent clone on the far side, which is then forced to the bundled commit
@@ -37,9 +39,142 @@
 # job: the newest `--keep` (default 3) of each job's dirs, so an idle job keeps
 # its warm `target/` no matter how many other jobs ran after it. Nothing is
 # removed without `--yes`; the default is a dry run.
+#
+# No core dumps (BUILD-INFRA rule 6, docs/BUILD.md). The crash-injection suites
+# (M3 and its reviews) abort a `kelir` on purpose, and on a stock Linux box every
+# abort left a ~290 KB core in the system store: 2,660 files / 904 MB on
+# 2026-11-20, all `.../target/debug/kelir` SIGABRT. `kernel.core_pattern` and the
+# dump settings decide that, not the repo, so the far-side runner sets
+# `ulimit -c 0` before the first test binary starts and every child inherits it.
+# In the script rather than on the host on purpose: no sudo, no system config
+# touched, and the same file governs every box. The runner prints the live
+# `ulimit -c`, so a gate log says in its own words that the limit is really 0.
+# `far-env` prints that prologue, which is how a test executes it for real.
 set -uo pipefail
 
-usage() { sed -n '2,40p' "$0"; exit 2; }
+# The usage text is the file's own header: every line after the shebang, up to
+# the first line of code, so it cannot drift out of date.
+usage() { awk 'NR > 1 && /^set -uo pipefail$/ { exit } NR > 1' "$0"; exit 2; }
+
+sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# The far side's environment, and its one rule that is not about cargo: no core
+# dumps. Printed on its own (`far-env`) so a test can execute the very text the
+# gate ships, and pasted verbatim at the top of the runner, so there is one copy.
+far_env() {
+  cat <<'EOS'
+set -uo pipefail
+# A non-login shell may have no cargo on PATH; the profile puts it in ~/.cargo.
+case ":$PATH:" in
+  *":$HOME/.cargo/bin:"*) ;;
+  *) PATH="$HOME/.cargo/bin:$PATH"; export PATH ;;
+esac
+export CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+# No core dumps (BUILD-INFRA rule 6): the crash-injection tests abort on
+# purpose, and an unchecked box wrote 2,660 cores / 904 MB for them. Set before
+# any test binary starts, in the shell that starts them, so every child inherits
+# it; no -S/-H, so this lowers the soft *and* the hard limit and nothing the
+# gate runs can raise it back.
+ulimit -c 0 2>/dev/null || echo "CORE-LIMIT: cannot set ulimit -c 0" >&2
+echo "CORE-LIMIT: ulimit -c = $(ulimit -c 2>/dev/null)"
+EOS
+}
+
+# The far-side runner: that environment, then the work dir and the stages. It is
+# written to a file and run from there, so quoting cannot bite.
+far_runner() {
+  far_env
+  cat <<'EOS'
+wd="$HOME/$W"
+created=0
+[ -d "$wd" ] || created=1
+mkdir -p "$wd" && cd "$wd" || exit 1
+# The marker is the proof that prune may ever remove this dir: it is written
+# only when this script creates the dir, so a directory somebody else made (or
+# one that merely looks like a work dir) is never a prune candidate.
+if [ "$created" = 1 ] && [ ! -e .kelir-workdir ]; then
+  printf 'token %s\ncreated %s\njob %s\ncreator remote-check.sh\n' \
+    "$(date -u +%Y%m%dT%H%M%SZ).$$.$RANDOM$RANDOM" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$W" \
+    >.kelir-workdir
+fi
+# Logs go in this work dir, in a directory of their own per run: two gates for
+# different jobs on the same box must not read each other's results (S6).
+logdir="$wd/logs/$(date -u +%Y%m%dT%H%M%SZ).$$"
+mkdir -p "$logdir" || exit 1
+echo "logdir: $logdir"
+base64 -d k.b64 > k.bundle 2>/dev/null || { echo "MACHINE-GATE: cannot decode k.b64"; exit 1; }
+tree=src-tree
+if [ ! -d "$tree/.git" ]; then
+  rm -rf "$tree"
+  git clone -q k.bundle "$tree" || { echo "MACHINE-GATE: clone failed"; exit 1; }
+fi
+cd "$tree" || exit 1
+# The lock file only means "a run is in here": prune skips it.
+printf 'pid %s\n' "$$" > ../lock
+trap 'rm -f ../lock' EXIT INT TERM
+git fetch -q --force ../k.bundle "+refs/heads/*:refs/remotes/verify/*" >/dev/null 2>&1
+git checkout -q -f --detach "$HEAD_SHA" 2>/dev/null || {
+  echo "MACHINE-GATE: the bundle does not contain $HEAD_SHA"; exit 1; }
+git clean -qfdx -e target >/dev/null 2>&1
+echo "HEAD: $(git log --oneline -1)"
+echo "MACHINE-GATE: $(uname -s) $(nproc) cores, $(date -u +%FT%TZ)"
+if cargo fmt --check > "$logdir/fmt.log" 2>&1; then
+  echo FMT-OK
+else
+  echo FMT-FAIL; head -20 "$logdir/fmt.log"; exit 1
+fi
+if cargo clippy --all-targets -- -D warnings > "$logdir/clippy.log" 2>&1; then
+  echo CLIPPY-OK
+else
+  echo CLIPPY-FAIL; tail -20 "$logdir/clippy.log"; exit 1
+fi
+if command -v cargo-nextest >/dev/null 2>&1; then
+  cargo nextest run --no-fail-fast --retries 2 -j 4 $EXTRA > "$logdir/nextest.log" 2>&1
+  rc=$?
+  grep -E '^[[:space:]]*(Summary|TRY [2-9]|FLAKY|LEAK)' "$logdir/nextest.log" | sed 's/^[[:space:]]*//' | tail -30
+  if [ $rc != 0 ]; then
+    grep -E 'FAIL|LEAK|panicked' "$logdir/nextest.log" | head -20
+    echo "NEXTEST-FAIL (log: $logdir/nextest.log)"
+    exit $rc
+  fi
+  echo NEXTEST-OK
+else
+  cargo test --no-fail-fast > "$logdir/test.log" 2>&1
+  rc=$?
+  grep -E '^test result|FAILED|panicked' "$logdir/test.log" | head -40
+  if [ $rc != 0 ]; then echo "TEST-FAIL (log: $logdir/test.log)"; exit $rc; fi
+  echo TEST-OK
+fi
+if cargo test --doc > "$logdir/doc.log" 2>&1; then
+  echo DOCTEST-OK
+else
+  echo DOCTEST-FAIL; tail -10 "$logdir/doc.log"; exit 1
+fi
+EOS
+}
+
+# What the far side is given, one `NAME=value` per line: the work dir, the
+# commit the bundle must contain, and the extra nextest arguments. Printed so a
+# test reads the same values this side sends.
+far_fields() { # <workdir> <head-sha> <extra>
+  printf '%s\n' "W=$1" "HEAD_SHA=$2" "EXTRA=$3"
+}
+
+# The far-side argv, one argument per line: the caller reads it back into an
+# array, so no word splitting or quoting on this side can change it (an `EXTRA`
+# with a space in it arrives as one argument).
+far_argv() { # <workdir> <head-sha> <extra>
+  printf '%s\n' env
+  far_fields "$@"
+  printf '%s\n' bash "$1/run.sh"
+}
+
+case "${1:-}" in
+  far-env) far_env; exit 0 ;;
+  far-runner) far_runner; exit 0 ;;
+  far-argv) shift; far_argv "${1:-kelir-verify-job}" "${2:-0ff1ce}" "${3:-}"; exit 0 ;;
+esac
 
 if [ "${1:-}" = "prune" ]; then
   shift
@@ -237,89 +372,18 @@ trap 'rm -f "$B" "$far"' EXIT INT TERM
 git bundle create "$B" --all >/dev/null 2>&1 || { echo "remote-check: git bundle failed" >&2; exit 2; }
 
 # The far side runs a file, not an inline string, so quoting cannot bite.
-cat >"$far" <<'EOS'
-set -uo pipefail
-# A non-login shell may have no cargo on PATH; the profile puts it in ~/.cargo.
-case ":$PATH:" in
-  *":$HOME/.cargo/bin:"*) ;;
-  *) PATH="$HOME/.cargo/bin:$PATH"; export PATH ;;
-esac
-export CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
-wd="$HOME/$W"
-created=0
-[ -d "$wd" ] || created=1
-mkdir -p "$wd" && cd "$wd" || exit 1
-# The marker is the proof that prune may ever remove this dir: it is written
-# only when this script creates the dir, so a directory somebody else made (or
-# one that merely looks like a work dir) is never a prune candidate.
-if [ "$created" = 1 ] && [ ! -e .kelir-workdir ]; then
-  printf 'token %s\ncreated %s\njob %s\ncreator remote-check.sh\n' \
-    "$(date -u +%Y%m%dT%H%M%SZ).$$.$RANDOM$RANDOM" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$W" \
-    >.kelir-workdir
-fi
-# Logs go in this work dir, in a directory of their own per run: two gates for
-# different jobs on the same box must not read each other's results (S6).
-logdir="$wd/logs/$(date -u +%Y%m%dT%H%M%SZ).$$"
-mkdir -p "$logdir" || exit 1
-echo "logdir: $logdir"
-base64 -d k.b64 > k.bundle 2>/dev/null || { echo "MACHINE-GATE: cannot decode k.b64"; exit 1; }
-tree=src-tree
-if [ ! -d "$tree/.git" ]; then
-  rm -rf "$tree"
-  git clone -q k.bundle "$tree" || { echo "MACHINE-GATE: clone failed"; exit 1; }
-fi
-cd "$tree" || exit 1
-# The lock file only means "a run is in here": prune skips it.
-printf 'pid %s\n' "$$" > ../lock
-trap 'rm -f ../lock' EXIT INT TERM
-git fetch -q --force ../k.bundle "+refs/heads/*:refs/remotes/verify/*" >/dev/null 2>&1
-git checkout -q -f --detach "$HEAD_SHA" 2>/dev/null || {
-  echo "MACHINE-GATE: the bundle does not contain $HEAD_SHA"; exit 1; }
-git clean -qfdx -e target >/dev/null 2>&1
-echo "HEAD: $(git log --oneline -1)"
-echo "MACHINE-GATE: $(uname -s) $(nproc) cores, $(date -u +%FT%TZ)"
-if cargo fmt --check > "$logdir/fmt.log" 2>&1; then
-  echo FMT-OK
-else
-  echo FMT-FAIL; head -20 "$logdir/fmt.log"; exit 1
-fi
-if cargo clippy --all-targets -- -D warnings > "$logdir/clippy.log" 2>&1; then
-  echo CLIPPY-OK
-else
-  echo CLIPPY-FAIL; tail -20 "$logdir/clippy.log"; exit 1
-fi
-if command -v cargo-nextest >/dev/null 2>&1; then
-  cargo nextest run --no-fail-fast --retries 2 -j 4 $EXTRA > "$logdir/nextest.log" 2>&1
-  rc=$?
-  grep -E '^[[:space:]]*(Summary|TRY [2-9]|FLAKY|LEAK)' "$logdir/nextest.log" | sed 's/^[[:space:]]*//' | tail -30
-  if [ $rc != 0 ]; then
-    grep -E 'FAIL|LEAK|panicked' "$logdir/nextest.log" | head -20
-    echo "NEXTEST-FAIL (log: $logdir/nextest.log)"
-    exit $rc
-  fi
-  echo NEXTEST-OK
-else
-  cargo test --no-fail-fast > "$logdir/test.log" 2>&1
-  rc=$?
-  grep -E '^test result|FAILED|panicked' "$logdir/test.log" | head -40
-  if [ $rc != 0 ]; then echo "TEST-FAIL (log: $logdir/test.log)"; exit $rc; fi
-  echo TEST-OK
-fi
-if cargo test --doc > "$logdir/doc.log" 2>&1; then
-  echo DOCTEST-OK
-else
-  echo DOCTEST-FAIL; tail -10 "$logdir/doc.log"; exit 1
-fi
-EOS
+far_runner >"$far" || { echo "remote-check: cannot write the runner" >&2; exit 2; }
 
 base64 -w0 "$B" | hc file write --on "$M" "$W/k.b64" >/dev/null \
   || { echo "remote-check: cannot write the bundle to $M:~/$W" >&2; exit 2; }
 hc file write --on "$M" "$W/run.sh" <"$far" >/dev/null \
   || { echo "remote-check: cannot write the runner to $M:~/$W" >&2; exit 2; }
 
-hc exec --on "$M" --timeout 600 -- \
-  env W="$W" HEAD_SHA="$HEAD_SHA" EXTRA="${extra[*]:-}" bash "$W/run.sh"
+# The command travels as argv, read back into an array here: an `EXTRA` with
+# spaces in it then reaches the far side as one argument, which the old
+# `env ... EXTRA="${extra[*]}"` string form did not guarantee.
+mapfile -t far_cmd < <(far_argv "$W" "$HEAD_SHA" "${extra[*]:-}")
+hc exec --on "$M" --timeout 600 -- "${far_cmd[@]}"
 rc=$?
 echo "remote-check: $M rc=$rc (HEAD ${HEAD_SHA:0:7}, work dir ~/$W/src-tree kept)"
 exit $rc

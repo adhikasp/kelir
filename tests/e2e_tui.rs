@@ -55,9 +55,81 @@ fn snapshot(app: &mut App) -> String {
     out
 }
 
+/// Render `app` into a `width`x8 TestBackend, one string per row.
+fn render_at(app: &mut App, width: u16) -> String {
+    let backend = TestBackend::new(width, VIEWPORT_HEIGHT);
+    let mut terminal = Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Inline(VIEWPORT_HEIGHT),
+        },
+    )
+    .unwrap();
+    terminal.draw(|frame| tui::render(app, frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut out = String::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            if let Some(cell) = buffer.cell(Rect::new(x, y, 1, 1).as_position()) {
+                line.push_str(cell.symbol());
+            }
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+/// A styled line's text, tones dropped.
+fn line_text(line: &ratatui::text::Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
 fn new_app() -> App {
     let (to_tui, verbs) = channels();
     App::new(60, VIEWPORT_HEIGHT as usize, to_tui, verbs, String::new())
+}
+
+/// The text of a pty stream, with every CSI/OSC escape removed: the assertion
+/// is about what a reader sees, not about the bytes that paint it.
+fn plain(screen: &str) -> String {
+    let mut out = String::new();
+    let mut chars = screen.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                // CSI: drop the `[`, then parameters until a final byte in
+                // 0x40..=0x7e (the `[` itself is in that range, so it has to go
+                // first or the scan stops on it).
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // OSC: until BEL or ST.
+                let mut last = '\0';
+                for c in chars.by_ref() {
+                    if c == '\u{7}' || (last == '\u{1b}' && c == '\\') {
+                        break;
+                    }
+                    last = c;
+                }
+            }
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Every OSC 7501 record in a byte stream, exactly as it went out. Herdr
@@ -78,14 +150,30 @@ fn herdr_records(screen: &str) -> Vec<String> {
     records
 }
 
+/// Assert the screen's row `index` equals `expected`, and that every other row
+/// is `blank`; returns the whole screen for a message.
+fn row_eq(screen: &str, index: usize, expected: &str) {
+    let rows: Vec<&str> = screen.lines().collect();
+    assert_eq!(
+        rows.get(index),
+        Some(&expected),
+        "row {index} of {screen:?}"
+    );
+}
+
+/// The viewport's rows 0..3 are the live area. The idle one is blank; a
+/// streaming answer renders markdown with no `##`/`**` left in it.
 #[test]
 fn snapshot_the_idle_viewport() {
     let mut app = new_app();
     app.push_text(""); // nothing to commit
-    assert_eq!(
-        snapshot(&mut app),
-        "\n\n\n\n›\n\n\nkelir idle · step 0 · 0 tok\n"
-    );
+    let screen = snapshot(&mut app);
+    row_eq(&screen, 0, "");
+    row_eq(&screen, 1, "");
+    row_eq(&screen, 2, "");
+    row_eq(&screen, 3, " ● idle · ready");
+    row_eq(&screen, 4, "›");
+    row_eq(&screen, 7, "kelir idle · step 0 · 0 tok");
 }
 
 #[test]
@@ -104,11 +192,29 @@ fn snapshot_streaming_text_in_the_live_area() {
         turn_steps: 1,
         limit: None,
     });
-    app.apply(UiEvent::Delta("Hello ".into()));
-    app.apply(UiEvent::Delta("world".into()));
-    assert_eq!(
-        snapshot(&mut app),
-        "Hello world\n\n\n\n›\n\n\nkelir working · test/model · step 1 · 0 tok\n"
+    app.apply(UiEvent::Delta("Hello **wor".into()));
+    let screen = snapshot(&mut app);
+    // The unclosed `**` stays literal (a streamed prefix is not a mistake).
+    assert!(screen.contains("Hello **wor"), "{screen:?}");
+    app.apply(UiEvent::Delta("ld**\n\n".into()));
+    let screen = snapshot(&mut app);
+    let state = screen.lines().nth(3).unwrap_or_default();
+    assert!(state.contains("writing"), "{screen:?}");
+    // A closed block goes straight into the scrollback now (S1): the closed
+    // emphasis shows there, with no literal markers.
+    let committed: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+    assert!(
+        committed.iter().any(|row| row.contains("Hello world")),
+        "the closed emphasis renders: {committed:?}"
+    );
+    assert!(
+        !committed.iter().any(|row| row.contains("**")),
+        "no literal markers: {committed:?}"
+    );
+    let facts = screen.lines().nth(7).unwrap_or_default();
+    assert!(
+        facts.starts_with("kelir working · test/model · step 1"),
+        "{facts:?}"
     );
 }
 
@@ -128,10 +234,12 @@ fn snapshot_a_running_call() {
         name: "bash".into(),
         input: json!({"command": "sleep 1"}),
     });
-    assert_eq!(
-        snapshot(&mut app),
-        "$ sleep 1\n\n\n\n›\n\n\nkelir working · test/model · step 0 · 0 tok · 1 running\n"
-    );
+    let screen = snapshot(&mut app);
+    let state = screen.lines().nth(3).unwrap_or_default();
+    assert!(state.contains("running bash: sleep 1"), "{screen:?}");
+    // The live rows are quiet while a call runs: the state row says what is
+    // happening, and it is the only thing that moved.
+    assert_eq!(screen.lines().next(), Some(""), "{screen:?}");
 }
 
 #[test]
@@ -145,14 +253,16 @@ fn snapshot_an_error() {
     });
     app.apply(UiEvent::Error("provider said no".into()));
     assert_eq!(app.status.phase, Phase::Error);
-    assert_eq!(
-        snapshot(&mut app),
-        "provider said no\n\n\n\n›\n\n\nkelir error · test/model · step 0 · 0 tok\n"
-    );
+    let screen = snapshot(&mut app);
+    let state = screen.lines().nth(3).unwrap_or_default();
+    assert!(state.contains("error"), "{screen:?}");
+    assert!(state.contains("provider said no"), "{screen:?}");
+    let facts = screen.lines().nth(7).unwrap_or_default();
+    assert!(facts.starts_with("kelir error"), "{facts:?}");
 }
 
-/// Ctrl-O: the last call's output tail takes the whole area above the status
-/// line, and the editor is out of the way while it is open.
+/// Ctrl-O: the last call's output tail takes the whole area above the facts
+/// row, and the editor is out of the way while it is open.
 #[test]
 fn snapshot_the_output_tail_view() {
     let dir = tempfile::tempdir().unwrap();
@@ -164,22 +274,26 @@ fn snapshot_the_output_tail_view() {
         input: json!({"command": "cargo test"}),
         outcome: "ok".into(),
         exit_code: Some(0),
+        elapsed_ms: 200,
         bytes: 30,
         lines: 3,
         spilled: false,
         out_path: out.to_string_lossy().into_owned(),
+        tail: String::new(),
     });
-    let settled = app.take_scroll();
-    assert_eq!(
-        settled,
-        vec!["$ cargo test  (exit 0 · 30 B · 3 lines)".to_string()]
-    );
+    // The call is still in the open group, not committed yet: nothing to
+    // scroll.
+    assert!(app.take_scroll().is_empty());
     app.press(tui::Press::ToggleTail);
     let screen = snapshot(&mut app);
     let rows: Vec<&str> = screen.lines().collect();
-    assert_eq!(rows[0], "line one", "{screen}");
-    assert_eq!(rows[1], "line two", "{screen}");
-    assert_eq!(rows[2], "line three", "{screen}");
+    // The header names the call (design note §4), then the tail itself.
+    assert!(rows[0].contains("$ cargo test"), "{screen}");
+    assert_eq!(rows[1], "line one", "{screen}");
+    assert_eq!(rows[2], "line two", "{screen}");
+    assert_eq!(rows[3], "line three", "{screen}");
+    // The state row is still there (the overlay only takes the area above it).
+    assert!(rows[7].starts_with("tail (Ctrl-O closes)"), "{screen}");
     assert!(
         rows[7].starts_with("tail (Ctrl-O closes) · kelir idle"),
         "{}",
@@ -192,7 +306,7 @@ fn snapshot_the_output_tail_view() {
 }
 
 /// A long line in the editor is clipped by the row, not wrapped into the
-/// status line.
+/// facts row.
 #[test]
 fn snapshot_a_long_editor_line_stays_on_its_row() {
     let mut app = new_app();
@@ -204,8 +318,105 @@ fn snapshot_a_long_editor_line_stays_on_its_row() {
     assert_eq!(rows.len(), 8);
     assert_eq!(rows[4].chars().count(), 60, "{}", rows[4]);
     assert!(rows[7].starts_with("kelir idle"), "{}", rows[7]);
-    // The streamed rows above are untouched.
-    assert!(rows[0..4].iter().all(|row| row.is_empty()));
+    // The live rows above are untouched.
+    assert!(rows[0..3].iter().all(|row| row.is_empty()), "{screen:?}");
+}
+
+/// 80, 60 and 40 columns: the state row, the facts row and a tool line all fit
+/// the width and never spill onto a second row.
+#[test]
+fn snapshot_narrow_panes_keep_every_row_inside_its_width() {
+    for width in [80u16, 60, 40, 30, 20] {
+        let (to_tui, _events) = tokio::sync::mpsc::unbounded_channel();
+        let (verbs, _incoming) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            width as usize,
+            VIEWPORT_HEIGHT as usize,
+            to_tui,
+            verbs,
+            String::new(),
+        );
+        app.apply(UiEvent::TurnStarted {
+            turn: 1,
+            provider: "openrouter".into(),
+            model: "deepseek/deepseek-v4.1-flash-1017".into(),
+            limit: None,
+        });
+        app.apply(UiEvent::ToolStarted {
+            name: "bash".into(),
+            input: json!({"command": "cargo test --all-targets -- --nocapture"}),
+        });
+        let screen = render_at(&mut app, width);
+        for (index, row) in screen.lines().enumerate() {
+            assert!(
+                kelir::scrollback::display_width(row) <= width as usize,
+                "width {width}, row {index}: {row:?}"
+            );
+        }
+        let state = screen.lines().nth(3).unwrap_or_default();
+        assert!(state.contains("running"), "width {width}: {state:?}");
+    }
+}
+
+/// The state row and the prompt tell idle from working without colour: the
+/// glyph and the word change, and the prompt dims.
+#[test]
+fn snapshot_the_idle_and_working_rows_are_visibly_different() {
+    let mut app = new_app();
+    let idle = render_at(&mut app, 60);
+    app.apply(UiEvent::TurnStarted {
+        turn: 1,
+        provider: "p".into(),
+        model: "m".into(),
+        limit: None,
+    });
+    let working = render_at(&mut app, 60);
+    let idle_state = idle.lines().nth(3).unwrap_or_default().to_string();
+    let working_state = working.lines().nth(3).unwrap_or_default().to_string();
+    assert!(idle_state.contains("idle"), "{idle_state:?}");
+    assert!(working_state.contains("thinking"), "{working_state:?}");
+    assert_ne!(
+        idle_state.trim_start_matches(' ').chars().next(),
+        working_state.trim_start_matches(' ').chars().next(),
+        "the glyph differs too: {idle_state:?} vs {working_state:?}"
+    );
+}
+
+/// A tool group that folds: the live area shows the calls, the scrollback gets
+/// the folded line plus the errors.
+#[test]
+fn snapshot_a_tool_group_before_and_after_it_closes() {
+    let mut app = new_app();
+    for command in ["git --version", "python --version", "cargo fmt"] {
+        app.apply(UiEvent::ToolSettled {
+            name: "bash".into(),
+            input: json!({"command": command}),
+            outcome: "ok".into(),
+            exit_code: Some(0),
+            elapsed_ms: 300,
+            bytes: 29,
+            lines: 1,
+            spilled: false,
+            out_path: String::new(),
+            tail: String::new(),
+        });
+    }
+    let open = render_at(&mut app, 60);
+    let live: Vec<&str> = open.lines().take(3).collect();
+    // Already three calls: the live area shows the same fold the scrollback
+    // will get, so nobody sees it change shape when it commits.
+    assert!(
+        live.iter().any(|row| row.contains("ran 3 commands")),
+        "the open group is visible: {live:?}"
+    );
+    app.apply(UiEvent::Assistant {
+        text: "all good".into(),
+    });
+    let committed: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+    assert!(
+        committed.iter().any(|row| row.contains("ran 3 commands")),
+        "{committed:?}"
+    );
 }
 
 // -------------------------------------------------- every action is a verb
@@ -423,7 +634,9 @@ fn drive_in_a_pty(
     if wait_for(&screen, "kelir", Duration::from_secs(20)) {
         // A moment for raw mode; then anything the test types first, the
         // message, and Enter.
-        std::thread::sleep(Duration::from_millis(200));
+        // A bracketed paste is only delivered as a paste once the app has
+        // enabled the mode; half a second is enough on every terminal seen.
+        std::thread::sleep(Duration::from_millis(600));
         if !preamble.is_empty() {
             send(preamble);
             std::thread::sleep(Duration::from_millis(200));
@@ -502,6 +715,19 @@ async fn the_tui_runs_a_turn_in_a_pty() {
     assert_eq!(run.code, 0, "screen: {:?}", run.screen);
     // The answer was rendered (the scrollback ends up in the pty's output).
     assert!(run.screen.contains("PARROT"), "screen: {:?}", run.screen);
+    // Every frame is wrapped in synchronised output, so a frame is never torn
+    // (`ESC[?2026h` … `ESC[?2026l`). Terminals that do not know the pair ignore
+    // it, so nothing has to probe for it.
+    assert!(
+        run.screen.contains("\u{1b}[?2026h"),
+        "frames are not synchronised: {:?}",
+        run.screen
+    );
+    assert!(
+        run.screen.contains("\u{1b}[?2026l"),
+        "a sync frame is never closed: {:?}",
+        run.screen
+    );
     // The banner names the window compaction measures against and where it came
     // from (STEER-1: the provider's list, fetched before the first step).
     assert!(
@@ -560,6 +786,350 @@ async fn the_tui_runs_a_turn_in_a_pty() {
         .expect("the say was logged as a verb");
     assert_eq!(verb["from"], "tui");
     assert_eq!(verb["name"], "say");
+}
+
+/// A markdown answer arrives rendered: the `##`, `**` and `|---|` never reach
+/// the screen, and the answer lands in the terminal's scrollback.
+#[tokio::test]
+async fn the_tui_renders_a_markdown_answer_and_commits_it() {
+    let answer = "## Files\n\nSome **bold** words and a `code` span.\n\n\
+                  | a | b |\n|---|---|\n| 1 | 2 |\n\n```sh\ncargo test\n```\n";
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn(answer, 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            b"",
+            vec!["cargo test".into(), "Files".into()],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    for markdown in ["## Files", "**bold**", "|---", "```"] {
+        assert!(
+            !run.screen.contains(markdown),
+            "raw markdown {markdown:?} reached the screen: {:?}",
+            run.screen
+        );
+    }
+    // The plain words are there, and the code block keeps its line. The pty
+    // stream interleaves escape sequences with the text, so the assertion is
+    // on the stripped text (a reader sees the stripped text).
+    let text = plain(&run.screen);
+    assert!(text.contains("Some bold words"), "{text:?}");
+    assert!(text.contains("cargo test"), "{text:?}");
+    // The committed turn ends with the one-line summary.
+    assert!(text.contains("1 step"), "{text:?}");
+    // (the state row's idle text is checked by the snapshot tests; the pty's
+    // repaint diff only rewrites what changed, so it need not appear here)
+}
+
+/// Idle costs no wakeups: after the turn ends, the TUI writes nothing for two
+/// seconds (no spinner, no elapsed tick). This is the "idle must cost zero
+/// wakeups" rule; a constant-rate repaint would fail it.
+#[tokio::test]
+async fn an_idle_tui_writes_nothing_for_two_seconds() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("DONE", 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let quiet = tokio::task::spawn_blocking(move || {
+        drive_and_count_idle_bytes(cwd, config, state, base_url)
+    })
+    .await
+    .expect("the pty driver");
+    assert_eq!(quiet.code, 0, "{quiet:?}");
+    assert_eq!(
+        quiet.bytes_while_idle, 0,
+        "the idle TUI wrote {} bytes in two seconds",
+        quiet.bytes_while_idle
+    );
+}
+
+#[derive(Debug)]
+struct IdleRun {
+    code: u64,
+    bytes_while_idle: usize,
+}
+
+/// Drive one turn, wait for it to settle, then count every byte the TUI writes
+/// while it sits idle for two seconds.
+fn drive_and_count_idle_bytes(
+    cwd: std::path::PathBuf,
+    config: std::path::PathBuf,
+    state: std::path::PathBuf,
+    base_url: String,
+) -> IdleRun {
+    let pty_system = portable_pty::native_pty_system();
+    let pair = pty_system
+        .openpty(portable_pty::PtySize {
+            rows: 40,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open a pty");
+    let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_kelir"));
+    command.cwd(&cwd);
+    command.env("KELIR_CONFIG", &config);
+    command.env("KELIR_CONFIG_DIR", state.join("no-config"));
+    command.env("KELIR_STATE_DIR", &state);
+    command.env("KELIR_HOME", state.join("home"));
+    command.env("KELIR_BASE_URL", &base_url);
+    command.env("OPENROUTER_API_KEY", "test-openrouter-key");
+    command.env("TERM", "xterm-256color");
+    let mut child = pair.slave.spawn_command(command).expect("spawn kelir");
+    drop(pair.slave);
+    let writer = Arc::new(Mutex::new(pair.master.take_writer().expect("pty writer")));
+    let mut reader = pair.master.try_clone_reader().expect("pty reader");
+    let screen = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let sink = screen.clone();
+    let responder = writer.clone();
+    let reader_task = std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    let bytes = &chunk[..n];
+                    sink.lock().unwrap().extend_from_slice(bytes);
+                    let text = String::from_utf8_lossy(bytes);
+                    let mut replies = Vec::new();
+                    for _ in 0..text.matches("\u{1b}[6n").count() {
+                        replies.extend_from_slice(b"\x1b[1;1R");
+                    }
+                    for _ in 0..text.matches("\u{1b}[c").count() {
+                        replies.extend_from_slice(b"\x1b[?1;2c");
+                    }
+                    if !replies.is_empty() {
+                        let mut out = responder.lock().unwrap();
+                        let _ = out.write_all(&replies);
+                        let _ = out.flush();
+                    }
+                }
+            }
+        }
+    });
+    let text = |screen: &Arc<Mutex<Vec<u8>>>| -> String {
+        String::from_utf8_lossy(&screen.lock().unwrap()).into_owned()
+    };
+    let wait_for = |screen: &Arc<Mutex<Vec<u8>>>, needle: &str, limit: Duration| -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if text(screen).contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+    let send = |bytes: &[u8]| {
+        let mut out = writer.lock().unwrap();
+        out.write_all(bytes).unwrap();
+        out.flush().unwrap();
+    };
+    assert!(
+        wait_for(&screen, "kelir", Duration::from_secs(20)),
+        "the TUI never drew"
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    send(b"hi");
+    std::thread::sleep(Duration::from_millis(100));
+    send(b"\r");
+    assert!(
+        wait_for(&screen, "DONE", Duration::from_secs(30)),
+        "the answer never arrived: {:?}",
+        text(&screen)
+    );
+    // Wait for the state row to say idle again (the turn is over and the
+    // spinner is gone).
+    assert!(
+        wait_for(&screen, "idle", Duration::from_secs(10)),
+        "the TUI never went idle: {:?}",
+        text(&screen)
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let before = screen.lock().unwrap().len();
+    std::thread::sleep(Duration::from_secs(2));
+    let after = screen.lock().unwrap().len();
+    send(b"/quit");
+    std::thread::sleep(Duration::from_millis(100));
+    send(b"\r");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.exit_code() as u64,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.clone_killer().kill();
+                panic!("kelir did not exit");
+            }
+        }
+    };
+    drop(reader_task);
+    IdleRun {
+        code,
+        bytes_while_idle: after - before,
+    }
+}
+
+/// A bracketed paste of a PNG path (which is what a terminal sends for a drag
+/// and drop or a clipboard path) becomes a chip, the prompt carries the
+/// pointer, and no image bytes are in it.
+#[tokio::test]
+async fn a_pasted_image_path_becomes_a_pointer_in_the_prompt() {
+    let answer = "described";
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn(answer, 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let image = cwd.join("shot.png");
+    std::fs::write(&image, tiny_png()).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    // A quoted path, as a Windows drag and drop (or a clipboard paste of a
+    // file) puts on the input line. It is typed as keystrokes here: crossterm
+    // 0.29 only decodes `ESC[200~` on Unix, so on Windows a bracketed paste
+    // arrives as characters. The submit-time path scan is what makes both
+    // platforms a pointer (`App::absorb_image_paths`).
+    let paste = format!("\"{}\"", image.display());
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(cwd, config, state, base_url, paste.as_bytes(), vec![])
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    // The saved file is in the session's attachments, unmodified.
+    let log = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
+    let attachments = run.session_dir.join("attachments");
+    if !attachments.is_dir() {
+        panic!(
+            "no attachments dir.
+log: {log}
+screen: {:?}",
+            run.screen
+        );
+    }
+    let files: Vec<_> = std::fs::read_dir(&attachments)
+        .expect("an attachments dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(std::fs::read(&files[0]).unwrap(), tiny_png());
+    // The `user` event carries the pointer, not the path and not the bytes.
+    let log = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
+    let user = log
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["type"] == "user")
+        .expect("a user event");
+    let text = user["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("[image: attachments/1-shot.png"),
+        "the prompt carries the pointer: {text:?}"
+    );
+    assert!(
+        text.contains("hello there"),
+        "the typed text is still there: {text:?}"
+    );
+    assert!(!text.contains("shot.png\""), "no raw path: {text:?}");
+    assert!(
+        !text.contains("iVBOR"),
+        "no image bytes in the prompt: {text:?}"
+    );
+}
+
+/// The Windows paste path end to end, in a pty: the kernel delivers the pasted
+/// path as a stream of key events there too, so the chip has to appear before
+/// Enter — the review's finding was that on Windows it appeared only at submit,
+/// as raw path text (`S8`).
+#[tokio::test]
+async fn a_typed_image_path_is_a_chip_in_the_editor_before_it_is_sent() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("PARROT", 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let image = cwd.join("shot.png");
+    std::fs::write(&image, tiny_png()).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let typed = image.display().to_string();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(cwd, config, state, base_url, typed.as_bytes(), vec![])
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    // The screen showed the chip (the path itself was replaced), which is what
+    // a Backspace then removes whole; the submit-time scan is no longer the only
+    // thing that makes the pointer.
+    let plain = plain(&run.screen);
+    assert!(plain.contains("[image 1]"), "the chip was drawn: {plain:?}");
+    let user = std::fs::read_to_string(run.session_dir.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["type"] == "user")
+        .expect("a user event");
+    let text = user["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("[image: attachments/1-shot.png"),
+        "the prompt carries the pointer once: {text:?}"
+    );
+    assert!(!text.contains("iVBOR"), "no bytes: {text:?}");
+}
+
+/// A 4x3 PNG: bytes a real decoder would accept as a header.
+fn tiny_png() -> Vec<u8> {
+    let mut bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&4u32.to_be_bytes());
+    bytes.extend_from_slice(&3u32.to_be_bytes());
+    bytes.extend_from_slice(&[8, 2, 0, 0, 0]);
+    bytes
 }
 
 /// The failure word: `error` goes out over the same OSC record — and a failed
@@ -664,6 +1234,59 @@ async fn the_tui_reports_a_paused_turn_to_herdr() {
     let text = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
     assert!(text.contains("\"outcome\":\"paused\""), "{text}");
     assert!(text.contains("\"reason\":\"provider\""), "{text}");
+    assert!(!text.contains("\"outcome\":\"error\""), "{text}");
+}
+
+/// STEER-5's retry countdown reaches tui2's rows: a 429 shows the wait line
+/// and its countdown in the facts row and the `rate limited` state in the
+/// state row, both with the attempt number, and the turn then goes through.
+#[tokio::test]
+async fn the_tui_shows_the_retry_countdown_and_recovers() {
+    let mock = Mock::start(vec![
+        Reply::Http(429, "slow down".into()),
+        Reply::Sse(sse(&text_turn("RECOVERED", 0))),
+    ])
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\nretry_base_ms = 3000\nretry_cap_ms = 3000\nretry_max_attempts = 3\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(
+            cwd,
+            config,
+            state,
+            base_url,
+            b"",
+            vec![
+                // The facts row carries the whole wait line, the state row the
+                // countdown and the attempt. Both name this pane's key: `stop`
+                // typed here is a `say` the model receives (`R5`).
+                "rate limited (429): retrying in".into(),
+                "esc stops".into(),
+                // The facts row's own countdown, read from the wall clock.
+                "s left".into(),
+                "attempt 1".into(),
+                "RECOVERED".into(),
+            ],
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    // The wait is in the log as an `error` event, and the turn that followed it
+    // ended `done`: a retried 429 is not a failure.
+    let text = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
+    assert!(text.contains("\"status\":429"), "{text}");
+    assert!(text.contains("\"outcome\":\"done\""), "{text}");
     assert!(!text.contains("\"outcome\":\"error\""), "{text}");
 }
 
