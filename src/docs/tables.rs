@@ -95,7 +95,7 @@ pub const VERBS: &[VerbDoc] = &[
         name: "status",
         args: "none; `--json` prints the answer as one JSON line",
         applies: "`now`",
-        effect: "read-only and never logged: answers at once, even mid-request or in a retry wait,                  with steps used/limit, turn, last prompt size and context %, cache hit ratio,                  tokens, cost and its source, last error, retry in progress, running calls,                  background jobs, children. Needs the session token like every verb",
+        effect: "read-only and never logged: answers at once, even mid-request or in a retry wait,                  with steps used/limit, turn, last prompt size and context %, cache hit ratio,                  tokens, cost and its source, last error, retry in progress, running calls,                  background jobs, children. `context.window` is `null` (with `context.window_source` `default`) until the model list answers or a window is configured, and `percent` stays `null` with it. A provider-reported cost of exactly 0 on a priced model is replaced by a table estimate (`cost.source` `table`). Needs the session token like every verb",
     },
     VerbDoc {
         name: "end",

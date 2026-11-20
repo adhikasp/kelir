@@ -54,14 +54,11 @@ const fn price(input: f64, cached_input: f64, output: f64) -> Price {
 /// The built-in table. Data, not logic: add a row, never an `if`. Only
 /// models whose price the provider publishes are here; everything else is
 /// "unknown", which is an honest answer (Go bills against an allowance, so it
-/// has no rows). `[prices."<model>"]` in `config.toml` overrides a row and adds
+/// has no rows). Models priced by time of day (`deepseek-v4.1-flash-1017`:
+/// peak and off-peak) are left out on purpose: a peak figure was 1.3x-4.5x too
+/// high against what OpenRouter billed (STEER-8 review F1). `[prices."<model>"]` in `config.toml` overrides a row and adds
 /// models.
 const TABLE: &[Entry] = &[
-    Entry {
-        provider: "openrouter",
-        model: "deepseek/deepseek-v4.1-flash-1017",
-        price: price(0.30, 0.006, 1.20),
-    },
     Entry {
         provider: "openrouter",
         model: "deepseek/deepseek-v4.1-flash",
@@ -361,8 +358,13 @@ impl Tally {
             out.push(Warning {
                 kind: "cost",
                 message: format!(
-                    "this session's estimated cost is ${:.4}, over warn_cost (${limit})",
-                    self.cost
+                    "this session's cost is ${}, over warn_cost (${limit}){}",
+                    money(self.cost),
+                    if self.by_table > 0 {
+                        " (partly estimated)"
+                    } else {
+                        ""
+                    }
                 ),
                 value: self.cost,
                 threshold: limit,
@@ -417,7 +419,8 @@ pub struct Live<'a> {
     pub turn_steps: u32,
     pub max_steps: Option<u32>,
     pub session_steps: u32,
-    pub window: u64,
+    pub window: Option<u64>,
+    pub window_source: &'a str,
     pub running: &'a [String],
     pub retry: Option<RetryNote>,
     pub warn: Warn,
@@ -437,8 +440,8 @@ pub fn status_json(tally: &Tally, live: &Live<'_>) -> Value {
     };
     let last = tally.last.as_ref();
     let context_percent = last
-        .filter(|_| live.window > 0)
-        .map(|last| ((last.prompt as f64 / live.window as f64) * 1000.0).round() / 10.0);
+        .zip(live.window.filter(|w| *w > 0))
+        .map(|(last, window)| ((last.prompt as f64 / window as f64) * 1000.0).round() / 10.0);
     let error = tally.last_error.as_ref().map(|error| {
         json!({
             "seq": error.seq,
@@ -473,6 +476,7 @@ pub fn status_json(tally: &Tally, live: &Live<'_>) -> Value {
         "context": {
             "last_prompt_tokens": last.map(|last| last.prompt),
             "window": live.window,
+            "window_source": live.window_source,
             "percent": context_percent,
         },
         "cache": {
@@ -553,7 +557,7 @@ pub fn render_text(state: &Value) -> String {
     ));
     let context = match get(&["context", "last_prompt_tokens"]).as_u64() {
         Some(prompt) => {
-            let window = num(&["context", "window"]);
+            let window = get(&["context", "window"]).as_u64().unwrap_or(0);
             let share = get(&["context", "percent"])
                 .as_f64()
                 .map_or(String::new(), |p| {
@@ -651,6 +655,18 @@ pub fn render_text(state: &Value) -> String {
     lines.join("\n")
 }
 
+/// A dollar figure with enough digits to tell it from the threshold it passed.
+fn money(value: f64) -> String {
+    let text = format!("{value:.6}");
+    let trimmed = text.trim_end_matches('0');
+    let trimmed = trimmed.strip_suffix('.').unwrap_or(trimmed);
+    if value >= 0.01 {
+        format!("{value:.4}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,8 +739,8 @@ mod tests {
     #[test]
     fn lookup_is_exact_and_the_config_wins() {
         let none = BTreeMap::new();
-        assert!(lookup("openrouter", "deepseek/deepseek-v4.1-flash-1017", &none).is_some());
-        assert!(lookup("openrouter", "DeepSeek/DeepSeek-V4.1-Flash-1017", &none).is_some());
+        assert!(lookup("openrouter", "deepseek/deepseek-v4-flash", &none).is_some());
+        assert!(lookup("openrouter", "DeepSeek/DeepSeek-V4-Flash", &none).is_some());
         // a variant is not its parent
         assert!(lookup("openrouter", "deepseek/deepseek-v4.1-flash:batch", &none).is_none());
         assert!(lookup("opencode-go", "deepseek-v4.1-flash", &none).is_none());
@@ -853,7 +869,8 @@ mod tests {
             turn_steps: 2,
             max_steps: Some(5),
             session_steps: 2,
-            window: 200_000,
+            window: Some(200_000),
+            window_source: "api",
             running,
             retry,
             warn: Warn {
@@ -861,6 +878,53 @@ mod tests {
                 cost: None,
             },
         }
+    }
+
+    #[test]
+    fn status_window_is_null_until_known() {
+        // review F2: a defaulted window is a guess, so it is null, with its source.
+        let mut tally = Tally::default();
+        tally.observe(2, &usage(100_000, 0, 0.0, None, None));
+        let mut l = live(None, &[]);
+        l.window = None;
+        l.window_source = "default";
+        let json = status_json(&tally, &l);
+        assert!(json["context"]["window"].is_null());
+        assert!(json["context"]["percent"].is_null());
+        assert_eq!(json["context"]["window_source"], "default");
+        let text = render_text(&json);
+        assert!(text.contains("100.0k tokens"), "{text}");
+    }
+
+    #[test]
+    fn time_priced_default_model_has_no_table_row() {
+        // review F1: no wrong estimate for a model priced by time of day.
+        assert!(
+            lookup(
+                "openrouter",
+                "deepseek/deepseek-v4.1-flash-1017",
+                &BTreeMap::new()
+            )
+            .is_none()
+        );
+        assert!(lookup("openrouter", "deepseek/deepseek-v4-flash", &BTreeMap::new()).is_some());
+    }
+
+    #[test]
+    fn small_cost_warning_shows_distinct_figures() {
+        // review F4: "$0.0003 over $0.0003" told nothing.
+        let warn = Warn {
+            prompt_tokens: None,
+            cost: Some(0.0003),
+        };
+        let mut tally = Tally {
+            cost: 0.000309,
+            by_provider: 1,
+            ..Tally::default()
+        };
+        let w = tally.warnings(warn);
+        assert!(w[0].message.contains("$0.000309"), "{}", w[0].message);
+        assert!(!w[0].message.contains("estimated"), "{}", w[0].message);
     }
 
     #[test]

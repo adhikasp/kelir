@@ -1902,7 +1902,10 @@ impl Session {
             turn_steps: self.turn_steps,
             max_steps: self.cfg.max_steps,
             session_steps: self.step,
-            window: self.window,
+            // Until the model list answers (or a window is configured) the
+            // number is a guess, and a guess is `null`, not 128000 (review F2).
+            window: (self.window_source != "default").then_some(self.window),
+            window_source: self.window_source,
             running: &self.live_calls,
             retry,
             warn: self.warn(),
