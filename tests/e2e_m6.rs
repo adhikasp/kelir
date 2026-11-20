@@ -7,7 +7,7 @@
 
 mod support;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -59,11 +59,15 @@ fn pid_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-        std::process::Command::new(Path::new(&root).join("System32").join("tasklist.exe"))
-            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-            .output()
-            .map(|out| String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")))
-            .unwrap_or(false)
+        std::process::Command::new(
+            std::path::Path::new(&root)
+                .join("System32")
+                .join("tasklist.exe"),
+        )
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")))
+        .unwrap_or(false)
     }
     #[cfg(not(windows))]
     {
