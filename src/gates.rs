@@ -650,7 +650,6 @@ pub struct Runner {
     cwd: PathBuf,
     session_id: String,
     session_dir: PathBuf,
-    runs: AtomicU64,
     timeout: Duration,
 }
 
@@ -668,7 +667,6 @@ impl Runner {
             cwd,
             session_id,
             session_dir,
-            runs: AtomicU64::new(0),
             timeout: timeout(),
         }
     }
@@ -838,8 +836,6 @@ impl Runner {
                 .ok_or_else(|| "cannot create a job object".to_string())?;
             group.with_job(job)
         };
-        #[cfg(not(windows))]
-        let _ = self.runs.fetch_add(1, Ordering::SeqCst);
         group.configure(&mut command);
         let mut child = command
             .spawn()
