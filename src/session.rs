@@ -2698,8 +2698,9 @@ impl Session {
         // file, and a validly signed final record wins over whatever the status
         // file now says, so putting an older record back cannot un-settle the
         // job (a replay can withhold a result, never change it).
-        let last = crate::bg::Status::read(&crate::bg::final_path(&dir, &id))
-            .filter(|last| last.id == id && last.settled() && self.trust.seal(last) == Seal::Good);
+        let last = crate::bg::Status::read(&crate::bg::final_path(&dir, &id)).filter(|last| {
+            last.id == id && last.is_job() && last.settled() && self.trust.seal(last) == Seal::Good
+        });
         let candidate = last.as_ref().or(file.as_ref()).unwrap_or(reported);
         let sealed = if candidate.id == id {
             self.trust.seal(candidate)
