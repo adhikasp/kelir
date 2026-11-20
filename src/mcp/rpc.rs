@@ -175,6 +175,13 @@ impl Client {
     ) -> Result<Client, CallError> {
         let resolved = resolve_command(&config.command);
         #[cfg(unix)]
+        if !on_path(&resolved) {
+            return Err(CallError::Unavailable(format!(
+                "{}: cannot start `{}`: no such file or command",
+                config.name, config.command
+            )));
+        }
+        #[cfg(unix)]
         let mut command = {
             // The server runs under a tiny watcher (same process group) that
             // kills the group when this process is gone, so a `kill -9` of the
@@ -470,7 +477,24 @@ impl Client {
 /// polls the session's pid and kills the group (server, its children, itself)
 /// once the session is gone or the server has exited.
 #[cfg(unix)]
-const UNIX_GUARD: &str = "g=$$; p=$PPID; ( while kill -0 $p 2>/dev/null && kill -0 $g 2>/dev/null; do sleep 1; done; kill -s KILL -- -$g ) </dev/null >/dev/null 2>&1 & exec \"$@\"";
+const UNIX_GUARD: &str = concat!(
+    // A zombie counts as gone (a parent that was killed but not yet reaped).
+    "alive() { kill -0 $1 2>/dev/null || return 1; read -r l </proc/$1/stat 2>/dev/null; ",
+    "case $l in *\") Z \"*) return 1;; esac; return 0; }; ",
+    "g=$$; p=$PPID; ( while alive $p && alive $g; do sleep 1; done; ",
+    "kill -s KILL -- -$g ) </dev/null >/dev/null 2>&1 & exec \"$@\""
+);
+
+/// Does `command` name something to run? (`sh` would only say "not found" and
+/// exit 127, hiding the "cannot start" error.)
+#[cfg(unix)]
+fn on_path(command: &Path) -> bool {
+    if command.components().count() > 1 {
+        return command.exists();
+    }
+    let path = crate::envs::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path).any(|dir| dir.join(command).is_file())
+}
 
 /// `env` values worth redacting (short ones would mangle ordinary text).
 fn secret_values(config: &ServerConfig) -> Vec<String> {
