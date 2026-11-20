@@ -109,11 +109,11 @@ fn an_all_failed_run_has_no_checkmark_line() {
     }
 }
 
-/// F-edit: an `edit` that changed a file is a call like any other now and
-/// disappears into "N calls". This pins the current behaviour; the finding is
-/// that no row names the file any more.
+/// F-edit (fixed in `tui3fix`): an `edit` keeps its own line inside a fold, so
+/// the transcript names the file that was changed, and the checked count covers
+/// only the foldable read/exec calls it stands in for.
 #[test]
-fn an_edit_inside_a_fold_is_not_named_anywhere_in_the_transcript() {
+fn an_edit_inside_a_fold_keeps_its_own_line() {
     let mut app = app(80);
     app.apply(ok("cat a"));
     app.apply(call(
@@ -125,20 +125,20 @@ fn an_edit_inside_a_fold_is_not_named_anywhere_in_the_transcript() {
     app.apply(ok("cargo test"));
     prose(&mut app, "patched");
     let scroll = rows(&mut app);
-    assert!(scroll.iter().any(|r| r.contains("3 calls")), "{scroll:?}");
     assert!(
-        !scroll.iter().any(|r| r.contains("src/lib.rs")),
-        "if this fails the edit became visible again (F-edit fixed): {scroll:?}"
+        scroll.iter().any(|r| r.contains("2 calls")),
+        "only the two bash calls are folded: {scroll:?}"
+    );
+    assert!(
+        scroll.iter().any(|r| r.contains("edit src/lib.rs")),
+        "the file change is named in the transcript (F-edit): {scroll:?}"
     );
 }
 
-/// F-cancel (should-fix): a call cancelled by Esc inside a fold must not be
-/// counted as a checked (successful) call. Today `Group::close` counts every
-/// call that is not `failed()`, and `failed()` excludes a cancelled call, so the
-/// transcript says `✓ 3 calls` for two successes and one `stopped`.
-/// Ignored so the gate stays green; run with `--ignored` to see it fail.
+/// F-cancel (fixed in `tui3fix`): a call cancelled by Esc inside a fold must
+/// not be counted as a checked (successful) call; it keeps its own line, and
+/// the fold says how many stopped.
 #[test]
-#[ignore = "tui3 review F-cancel: fails until the fold stops counting a cancelled call as checked"]
 fn a_cancelled_call_is_not_counted_as_a_checked_call() {
     let mut app = app(80);
     app.apply(ok("a"));
@@ -162,6 +162,20 @@ fn a_cancelled_call_is_not_counted_as_a_checked_call() {
     assert!(
         !line.contains("3 calls"),
         "a cancelled call was folded into a checked count: {scroll:?}"
+    );
+    assert!(
+        line.contains("2 calls"),
+        "the two that finished: {scroll:?}"
+    );
+    assert!(
+        line.contains("1 stopped"),
+        "the fold says one call was stopped: {scroll:?}"
+    );
+    assert!(
+        scroll
+            .iter()
+            .any(|r| r.contains("sleep 20") && r.contains("cancelled")),
+        "the stopped call keeps its own line: {scroll:?}"
     );
 }
 
