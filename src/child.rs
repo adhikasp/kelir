@@ -1153,6 +1153,96 @@ mod tests {
         assert_eq!(snapshot_cut(&[]), 0);
     }
 
+    fn session_started(id: &str) -> LogEvent {
+        LogEvent::new(
+            1,
+            EventBody::SessionStarted {
+                id: id.into(),
+                parent: None,
+                depth: 0,
+                cwd: "/tmp".into(),
+                os: "linux".into(),
+                kelir_version: "0.1.0".into(),
+                provider: "openrouter".into(),
+                model: "m".into(),
+                system: crate::event::SystemInfo {
+                    text: "SYS".into(),
+                    hash: "h".into(),
+                },
+                sources: vec![],
+                tools: vec!["bash".into(), "edit".into(), "compact".into()],
+                reasoning_effort: None,
+                key_origin: Some("env KEY".into()),
+            },
+        )
+    }
+
+    /// A snapshot is a copy by value: the child's log folds to the parent's
+    /// prefix exactly, names the child and its parent, and changing either log
+    /// afterwards touches only that log.
+    #[test]
+    fn a_snapshot_folds_to_the_parents_prefix_and_is_a_copy() {
+        let base = std::env::temp_dir().join(format!("kelir-snap-{}", ulid::Ulid::new()));
+        let (source, dest) = (base.join("parent"), base.join("child"));
+        std::fs::create_dir_all(source.join("blobs")).unwrap();
+        std::fs::write(source.join("blobs").join("1-x"), "\"blob\"").unwrap();
+        let mut events = vec![session_started("ses_parent")];
+        let mut next = user(2);
+        next.seq = 2;
+        events.push(next);
+        events.push(assistant(3, &["a"]));
+        events.push(tool_settled(4, "a"));
+        events.push(assistant(5, &["b"]));
+        let copied = seed_snapshot(&source, &dest, &events, "ses_child", "ses_parent", 1).unwrap();
+        assert_eq!(copied, 4, "the unsettled batch is cut");
+
+        let text = std::fs::read_to_string(dest.join("events.jsonl")).unwrap();
+        let child: Vec<LogEvent> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        match &child[0].body {
+            EventBody::SessionStarted {
+                id,
+                parent,
+                depth,
+                key_origin,
+                ..
+            } => {
+                assert_eq!(id, "ses_child");
+                assert_eq!(parent.as_deref(), Some("ses_parent"));
+                assert_eq!(*depth, 1);
+                assert!(
+                    key_origin.is_none(),
+                    "the parent's key origin is not copied"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let folded_parent = crate::fold::fold(&events[..4], &source).unwrap();
+        let folded_child = crate::fold::fold(&child, &dest).unwrap();
+        assert_eq!(folded_child.system, folded_parent.system);
+        assert_eq!(
+            serde_json::to_value(&folded_child.messages).unwrap(),
+            serde_json::to_value(&folded_parent.messages).unwrap(),
+            "the child's prefix is the parent's, byte for byte"
+        );
+        assert!(dest.join("blobs").join("1-x").is_file(), "blobs are copied");
+        // By value: the parent's log growing later changes nothing here.
+        let before = std::fs::read_to_string(dest.join("events.jsonl")).unwrap();
+        events.push(tool_settled(6, "b"));
+        assert_eq!(
+            before,
+            std::fs::read_to_string(dest.join("events.jsonl")).unwrap()
+        );
+        // Closed cleanly, so opening it with a task starts a fresh turn.
+        assert!(matches!(
+            child.last().map(|event| &event.body),
+            Some(EventBody::SessionEnded { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn the_handoff_debug_output_has_no_secret() {
         let handoff = Handoff {

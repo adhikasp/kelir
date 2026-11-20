@@ -304,8 +304,7 @@ async fn a_background_child_returns_a_handle_and_wakes_the_parent() {
     let last = mock
         .requests()
         .into_iter()
-        .filter(|request| task_of(request) == "ROOT")
-        .next_back()
+        .rfind(|request| task_of(request) == "ROOT")
         .unwrap();
     let wake = last
         .messages()
@@ -418,9 +417,15 @@ async fn the_eleventh_live_child_of_one_agent_is_refused_and_nothing_outlives_th
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     let (_, root) = family.session_for("ROOT");
     let lines = result_of_call(&root, "call_loop");
-    let rcs: Vec<&str> = lines.lines().filter(|line| line.starts_with("rc=")).collect();
+    let rcs: Vec<&str> = lines
+        .lines()
+        .filter(|line| line.starts_with("rc="))
+        .collect();
     assert_eq!(rcs.len(), 11, "{lines}");
-    assert!(rcs[..10].iter().all(|line| line.starts_with("rc=0 ")), "{lines}");
+    assert!(
+        rcs[..10].iter().all(|line| line.starts_with("rc=0 ")),
+        "{lines}"
+    );
     assert!(rcs[10].starts_with("rc=3 "), "the 11th: {}", rcs[10]);
     assert!(rcs[10].contains("10 live children"), "{}", rcs[10]);
     assert!(rcs[10].contains("limit 10"), "{}", rcs[10]);
@@ -464,9 +469,15 @@ async fn the_seventeenth_live_descendant_is_refused() {
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     let (_, nest) = family.session_for("NEST");
     let lines = result_of_call(&nest, "call_nest");
-    let rcs: Vec<&str> = lines.lines().filter(|line| line.starts_with("rc=")).collect();
+    let rcs: Vec<&str> = lines
+        .lines()
+        .filter(|line| line.starts_with("rc="))
+        .collect();
     assert_eq!(rcs.len(), 7, "{lines}");
-    assert!(rcs[..6].iter().all(|line| line.starts_with("rc=0 ")), "{lines}");
+    assert!(
+        rcs[..6].iter().all(|line| line.starts_with("rc=0 ")),
+        "{lines}"
+    );
     assert!(rcs[6].starts_with("rc=3 "), "the 17th: {}", rcs[6]);
     assert!(rcs[6].contains("16 live descendants"), "{}", rcs[6]);
     gate.notify_waiters();
@@ -501,11 +512,18 @@ async fn depth_four_is_refused() {
     assert!(result.contains("depth 4"), "{result}");
     assert!(result.contains("max_child_depth"), "{result}");
     assert!(
-        family.by_task().iter().all(|(_, task, _)| !task.starts_with("L5")),
+        family
+            .by_task()
+            .iter()
+            .all(|(_, task, _)| !task.starts_with("L5")),
         "no depth-4 session may exist"
     );
     let (_, l1) = family.session_for("L1");
-    assert_eq!(of_type(&l1, "child_started").len(), 3, "L2, L3, L4 and nothing for L5");
+    assert_eq!(
+        of_type(&l1, "child_started").len(),
+        3,
+        "L2, L3, L4 and nothing for L5"
+    );
     let started = family.session_for("L4 x").1;
     assert_eq!(started[0]["depth"], 3);
 }
@@ -559,7 +577,11 @@ async fn a_brief_shares_the_parents_prefix_and_leaves_its_history_alone() {
     let parent: Vec<&Recorded> = requests.iter().filter(|r| !is_brief(r)).collect();
     let brief: Vec<&Recorded> = requests.iter().filter(|r| is_brief(r)).collect();
     assert_eq!(parent.len(), 3, "root steps");
-    assert_eq!(brief.len(), 2, "the brief asked, was refused an edit, answered");
+    assert_eq!(
+        brief.len(),
+        2,
+        "the brief asked, was refused an edit, answered"
+    );
 
     // The first brief request is the parent's last settled request plus the
     // question: same system, same tools, same messages, one more at the tail.
@@ -639,25 +661,41 @@ async fn ls_shows_the_tree_and_kill_takes_a_subtree_but_only_from_above() {
     let text = result_of_call(&root, "call_main");
 
     // `ls --json` is one line holding the tree: the root, with its children.
-    let json_line = text.lines().find(|line| line.starts_with('[')).expect("ls --json");
+    let json_line = text
+        .lines()
+        .find(|line| line.starts_with('['))
+        .expect("ls --json");
     let tree: Value = serde_json::from_str(json_line).unwrap();
     assert_eq!(tree[0]["id"], root_id.as_str());
     let kids = tree[0]["children"].as_array().unwrap();
     assert_eq!(kids.len(), 3, "{tree}");
-    assert!(kids.iter().all(|kid| kid["depth"] == 1 && kid["kind"] == "child"));
+    assert!(
+        kids.iter()
+            .all(|kid| kid["depth"] == 1 && kid["kind"] == "child")
+    );
     let nest = kids
         .iter()
         .find(|kid| kid["task"].as_str().unwrap().starts_with("NESTK"))
         .unwrap();
     assert_eq!(nest["children"][0]["depth"], 2);
-    for key in ["state", "model", "cost_usd", "cache_hit_ratio", "task", "tree_cost_usd"] {
+    for key in [
+        "state",
+        "model",
+        "cost_usd",
+        "cache_hit_ratio",
+        "task",
+        "tree_cost_usd",
+    ] {
         assert!(tree[0].get(key).is_some(), "missing {key}");
     }
 
     // Killing the nest stops it and the sleeper below it.
     assert!(text.contains("killrc=0"), "{text}");
     let settled = of_type(&root, "child_settled");
-    let killed: Vec<_> = settled.iter().filter(|e| e["outcome"] == "killed").collect();
+    let killed: Vec<_> = settled
+        .iter()
+        .filter(|e| e["outcome"] == "killed")
+        .collect();
     assert_eq!(killed.len(), 2, "{settled:?}");
     let after = text.split("killrc=").nth(1).unwrap();
     assert!(after.contains("killed"), "{after}");
@@ -669,7 +707,9 @@ async fn ls_shows_the_tree_and_kill_takes_a_subtree_but_only_from_above() {
     let lines: Vec<&str> = tries.lines().filter(|l| l.contains(" rc=")).collect();
     assert!(lines.len() >= 4, "{tries}");
     assert!(
-        lines.iter().all(|line| line.contains("rc=1") && line.contains("refused")),
+        lines
+            .iter()
+            .all(|line| line.contains("rc=1") && line.contains("refused")),
         "{tries}"
     );
     assert!(
@@ -678,4 +718,420 @@ async fn ls_shows_the_tree_and_kill_takes_a_subtree_but_only_from_above() {
     );
     gate.notify_waiters();
     no_leftovers(&family).await;
+}
+
+// ------------------------------------------------- live sessions: orphans
+
+/// The live children of a root, from `ctl status --json`.
+async fn child_list(live: &LiveSession) -> Vec<Value> {
+    let answer = live.ctl(&["status", "--json"]).await;
+    assert_eq!(answer.code, 0, "{}", answer.stderr);
+    answer.response()["state"]["child_list"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+async fn wait_for_children(live: &LiveSession, count: usize) -> Vec<Value> {
+    let started = Instant::now();
+    loop {
+        let list = child_list(live).await;
+        if list.len() >= count && list.iter().all(|kid| kid["pid"].is_number()) {
+            return list;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "wanted {count} children with pids, have {list:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn pids_of(list: &[Value]) -> Vec<u32> {
+    list.iter()
+        .filter_map(|kid| kid["pid"].as_u64())
+        .map(|pid| pid as u32)
+        .collect()
+}
+
+fn leftovers_in(state: &std::path::Path, guard: &TreeGuard) -> Vec<u32> {
+    #[cfg(windows)]
+    {
+        let _ = state;
+        vec![0; guard.active() as usize]
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = guard;
+        let needle = format!("KELIR_STATE_DIR={}", state.display());
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&environ);
+            if text.split('\0').any(|var| var == needle) && pid_alive(pid) {
+                found.push(pid);
+            }
+        }
+        found
+    }
+}
+
+#[tokio::test]
+async fn killing_the_root_hard_leaves_no_orphans() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let held_gate = gate.clone();
+    let mock = Mock::start_routed(vec![], move |request| {
+        let task = task_of(request);
+        let results = tool_results(request).len();
+        Some(match (task.as_str(), results) {
+            ("ROOT", 0) => bash(
+                "call_start",
+                "\"$KELIR_BIN\" run --child --background \"SLEEP one\" >/dev/null; \
+                 \"$KELIR_BIN\" run --child --background \"NESTORPHAN x\" >/dev/null; echo started",
+            ),
+            ("ROOT", _) => bash("call_long", "sleep 300"),
+            (nest, 0) if nest.starts_with("NESTORPHAN") => bash(
+                "call_nest",
+                "\"$KELIR_BIN\" run --child --background \"SLEEP nested\" >/dev/null; sleep 300",
+            ),
+            (other, _) if other.starts_with("SLEEP") => held(&held_gate),
+            _ => return None,
+        })
+    })
+    .await;
+    let mut root = LiveSession::start(&mock, &["run", "--keep", "--json", "ROOT"], "").await;
+    // Three live descendants: one sleeper, a nest, and the nest's sleeper.
+    let list = wait_for_children(&root, 3).await;
+    let pids = pids_of(&list);
+    assert_eq!(pids.len(), 3, "{list:?}");
+    assert!(pids.iter().all(|pid| pid_alive(*pid)));
+    assert!(list.iter().any(|kid| kid["depth"] == 2), "{list:?}");
+
+    // The session dies the way a crash or `taskkill /F` ends it: no cleanup.
+    let state = root.state.clone();
+    root.kill().await;
+
+    wait_gone(&pids, Duration::from_secs(30)).await;
+    let started = Instant::now();
+    loop {
+        let left = leftovers_in(&state, &root.guard);
+        if left.is_empty() {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "processes left after the root was killed: {left:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    gate.notify_waiters();
+}
+
+#[tokio::test]
+async fn stopping_the_call_stops_its_foreground_child() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let held_gate = gate.clone();
+    let mock = Mock::start_routed(vec![], move |request| {
+        let task = task_of(request);
+        let results = tool_results(request).len();
+        Some(match (task.as_str(), results) {
+            ("ROOT", 0) => bash("call_fg", &child_cmd("", "SLEEP foreground")),
+            ("ROOT", _) => say("root done"),
+            (other, _) if other.starts_with("SLEEP") => held(&held_gate),
+            _ => return None,
+        })
+    })
+    .await;
+    let mut root = LiveSession::start(&mock, &["run", "--keep", "--json", "ROOT"], "").await;
+    let list = wait_for_children(&root, 1).await;
+    let pids = pids_of(&list);
+    let stopped = root.ctl(&["stop", "--call", "call_fg"]).await;
+    assert_eq!(stopped.code, 0, "{} {}", stopped.stdout, stopped.stderr);
+    wait_gone(&pids, Duration::from_secs(30)).await;
+    // The registry records how it ended, and the slot is free again.
+    let settled = loop {
+        let log = root.log();
+        if let Some(event) = log.iter().find(|event| event["type"] == "child_settled") {
+            break event.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        settled["outcome"] == "stopped" || settled["outcome"] == "killed",
+        "{settled}"
+    );
+    let list = child_list(&root).await;
+    assert!(list.iter().all(|kid| kid["state"] != "running"), "{list:?}");
+    gate.notify_waiters();
+    root.kill().await;
+}
+
+// -------------------------------------------------------------- security
+
+/// A raw request to a session's socket with its token, as any holder of the
+/// token file could send.
+async fn raw(live: &LiveSession, verb: &str, args: Value, from: &str) -> kelir::ipc::Response {
+    let request = kelir::ipc::Request::new(verb, args, from);
+    kelir::ipc::request_with_token_file(&live.session_dir, &live.id, &request)
+        .await
+        .expect("the session answers")
+}
+
+fn all_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            all_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn command_line_of(pid: u32) -> String {
+    use std::os::windows::process::CommandExt as _;
+    let script = format!("(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine");
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(0x0800_0000)
+        .output()
+        .expect("powershell");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[cfg(not(windows))]
+fn command_line_of(pid: u32) -> String {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn registry_operations_need_the_childs_link_and_no_secret_travels() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let held_gate = gate.clone();
+    let mock = Mock::start_routed(vec![], move |request| {
+        let task = task_of(request);
+        let results = tool_results(request).len();
+        Some(match (task.as_str(), results) {
+            ("ROOT", 0) => bash(
+                "call_start",
+                "\"$KELIR_BIN\" run --child --background \"SLEEP sec\" >/dev/null; \
+                 \"$KELIR_BIN\" run --child --background \"ENVDUMP x\" >/dev/null; echo started",
+            ),
+            ("ROOT", _) => bash("call_long", "sleep 300"),
+            (dump, 0) if dump.starts_with("ENVDUMP") => bash("call_env", "env | sort"),
+            (dump, _) if dump.starts_with("ENVDUMP") => say("env dumped"),
+            (other, _) if other.starts_with("SLEEP") => held(&held_gate),
+            _ => return None,
+        })
+    })
+    .await;
+    let mut root = LiveSession::start(&mock, &["run", "--keep", "--json", "ROOT"], "").await;
+    let list = wait_for_children(&root, 2).await;
+    let before = root.log().len();
+    let sleeper = list
+        .iter()
+        .find(|kid| kid["state"] == "running")
+        .cloned()
+        .unwrap();
+
+    // 1. The root's token is not enough to act as a child: every registry
+    //    operation names a link, and a guess is no link.
+    let child_id = sleeper["child_id"].as_str().unwrap().to_string();
+    for (op, extra) in [
+        ("admit", json!({"task": "forged", "kind": "child"})),
+        ("up", json!({"child_id": child_id, "pid": 4242})),
+        (
+            "settle",
+            json!({"child_id": child_id, "outcome": "done", "result": "forged"}),
+        ),
+        ("kill", json!({"target": child_id, "link": "guess"})),
+    ] {
+        for link in ["", "guess", "0000"] {
+            let mut args = json!({"op": op, "link": link});
+            for (key, value) in extra.as_object().unwrap() {
+                args[key] = value.clone();
+            }
+            let answer = raw(&root, "child", args, "child").await;
+            assert!(
+                !answer.ok,
+                "{op} with link {link:?} was accepted: {answer:?}"
+            );
+            let error = answer.error.unwrap_or_default();
+            assert!(error.contains("refused"), "{op}: {error}");
+        }
+    }
+    // 2. The session's own operations need the session's private key.
+    for op in [
+        "admit-local",
+        "up-local",
+        "settle-local",
+        "note-started",
+        "note-settled",
+        "reap",
+    ] {
+        let answer = raw(
+            &root,
+            "child",
+            json!({"op": op, "key": "nope"}),
+            "child-internal",
+        )
+        .await;
+        assert!(!answer.ok, "{op}: {answer:?}");
+        let answer = raw(&root, "child", json!({"op": op}), "child").await;
+        assert!(!answer.ok, "{op}: {answer:?}");
+    }
+    // 3. Nothing was written and the sleeper is untouched.
+    let after: Vec<Value> = root.log();
+    assert!(
+        after[before..]
+            .iter()
+            .all(|event| !event["type"].as_str().unwrap_or("").starts_with("child_")),
+        "a forged operation reached the log: {:?}",
+        &after[before..]
+    );
+    let list = child_list(&root).await;
+    let still = list
+        .iter()
+        .find(|kid| kid["child_id"] == child_id.as_str())
+        .unwrap();
+    assert_eq!(still["state"], "running");
+    assert_eq!(still["pid"], sleeper["pid"]);
+
+    // 4. No secret in a child's argv or in any file kelir writes.
+    let root_token = std::fs::read_to_string(root.session_dir.join("token")).unwrap();
+    let root_token = root_token.trim().to_string();
+    assert!(root_token.len() >= 32);
+    let mut child_tokens = Vec::new();
+    for kid in &list {
+        let session = kid["session"].as_str().unwrap();
+        let dir = root.state.join("sessions").join(session);
+        if let Ok(token) = std::fs::read_to_string(dir.join("token")) {
+            child_tokens.push(token.trim().to_string());
+        }
+        if kid["state"] != "running" {
+            continue;
+        }
+        let pid = kid["pid"].as_u64().unwrap() as u32;
+        let line = command_line_of(pid);
+        // On Windows the host's own DACL denies even this read (the PEB needs
+        // PROCESS_VM_READ), which is the hardening working; Linux shows it.
+        if cfg!(not(windows)) || !line.trim().is_empty() {
+            assert!(
+                line.trim_end().ends_with("child-host"),
+                "the child host's command line is only `child-host`: {line}"
+            );
+        }
+        assert!(!line.contains(&root_token), "{line}");
+    }
+    // The env dump finished: its tool result is in its own log.
+    let envdump = loop {
+        let list = child_list(&root).await;
+        let kid = list.iter().find(|kid| kid["state"] == "done").cloned();
+        if let Some(kid) = kid {
+            break kid;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let dump_dir = root
+        .state
+        .join("sessions")
+        .join(envdump["session"].as_str().unwrap());
+    let dump_log = std::fs::read_to_string(dump_dir.join("events.jsonl")).unwrap();
+    let dump: String = dump_log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["type"] == "tool_settled")
+        .map(|event| event["result"].to_string())
+        .collect();
+    assert!(dump.contains("KELIR_ROOT="), "{dump}");
+    assert!(
+        dump.contains(&format!(
+            "KELIR_PARENT={}",
+            envdump["session"].as_str().unwrap()
+        )),
+        "{dump}"
+    );
+    assert!(dump.contains("KELIR_DEPTH=1"), "{dump}");
+    assert!(dump.contains(&format!("KELIR_ROOT={}", root.id)), "{dump}");
+    assert!(
+        !dump.contains(&root_token),
+        "the root's token reached a tool child"
+    );
+    assert!(
+        !dump.contains("test-openrouter-key"),
+        "the provider key reached a tool child"
+    );
+    let mut files = Vec::new();
+    all_files(&root.state.join("sessions"), &mut files);
+    for path in files {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if name != "token" {
+            assert!(
+                !text.contains(&root_token),
+                "root token in {}",
+                path.display()
+            );
+            for token in &child_tokens {
+                assert!(!text.contains(token), "a child token in {}", path.display());
+            }
+        }
+        assert!(
+            !text.contains("test-openrouter-key") && !text.contains("test-go-key"),
+            "a provider key in {}",
+            path.display()
+        );
+    }
+    gate.notify_waiters();
+    root.kill().await;
+}
+
+#[tokio::test]
+async fn a_resumed_root_settles_the_children_it_cannot_reach_as_lost() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let held_gate = gate.clone();
+    let mock = Mock::start_routed(vec![], move |request| {
+        let task = task_of(request);
+        let results = tool_results(request).len();
+        if last_text(request).starts_with("go on") {
+            return Some(say("resumed"));
+        }
+        Some(match (task.as_str(), results) {
+            ("ROOT", 0) => bash(
+                "call_start",
+                "\"$KELIR_BIN\" run --child --background \"SLEEP lost\" >/dev/null; echo started",
+            ),
+            ("ROOT", _) => bash("call_long", "sleep 300"),
+            (other, _) if other.starts_with("SLEEP") => held(&held_gate),
+            _ => return None,
+        })
+    })
+    .await;
+    let mut root = LiveSession::start(&mock, &["run", "--keep", "--json", "ROOT"], "").await;
+    let list = wait_for_children(&root, 1).await;
+    let pids = pids_of(&list);
+    root.kill().await;
+    wait_gone(&pids, Duration::from_secs(30)).await;
+
+    let sandbox = Sandbox::from_live(&root);
+    let out = sandbox
+        .kelir(&mock.base_url(), &["resume", &root.id, "go on"], &[])
+        .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let log = sandbox.log(&root.id);
+    let settled = of_type(&log, "child_settled");
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert_eq!(settled[0]["outcome"], "lost");
+    assert_eq!(settled[0]["session"], list[0]["session"]);
+    gate.notify_waiters();
 }

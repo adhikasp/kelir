@@ -459,9 +459,7 @@ pub async fn ls(args: LsArgs) -> u8 {
     }
     // A session that is not running ended however its parent's registry says it
     // did (a kill leaves no `session_ended` behind).
-    let outcomes: std::collections::HashMap<String, String> = settled
-        .into_iter()
-        .collect();
+    let outcomes: std::collections::HashMap<String, String> = settled.into_iter().collect();
     for node in &mut nodes {
         if matches!(node.state.as_str(), "crashed" | "ended")
             && let Some(outcome) = outcomes.get(&node.id)
