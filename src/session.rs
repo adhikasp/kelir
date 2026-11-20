@@ -3232,7 +3232,22 @@ impl Session {
                 self.apply_list(list);
                 continue;
             }
-            let Some(incoming) = rx.recv().await else {
+            // A fetch still running must not strand its answer: blocking on
+            // `rx.recv()` here would keep the idle session from ever applying
+            // a list that lands a second later (the offline reason the banner
+            // and `state` owe a person, STEER-1 review N4). So while one runs,
+            // wait for a verb and for the next look at the fetch, whichever
+            // comes first; with none running, wait for the verb alone.
+            let incoming = match self.models_fetch.as_ref().map(Fetch::is_running) {
+                Some(true) => {
+                    tokio::select! {
+                        incoming = rx.recv() => incoming,
+                        _ = tokio::time::sleep(IDLE_MODELS_WAIT) => continue,
+                    }
+                }
+                _ => rx.recv().await,
+            };
+            let Some(incoming) = incoming else {
                 return Idle::End;
             };
             // Nothing is running in idle, so a `stop` has nothing to stop:
