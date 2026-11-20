@@ -242,7 +242,7 @@ fn builtin_provider(name: &str) -> Option<RawProvider> {
 pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     let explicit = explicit
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("KELIR_CONFIG").map(PathBuf::from))
+        .or_else(|| crate::envs::var_os("KELIR_CONFIG").map(PathBuf::from))
         .filter(|p| !p.as_os_str().is_empty());
 
     let mut merged = toml::Value::Table(Default::default());
@@ -471,7 +471,7 @@ fn step_cap(configured: Option<u32>) -> Option<u32> {
 /// Seconds between `config.toml` and `KELIR_PROMOTE_AFTER`. Zero disables
 /// promotion: a long call then runs to completion, as it did before M4.
 fn promote_after(configured: Option<u64>) -> Result<std::time::Duration, ConfigError> {
-    let seconds = match std::env::var_os("KELIR_PROMOTE_AFTER") {
+    let seconds = match crate::envs::var_os("KELIR_PROMOTE_AFTER") {
         Some(value) => {
             let text = value.to_string_lossy().trim().to_string();
             text.parse::<u64>().map_err(|_| {
@@ -493,7 +493,7 @@ impl Config {
             .cloned()
             .ok_or_else(|| unknown_provider(name))?;
         // A stand-in for either provider (the mock server in tests, a proxy).
-        if let Some(url) = std::env::var_os("KELIR_BASE_URL")
+        if let Some(url) = crate::envs::var_os("KELIR_BASE_URL")
             .map(|url| url.to_string_lossy().trim().to_string())
             .filter(|url| !url.is_empty())
         {
@@ -539,8 +539,7 @@ fn expand_home(path: &str) -> PathBuf {
 }
 
 fn secret_from_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
+    crate::envs::named(name)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
@@ -682,7 +681,7 @@ pub fn default_shell() -> Vec<String> {
 }
 
 fn on_path(program: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
+    let Some(path) = crate::envs::var_os("PATH") else {
         return false;
     };
     for dir in std::env::split_paths(&path) {

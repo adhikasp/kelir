@@ -202,7 +202,7 @@ fn fits(path: &Path) -> bool {
 /// temp dir is only used when there is no runtime dir.
 #[cfg(unix)]
 fn fallback_path(id: &str) -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
+    let base = crate::envs::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|dir| dir.is_dir())
         .unwrap_or_else(std::env::temp_dir);

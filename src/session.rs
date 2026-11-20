@@ -137,7 +137,7 @@ pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
 /// never edited.
 pub async fn view(args: crate::cli::ViewArgs) -> u8 {
     let Some(address) =
-        std::env::var_os("KELIR_SOCK").map(|value| value.to_string_lossy().into_owned())
+        crate::envs::var_os("KELIR_SOCK").map(|value| value.to_string_lossy().into_owned())
     else {
         eprintln!("kelir: view: no session: run it from a kelir tool call (KELIR_SOCK is not set)");
         return 1;
@@ -416,7 +416,7 @@ fn compact_queued(focus: &Option<String>) -> String {
 /// Is this process armed to die at `point`? The documented test hook
 /// (`KELIR_CRASH_AT=<point>`) is a no-op unless it names this point exactly.
 fn crash_armed(point: &str) -> bool {
-    std::env::var_os("KELIR_CRASH_AT")
+    crate::envs::var_os("KELIR_CRASH_AT")
         .map(|value| value.to_string_lossy().trim() == point)
         .unwrap_or(false)
 }

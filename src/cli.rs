@@ -38,6 +38,8 @@ pub enum Command {
     Bg(BgArgs),
     /// Show which key each provider would use (never the key itself).
     Doctor(DoctorArgs),
+    /// Read kelir's own reference (config, CLI, verbs, files, …).
+    Docs(DocsArgs),
     /// Internal: the background-job shim. Not for humans.
     #[command(hide = true, name = "bg-shim")]
     BgShim(BgShimArgs),
@@ -190,6 +192,29 @@ pub struct ViewArgs {
     /// first), or any path.
     #[arg(value_name = "PATH")]
     pub path: String,
+}
+
+/// `kelir docs [topic]`: the reference, embedded in this binary, so a session
+/// with no checkout on disk can still read how to operate kelir.
+#[derive(Debug, Args, Clone, Default)]
+#[command(after_help = "Exit 0 on a read, 1 for an unknown topic or no search hit.")]
+pub struct DocsArgs {
+    /// The topic: `config`, `cli`, `verbs`, `env`, `events`, `files`, …
+    #[arg(value_name = "TOPIC")]
+    pub topic: Option<String>,
+    /// List the topics and their one-line summaries.
+    #[arg(long)]
+    pub list: bool,
+    /// Ranked search over every topic: which file mentions these words.
+    #[arg(long, value_name = "WORDS")]
+    pub find: Option<String>,
+    /// Rewrite the generated blocks (`cli`, `env`, `events`, `verbs`, `config`)
+    /// from the code. Needs a checkout.
+    #[arg(long)]
+    pub generate: bool,
+    /// Fail when a generated block is stale: CI and the drift test.
+    #[arg(long)]
+    pub check: bool,
 }
 
 /// `kelir doctor`: what the two providers are wired to, and where each key

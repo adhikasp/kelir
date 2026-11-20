@@ -72,20 +72,31 @@ async fn session_started_carries_the_real_sources_and_the_system_has_them() {
 
     let started = run.one_event("session_started");
     let sources = started["sources"].as_array().expect("sources[]");
-    // The base prompt, the instruction file and the skill: all three are
-    // recorded, each with a real path and a hash.
+    // The base prompt, the instruction file and both skills: all recorded,
+    // each with a hash, and each with a path only when there is a file behind
+    // it (the builtin `kelir` skill and the embedded prompt have none).
     let names: Vec<&str> = sources
         .iter()
         .map(|source| source["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["prompt.md", "AGENTS.md", "sift"], "{sources:?}");
+    assert_eq!(
+        names,
+        vec!["prompt.md", "AGENTS.md", "kelir", "sift"],
+        "{sources:?}"
+    );
     // The embedded default has no path at all: never the sentinel `embedded`,
     // which a reader could take for a file (M5-A fixes F2b).
     assert_eq!(sources[0]["path"], "");
     assert_eq!(sources[0]["kind"], "prompt");
-    for source in &sources[1..] {
+    // The builtin skill is the binary's own (STEER-11): listed like a skill,
+    // with no path, so there is nothing to watch or re-read.
+    assert_eq!(sources[2]["path"], "");
+    assert_eq!(sources[2]["kind"], "skill");
+    for source in [&sources[1], &sources[3]] {
         let path = Path::new(source["path"].as_str().unwrap());
         assert!(path.is_file(), "{} is not a file", path.display());
+    }
+    for source in sources {
         assert_eq!(source["hash"].as_str().unwrap().len(), 16);
     }
     assert!(sources[1]["path"].as_str().unwrap().ends_with("AGENTS.md"));

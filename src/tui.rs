@@ -2209,7 +2209,7 @@ impl Tui {
             // A documented, test-only panic with the terminal fully owned (raw
             // mode on, bracketed paste on, a painted viewport): it exercises
             // the restore path a real crash takes (`tests/e2e_tui.rs`).
-            if std::env::var_os("KELIR_TEST_PANIC").is_some() {
+            if crate::envs::var_os("KELIR_TEST_PANIC").is_some() {
                 panic!("KELIR_TEST_PANIC: injected panic to prove the terminal is restored");
             }
             if self.app.quit {

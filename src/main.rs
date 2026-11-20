@@ -46,6 +46,7 @@ async fn main() -> ExitCode {
         Some(Command::View(args)) => kelir::session::view(args).await,
         Some(Command::Bg(args)) => kelir::bg::cli(args.command).await,
         Some(Command::Doctor(args)) => kelir::doctor::doctor(args),
+        Some(Command::Docs(args)) => kelir::docs::cli(&args),
         Some(Command::BgShim(args)) => kelir::bg::shim_main(args).await,
         // `kelir` with no subcommand is the interactive session.
         None => kelir::session::tui(cli.tui).await,
