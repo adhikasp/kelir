@@ -368,6 +368,8 @@ struct Session {
     /// Job ids whose status file was refused (unsigned or badly signed): the log
     /// records each once, so a child rewriting a file cannot grow it.
     refused_status: std::collections::HashSet<String>,
+    /// The highest signed sequence number believed per job.
+    seen_seq: std::collections::HashMap<String, u64>,
 }
 
 /// A compaction asked for by someone; it applies at the next `before_step`.
@@ -1523,6 +1525,7 @@ impl Session {
             governor: prepared.governor,
             trust,
             refused_status: std::collections::HashSet::new(),
+            seen_seq: std::collections::HashMap::new(),
         };
         // The watcher re-checks the sources the frozen system was rendered
         // from; on a resume it is rebuilt from the log's `sources[]` *and* the
@@ -2097,19 +2100,14 @@ impl Session {
         match crate::trust::spawn_request(request)
             .and_then(|spawn| crate::bg::spawn_shim_for_client(&self.trust, &spawn))
         {
-            Ok(spawned) => Response::ok(
-                "bg-spawn",
-                0,
-                "now",
-                json!({"id": spawned.id, "capability": spawned.capability, "key": spawned.key}),
-            ),
+            Ok(spawned) => Response::ok("bg-spawn", 0, "now", json!({"id": spawned.id})),
             Err(error) => Response::error(error),
         }
     }
 
-    /// `bg-claim`: mint one job's id and capability, and answer with both. The
-    /// caller (a `kelir bg run` inside a call) puts the id on its own shim and
-    /// the capability in its own environment; neither is ever an argv.
+    /// `bg-claim`: reserve one job id, and answer with that id only (an
+    /// acknowledgement). `kelir bg run` no longer uses it — it asks `bg-spawn`,
+    /// and the session starts the shim.
     fn bg_claim_answer(&mut self, request: &Request) -> Response {
         let call = request
             .args
@@ -2122,15 +2120,10 @@ impl Session {
             // flood finite either way.
             .filter(|call| self.live_calls.iter().any(|live| live == call));
         match self.trust.claim(call) {
-            Ok((id, capability)) => {
-                let key = self.trust.key(&id).unwrap_or_default();
-                Response::ok(
-                    "bg-claim",
-                    0,
-                    "now",
-                    json!({"id": id, "capability": capability, "key": key}),
-                )
-            }
+            // An acknowledgement: the id is not a secret, the capability and
+            // the signing key are the session's and the shim's alone, and no
+            // verb returns either.
+            Ok((id, _capability)) => Response::ok("bg-claim", 0, "now", json!({"id": id})),
             Err(error) => Response::error(error),
         }
     }
@@ -2701,12 +2694,35 @@ impl Session {
         // the snapshot is held to the same rule.
         let dir = self.trust.bg_dir();
         let file = crate::bg::Status::read(&crate::bg::status_path(&dir, &id));
-        let candidate = file.as_ref().unwrap_or(reported);
+        // A final record is terminal: the shim also keeps it beside the status
+        // file, and a validly signed final record wins over whatever the status
+        // file now says, so putting an older record back cannot un-settle the
+        // job (a replay can withhold a result, never change it).
+        let last = crate::bg::Status::read(&crate::bg::final_path(&dir, &id))
+            .filter(|last| last.id == id && last.settled() && self.trust.seal(last) == Seal::Good);
+        let candidate = last.as_ref().or(file.as_ref()).unwrap_or(reported);
         let sealed = if candidate.id == id {
             self.trust.seal(candidate)
         } else {
             Seal::Forged
         };
+        // Sequence numbers only go up: a record older than one already
+        // believed is a replay.
+        if sealed == Seal::Good {
+            let seen = self.seen_seq.entry(id.clone()).or_insert(0);
+            if candidate.seq < *seen {
+                return Ok(false);
+            }
+            *seen = candidate.seq;
+        }
+        // A signed record still cannot point the session at a file outside its
+        // own `bg/`: its `out` is quoted into the wake message.
+        if sealed == Seal::Good
+            && !candidate.out.trim().is_empty()
+            && !self.trust.inside_bg(&candidate.out)
+        {
+            return Ok(false);
+        }
         let status = match sealed {
             Seal::Good => crate::bg::observed_in(&dir, candidate),
             Seal::Unowned => return Ok(false),
@@ -2727,7 +2743,7 @@ impl Session {
                         "its status file's signature is not the job's"
                     };
                     let message = format!(
-                        "bg: the status file of `{id}` was ignored: {why}, so it was not written                          by that job's shim"
+                        "bg: the status file of `{id}` was ignored: {why}, so it was not written by that job's shim"
                     );
                     self.refuse_verb("bg", &json!({"id": id}), "job", &message)?;
                 }
@@ -2799,7 +2815,7 @@ impl Session {
         lost.finished = Some(crate::event::now_ts());
         lost.call = call;
         lost.error = Some(
-            "the session was resumed after this job started, so its result could not be              authenticated; read its output"
+            "the session was resumed after this job started, so its result could not be authenticated; read its output"
                 .into(),
         );
         Some(lost)
@@ -5060,6 +5076,7 @@ mod tests {
             // nothing in these tests sends a `bg` or `cancel` verb.
             trust: std::sync::Arc::new(crate::trust::Trust::new(dir_for_trust(), String::new())),
             refused_status: std::collections::HashSet::new(),
+            seen_seq: std::collections::HashMap::new(),
         }
     }
 

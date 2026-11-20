@@ -75,19 +75,26 @@ Reaching the socket is **not** authorisation. Two things gate every request:
   in-memory registry *and* in the log (`bg_started`, and `tool_started.dir` for a call), and
   rebuilt from the log on resume. `bg` reports, `cancel` and `bg-spawn` name an id, and the
   session answers only for one in the registry. A `bg` report must *also* carry **that job's
-  capability** (32 random bytes returned to the process that claimed the job), because every tool
-  child holds the session token by design. A request that names an unknown id, an id that is not
+  capability** (32 random bytes the session generates and hands only to that job's shim), because
+  every tool child holds the session token by design. A request that names an unknown id, an id that is not
   a job (a call's own id, a job adopted by a resume) or the wrong capability is refused with a
   clear error and a `verb` event with boundary `rejected`, rate-limited to `32` such events per
-  session. `kelir bg run` asks for its id with the internal `bg-claim` verb (it starts nothing);
-  the number of ids one session mints on request is bounded (`256`). Every job directory and
+  session. **No secret ever leaves the session or the job's own shim:** neither the capability nor
+  the signing key is returned by any verb. `kelir bg run` sends the internal `bg-spawn` verb with
+  its command, working directory and environment, and the **session** mints the id, starts the
+  shim and hands it the key and capability on the shim's stdin pipe; the answer is the id and
+  nothing else. A `bg-spawn` that names a job id (owned or not) is refused, and `bg-claim` is an
+  acknowledgement (an id) only. No verb reads or echoes a caller-named path: a settled job's `out`
+  must lie inside the session's own `bg/`. The number of ids one session mints on request is
+  bounded (`256`). Every job directory and
   status/out path in a request must resolve **inside the session's own `bg/` or `commands/`**,
   canonicalised: `..`, a symlink out of it and, on Windows, a UNC or another drive's path are all
   refused.
 - **A status file is evidence only if the job's shim signed it.** Writing `bg/<id>.status` is
   within every tool child's rights, so the file's existence or contents prove nothing. The
   session mints an Ed25519 key pair per job (per bash call too); the private key goes to the
-  session's memory and to that job's shim **over an inherited pipe** (not argv, not the
+  session's memory and to that job's shim **over an inherited pipe** (the only copy outside the
+  session, and never returned to a caller) (not argv, not the
   environment, which a same-user process reads through `/proc/<pid>/environ` or the PEB, not a
   file), and the shim does not pass it to the command it runs. The shim signs every status record
   (`sig`, hex, over the record without it); the session verifies every record it folds into the
@@ -95,11 +102,21 @@ Reaching the socket is **not** authorisation. Two things gate every request:
   which `bg_started` records (`pubkey`) so a resume can verify a shim that outlived its session.
   An unsigned or badly signed record is ignored and recorded once per id as a refused `verb`
   event. After a resume, a job whose public key the log does not hold cannot be authenticated and
-  is reported `lost`.
+  is reported `lost`. Every signed record carries a **sequence number** (covered by the signature,
+  with the job id) that only goes up; the session refuses a record older than one it has believed,
+  and a settled job's final record is also kept in `bg/<id>.final`, which wins over the status
+  file, so putting an older `running` record back cannot un-settle a job (a replay can withhold a
+  result, never change one).
   **What this does not cover.** `kelir bg ls|out|wait|cancel` run in a tool child or a terminal,
   hold no key, and read the files as a view; they never write the log. A process of the same user
-  that can read another process's memory (a debugger, `ReadProcessMemory`, `/proc/<pid>/mem`
-  where ptrace is allowed) can read a shim's key; and `events.jsonl` and the session directory
+  that can read another process's memory can read a shim's key. A job's shim narrows this as far
+  as the platform lets an unprivileged process: on Windows it removes `PROCESS_VM_READ` and
+  friends (and `WRITE_DAC`) for its own user with an Owner Rights DACL, and on Linux it clears
+  `PR_SET_DUMPABLE`; it holds the key only for its lifetime and overwrites its own copy when it
+  exits. That stops a sibling tool child's ordinary `ReadProcessMemory`/`/proc/<pid>/mem` read. It
+  does **not** stop an elevated administrator enabling `SeDebugPrivilege`, root, a debugger run
+  by the same user as the shim's parent, or a read of the session's own memory, which holds every
+  key, so those stay outside the boundary; and `events.jsonl` and the session directory
   are writable by any same-user process, so code that deliberately rewrites the log (a forged
   `bg_started.pubkey` or `tool_started.dir`) is inside the boundary. The boundary is other users,
   other sessions, stray processes and **the model's own tools acting through the files and the

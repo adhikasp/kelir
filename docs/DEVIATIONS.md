@@ -1352,6 +1352,19 @@ this differs from the spec text, or needed a call the brief left open:
   reads: steer7b S-A), and records the public half in `bg_started.pubkey`. A bash call's id is
   `<seq>-<step>-<n>`, not a random id (steer7b S-B2): two sessions share those names, which is
   harmless because each session has its own `bg/`, registry and keys.
+- **No secret ever leaves the session or the job's own shim (steer7fix3, steer7c review B1/B2).**
+  Round 2 handed the per-job capability and signing key to the process that claimed the job, and
+  `bg-spawn` for an existing id answered any token holder with them; both let a tool child sign
+  records the session believed. Now the session starts every job's shim itself (`bg-spawn`, with
+  the client's environment, cwd and command), gives it the key and capability on its stdin pipe
+  and answers with the id only; `bg-spawn` naming an id is refused, `bg-claim` returns an
+  acknowledgement, and `out` must be inside `bg/`. Costs: a job started by `kelir bg run` is
+  parented to the session (not the tool child), and the shim reports itself (it holds the
+  capability). Signed records carry a monotonic sequence number and a final copy in
+  `bg/<id>.final`, which beats a replayed older record. The Windows shim also closes its process to
+  same-user memory reads (Owner Rights DACL) and clears the key on exit; an elevated administrator
+  with `SeDebugPrivilege`, or root, is still outside the boundary. Per-id refusal budgets
+  (review nit) are not done: the budget stays shared (32 events per session).
 - **What the boundary is, honestly.** It is other users, other sessions, stray processes and the
   model's own tools acting through the files and the socket kelir exposes. It is not same-user
   code that reads another process's memory (a debugger, `ReadProcessMemory`) or rewrites

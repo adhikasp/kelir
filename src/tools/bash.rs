@@ -71,6 +71,8 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
         // file with it, and the session ignores a status that is not. It goes
         // down a pipe, never to an argv, the environment or a file.
         key: ctx.trust.as_ref().and_then(|trust| trust.key(dir)),
+        capability: None,
+        env: None,
         // The call runs where the session (or `--cwd`, or a resumed session's
         // log) says, not in whatever directory the session process happens to
         // have (M4 review F2).

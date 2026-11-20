@@ -49,6 +49,7 @@ the value; `session_started.key_origin` records the same.
 | variable | effect |
 |---|---|
 | `KELIR_SOCK` | the session socket (a Unix socket path or a pipe name), so `kelir ctl`/`view`/`bg` reach the session |
+| `KELIR_TOKEN` | the session's socket token: a tool child sends it with every request to the session |
 | `KELIR_SESSION_DIR` | the session's directory |
 | `KELIR_CALL_ID` | the provider call id of the bash call |
 | `KELIR_BIN` | the kelir binary, so `kelir bg`/`kelir view` work off `PATH` |

@@ -120,6 +120,12 @@ pub struct Status {
     /// the job's public key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sig: Option<String>,
+    /// A counter that only goes up, bound into the signature together with the
+    /// job id: every signed write takes a higher one than any before it, so a
+    /// reader that has seen a record refuses an older one, and a final record
+    /// (exited, cancelled, lost) is terminal (STEER-7 review round 3).
+    #[serde(default)]
+    pub seq: u64,
 }
 
 impl Status {
@@ -143,6 +149,7 @@ impl Status {
             job: None,
             error: None,
             sig: None,
+            seq: 0,
         }
     }
 
@@ -171,11 +178,21 @@ impl Status {
 
     /// Write the record signed with `key` (unsigned when there is none: a job
     /// started by hand has no session to authenticate to).
+    ///
+    /// A signed write takes the next sequence number, and a final record is
+    /// also written beside the status file ([`final_path`]) so that putting an
+    /// older record back over the status file cannot un-settle the job.
     pub fn write_with(&self, path: &Path, key: Option<&str>) -> std::io::Result<()> {
         match key.filter(|key| !key.is_empty()) {
             Some(key) => {
                 let mut signed = self.clone();
+                signed.seq = next_seq(self.seq);
                 signed.sign(key);
+                if signed.settled() {
+                    // Final first: if the status write is cut short, the
+                    // terminal record still exists.
+                    let _ = signed.write(&path.with_extension("final"));
+                }
                 signed.write(path)
             }
             None => self.write(path),
@@ -347,6 +364,33 @@ pub fn root() -> PathBuf {
     crate::paths::state_dir().join("bg")
 }
 
+/// The next signed-record sequence number: strictly above `floor` and above
+/// every one this process handed out, and (the wall clock in nanoseconds) above
+/// whatever an earlier process of the same job used.
+fn next_seq(floor: u64) -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos() as u64)
+        .unwrap_or(0);
+    let want = now.max(floor.saturating_add(1));
+    let mut last = LAST.load(Ordering::Relaxed);
+    loop {
+        let next = want.max(last.saturating_add(1));
+        match LAST.compare_exchange(last, next, Ordering::SeqCst, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(seen) => last = seen,
+        }
+    }
+}
+
+/// Where a job's final record is also kept: `<id>.final`, written by the shim
+/// (or the session's `cancel`) when the job settles.
+pub fn final_path(dir: &Path, id: &str) -> PathBuf {
+    status_path(dir, id).with_extension("final")
+}
+
 pub fn status_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.status"))
 }
@@ -499,6 +543,13 @@ pub struct Launch<'a> {
     /// the environment (a same-user child reads both), not a file. The shim
     /// does not pass it on to the command it runs.
     pub key: Option<String>,
+    /// This job's capability, the second line of the same pipe: the shim
+    /// reports itself to the session with it. Never argv, never environment.
+    pub capability: Option<String>,
+    /// The environment the shim and its command get, when the starter is the
+    /// session acting for a client: exactly the client's own (the session's
+    /// environment is not the client's and must not leak into its job).
+    pub env: Option<Vec<(String, String)>>,
     /// The directory the command runs in. The shim is started there and the
     /// command inherits it, so a `--cwd` session (and a resumed session's
     /// recorded cwd) is the directory its commands see (M4 review F2).
@@ -511,6 +562,10 @@ pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> 
     let binary = std::env::current_exe()
         .map_err(|error| format!("cannot find the kelir binary: {error}"))?;
     let mut command = tokio::process::Command::new(binary);
+    if let Some(env) = &launch.env {
+        command.env_clear();
+        command.envs(env.iter().map(|(name, value)| (name, value)));
+    }
     command
         .arg("bg-shim")
         .arg("--dir")
@@ -563,12 +618,14 @@ pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> 
     let mut stdin = std::process::Stdio::null();
     if let Some(key) = launch.key.as_deref().filter(|key| !key.is_empty()) {
         use std::io::Write as _;
+        let capability = launch.capability.as_deref().unwrap_or("");
         let (reader, mut writer) =
             std::io::pipe().map_err(|error| format!("cannot make the key pipe: {error}"))?;
         writer
             .write_all(
                 format!(
                     "{key}
+{capability}
 "
                 )
                 .as_bytes(),
@@ -654,6 +711,9 @@ pub struct SpawnRequest {
     /// the call does, and the session is not there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// The client's environment: the job runs in it, not in the session's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
 }
 
 impl SpawnRequest {
@@ -670,6 +730,7 @@ impl SpawnRequest {
             sock: launch.sock.clone(),
             token: launch.token.clone(),
             cwd: launch.cwd.as_ref().map(|cwd| path_string(cwd)),
+            env: crate::envs::all(),
         }
     }
 
@@ -693,6 +754,8 @@ impl SpawnRequest {
             sock: self.sock.clone(),
             token: self.token.clone(),
             key: None,
+            capability: None,
+            env: Some(self.env.clone()),
             cwd: self.cwd.as_ref().map(PathBuf::from),
         }
     }
@@ -768,46 +831,50 @@ fn spawn_shim(launch: &Launch<'_>, escape: bool) -> Result<(), String> {
         .map_err(|error| format!("cannot start the shim: {error}"))
 }
 
-/// How the session answers a spawn: the id it minted (or confirmed) and the
-/// capability the shim now holds. Both are the session's, never the caller's
-/// (STEER-7 review B1); neither is logged.
+/// How the session answers a spawn: the id it minted, and nothing else. The
+/// job's capability and signing key go from the session to the shim it starts
+/// (over the shim's stdin pipe) and to nobody else: no verb returns either, so
+/// no tool child, which holds the session token, can ever obtain one (STEER-7
+/// review round 3, B1/B2).
 #[derive(Debug, Clone, Serialize)]
 pub struct Spawned {
     pub id: String,
-    pub capability: String,
-    /// The job's private signing key: handed to the shim over a pipe, never
-    /// logged and never put on a command line.
-    pub key: String,
 }
 
-/// The session's half of [`SpawnRequest`]: start the shim for a client that
-/// cannot start it itself, and answer at once (`kelir bg run` waits for the
-/// status file; the session must not block on a job).
+/// The session's half of [`SpawnRequest`]: start the shim for a client and
+/// answer at once (`kelir bg run` waits for the status file; the session must
+/// not block on a job).
 ///
-/// The session mints the id and the capability; a named id must already be one
-/// of this session's own jobs (`trust::check_spawn` said so), and an unnamed one
-/// is minted here. The capability goes to the shim's environment and back to the
-/// client's own environment, never onto a command line.
+/// The session mints the id, the capability and the key, always: a request
+/// that names an id is refused by `trust::check_spawn`, so there is no way to
+/// ask for an existing job's secrets. Where the job lives (`bg/`, its output
+/// file) is the session's, never the request's. The secrets reach the shim over
+/// an inherited pipe, never an argv or the environment.
 pub fn spawn_shim_for_client(
     trust: &crate::trust::Trust,
     spawn: &SpawnRequest,
 ) -> Result<Spawned, String> {
-    let (id, capability, fresh) = match spawn.id.as_deref().map(str::trim) {
-        // A re-spawn of a job this session already owns: its capability stays.
-        Some(id) if !id.is_empty() => match trust.capability(id) {
-            Some(capability) => (id.to_string(), capability, false),
-            None => return Err(format!("bg-spawn: this session does not own `{id}`")),
-        },
-        // A first spawn: the session is the issuer.
-        _ => {
-            let (id, capability) = trust.claim(spawn.call.as_deref())?;
-            (id, capability, true)
+    if spawn.id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+        return Err("bg-spawn: the session mints job ids; a request cannot name one".to_string());
+    }
+    let (id, capability) = trust.claim(spawn.call.as_deref())?;
+    let dir = trust.bg_dir();
+    let shell_args: Vec<String> = spawn.shell.iter().skip(1).cloned().collect();
+    let cmd_file = match crate::shellcmd::input(&spawn.cmd, &shell_args, &dir, &id) {
+        Ok(crate::shellcmd::ShellInput::Argument(_)) => None,
+        Ok(crate::shellcmd::ShellInput::Script { path, .. }) => Some(path),
+        Err(error) => {
+            trust.forget(&id);
+            return Err(format!("bg-spawn: {error}"));
         }
     };
-    let launch = Launch {
-        key: trust.key(&id),
-        ..spawn.launch(&id)
-    };
+    let mut launch = spawn.launch(&id);
+    launch.out = out_path(&dir, &id);
+    launch.dir = dir;
+    launch.cmd_file = cmd_file;
+    launch.job = Some(job_name("job", &id));
+    launch.key = trust.key(&id);
+    launch.capability = Some(capability);
     // The session can itself be inside a job that forbids breakaway (a test
     // harness, a scheduler) while the client is in a call's job. Escape it if
     // the OS allows; otherwise spawn into the session's own job, which is still
@@ -818,17 +885,10 @@ pub fn spawn_shim_for_client(
     };
     if let Err(error) = spawned {
         // Nothing was started: do not leave a job nobody can report for.
-        if fresh {
-            trust.forget(&id);
-        }
+        trust.forget(&id);
         return Err(error);
     }
-    let key = trust.key(&id).unwrap_or_default();
-    Ok(Spawned {
-        id,
-        capability,
-        key,
-    })
+    Ok(Spawned { id })
 }
 
 // ------------------------------------------------------------- what the model sees
@@ -918,8 +978,19 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     let dir = args.dir.clone();
     // The status key, read once from the pipe the starter wrote it to; it stays
     // in this process's memory and is never handed to the command.
-    let key = if args.key_stdin { read_key() } else { None };
-    let key = key.as_deref();
+    let secrets = if args.key_stdin {
+        read_secrets()
+    } else {
+        Secrets::default()
+    };
+    let key = secrets.key.as_deref();
+    // A job's shim holds the signing key for as long as the job lives: close
+    // the process to its own user's ordinary memory reads (Windows; on Unix
+    // `/proc/<pid>/mem` is closed to a non-ptrace-capable sibling by the
+    // kernel's ptrace rules where Yama is on, and by dumpable below).
+    if key.is_some() && args.kind == KIND_JOB {
+        harden_process();
+    }
     if let Err(error) = std::fs::create_dir_all(&dir) {
         eprintln!("kelir bg-shim: cannot create {}: {error}", dir.display());
         return 1;
@@ -1137,6 +1208,17 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     if let Err(error) = status.write_with(&status_path(&dir, &args.id), key) {
         eprintln!("kelir bg-shim: cannot write the status file: {error}");
     }
+    // Report to the session ourselves: the capability is ours alone (it came
+    // down the pipe), so this is the report only this job's shim can make.
+    if let (Some(sock), Some(capability)) = (args.sock.as_deref(), secrets.capability.as_deref())
+        && args.kind == KIND_JOB
+    {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(3),
+            notify(&status, sock, Some(capability)),
+        )
+        .await;
+    }
 
     // The owner watch: a session that dies without promoting this call must
     // not leave the tree behind. Promotion sets the marker and the shim keeps
@@ -1201,13 +1283,60 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     }
 }
 
-/// The status key, from the first line of stdin (the pipe the starter wrote).
-fn read_key() -> Option<String> {
+/// Make this process's memory unreadable to other processes of the same user,
+/// as far as the platform allows. Best effort: a failure is a note on stderr,
+/// not a reason to not run the job.
+fn harden_process() {
+    #[cfg(windows)]
+    if let Err(error) = crate::proc::win::deny_same_user_memory_access() {
+        eprintln!("kelir bg-shim: {error}");
+    }
+    #[cfg(target_os = "linux")]
+    // SAFETY: prctl(PR_SET_DUMPABLE, 0) only changes this process's flag.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
+}
+
+/// What the starter wrote down the shim's stdin pipe: the signing key and the
+/// capability, one per line. Held only in this process; overwritten when the
+/// shim ends. (A process of the same user that can read this process's memory
+/// can read them while the shim lives: see SPEC, "what the boundary is".)
+#[derive(Default)]
+struct Secrets {
+    key: Option<String>,
+    capability: Option<String>,
+}
+
+impl Drop for Secrets {
+    fn drop(&mut self) {
+        for secret in [self.key.take(), self.capability.take()]
+            .into_iter()
+            .flatten()
+        {
+            let mut bytes = secret.into_bytes();
+            bytes.fill(0);
+            std::hint::black_box(&bytes);
+        }
+    }
+}
+
+fn read_secrets() -> Secrets {
     use std::io::BufRead as _;
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line).ok()?;
-    let key = line.trim().to_string();
-    (!key.is_empty()).then_some(key)
+    let mut input = std::io::stdin().lock();
+    let mut line = || {
+        let mut text = String::new();
+        input.read_line(&mut text).ok()?;
+        let trimmed = text.trim().to_string();
+        let kept = (!trimmed.is_empty()).then(|| trimmed.clone());
+        let mut bytes = text.into_bytes();
+        bytes.fill(0);
+        std::hint::black_box(&bytes);
+        kept
+    };
+    let key = line();
+    let capability = line();
+    Secrets { key, capability }
 }
 
 /// The command has exited; stay as the tree's owner while the tree still has a
@@ -1378,73 +1507,72 @@ async fn run(args: BgRunArgs) -> u8 {
         }
     };
     let dir = root();
-    // The id and the capability come from the session when there is one: it is
-    // the only issuer (STEER-7 review B1), and it is what makes the shim's
-    // report acceptable. A `bg run` with no session (a bare shell) mints its
-    // own, and its report has nobody to satisfy — the file is the record.
-    let session = match spawned_by_session().await {
-        Ok(session) => session,
-        Err(error) => {
+    // With a session, the session starts the shim and mints everything the
+    // job is trusted with (id, capability, signing key): none of it is ever
+    // returned to this process, which is a tool child (STEER-7 review round 3).
+    // Without one (a bare shell) the job is a local record and this process
+    // starts the shim itself.
+    let id = if let Some(sock) = session_socket() {
+        let spawn = SpawnRequest {
+            dir: path_string(&dir),
+            id: None,
+            out: String::new(),
+            cmd: command.clone(),
+            shell,
+            kind: KIND_JOB.to_string(),
+            call: crate::envs::var("KELIR_CALL_ID")
+                .map(|call| call.trim().to_string())
+                .filter(|call| !call.is_empty()),
+            job: None,
+            sock: Some(sock.clone()),
+            token: crate::trust::token_from_env(),
+            cwd: std::env::current_dir().ok().map(|cwd| path_string(&cwd)),
+            env: crate::envs::all(),
+        };
+        match spawned_by_session(&sock, &spawn).await {
+            Ok(id) => id,
+            Err(error) => {
+                eprintln!("kelir: bg run: {error}");
+                return 1;
+            }
+        }
+    } else {
+        let id = new_id();
+        let out = out_path(&dir, &id);
+        let shell_args: Vec<String> = shell.iter().skip(1).cloned().collect();
+        let cmd_file = match crate::shellcmd::input(&command, &shell_args, &dir, &id) {
+            Ok(crate::shellcmd::ShellInput::Argument(_)) => None,
+            Ok(crate::shellcmd::ShellInput::Script { path, .. }) => Some(path),
+            Err(error) => {
+                eprintln!("kelir: bg run: {error}");
+                return 1;
+            }
+        };
+        let launch = Launch {
+            dir: dir.clone(),
+            id: id.clone(),
+            out,
+            cmd: command.clone(),
+            cmd_file,
+            shell,
+            kind: KIND_JOB,
+            // A job belongs to nobody: it outlives whatever started it.
+            owner: None,
+            call: None,
+            job: Some(job_name("job", &id)),
+            sock: None,
+            token: None,
+            key: None,
+            capability: None,
+            env: None,
+            cwd: std::env::current_dir().ok(),
+        };
+        if let Err(error) = start_shim(&launch).await {
             eprintln!("kelir: bg run: {error}");
             return 1;
         }
+        id
     };
-    let id = match &session {
-        Some(spawned) => spawned.id.clone(),
-        None => new_id(),
-    };
-    let out = out_path(&dir, &id);
-    let call = crate::envs::var("KELIR_CALL_ID")
-        .map(|call| call.trim().to_string())
-        .filter(|call| !call.is_empty());
-    // A job command takes the same route as a bash call: a file beside the
-    // job's output (always on Windows), so neither the shim's spawn nor the
-    // shell's gets a command line past the Windows limit, and no backslash
-    // crosses msys' argv rewriting (`shellcmd`).
-    let shell_args: Vec<String> = shell.iter().skip(1).cloned().collect();
-    let cmd_file = match crate::shellcmd::input(&command, &shell_args, &dir, &id) {
-        Ok(crate::shellcmd::ShellInput::Argument(_)) => None,
-        Ok(crate::shellcmd::ShellInput::Script { path, .. }) => Some(path),
-        Err(error) => {
-            eprintln!("kelir: bg run: {error}");
-            return 1;
-        }
-    };
-    let launch = Launch {
-        dir: dir.clone(),
-        id: id.clone(),
-        out: out.clone(),
-        cmd: command.clone(),
-        cmd_file,
-        shell,
-        kind: KIND_JOB,
-        // A job belongs to nobody: it outlives whatever started it.
-        owner: None,
-        call,
-        job: Some(job_name("job", &id)),
-        // A job started from inside a call inherits `KELIR_SOCK` from the CLI's
-        // own environment; a job started by hand has no session to talk to. The
-        // shim passes it on to the command, and the session uses it when the
-        // job has to be started from outside a call's Job Object.
-        sock: crate::envs::var("KELIR_SOCK")
-            .map(|sock| sock.trim().to_string())
-            .filter(|sock| !sock.is_empty()),
-        // ...and its token, so the report this job sends is authenticated
-        // (STEER-7). It travels to the shim on its own command line, like the
-        // socket address; it is never printed.
-        token: crate::trust::token_from_env(),
-        // The key, when the session minted this job: it goes to the shim over
-        // a pipe and nowhere else.
-        key: session.as_ref().map(|spawned| spawned.key.clone()),
-        // A job runs where the caller was, exactly like a call does (M4 review
-        // F2): explicit, because on Windows the session may start the shim from
-        // its own directory.
-        cwd: std::env::current_dir().ok(),
-    };
-    if let Err(error) = start_shim(&launch).await {
-        eprintln!("kelir: bg run: {error}");
-        return 1;
-    }
 
     // Wait for the shim to say the command is running (or already failed), so
     // the id and the pid are real when the model reads them.
@@ -1472,15 +1600,6 @@ async fn run(args: BgRunArgs) -> u8 {
                 "read: kelir bg out {} | wait: kelir bg wait {} | cancel: kelir bg cancel {}",
                 status.id, status.id, status.id
             );
-            // Tell the session at once (even when it started the shim itself):
-            // the watcher would find the job on its next 250 ms poll, but the
-            // report is what puts `bg_started` in the log before the call that
-            // asked for the job has even settled.
-            notify(
-                &status,
-                session.as_ref().map(|spawned| spawned.capability.as_str()),
-            )
-            .await;
             if status.error.is_some() { 1 } else { 0 }
         }
         None => {
@@ -1490,54 +1609,26 @@ async fn run(args: BgRunArgs) -> u8 {
     }
 }
 
-/// Ask the session to mint this job's id and capability, before the shim is
-/// started. `None` when this process has no session to ask (a bare shell): then
-/// the job is a local record and nobody will demand a capability for it.
-///
-/// The route is `bg-claim`: one round trip that returns an id and a capability
-/// and starts nothing. `bg-spawn` would work too, but it starts a shim of its
-/// own — and `kelir bg run` starts its own shim on Unix and outside a call on
-/// Windows, so a spawn would leave a second one behind (STEER-7 review B1).
-async fn spawned_by_session() -> Result<Option<Spawned>, String> {
-    let Some(sock) = session_socket() else {
-        return Ok(None);
-    };
-    // A job started inside a call has a call id; a job started by hand has
-    // none, which the session turns into a fresh id.
-    let request = crate::ipc::Request::new(
-        "bg-claim",
-        serde_json::json!({"call": std::env::var("KELIR_CALL_ID").ok()}),
-        "job",
-    );
+/// Ask the session to start this job's shim. The answer is the job's id and
+/// nothing else: the session keeps the capability and the signing key and gives
+/// them to the shim it starts.
+async fn spawned_by_session(sock: &str, spawn: &SpawnRequest) -> Result<String, String> {
+    let args = serde_json::to_value(spawn)
+        .map_err(|error| format!("cannot serialise the spawn request: {error}"))?;
+    let request = crate::ipc::Request::new("bg-spawn", args, "job");
     let answer = crate::ipc::request_value(sock.trim(), &request)
         .await
         .map_err(|error| format!("cannot reach the session: {error}"))?;
     if !answer.ok {
         return Err(answer.error.unwrap_or_else(|| "the session refused".into()));
     }
-    let id = answer
+    answer
         .state
         .as_ref()
         .and_then(|state| state.get("id"))
         .and_then(|id| id.as_str())
-        .ok_or_else(|| "the session answered without a job id".to_string())?;
-    let capability = answer
-        .state
-        .as_ref()
-        .and_then(|state| state.get("capability"))
-        .and_then(|capability| capability.as_str())
-        .ok_or_else(|| "the session answered without a capability".to_string())?;
-    let key = answer
-        .state
-        .as_ref()
-        .and_then(|state| state.get("key"))
-        .and_then(|key| key.as_str())
-        .ok_or_else(|| "the session answered without a signing key".to_string())?;
-    Ok(Some(Spawned {
-        id: id.to_string(),
-        capability: capability.to_string(),
-        key: key.to_string(),
-    }))
+        .map(str::to_string)
+        .ok_or_else(|| "the session answered without a job id".to_string())
 }
 
 /// The session socket this process inherited, if any.
@@ -1551,10 +1642,7 @@ fn session_socket() -> Option<String> {
 /// straight away instead of noticing the file on its next poll. Best effort:
 /// a session that is gone, busy or not there is what the poller and `resume`
 /// are for.
-async fn notify(status: &Status, capability: Option<&str>) {
-    let Some(sock) = session_socket() else {
-        return;
-    };
+async fn notify(status: &Status, sock: &str, capability: Option<&str>) {
     let args = match serde_json::to_value(status) {
         Ok(args) => args,
         Err(_) => return,
@@ -2142,6 +2230,7 @@ mod tests {
             job: Some("kelir-bg-job-bg_1".into()),
             error: None,
             sig: None,
+            seq: 0,
         }
     }
 

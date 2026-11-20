@@ -198,8 +198,7 @@ pub fn read_token(dir: &Path) -> Option<String> {
 /// The token a session exported to this process, when this process is one of
 /// its children.
 pub fn token_from_env() -> Option<String> {
-    std::env::var(TOKEN_ENV)
-        .ok()
+    crate::envs::var(TOKEN_ENV)
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
 }
@@ -868,8 +867,12 @@ impl Trust {
             .map(str::trim)
             .filter(|id| !id.is_empty())
         {
-            // A named id: this session must already own the job (a re-spawn).
-            Some(id) => self.check_owned(id, "bg-spawn"),
+            // A named id is refused, owned or not: the session mints ids, and a
+            // spawn for an existing job is what once answered a token holder
+            // with that job's secrets (STEER-7 review round 3, B1).
+            Some(id) => Err(format!(
+                "bg-spawn: a spawn cannot name a job id (`{id}`); the session mints them"
+            )),
             // No id: the session mints one when it answers.
             None => Ok(()),
         }
@@ -977,6 +980,11 @@ impl Trust {
             "{verb}: this session did not start job `{id}`, so it will not answer for it \
              (reports, cancels and spawns are accepted only for the session's own jobs)"
         ))
+    }
+
+    /// Is `candidate` a path inside this session's `bg/` or `commands/`?
+    pub fn inside_bg(&self, candidate: &str) -> bool {
+        self.check_job_path(candidate, "out").is_ok()
     }
 
     fn check_job_path(&self, candidate: &str, field: &str) -> Result<(), String> {
@@ -1415,11 +1423,10 @@ mod tests {
             spawn(&bg, &bg.join(format!("{id}.out")), &id),
             "job",
         );
-        assert!(
-            trust.check_spawn(&ok).is_ok(),
-            "{:?}",
-            trust.check_spawn(&ok)
-        );
+        // A spawn naming a job the session owns is refused too: that was the
+        // door a token holder used to be handed a running job's secrets.
+        let error = trust.check_spawn(&ok).unwrap_err();
+        assert!(error.contains("cannot name a job id"), "{error}");
         // An id the session never minted: a child can pick any name it likes,
         // and it is still not this session's job.
         let made_up = Request::new(
@@ -1428,7 +1435,7 @@ mod tests {
             "job",
         );
         let error = trust.check_spawn(&made_up).unwrap_err();
-        assert!(error.contains("did not start job"), "{error}");
+        assert!(error.contains("cannot name a job id"), "{error}");
         // No id at all: the session mints one when it answers.
         let mut args = spawn(&bg, &bg.join("bg_new.out"), &id);
         args.as_object_mut().unwrap().remove("id");

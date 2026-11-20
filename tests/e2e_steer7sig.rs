@@ -141,7 +141,7 @@ async fn an_unsigned_or_self_signed_status_does_not_settle_a_job() {
 }
 
 /// A resume reads a surviving shim's records under the public key the log holds, and does not
-/// believe a record that was edited after the shim wrote it.
+/// believe a record that was edited after the shim wrote it (the shim's own final record wins).
 #[tokio::test]
 async fn a_resume_rejects_a_status_edited_after_the_shim_wrote_it() {
     let mock = Mock::start(vec![
@@ -202,8 +202,17 @@ async fn a_resume_rejects_a_status_edited_after_the_shim_wrote_it() {
         .await;
     assert_eq!(resumed.code, 0, "{}\n{}", resumed.stdout, resumed.stderr);
     let log = sandbox.log(&session_id);
+    // The edit is never believed. Since steer7fix3 the shim also keeps its final record beside the
+    // status file (`<id>.final`), so the resumed session settles the job from the shim's own
+    // record (exit 0), not from the edited one (exit 77).
+    for settled in events_of(&log, "bg_settled") {
+        assert_eq!(
+            settled["exit_code"], 0,
+            "an edited record settled the job: {log:?}"
+        );
+    }
     assert!(
-        events_of(&log, "bg_settled").is_empty(),
-        "an edited record settled the job: {log:?}"
+        !log.iter().any(|e| e.to_string().contains("exited 77")),
+        "an edited record reached the log: {log:?}"
     );
 }

@@ -618,6 +618,7 @@ mod tests {
             job: None,
             error: None,
             sig: None,
+            seq: 0,
         };
         let args = serde_json::to_value(&status).unwrap();
         let verb = parse("bg", &args).unwrap();
