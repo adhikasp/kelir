@@ -313,11 +313,13 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             name,
             input,
             pid,
+            dir,
         } => EventBody::ToolStarted {
             call_id,
             name,
             input: spill_payload(blobs, seq, "input", input)?,
             pid,
+            dir,
         },
         EventBody::ToolSettled {
             call_id,
@@ -553,6 +555,12 @@ pub enum EventBody {
         input: Payload,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pid: Option<u32>,
+        /// The call's own directory under `commands/` (its job id, STEER-7).
+        /// A resumed session adopts it as a job it may be told about: the
+        /// registry is this process's memory, and a resume rebuilds it from
+        /// the log. Absent from a log written by an older kelir.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dir: Option<String>,
     },
     ToolSettled {
         call_id: String,
@@ -929,6 +937,7 @@ mod tests {
                 name: "bash".into(),
                 input: json!({"command": "ls"}).into(),
                 pid: Some(42),
+                dir: Some("9-1-1".into()),
             },
             EventBody::ToolSettled {
                 call_id: "call_1".into(),

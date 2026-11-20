@@ -54,13 +54,23 @@ async fn a_child_cannot_invent_a_job_by_making_a_commands_dir() {
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     session.wait_for("turn_ended").await;
     let token = kelir::trust::read_token(&session.session_dir).unwrap();
-    let dir = session.session_dir.join("commands").join("bg_fake_by_child");
+    let dir = session
+        .session_dir
+        .join("commands")
+        .join("bg_fake_by_child");
     std::fs::create_dir_all(&dir).unwrap();
-    let _ = raw(&session, forged("bg_fake_by_child", &dir.join("out"), &token)).await;
+    let _ = raw(
+        &session,
+        forged("bg_fake_by_child", &dir.join("out"), &token),
+    )
+    .await;
     let log = settle_and_collect(&session).await;
     let bad = impersonated(&log, "bg_fake_by_child");
     let _ = session.end().await;
-    assert!(!bad, "a made-up job reached the log as bg_started/bg_settled + a user event from `job`");
+    assert!(
+        !bad,
+        "a made-up job reached the log as bg_started/bg_settled + a user event from `job`"
+    );
 }
 
 /// B1b: the same by dropping a `bg/<id>.status` file the shim never wrote.
@@ -75,9 +85,16 @@ async fn a_child_cannot_invent_a_job_by_dropping_a_status_file() {
         "started": "2026-01-01T00:00:00Z", "finished": "2026-01-01T00:00:01Z", "cmd": "forged",
         "out": kelir::util::path_string(&bg.join("bg_fake_status.out")), "kind": "job"});
     std::fs::write(bg.join("bg_fake_status.status"), status.to_string()).unwrap();
-    let _ = raw(&session, forged("bg_fake_status", &bg.join("bg_fake_status.out"), &token)).await;
+    let _ = raw(
+        &session,
+        forged("bg_fake_status", &bg.join("bg_fake_status.out"), &token),
+    )
+    .await;
     let log = settle_and_collect(&session).await;
     let bad = impersonated(&log, "bg_fake_status");
     let _ = session.end().await;
-    assert!(!bad, "a status file dropped by a child became a recorded job");
+    assert!(
+        !bad,
+        "a status file dropped by a child became a recorded job"
+    );
 }

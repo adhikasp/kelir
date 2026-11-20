@@ -1384,6 +1384,21 @@ impl Session {
         // Background jobs that started or settled while no session was running:
         // the shim's status file is the record, and this is where it reaches the
         // log (`bg_started`, `bg_settled` and the message that wakes the model).
+        //
+        // The registry is rebuilt first, **from the log and only from the
+        // log** (STEER-7 review B1): the ids are this session's own — a
+        // `tool_started` carries the call's `commands/<dir>` name, a
+        // `bg_started` a job's id — and a file in `bg/` proves nothing,
+        // because a tool child can write one. A note is recorded only for an
+        // id already adopted here; a status file nobody minted is left alone
+        // (it is still visible to `kelir bg ls`, which reads the files).
+        for event in &self.events {
+            match &event.body {
+                EventBody::BgStarted { bg_id, .. } => self.trust.adopt(bg_id),
+                EventBody::ToolStarted { dir: Some(dir), .. } => self.trust.adopt(dir),
+                _ => {}
+            }
+        }
         let mut woke = false;
         for status in crate::bg::list(&self.dir.join("bg")) {
             if !status.is_job() {
@@ -1649,13 +1664,25 @@ impl Session {
             let _ = reply.send(answer);
             return None;
         }
+        if name == "bg-claim" {
+            let answer = self.bg_spawn_answer(&from, &request);
+            let _ = reply.send(answer);
+            return None;
+        }
         let parsed = self.parse_verb(&request, &from);
         let scope = match &parsed {
             Ok(verb) => applies.unwrap_or_else(|| verb.scope()),
             Err(_) => "rejected",
         };
         let error = parsed.as_ref().err().cloned();
-        let recorded = self.log_verb(&name, &request.args, &from, scope, error);
+        // A refusal is recorded only while the refusal budget lasts: a token
+        // holder that names foreign jobs one by one cannot grow the log without
+        // bound (STEER-7 review B1). The answer still goes out.
+        let recorded = if error.is_some() && !self.trust.may_record_refusal() {
+            Err("the refusal budget is spent".to_string())
+        } else {
+            self.log_verb(&name, &request.args, &from, scope, error)
+        };
         // The ack must not outrun the log: a crash right after `{"ok": true}`
         // may not lose a verb the client believes was accepted (M1 review N1).
         self.sync();
@@ -1701,10 +1728,22 @@ impl Session {
             let _ = reply.send(answer);
             return AtOnce::Rejected;
         }
+        if name == "bg-claim" {
+            let answer = self.bg_spawn_answer(&from, &request);
+            let _ = reply.send(answer);
+            return AtOnce::Rejected;
+        }
         let parsed = self.parse_verb(&request, &from);
         let boundary = if parsed.is_ok() { "now" } else { "rejected" };
         let error = parsed.as_ref().err().cloned();
-        let recorded = self.log_verb(&name, &request.args, &from, boundary, error);
+        // The refusal budget (STEER-7 review B1) applies here too: a token
+        // holder naming foreign jobs one by one gets its answer either way, and
+        // the log grows by no more than the budget.
+        let recorded = if error.is_some() && !self.trust.may_record_refusal() {
+            Err("the refusal budget is spent".to_string())
+        } else {
+            self.log_verb(&name, &request.args, &from, boundary, error)
+        };
         self.sync();
         let (verb, event) = match (parsed, recorded) {
             (Ok(verb), Ok(event)) => (verb, event),
@@ -1735,29 +1774,79 @@ impl Session {
     /// the only sender allowed to ask. A refusal — a foreign job directory, a
     /// path that escapes this session's own `bg/` — is recorded like any other
     /// refused verb, so the log says what was tried (STEER-7).
+    ///
+    /// `bg-claim` is the sibling verb a `kelir bg run` sends *before* it starts
+    /// its own shim: the session mints the id and the capability and starts
+    /// nothing. The id is the session's, never the caller's (review B1), so a
+    /// child cannot pick a name it later reports for.
     fn bg_spawn_answer(&mut self, from: &str, request: &Request) -> Response {
         if from != "job" {
             return Response::error("bg-spawn: an internal verb; jobs report themselves");
         }
+        if request.verb == "bg-claim" {
+            return self.bg_claim_answer(request);
+        }
         if let Err(error) = self.trust.check_spawn(request) {
-            return match self.log_verb(
-                "bg-spawn",
-                &request.args,
-                from,
-                "rejected",
-                Some(error.clone()),
-            ) {
-                Ok(_) => {
-                    self.sync();
-                    Response::error(error)
-                }
+            return match self.refuse_verb("bg-spawn", &request.args, from, &error) {
+                Ok(()) => Response::error(error),
                 Err(message) => Response::error(message),
             };
         }
-        match crate::bg::spawn_shim_for_client(&request.args) {
-            Ok(id) => Response::ok("bg-spawn", 0, "now", json!({"id": id})),
+        match crate::trust::spawn_request(request)
+            .and_then(|spawn| crate::bg::spawn_shim_for_client(&self.trust, &spawn))
+        {
+            Ok(spawned) => Response::ok(
+                "bg-spawn",
+                0,
+                "now",
+                json!({"id": spawned.id, "capability": spawned.capability}),
+            ),
             Err(error) => Response::error(error),
         }
+    }
+
+    /// `bg-claim`: mint one job's id and capability, and answer with both. The
+    /// caller (a `kelir bg run` inside a call) puts the id on its own shim and
+    /// the capability in its own environment; neither is ever an argv.
+    fn bg_claim_answer(&mut self, request: &Request) -> Response {
+        let call = request
+            .args
+            .get("call")
+            .and_then(|call| call.as_str())
+            .map(str::trim)
+            .filter(|call| !call.is_empty())
+            // A claim may only name a call this session is running: the call
+            // id is public, but the claim budget is what keeps an authenticated
+            // flood finite either way.
+            .filter(|call| self.live_calls.iter().any(|live| live == call));
+        match self.trust.claim(call) {
+            Ok((id, capability)) => Response::ok(
+                "bg-claim",
+                0,
+                "now",
+                json!({"id": id, "capability": capability}),
+            ),
+            Err(error) => Response::error(error),
+        }
+    }
+
+    /// Record a refused verb, unless the refusal budget is spent: a token
+    /// holder can name foreign jobs one by one and the log must not grow by one
+    /// event per try (STEER-7 review B1).
+    fn refuse_verb(
+        &mut self,
+        name: &str,
+        args: &Value,
+        from: &str,
+        error: &str,
+    ) -> Result<(), String> {
+        if !self.trust.may_record_refusal() {
+            return Ok(());
+        }
+        let event = self.log_verb(name, args, from, "rejected", Some(error.to_string()))?;
+        self.sync();
+        let _ = event;
+        Ok(())
     }
 
     /// Validate one arrival. `bg` is internal, and `stop --call` for a call that
@@ -2179,10 +2268,13 @@ impl Session {
         };
 
         let status = &status;
-        // The id is this session's own from here on (STEER-7): a status file in
-        // its `bg/` reached it, so a later report or cancel for the same id is
-        // accepted without depending on the file still being there.
-        self.trust.register(&status.id);
+        // The id is this session's own from here on (STEER-7): it is in the
+        // registry, so a later report or cancel for the same id is accepted
+        // without depending on a file still being there. A status file nobody
+        // minted never reaches the log as a job (review B1).
+        if !self.trust.owns(&status.id) {
+            return Ok(false);
+        }
         let started = self.events.iter().any(|event| {
             matches!(&event.body, EventBody::BgStarted { bg_id, .. } if bg_id == &status.id)
         });
@@ -2835,6 +2927,11 @@ impl Session {
         }
         let _ = self.record(EventBody::SessionEnded { reason });
         self.sync();
+        // The session is ending: the token it minted is no longer served by
+        // anything, so it must not stay on disk for whoever comes next (STEER-7
+        // review S1). Jobs that outlive the session keep their capabilities: a
+        // resume adopts them from the registry.
+        self.trust.retire();
         code
     }
 
@@ -3680,6 +3777,10 @@ impl Session {
                 name: call.name.clone(),
                 input: Payload::value(call.args.clone()),
                 pid: None,
+                // The call's own directory name: a resume adopts the call's job
+                // id from the log, not from a directory a child could make
+                // (STEER-7 review B1).
+                dir: Some(format!("{}-{}-{}", self.writer.next_seq(), step, index + 1)),
             })?;
             self.emit(UiEvent::ToolStarted {
                 name: call.name.clone(),
@@ -3687,9 +3788,12 @@ impl Session {
             });
             let dir = format!("{}-{}-{}", started.seq, step, index + 1);
             // The job registry (STEER-7): a call's output dir name is the id
-            // its `bg` reports carry, so it is registered before the call can
-            // report anything.
-            self.trust.register(&dir);
+            // its `bg` reports carry, so the session registers it — with a
+            // capability minted here and handed to that call's shim only —
+            // before the call can report anything (review B1). A machine with
+            // no secure randomness still runs the call: it simply has no job
+            // id it will answer for.
+            let _ = self.trust.issue_call(&dir, &call.id);
             plan.push((dir, call.clone()));
         }
         self.sync();

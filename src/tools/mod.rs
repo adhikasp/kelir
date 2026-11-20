@@ -25,6 +25,10 @@ pub struct Ctx {
     pub token: String,
     /// This session's id: the bash call's job object name is derived from it.
     pub session_id: String,
+    /// The capability of the call whose tool is running now (STEER-7): the
+    /// session mints one per call and hands it to that call's shim, so the
+    /// shim's reports carry it. Empty outside a call (a test's `Ctx`).
+    pub capability: String,
     /// A call still running after this long is promoted to a background job
     /// (`promote_after` in the config; zero disables it).
     pub promote_after: std::time::Duration,
@@ -52,6 +56,7 @@ impl Ctx {
             sock,
             token: String::new(),
             session_id: String::new(),
+            capability: String::new(),
             promote_after: std::time::Duration::from_secs(600),
             groups: SessionGroups::new(),
             running: Running::new(),
@@ -67,6 +72,16 @@ impl Ctx {
 
     pub fn keep_group(&self, group: crate::proc::ProcessGroup) {
         self.groups.keep(group);
+    }
+
+    /// The same context with one call's capability (the session mints one per
+    /// call). Everything else — the groups, the running calls, the token — is
+    /// shared, so a `stop` still reaches the call this clone is for.
+    pub fn with_capability(&self, capability: String) -> Self {
+        Self {
+            capability,
+            ..self.clone()
+        }
     }
 }
 

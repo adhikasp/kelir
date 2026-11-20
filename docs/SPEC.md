@@ -19,9 +19,10 @@ that appends an event; the loop applies verbs at named boundaries.
 <state>/sessions/<id>/
   events.jsonl            # append-only, fsync'd per batch, monotonic seq; the only source of truth
   commands/<call-id>/out  # full tool output, never truncated; also the >10 KB spill file
-  bg/<bg-id>.status       # written by the bg shim; survives kelir exiting
+  bg/<bg-id>.status       # written by the bg shim; survives kelir exiting; the dir is 0700
   sock                    # the session socket (a named pipe on Windows)
-  token                   # this session's secret, owner-only (0600); `kelir ctl` reads it
+  token                   # this session's secret, owner-only (0600), removed when the session ends;
+                          # `kelir ctl` reads it while it lives
   bg/<bg-id>.cancel       # exists only while a `cancel` is in flight (so a reader says
                           # "running", not "lost", between the kill and the status write)
 ```
@@ -64,13 +65,25 @@ Reaching the socket is **not** authorisation. Two things gate every request:
   `$KELIR_TOKEN` from the environment it inherited. **A process that can read the session's
   environment or its token file already runs as the user, in the session, and is trusted** — the
   token stops a *different* session's child, a stray process and a script that found the pipe by
-  name, not the user or the model's own tools.
-- **A registry of the jobs this session created.** `bg` reports, `cancel` and `bg-spawn` name a
-  job id; the session answers only for ids it started or registered (in memory, a status file in
-  its own `bg/`, or an output dir in its own `commands/`). Every job directory and status/out
-  path in a request must resolve **inside the session's own `bg/`**, canonicalised: `..`, a
-  symlink out of it and, on Windows, a UNC or another drive's path are all refused. A refusal is
-  a clear error to the caller and a `verb` event with boundary `rejected` in the log.
+  name, not the user or the model's own tools. The token file is removed when the session ends: a
+  token nobody serves is only something to find.
+- **A registry of the jobs this session created, and a capability per job.** The session is the
+  only issuer of job ids: `bg_<32 random hex>` for an explicit job, `call_<32 random hex>` for a
+  `bg/` id of a bash call. An id is minted in this process, recorded in an in-memory registry *and*
+  in the log (`bg_started`, and `tool_started.dir` for a call), and rebuilt from the log on resume.
+  **A file is never ownership evidence**: `commands/<id>/` and `bg/<id>.status` are writable by any
+  tool child, so neither registers a job. `bg` reports, `cancel` and `bg-spawn` name an id, and the
+  session answers only for one in the registry. A `bg` report must *also* carry **that job's
+  capability** — 32 random bytes, handed only to that job's shim (`KELIR_JOB_CAP` in its
+  environment, never an argv, never a file) — because every tool child holds the session token by
+  design. A request that names an unknown id, an id that is not a job (a call's own id, a job
+  adopted by a resume) or the wrong capability is refused with a clear error and a `verb` event
+  with boundary `rejected`, rate-limited to `32` such events per session so a child cannot grow the
+  log by trying. `kelir bg run` asks for its id and capability with the internal `bg-claim` verb
+  (it starts nothing); the number of ids one session mints on request is bounded (`256`).
+  Every job directory and status/out path in a request must resolve **inside the session's own
+  `bg/` or `commands/`**, canonicalised: `..`, a symlink out of it and, on Windows, a UNC or
+  another drive's path are all refused.
 - **The socket and the pipe are owner-only too.** The Unix socket is `0600` in a directory only
   the user can enter; the Windows pipe's DACL grants this user and no one else. Both are read
   back at start: a session that cannot prove its socket is private says so and refuses to serve.
@@ -130,7 +143,7 @@ are never inline: the event holds the path.
 | `step_started` | `step`, `provider`, `model`, `request_hash` | one per provider request |
 | `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]` (`id`, `name`, `args`), `finish_reason` | |
 | `usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `cost`, `allowance?` | from the final stream chunk |
-| `tool_started` | `call_id`, `name`, `input`, `pid?` | intent; written before the process starts |
+| `tool_started` | `call_id`, `name`, `input`, `pid?`, `dir?` | intent; written before the process starts. `dir` is the call's own `commands/<dir>` name (its job id), so a resume adopts it from the log rather than from a directory |
 | `tool_settled` | `call_id`, `outcome` (`ok`, `error`, `stopped`, `skipped`, `denied`, `disabled`, `promoted`, `unknown`), `exit_code?`, `bytes`, `lines`, `out_path`, `spilled`, `result` | commit; `result` is what the model sees (≤10 KB or the spill notice) |
 | `mcp_started` / `mcp_settled` | `mcp_id`, `server`, `tool`, `args`, `outcome`, `out_path`, `parent_call_id` | a `kelir mcp` call made from inside a bash call |
 | `bg_started` / `bg_settled` | `bg_id`, `call_id`, `cmd`, `pid`, `exit_code?`, `out_path` | `promoted` tool calls and explicit `kelir bg` jobs |
@@ -339,8 +352,10 @@ the session. Completion while the session runs appends `bg_settled` and admits a
 next boundary so the agent wakes; while it does not, see *Process model*.
 
 A job's shim inherits `KELIR_SOCK` and `KELIR_TOKEN` from the session that started it (its
-command line carries neither), so its report is accepted; a shim from a *different* session, or a
-`cancel` for an id this session did not create, is refused (see *Who may drive a session*).
+command line carries neither), plus its own `KELIR_JOB_CAP` — the capability that makes its `bg`
+report its own. A shim from a *different* session, a report with the token but not the job's
+capability, and a `cancel` for an id this session did not create are all refused (see *Who may
+drive a session*).
 
 ## Scriptable, TUI and Herdr status
 

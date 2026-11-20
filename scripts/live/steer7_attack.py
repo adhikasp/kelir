@@ -11,11 +11,15 @@ Modes (each is a different attacker vantage point; no key or secret is ever prin
   child      runs INSIDE the session (a bash tool call): holds KELIR_TOKEN/KELIR_SOCK like any test child.
              Tries to impersonate the bg shim, escape bg/, cancel the victim session's job.
 
-Every attack prints one JSON line {"attack","answer","effect"}; `effect` is the number of NEW lines in
-the target's events.jsonl and a flag whether any bg_started/bg_settled/user-from-job event appeared.
-The summary line `SUMMARY exploits=[...]` lists the attacks that changed state or got ok:true.
+Every attack prints one JSON line {"attack","ok","error","new_events"}; a `verb` event with
+boundary `rejected` is a *refusal* and not an effect (an authenticated attempt is logged by
+design), so `new_events` names it as such and only an accepted verb or a job event counts.
+The summary line `SUMMARY exploits=[...]` lists the attacks that were accepted or changed state.
+
+`reader` is expected to have one: a same-user process can read the token file, which is the
+documented same-user trust boundary (SPEC/DEVIATIONS), and cannot read a job's capability.
 """
-import json, os, sys, time, glob, socket
+import json, os, sys, time, glob, socket, subprocess
 
 IS_WIN = os.name == "nt"
 mode, state, tid = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -42,13 +46,33 @@ def talk(address, line: bytes, timeout=8.0, close_after=True):
                     return {"transport_error": str(e)}
                 time.sleep(0.05)
         try:
-            f.write(line)
+            # The write itself is bounded: a peer that refuses the line at its
+            # cap stops reading, and an unbounded write would then block the
+            # attacker, not the session (STEER-7 fixes: this hung the drive).
+            sent = {"done": False}
+
+            def writer():
+                try:
+                    f.write(line)
+                    sent["done"] = True
+                except OSError as e:
+                    sent["error"] = str(e)
+
+            import threading
+            th = threading.Thread(target=writer, daemon=True)
+            th.start()
+            th.join(min(timeout, 10.0))
             out = b""
-            while not out.endswith(b"\n"):
-                chunk = f.read(4096)
-                if not chunk:
-                    break
-                out += chunk
+            try:
+                while not out.endswith(b"\n"):
+                    chunk = f.read(4096)
+                    if not chunk:
+                        break
+                    out += chunk
+            except OSError as e:
+                out = b'{"transport_error": "' + str(e).encode() + b'"}'
+            if not sent["done"] and not out:
+                out = b'{"transport_error": "write blocked after the peer stopped reading"}'
             return out
         finally:
             f.close()
@@ -87,13 +111,23 @@ def send(sid, req, label, token_probe=None):
     after = log_lines(sid)
     new = after[len(before):]
     types = []
+    # A refusal is *logged* by design (an authenticated caller's attempt is a
+    # `verb` event with boundary `rejected`), so it is not an effect: only an
+    # accepted verb, or a job event, is. Counting the refusal line itself as an
+    # exploit made every correctly refused attack look like one (STEER-7 fixes).
+    effects = []
     for l in new:
         try:
             e = json.loads(l)
-            types.append(e.get("type") + (":" + e.get("name", "") if e.get("type") == "verb" else "")
-                         + (":job" if e.get("type") == "user" and e.get("from") == "job" else ""))
+            rejected = e.get("type") == "verb" and e.get("boundary") == "rejected"
+            name = e.get("type") + (":" + e.get("name", "") if e.get("type") == "verb" else "")
+            name += ":job" if e.get("type") == "user" and e.get("from") == "job" else ""
+            types.append(name + ("(rejected)" if rejected else ""))
+            if not rejected:
+                effects.append(name)
         except Exception:
             types.append("?")
+            effects.append("?")
     if isinstance(raw, dict):
         ans = raw
     else:
@@ -102,7 +136,7 @@ def send(sid, req, label, token_probe=None):
         except Exception:
             ans = {"unparsed": raw[:120].decode("utf-8", "replace")}
     ok = isinstance(ans, dict) and ans.get("ok") is True
-    changed = bool(types)
+    changed = bool(effects)
     rec = {"attack": label, "ok": ok, "error": (ans or {}).get("error", "")[:140] if isinstance(ans, dict) else "",
            "new_events": types}
     # Never print a secret: scrub the token if an answer ever echoed it.
@@ -113,7 +147,7 @@ def send(sid, req, label, token_probe=None):
             exploits.append(label + " (token echoed)")
     print(s, flush=True)
     if ok or changed:
-        exploits.append(label)
+        exploits.append(label + ("" if ok else " (state changed)"))
     return ans
 
 
@@ -163,11 +197,48 @@ def stranger():
     time.sleep(0.4)
     after = log_lines(tid)
     print(json.dumps({"attack": "pipelined-refused-then-valid", "answer_first": (raw[:100].decode("utf-8", "replace") if isinstance(raw, bytes) else raw), "new_events": len(after) - len(before)}), flush=True)
-    # Resource: 1 MB junk without newline then close
+    # Resource: 1 MB junk without a newline, from a child process with a deadline.
+    # In this process a blocked write would also hold the file object's lock, so
+    # the read that should collect the refusal could never run; a peer that does
+    # not read cannot be told anything anyway, so what is checked is that the
+    # session stays responsive and that nothing entered its log.
+    before = log_lines(tid)
     t0 = time.time()
-    r = talk(addr(tid), b"A" * (1 << 20) + b"\n", timeout=8)
-    print(json.dumps({"attack": "1MB-junk-line", "answer": (r[:100].decode("utf-8", "replace") if isinstance(r, bytes) else r), "secs": round(time.time() - t0, 2)}), flush=True)
-    # Does the session still serve a real ctl afterwards? (caller checks)
+    # Its own connection and its own thread: a peer that does not read cannot be
+    # told anything, so the write may block for ever. That is the attacker's
+    # problem, not the session's, and the thread is left to die with us.
+    def flood():
+        try:
+            f = open(addr(tid), "r+b", buffering=0)
+            try:
+                f.write(b"A" * (1 << 20) + b"\n")
+            finally:
+                try:
+                    f.close()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    import threading
+    th = threading.Thread(target=flood, daemon=True)
+    th.start()
+    th.join(15)
+    print(json.dumps({"attack": "1MB-junk-line",
+                      "result": "write done" if not th.is_alive()
+                      else "write still blocked (the session stopped reading at its cap)",
+                      "secs": round(time.time() - t0, 2)}), flush=True)
+    # The session must still serve: an unauthenticated request is answered at
+    # once (that is the listener, not the log), and the junk changed nothing.
+    time.sleep(0.5)
+    after = log_lines(tid)
+    print(json.dumps({"attack": "1MB-junk-line-effects", "new_events": len(after) - len(before)}), flush=True)
+    t1 = time.time()
+    probe = talk(addr(tid), (json.dumps({"verb": "say", "from": "ctl",
+                                         "args": {"text": "still here"}}) + "\n").encode(), timeout=10)
+    answered = isinstance(probe, bytes) and b"\"ok\":false" in probe
+    print(json.dumps({"attack": "1MB-junk-line-then-a-request", "answered": answered,
+                      "secs": round(time.time() - t1, 2)}), flush=True)
 
 
 def reader():

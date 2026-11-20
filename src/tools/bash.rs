@@ -67,6 +67,10 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
         job: Some(bg::job_name(&ctx.session_id, dir)),
         sock: Some(ctx.sock.clone()),
         token: Some(ctx.token.clone()).filter(|token| !token.is_empty()),
+        // This call's own capability (STEER-7 review B1): the session minted it
+        // for this call, and a `bg` report for the call's id must carry it. It
+        // goes to the shim's environment, never to an argv or a status file.
+        capability: Some(ctx.capability.clone()).filter(|capability| !capability.is_empty()),
         // The call runs where the session (or `--cwd`, or a resumed session's
         // log) says, not in whatever directory the session process happens to
         // have (M4 review F2).

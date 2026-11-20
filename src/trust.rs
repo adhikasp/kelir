@@ -22,20 +22,32 @@
 //!   stops a *different* session's child, a stray process, and a script that
 //!   happened to find the pipe by name — not the user or the model's own tools.
 //!
-//! * **A registry of the jobs this session created.** `bg`, `cancel` and
-//!   `bg-spawn` name a job id; the session only answers for ids it started or
-//!   registered (its own `commands/<id>/` output dirs, its own
-//!   `bg/<id>.status` files, and what it registered in memory), and every job
-//!   directory and status/out path in a request must resolve *inside* the
-//!   session's own `bg/` (canonicalised: `..`, a symlink out of it and, on
-//!   Windows, a UNC or another drive's path are all refused).
+//! * **A registry of the jobs this session created, and a capability per job.**
+//!   The session is the only issuer of job ids. A job id is minted here —
+//!   `bg_<32 random hex>` for an explicit job, `call_<32 random hex>` for the
+//!   `bg/` id of a bash call — and recorded in this registry *and* in the
+//!   session's own log. `bg`, `cancel` and `bg-spawn` name a job id; the
+//!   session answers only for ids in the registry, and a `bg` report for one of
+//!   them must also carry **that job's capability** (a random per-job secret
+//!   given to its shim and nobody else). Both are needed, because a tool child
+//!   holds the session's token by design: the token says "this is somebody
+//!   inside this session", the capability says "this is *that job's shim*".
+//!
+//!   **File existence is never evidence.** `commands/<id>/` and `bg/<id>.status`
+//!   are written by whoever can write the session directory, a tool child
+//!   included, so neither registers a job; the registry is this process's
+//!   memory, rebuilt on resume from the log. Every job directory and status/out
+//!   path in a request must still resolve *inside* the session's own `bg/`
+//!   (canonicalised: `..`, a symlink out of it and, on Windows, a UNC or
+//!   another drive's path are all refused).
 //!
 //! [`check_job`] is that second half and runs in the session, where a refusal
 //! becomes a `verb` event (the caller is authenticated, so the log should say
-//! what it tried). [`Trust::accepts`] is the first half and runs at the socket,
-//! where a refusal is just an answer.
+//! what it tried; it is rate-limited so a child cannot flood the log with it).
+//! [`Trust::accepts`] is the first half and runs at the socket, where a refusal
+//! is just an answer.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -48,9 +60,30 @@ pub const TOKEN_FILE: &str = "token";
 /// Bytes of randomness in a token; 32 hex-encoded characters would be 128 bits,
 /// this is 256.
 pub const TOKEN_BYTES: usize = 32;
-/// The longest job id the session will look at. Ids are `bg_<ulid>` or a call's
-/// output dir name, both far shorter.
+/// The longest job id the session will look at. Ids are `bg_<hex>` or
+/// `call_<hex>` here, both far shorter.
 pub const MAX_ID: usize = 128;
+/// Bytes of randomness in a job id: 128 bits. A job id is not a secret (it is
+/// in the log and in `bg ls`), but it must never be guessable, so a foreign
+/// process cannot name a job that is about to exist.
+pub const ID_BYTES: usize = 16;
+/// Bytes of randomness in a job's capability: 256 bits, the same secret size as
+/// the session token. Only that job's shim holds it.
+pub const CAP_BYTES: usize = 32;
+/// The variable a job's shim hands its capability to the command it runs, when
+/// that command reports itself (`kelir bg run` inside a call). Never an argv.
+pub const CAP_ENV: &str = "KELIR_JOB_CAP";
+/// How many refused `bg`/`cancel`/`bg-spawn` verbs one session will record in
+/// its log before it answers without logging: a token holder names jobs that
+/// are not this session's one by one, and the log must not grow by one event
+/// per try (STEER-7 review B1).
+pub const REFUSAL_BUDGET: u32 = 32;
+/// How many job ids one session will mint on request (`bg-claim`) and for its
+/// calls. A tool child inside a call may ask for ids (that is how `kelir bg run`
+/// gets one), so the number is bounded: an authenticated process cannot make
+/// the session mint for ever. Past it, a claim is refused (and the refusal is
+/// logged at most [`REFUSAL_BUDGET`] times).
+pub const CLAIM_BUDGET: u32 = 256;
 
 // ------------------------------------------------------------------ the token
 
@@ -111,6 +144,16 @@ fn random_bytes(buf: &mut [u8]) -> Result<(), String> {
     }
 }
 
+/// 32 lowercase hex characters from the OS's randomness, or an empty string
+/// when the platform has no secure source (`` is never a valid id).
+pub fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    if random_bytes(&mut buf).is_err() {
+        return String::new();
+    }
+    hex(&buf)
+}
+
 /// Compare two secrets without telling a caller how far it got. Length is not a
 /// secret (every token is the same length).
 pub fn same(a: &str, b: &str) -> bool {
@@ -155,6 +198,30 @@ pub fn token_from_env() -> Option<String> {
         .ok()
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
+}
+
+/// Make a directory owner-only, the same way [`restrict_to_owner`] makes a
+/// file: `0700` on Unix, the owner-only DACL on Windows. The session directory
+/// above `bg/` is already `0700`, so this is defence in depth (STEER-7 review
+/// N2); a platform that cannot set it is not a reason to refuse the session.
+///
+/// Unix only sets the mode: on Windows a directory's DACL is inherited from the
+/// state directory, which is already the user's, and there is no portable
+/// `chmod 0700` that does what this means. The mode is set explicitly rather
+/// than left to the umask, which under `umask 000` leaves `777`.
+pub fn restrict_dir_to_owner(dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("cannot restrict {}: {error}", dir.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        // Nothing to set: the DACL is inherited from the owner-only state dir.
+        let _ = dir;
+        Ok(())
+    }
 }
 
 /// Make a file's permissions owner-only: `0600` on Unix, and on Windows a
@@ -224,15 +291,59 @@ pub fn token_file_is_private(dir: &Path) -> Result<(), String> {
 
 /// A job id this session may be told about: one path component, no traversal,
 /// nothing a status path could be built out of that lands elsewhere.
+///
+/// Windows resolves more names than it writes: a trailing `.` or space is
+/// dropped (`bg_esc.` *is* `bg_esc`), and `nul`/`con`/`com1` are devices, not
+/// files. Both are refused here rather than left to produce a status file the
+/// shim thinks it wrote and the OS did not (STEER-7 review N1).
 pub fn valid_job_id(id: &str) -> bool {
-    let id = id.trim();
-    !id.is_empty()
-        && id.len() <= MAX_ID
-        && !id.starts_with('.')
-        && !id.contains("..")
-        && id
+    // Whitespace is not trimmed away: an id with a trailing space *is* a
+    // different name on Windows (`bg_esc ` resolves to `bg_esc`) and a
+    // different path everywhere else, so it is refused rather than quietly
+    // rewritten into one this session may own.
+    if id.trim() != id {
+        return false;
+    }
+    if id.is_empty()
+        || id.len() > MAX_ID
+        || id.starts_with('.')
+        || id.contains("..")
+        || id.ends_with('.')
+        || id.ends_with(' ')
+        || !id
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return false;
+    }
+    !is_windows_device_name(id)
+}
+
+/// `CON`, `NUL`, `COM1`… and their `name.ext` spellings, which Windows resolves
+/// to a device whatever the extension. Only the stem before the first `.`
+/// counts: `nul.status` is the null device too.
+fn is_windows_device_name(id: &str) -> bool {
+    let stem = id.split('.').next().unwrap_or(id).trim_end();
+    let upper = stem.to_ascii_uppercase();
+    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    // COM0/COM1..COM9 and LPT1..LPT9 (COM0 is a device on Windows too).
+    if upper.len() == 4 {
+        let (head, digit) = upper.split_at(3);
+        if matches!(head, "COM" | "LPT") && digit.as_bytes()[0].is_ascii_digit() {
+            return true;
+        }
+    }
+    // The Unicode superscript digit forms (`COM¹`, `LPT²`) are devices as well.
+    let chars: Vec<char> = upper.chars().collect();
+    if chars.len() == 4
+        && matches!(chars[..3], ['C', 'O', 'M'] | ['L', 'P', 'T'])
+        && matches!(chars[3], '\u{b9}' | '\u{b2}' | '\u{b3}')
+    {
+        return true;
+    }
+    false
 }
 
 // ------------------------------------------------------------------- paths
@@ -302,14 +413,33 @@ fn resolve_existing(path: &Path) -> Result<PathBuf, String> {
 
 // --------------------------------------------------------------- the session
 
+/// One job this session minted: its capability and whose provider call (if
+/// any) asked for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Job {
+    /// The per-job secret: only that job's shim holds it. A `bg` report for the
+    /// id must carry it.
+    pub capability: String,
+    /// The provider call id, for an explicit `kelir bg run` inside a call.
+    pub call_id: Option<String>,
+}
+
 /// One session's trust state: its token and the jobs it will answer for.
 #[derive(Debug)]
 pub struct Trust {
     dir: PathBuf,
     token: String,
-    /// Ids this process registered in memory: a call it started, a job it
-    /// spawned. The `bg/` directory is the durable half of the registry.
-    ids: Mutex<HashSet<String>>,
+    /// The jobs this session minted, by id. This is the whole of "is it mine":
+    /// a file in the session directory is not evidence, because a tool child
+    /// can write one (STEER-7 review B1). It lives in this process's memory and
+    /// nowhere else — a capability on disk would be a capability a tool child
+    /// could read, which is the whole attack.
+    jobs: Mutex<HashMap<String, Job>>,
+    /// Refused-verb entries still allowed in the log (see
+    /// [`Trust::may_record_refusal`]).
+    refusals: Mutex<u32>,
+    /// Ids this session may still mint on request (see [`CLAIM_BUDGET`]).
+    claims: Mutex<u32>,
 }
 
 impl Trust {
@@ -317,7 +447,9 @@ impl Trust {
         Self {
             dir,
             token,
-            ids: Mutex::new(HashSet::new()),
+            jobs: Mutex::new(HashMap::new()),
+            refusals: Mutex::new(REFUSAL_BUDGET),
+            claims: Mutex::new(CLAIM_BUDGET),
         }
     }
 
@@ -325,9 +457,12 @@ impl Trust {
     pub fn create(dir: PathBuf) -> Result<Self, String> {
         // The session's own `bg/` exists from here on, so a spawn check can
         // canonicalise it and a job's status file has a home even before the
-        // first job (STEER-7).
-        std::fs::create_dir_all(dir.join("bg"))
-            .map_err(|error| format!("cannot create {}: {error}", dir.join("bg").display()))?;
+        // first job (STEER-7). It is owner-only like the token: the directory
+        // above it is `0700`, but defence in depth is cheap (review N2).
+        let bg = dir.join("bg");
+        std::fs::create_dir_all(&bg)
+            .map_err(|error| format!("cannot create {}: {error}", bg.display()))?;
+        let _ = restrict_dir_to_owner(&bg);
         let token = new_token();
         if token.is_empty() {
             return Err(
@@ -348,31 +483,202 @@ impl Trust {
         self.dir.join("bg")
     }
 
-    /// Remember a job this session started (a call's output dir name, or a
-    /// `bg` job an explicit `kelir bg run` made inside one of its calls).
-    pub fn register(&self, id: &str) {
+    /// Drop the token file: the session is ending, and a token nobody serves is
+    /// only something to find. `kelir ctl` on an exited session is refused
+    /// anyway (there is no socket to answer it).
+    pub fn retire(&self) {
+        // The token goes: a token nobody serves is only something to find, and
+        // it must not outlive the session that minted it (review S1). The
+        // registry needs nothing here — it was never on disk, and a resumed
+        // session adopts its jobs again from its log and its `bg/`.
+        let _ = std::fs::remove_file(self.dir.join(TOKEN_FILE));
+    }
+
+    /// Mint a job's id **and** its capability: `bg_<128 bits>` for an explicit
+    /// `kelir bg run`, `call_<128 bits>` for a bash call's background half. The
+    /// session is the only issuer, so an id is never a directory name two
+    /// sessions share (review S2) and never something a child can predict; the
+    /// capability goes to that job's shim and to nobody else.
+    pub fn mint(&self, prefix: &str) -> Result<(String, String), String> {
+        self.mint_for(prefix, None)
+    }
+
+    /// Mint a job's id and capability, recording which provider call asked for
+    /// it (an explicit job started by a call).
+    pub fn mint_for(
+        &self,
+        prefix: &str,
+        call_id: Option<&str>,
+    ) -> Result<(String, String), String> {
+        let suffix = random_hex(ID_BYTES);
+        if suffix.is_empty() {
+            return Err(
+                "cannot mint a job id (this machine has no secure random source)".to_string(),
+            );
+        }
+        let id = format!("{prefix}_{suffix}");
+        let capability = random_hex(CAP_BYTES);
+        if capability.is_empty() {
+            return Err(
+                "cannot mint a job capability (this machine has no secure random source)"
+                    .to_string(),
+            );
+        }
+        self.remember(
+            &id,
+            &capability,
+            call_id.map(|call| call.trim().to_string()),
+        )?;
+        Ok((id, capability))
+    }
+
+    /// Register a bash call's own `bg/` id (kelir names the directory itself,
+    /// `<seq>-<step>-<n>`, M1). A call gets **no capability**: its shim never
+    /// sends a `bg` report — the status file it writes is folded in by the
+    /// session's own watcher — so no report for a call's id is accepted, not
+    /// even from the call's own child (STEER-7 review B1). Registering it is
+    /// what makes `cancel <call id>` and the watcher's note legitimate.
+    pub fn issue_call(&self, id: &str, call_id: &str) -> Result<(), String> {
         let id = id.trim();
         if !valid_job_id(id) {
-            return;
+            return Err(format!("`{id}` is not a job id"));
         }
-        if let Ok(mut ids) = self.ids.lock() {
-            ids.insert(id.to_string());
+        self.remember(id, "", Some(call_id.to_string()))
+    }
+
+    /// Record a job in the registry. Every id the session answers for goes
+    /// through here; nothing is written to disk (a capability on disk is a
+    /// capability a tool child can read).
+    fn remember(&self, id: &str, capability: &str, call_id: Option<String>) -> Result<(), String> {
+        let job = Job {
+            capability: capability.trim().to_string(),
+            call_id,
+        };
+        match self.jobs.lock() {
+            Ok(mut jobs) => {
+                jobs.insert(id.trim().to_string(), job);
+            }
+            // A poisoned registry is not a reason to answer for a job: the
+            // caller gets a refusal instead of a capability nobody can check.
+            Err(_) => return Err("the job registry is unusable".to_string()),
+        }
+        Ok(())
+    }
+
+    /// A job this session minted and no longer needs (a spawn that never
+    /// started): drop the id the shim would have reported with.
+    pub fn forget(&self, id: &str) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.remove(id.trim());
         }
     }
 
-    /// Is `id` a job of this session? The in-memory registry, a status file in
-    /// its own `bg/`, or a call's output directory in its own `commands/`.
+    /// Mint an id and a capability on request (`bg-claim`: `kelir bg run` asks
+    /// the session for the id it may report with, instead of picking one). The
+    /// caller holds the session token — a tool child is what asks — so the
+    /// number of claims is bounded: an authenticated process cannot make the
+    /// session mint for ever.
+    pub fn claim(&self, call_id: Option<&str>) -> Result<(String, String), String> {
+        match self.claims.lock() {
+            Ok(mut left) => {
+                if *left == 0 {
+                    return Err(format!(
+                        "this session has minted its {CLAIM_BUDGET} jobs for this run; \
+                         `kelir bg run` cannot be granted another id"
+                    ));
+                }
+                *left -= 1;
+            }
+            Err(_) => return Err("the job registry is unusable".to_string()),
+        }
+        self.mint_for("bg", call_id.map(str::trim).filter(|call| !call.is_empty()))
+    }
+
+    /// Is `id` a job this session minted? The only ownership there is.
     pub fn owns(&self, id: &str) -> bool {
-        if !valid_job_id(id) {
+        self.jobs
+            .lock()
+            .map(|jobs| jobs.contains_key(id.trim()))
+            .unwrap_or(false)
+    }
+
+    /// Adopt a job a previous process of this session minted (a resume rebuilds
+    /// the registry from the log's `bg_started` events and from the jobs in its
+    /// own `bg/` at startup). The capability is gone with the process that
+    /// minted it, so an adopted job answers `cancel` but never a `bg` report:
+    /// a report is what a shim sends, and a shim that outlives its session
+    /// settles through its status file and the watcher instead.
+    pub fn adopt(&self, id: &str) {
+        let id = id.trim();
+        if !valid_job_id(id) || self.owns(id) {
+            return;
+        }
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.insert(
+                id.to_string(),
+                Job {
+                    capability: String::new(),
+                    call_id: None,
+                },
+            );
+        }
+    }
+
+    /// The capability a job's shim holds, for the session's own use (it hands
+    /// it to the shim it spawns). `None` for an id this session never minted,
+    /// and for one it only adopted from a previous process (see [`adopt`]: the
+    /// secret died with the process that minted it).
+    pub fn capability(&self, id: &str) -> Option<String> {
+        self.jobs
+            .lock()
+            .ok()
+            .and_then(|jobs| jobs.get(id.trim()).map(|job| job.capability.clone()))
+            .filter(|capability| !capability.is_empty())
+    }
+
+    /// Every id this session owns, for a test or a listing.
+    pub fn ids(&self) -> Vec<String> {
+        self.jobs
+            .lock()
+            .map(|jobs| jobs.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Does `given` prove that the sender is the shim of job `id`? Two things
+    /// are needed, and neither is enough alone: the id is in the registry, and
+    /// the capability is *that* job's. A tool child holds the session token by
+    /// design, so only the capability separates a shim from the child next to
+    /// it (STEER-7 review B1). An id with no capability at all (a call, an
+    /// adopted job) is proved by nothing.
+    pub fn proves(&self, id: &str, given: Option<&str>) -> bool {
+        let Some(given) = given.map(str::trim).filter(|given| !given.is_empty()) else {
+            return false;
+        };
+        let jobs = match self.jobs.lock() {
+            Ok(jobs) => jobs,
+            Err(_) => return false,
+        };
+        match jobs.get(id.trim()) {
+            Some(job) if !job.capability.is_empty() => same(given, &job.capability),
+            _ => false,
+        }
+    }
+
+    /// The refusal budget: a caller that is authenticated (it has the token) but
+    /// names jobs that are not this session's must not be able to grow the log
+    /// by one `verb` event per try. The first [`REFUSAL_BUDGET`] refusals are
+    /// recorded; past it the refusal is answered and *not* logged, so a flood
+    /// costs the session nothing it keeps.
+    pub fn may_record_refusal(&self) -> bool {
+        let mut budget = match self.refusals.lock() {
+            Ok(budget) => budget,
+            Err(_) => return false,
+        };
+        if *budget == 0 {
             return false;
         }
-        if self.ids.lock().map(|ids| ids.contains(id)).unwrap_or(false) {
-            return true;
-        }
-        if self.bg_dir().join(format!("{id}.status")).is_file() {
-            return true;
-        }
-        self.dir.join("commands").join(id).is_dir()
+        *budget -= 1;
+        true
     }
 
     /// The socket half: a request must carry this session's token. A request
@@ -401,23 +707,45 @@ impl Trust {
         }
     }
 
-    /// The `bg-spawn` half, which has its own verb (a spawn has no status file
-    /// yet, so "is it mine" is a question about the directory it would live in).
+    /// The `bg-spawn` half: the one thing a job cannot do itself (on Windows a
+    /// `kelir bg run` inside a call sits in the call's Job Object, which forbids
+    /// breakaway). The session starts the shim, so **the session mints the id**:
+    /// a spawn that names an id is a re-spawn of a job it already owns, and one
+    /// that names none gets a fresh id back. Either way the capability goes from
+    /// the session to the shim, never through the caller.
+    ///
+    /// Paths are checked before ownership so the answer says the more specific
+    /// thing: a spawn aimed outside this session's `bg/` is refused for that.
     pub fn check_spawn(&self, request: &Request) -> Result<(), String> {
-        if request.verb != "bg-spawn" {
-            return Ok(());
+        let spawn = spawn_request(request)?;
+        // Where the job would live, which is this session's own `bg/`.
+        self.check_spawn_dir(&spawn)?;
+        if !spawn.out.trim().is_empty() {
+            self.check_job_path(&spawn.out, "out")?;
         }
-        let spawn: crate::bg::SpawnRequest = serde_json::from_value(request.args.clone())
-            .map_err(|error| format!("bg-spawn: not a spawn request: {error}"))?;
-        if !valid_job_id(&spawn.id) {
-            return Err(format!(
-                "bg-spawn: `{}` is not a job id (one path component: letters, digits, `.`, `_`, \
-                 `-`)",
-                spawn.id
-            ));
+        if let Some(cwd) = spawn.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
+            // The command runs in the caller's directory; it is not this
+            // session's `bg/`, so it is not resolved against it, only required
+            // to be a directory that exists.
+            if !Path::new(cwd).is_dir() {
+                return Err(format!("bg-spawn: `{}` is not a directory", cwd.trim()));
+            }
         }
-        // A new job id cannot be in the registry yet; what can be proved is
-        // that the job would live in this session's own `bg/`.
+        match spawn
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            // A named id: this session must already own the job (a re-spawn).
+            Some(id) => self.check_owned(id, "bg-spawn"),
+            // No id: the session mints one when it answers.
+            None => Ok(()),
+        }
+    }
+
+    /// The `bg/` a spawn names must be this session's own, canonicalised.
+    fn check_spawn_dir(&self, spawn: &crate::bg::SpawnRequest) -> Result<(), String> {
         let ours = self.bg_dir();
         let base = std::fs::canonicalize(&ours)
             .map_err(|error| format!("cannot resolve {}: {error}", ours.display()))?;
@@ -427,9 +755,7 @@ impl Trust {
             // another drive); the answer says what the spawn asked for.
             Err(_) => {
                 return Err(format!(
-                    "bg-spawn: job `{}` would live in `{}`, which is not inside this session's \
-                     {}",
-                    spawn.id,
+                    "bg-spawn: would live in `{}`, which is not inside this session's {}",
                     spawn.dir.trim(),
                     base.display()
                 ));
@@ -437,36 +763,69 @@ impl Trust {
         };
         if real != base {
             return Err(format!(
-                "bg-spawn: job `{}` would live in {}, not in this session's {}",
-                spawn.id,
+                "bg-spawn: would live in {}, not in this session's {}",
                 real.display(),
                 base.display()
             ));
-        }
-        if !spawn.out.trim().is_empty() {
-            self.check_job_path(&spawn.out, "out")?;
         }
         Ok(())
     }
 
     /// The session half: `bg` and `cancel` name a job id, and the id (and the
-    /// paths that come with it) must be this session's own.
+    /// paths that come with it) must be a *job* this session issued. A `bg`
+    /// report additionally has to carry **that job's capability**: the token
+    /// alone proves only "somebody inside this session", which every tool child
+    /// is.
     pub fn check_job(&self, request: &Request) -> Result<(), String> {
         match request.verb.as_str() {
             "bg" => {
                 let status: crate::bg::Status = serde_json::from_value(request.args.clone())
                     .map_err(|error| format!("bg: not a job status: {error}"))?;
+                // The id first: a report that names a job this session never
+                // issued is refused for that, and its paths are never looked at
+                // (no `canonicalize` on a stranger's say-so).
                 self.check_owned(&status.id, "bg")?;
+                // Then the paths: a report for one of ours that points out of
+                // the session is refused for the path, which is what it tried.
+                // Both are needed before the capability, because a refusal must
+                // not depend on knowing a secret.
                 if !status.out.trim().is_empty() {
                     self.check_job_path(&status.out, "out")?;
                 }
                 if let Some(path) = &status.cmd_path {
                     self.check_job_path(path, "cmd_path")?;
                 }
+                // A *job*: a call's own id is in the registry (its status file
+                // reaches the log through the session's watcher), but no report
+                // is ever accepted for it — the call's shim never sends one, so
+                // a report with that id is a child quoting its own directory
+                // name (STEER-7 review B1).
+                if status.kind != crate::bg::KIND_JOB {
+                    return Err(format!(
+                        "bg: `{}` is not a job of this session (a call reports through its \
+                         status file, never over the socket)",
+                        status.id
+                    ));
+                }
+                // The capability lives on the request, not in the status: a
+                // status file (or a status-shaped `args`) is a thing a child can
+                // write, the request's own field is not.
+                if !self.proves(&status.id, request.capability.as_deref()) {
+                    return Err(format!(
+                        "bg: the report for job `{}` does not carry that job's capability, so it \
+                         is not from its shim (the session token is not one: every tool child has \
+                         it)",
+                        status.id
+                    ));
+                }
                 Ok(())
             }
             "cancel" => {
                 let id = crate::verbs::cancel_id(&request.args)?;
+                // A cancel names one of ours and is done by a token holder (a
+                // person at `kelir ctl`, the TUI, the session's own children).
+                // It needs no capability: it kills, it does not record a state a
+                // caller could be lied to about.
                 self.check_owned(&id, "cancel")
             }
             _ => Ok(()),
@@ -502,8 +861,16 @@ impl Trust {
     }
 }
 
+/// Parse a spawn request's arguments.
+pub fn spawn_request(request: &Request) -> Result<crate::bg::SpawnRequest, String> {
+    serde_json::from_value(request.args.clone())
+        .map_err(|error| format!("not a spawn request: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use serde_json::json;
 
@@ -563,8 +930,26 @@ mod tests {
             "a b",
             "café",
             "x/../../y",
+            // Windows resolves these to devices, whatever the extension, and
+            // drops a trailing dot or space (STEER-7 review N1).
+            "nul",
+            "NUL",
+            "nul.status",
+            "con",
+            "COM1",
+            "com0",
+            "lpt9.json",
+            "aux",
+            "prn",
+            "COM\u{b9}",
+            "bg_esc.",
+            "bg_esc ",
         ] {
             assert!(!valid_job_id(bad), "{bad} was accepted");
+        }
+        // A name that merely starts with a device name is a normal file.
+        for good in ["console", "nullable", "bg_com1", "com10"] {
+            assert!(valid_job_id(good), "{good}");
         }
         assert!(!valid_job_id(&"x".repeat(MAX_ID + 1)));
         assert!(valid_job_id(&"x".repeat(MAX_ID)));
@@ -687,20 +1072,124 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The registry is this process's memory and its persisted half — never a
+    /// file a child can create (STEER-7 review B1).
     #[test]
-    fn the_registry_is_the_sessions_own_bg_and_commands() {
+    fn the_registry_holds_only_ids_the_session_minted() {
         let dir = temp_dir("owns");
         std::fs::create_dir_all(dir.join("bg")).unwrap();
         std::fs::create_dir_all(dir.join("commands").join("12-3-2")).unwrap();
         let trust = Trust::new(dir.clone(), "t".into());
-        assert!(trust.owns("12-3-2"), "a call's output dir is its own");
-        assert!(!trust.owns("bg_other"));
+        // A call's output directory, and a status file dropped by a child, are
+        // both *files*: neither makes a job.
         std::fs::write(dir.join("bg").join("bg_1.status"), "{}").unwrap();
-        assert!(trust.owns("bg_1"), "a status file in bg/ is its own");
-        trust.register("bg_2");
-        assert!(trust.owns("bg_2"));
-        trust.register("../etc/passwd");
+        assert!(!trust.owns("12-3-2"), "a directory owned a job");
+        assert!(!trust.owns("bg_1"), "a status file owned a job");
+
+        let (id, capability) = trust.mint("bg").unwrap();
+        assert!(id.starts_with("bg_"), "{id}");
+        assert_eq!(id.len(), 3 + ID_BYTES * 2, "{id}");
+        assert_eq!(capability.len(), CAP_BYTES * 2, "{capability}");
+        assert!(trust.owns(&id));
+        assert_eq!(trust.capability(&id).as_deref(), Some(capability.as_str()));
         assert!(!trust.owns("../etc/passwd"));
+        trust.forget(&id);
+        assert!(!trust.owns(&id), "a forgotten job is not answered for");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two sessions never mint the same id (review S2): the id is random, and
+    /// a call's capability is not derived from anything a caller can pick.
+    #[test]
+    fn no_two_sessions_mint_the_same_id() {
+        let first = Trust::new(temp_dir("mint-a"), "t".into());
+        let second = Trust::new(temp_dir("mint-b"), "t".into());
+        let mut seen = HashSet::new();
+        for _ in 0..64 {
+            for trust in [&first, &second] {
+                let (id, capability) = trust.mint("bg").unwrap();
+                assert!(seen.insert(id), "an id repeated");
+                assert!(seen.insert(capability), "a capability repeated");
+            }
+        }
+        first.issue_call("12-3-1", "call_1").unwrap();
+        assert!(first.owns("12-3-1"), "a call's own id is registered");
+        assert_eq!(
+            first.capability("12-3-1"),
+            None,
+            "a call has no capability, so no report for it is ever accepted"
+        );
+        assert!(!first.proves("12-3-1", Some("anything")));
+    }
+
+    /// A resume rebuilds the registry from the log and from nothing else (a
+    /// file in `bg/` is a file a tool child can write, and a capability on disk
+    /// would be one it could read). An adopted job answers `cancel` but never a
+    /// `bg` report — the secret died with the process that minted it.
+    #[test]
+    fn a_resumed_session_adopts_only_what_its_log_names() {
+        let dir = temp_dir("adopt");
+        std::fs::create_dir_all(dir.join("bg")).unwrap();
+        let resumed = Trust::create(dir.clone()).unwrap();
+        assert!(!resumed.owns("bg_from_the_log"));
+        resumed.adopt("bg_from_the_log");
+        assert!(resumed.owns("bg_from_the_log"));
+        assert!(resumed.capability("bg_from_the_log").is_none());
+        assert!(!resumed.proves("bg_from_the_log", Some("anything")));
+        // Neither does an id that was never adopted, nor a path.
+        resumed.adopt("../escape");
+        assert!(!resumed.owns("../escape"));
+        // The token of the resumed process is a new one.
+        assert_ne!(resumed.token(), Trust::create(dir.clone()).unwrap().token());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The capability is what separates a shim from a tool child that holds the
+    /// session's token: no capability, or another job's, proves nothing.
+    #[test]
+    fn only_that_jobs_capability_proves_a_report() {
+        let dir = temp_dir("proves");
+        let trust = Trust::new(dir.clone(), "t".into());
+        let (_mine, my_cap) = trust.mint("bg").unwrap();
+        let (theirs, their_cap) = trust.mint("bg").unwrap();
+        assert!(trust.proves(&theirs, Some(&their_cap)));
+        assert!(!trust.proves(&theirs, Some(&my_cap)));
+        assert!(!trust.proves(&theirs, None));
+        assert!(!trust.proves(&theirs, Some("")));
+        assert!(!trust.proves("bg_never", Some(&their_cap)));
+        assert!(!trust.proves(&theirs, Some(&their_cap[1..])), "a prefix");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The refusal budget: an authenticated caller that names foreign jobs one
+    /// by one may put `REFUSAL_BUDGET` refusals in the log, not more.
+    #[test]
+    fn refusals_are_rate_limited() {
+        let dir = temp_dir("refusals");
+        let trust = Trust::new(dir.clone(), "t".into());
+        for _ in 0..REFUSAL_BUDGET {
+            assert!(trust.may_record_refusal());
+        }
+        for _ in 0..5 {
+            assert!(!trust.may_record_refusal(), "the budget refilled");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `bg-claim` is bounded: a child inside a call may ask the session for an
+    /// id (that is how `kelir bg run` gets one), but not for ever.
+    #[test]
+    fn claims_are_bounded() {
+        let dir = temp_dir("claims");
+        let trust = Trust::new(dir.clone(), "t".into());
+        let (id, capability) = trust.claim(Some("call_9")).unwrap();
+        assert!(id.starts_with("bg_"));
+        assert!(trust.proves(&id, Some(&capability)));
+        for _ in 1..CLAIM_BUDGET {
+            trust.claim(None).unwrap();
+        }
+        let error = trust.claim(None).unwrap_err();
+        assert!(error.contains("minted its"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -718,15 +1207,44 @@ mod tests {
         let error = trust.check_job(&foreign).unwrap_err();
         assert!(error.contains("did not start job `bg_1`"), "{error}");
 
-        trust.register("bg_1");
-        assert!(trust.check_job(&foreign).is_ok());
+        // Minted: the id is the session's own, but a report without that job's
+        // capability is still refused. The session token is what every tool
+        // child has (STEER-7 review B1).
+        let (id, capability) = trust.mint("bg").unwrap();
+        let out = crate::util::path_string(&dir.join("bg").join(format!("{id}.out")));
+        let report = json!({
+            "id": id, "state": "running", "started": "2026-01-01T00:00:00Z",
+            "out": out, "kind": "job"
+        });
+        let bare = Request::new("bg", report.clone(), "job").with_token(Some("t".into()));
+        let error = trust.check_job(&bare).unwrap_err();
+        assert!(
+            error.contains("does not carry that job's capability"),
+            "{error}"
+        );
+        assert!(
+            !error.contains(&capability),
+            "the refusal echoed the secret"
+        );
+
+        let wrong = bare
+            .clone()
+            .with_capability(Some("0".repeat(CAP_BYTES * 2)));
+        assert!(trust.check_job(&wrong).is_err());
+
+        let right = bare.with_capability(Some(capability.clone()));
+        assert!(
+            trust.check_job(&right).is_ok(),
+            "{:?}",
+            trust.check_job(&right)
+        );
 
         let stolen = json!({
-            "id": "bg_1", "state": "running", "started": "2026-01-01T00:00:00Z",
+            "id": id, "state": "running", "started": "2026-01-01T00:00:00Z",
             "out": crate::util::path_string(&dir.join("..").join("stolen.out")), "kind": "job"
         });
         let error = trust
-            .check_job(&Request::new("bg", stolen, "job"))
+            .check_job(&Request::new("bg", stolen, "job").with_capability(Some(capability.clone())))
             .unwrap_err();
         assert!(error.contains("not inside this session's own"), "{error}");
 
@@ -737,7 +1255,7 @@ mod tests {
         });
         assert!(
             trust
-                .check_job(&Request::new("bg", traversal, "job"))
+                .check_job(&Request::new("bg", traversal, "job").with_capability(Some(capability)))
                 .is_err()
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -750,25 +1268,47 @@ mod tests {
         std::fs::create_dir_all(&bg).unwrap();
         let other = temp_dir("spawn-other");
         let trust = Trust::new(dir.clone(), "t".into());
-        let spawn = |job_dir: &Path, out: &Path| {
+        let (id, _capability) = trust.mint("bg").unwrap();
+        let spawn = |job_dir: &Path, out: &Path, id: &str| {
             json!({
                 "dir": crate::util::path_string(job_dir),
-                "id": "bg_1",
+                "id": id,
                 "out": crate::util::path_string(out),
                 "cmd": "true",
                 "shell": ["bash"],
                 "kind": "job",
             })
         };
-        let ok = Request::new("bg-spawn", spawn(&bg, &bg.join("bg_1.out")), "job");
+        let ok = Request::new(
+            "bg-spawn",
+            spawn(&bg, &bg.join(format!("{id}.out")), &id),
+            "job",
+        );
         assert!(
             trust.check_spawn(&ok).is_ok(),
             "{:?}",
             trust.check_spawn(&ok)
         );
+        // An id the session never minted: a child can pick any name it likes,
+        // and it is still not this session's job.
+        let made_up = Request::new(
+            "bg-spawn",
+            spawn(&bg, &bg.join("bg_picked.out"), "bg_picked"),
+            "job",
+        );
+        let error = trust.check_spawn(&made_up).unwrap_err();
+        assert!(error.contains("did not start job"), "{error}");
+        // No id at all: the session mints one when it answers.
+        let mut args = spawn(&bg, &bg.join("bg_new.out"), &id);
+        args.as_object_mut().unwrap().remove("id");
+        assert!(
+            trust
+                .check_spawn(&Request::new("bg-spawn", args, "job"))
+                .is_ok()
+        );
         let foreign = Request::new(
             "bg-spawn",
-            spawn(&other.join("bg"), &other.join("bg").join("bg_1.out")),
+            spawn(&other.join("bg"), &other.join("bg").join("bg_1.out"), &id),
             "job",
         );
         let error = trust.check_spawn(&foreign).unwrap_err();

@@ -57,6 +57,15 @@ pub const SOCKET_POINTER_FILE: &str = "sock.path";
 const PIPE_PREFIX: &str = "kelir-";
 /// How long a client waits for a connection or an answer.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
+/// The longest request line the listener will read. A verb's arguments are a job
+/// status or a sentence; 64 KB is far past anything `kelir ctl` sends and far
+/// short of what a hostile peer would like this process to hold (STEER-7 review
+/// N3).
+pub const MAX_LINE: usize = 64 * 1024;
+/// How long a connection may sit without sending its request. A client that
+/// connects and says nothing is not a client of this session; it is refused
+/// rather than held open for as long as it likes (STEER-7 review N3).
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One request line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,6 +81,12 @@ pub struct Request {
     /// the session's own watcher run inside the session and set it from memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The **job capability** the sender holds ([`crate::trust::CAP_ENV`]): a
+    /// per-job secret only that job's shim has. A `bg` report must carry it, and
+    /// the session's token is not a substitute — every tool child has the token
+    /// (STEER-7 review B1). Never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
 }
 
 fn default_from() -> String {
@@ -85,12 +100,19 @@ impl Request {
             args,
             from: from.into(),
             token: None,
+            capability: None,
         }
     }
 
     /// The same request, carrying a token (what the client side does).
     pub fn with_token(mut self, token: Option<String>) -> Self {
         self.token = token;
+        self
+    }
+
+    /// The same request, carrying a job's capability (what a shim's report does).
+    pub fn with_capability(mut self, capability: Option<String>) -> Self {
+        self.capability = capability.filter(|capability| !capability.trim().is_empty());
         self
     }
 }
@@ -400,9 +422,18 @@ async fn connection(
     let mut line = String::new();
     loop {
         line.clear();
-        match lines.read_line(&mut line).await {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
+        match read_bounded(&mut lines, &mut line, IDLE_TIMEOUT).await {
+            Read::Line => {}
+            // The peer is gone, said nothing in time, or sent a line nobody
+            // would send: answer that once (when there is someone to answer)
+            // and close (STEER-7 review N3).
+            Read::Closed => return,
+            Read::Refused(message) => {
+                let mut out = Response::error(message).line();
+                out.push('\n');
+                let _ = reply_line(&mut write, &out).await;
+                return;
+            }
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -421,11 +452,9 @@ async fn connection(
                         })
                         .is_err()
                     {
-                        let _ = write
-                            .write_all(Response::error("the session is ending").line().as_bytes())
-                            .await;
-                        let _ = write.write_all(b"\n").await;
-                        let _ = write.flush().await;
+                        let mut out = Response::error("the session is ending").line();
+                        out.push('\n');
+                        let _ = reply_line(&mut write, &out).await;
                         return;
                     }
                     match answer.await {
@@ -444,13 +473,80 @@ async fn connection(
         };
         let mut out = response.line();
         out.push('\n');
-        if write.write_all(out.as_bytes()).await.is_err() || write.flush().await.is_err() {
+        if !reply_line(&mut write, &out).await {
             return;
         }
         if close {
             return;
         }
     }
+}
+
+/// Write one answer line, bounded in time. An answer nobody reads is an answer
+/// the peer is not waiting for (a hostile client can fill its own receive
+/// buffer and then not read, which would park this connection's task for as
+/// long as it likes); a write that does not finish in [`IO_TIMEOUT`] closes the
+/// connection instead (STEER-7 review N3). Whether the line went out.
+async fn reply_line<W>(write: &mut W, out: &str) -> bool
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt as _;
+    let sent = tokio::time::timeout(IO_TIMEOUT, async {
+        write.write_all(out.as_bytes()).await?;
+        write.flush().await
+    })
+    .await;
+    matches!(sent, Ok(Ok(())))
+}
+
+/// What one bounded read of a request line produced.
+enum Read {
+    /// A whole line is in the buffer.
+    Line,
+    /// The peer closed without a line (a client that just connects and leaves).
+    Closed,
+    /// A line the listener will not read: too long, or not sent in time. The
+    /// string is what the peer is told before the connection closes.
+    Refused(String),
+}
+
+/// Read one request line, bounded in **length** and in **time**: at most
+/// [`MAX_LINE`] bytes are pulled in (so a megabyte with no newline is never
+/// held) and at most `idle` passes before the peer is told to go away. Both
+/// are what makes the listener unattractive to a hostile peer that never
+/// authenticates (STEER-7 review N3).
+async fn read_bounded<R>(lines: &mut BufReader<R>, line: &mut String, idle: Duration) -> Read
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt as _;
+    use tokio::io::AsyncReadExt as _;
+    // `take` limits the read half, so the limit is on bytes, not on lines.
+    let mut limited = lines.take(MAX_LINE as u64);
+    let read = match tokio::time::timeout(idle, limited.read_line(line)).await {
+        Ok(Ok(read)) => read,
+        // A read error is a peer that left: nothing to answer.
+        Ok(Err(_)) => return Read::Closed,
+        // Nothing in time: the peer is told once and the connection closes.
+        Err(_) => {
+            return Read::Refused(format!(
+                "no request line within {}s; closing",
+                idle.as_secs_f32().round()
+            ));
+        }
+    };
+    if read == 0 {
+        return Read::Closed;
+    }
+    // `take` stopped at the cap without a newline: the line is too long and its
+    // tail is still coming. One refusal and a close is the whole answer.
+    if read >= MAX_LINE && !line.ends_with('\n') {
+        return Read::Refused(format!(
+            "the request line is longer than {MAX_LINE} bytes; closing"
+        ));
+    }
+    Read::Line
 }
 
 /// Connect to a session's socket. Read-only as far as the filesystem goes: the
@@ -795,6 +891,65 @@ mod tests {
         assert!(answer.ok);
         assert_eq!(answer.seq, Some(4));
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// A peer is read for at most `MAX_LINE` bytes and `IDLE_TIMEOUT`: an
+    /// unterminated megabyte is refused at the cap instead of being held, and a
+    /// connection that says nothing is closed rather than kept (STEER-7 review
+    /// N3).
+    #[tokio::test]
+    async fn a_request_line_is_bounded_in_length_and_in_time() {
+        use tokio::io::AsyncWriteExt as _;
+        // A whole line is a line.
+        let (client, server) = tokio::io::duplex(MAX_LINE * 2);
+        let mut reader = BufReader::new(server);
+        let mut line = String::new();
+        let mut client = client;
+        client.write_all(b"{\"verb\":\"say\"}\n").await.unwrap();
+        assert!(matches!(
+            read_bounded(&mut reader, &mut line, Duration::from_secs(1)).await,
+            Read::Line
+        ));
+        assert_eq!(line.trim(), "{\"verb\":\"say\"}");
+
+        // Longer than the cap, never ended: refused, and the buffer stops at the
+        // cap (the rest is never read).
+        let (mut client, server) = tokio::io::duplex(MAX_LINE * 2);
+        let writer = tokio::spawn(async move {
+            let chunk = vec![b'x'; 4096];
+            for _ in 0..(MAX_LINE / 4096 + 2) {
+                if client.write_all(&chunk).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let mut reader = BufReader::new(server);
+        let mut line = String::new();
+        match read_bounded(&mut reader, &mut line, Duration::from_secs(5)).await {
+            Read::Refused(message) => assert!(message.contains("longer than"), "{message}"),
+            _ => panic!("an unterminated line past the cap was accepted"),
+        }
+        assert!(line.len() <= MAX_LINE, "the buffer grew to {}", line.len());
+        let _ = writer.await;
+
+        // A peer that connects and says nothing is not a client.
+        let (_client, server) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(server);
+        let mut line = String::new();
+        match read_bounded(&mut reader, &mut line, Duration::from_millis(50)).await {
+            Read::Refused(message) => assert!(message.contains("no request line"), "{message}"),
+            _ => panic!("a silent peer was held open"),
+        }
+
+        // A peer that leaves before its line is simply gone.
+        let (client, server) = tokio::io::duplex(64);
+        drop(client);
+        let mut reader = BufReader::new(server);
+        let mut line = String::new();
+        assert!(matches!(
+            read_bounded(&mut reader, &mut line, Duration::from_secs(1)).await,
+            Read::Closed
+        ));
     }
 
     /// The socket half of STEER-7: a request with no token, or another

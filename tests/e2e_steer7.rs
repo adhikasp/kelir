@@ -270,6 +270,91 @@ async fn a_path_escaping_the_session_is_refused() {
     assert_eq!(code, 0, "{stderr}");
 }
 
+/// B1, the whole point: a tool child holds the session's token, so a report for
+/// one of the session's *own* jobs still needs that job's capability. With the
+/// token alone it is refused, and nothing it claims reaches the log.
+#[tokio::test]
+async fn a_report_with_the_token_but_no_capability_is_refused() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+    session.wait_for("turn_ended").await;
+    let token = token_of(&session);
+
+    // A real job of this session: the same route a bash child takes.
+    let sandbox = Sandbox::from_live(&session);
+    let started = sandbox
+        .kelir(
+            "http://127.0.0.1:9/v1",
+            &["bg", "run", "sleep 5; echo job"],
+            &[
+                (
+                    "KELIR_SESSION_DIR",
+                    &kelir::util::path_string(&session.session_dir),
+                ),
+                (
+                    "KELIR_SOCK",
+                    &kelir::ipc::value(&session.session_dir, &session.id),
+                ),
+                ("KELIR_TOKEN", &token),
+            ],
+        )
+        .await;
+    assert_eq!(started.code, 0, "stderr: {}", started.stderr);
+    let id = started
+        .stdout
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    assert!(id.starts_with("bg_"), "{}", started.stdout);
+    let out = session.session_dir.join("bg").join(format!("{id}.out"));
+
+    // The token, a real job id, and a claim that it was lost: exactly what a
+    // child can write, without the job's capability.
+    for capability in [None, Some("0".repeat(64)), Some("wrong".to_string())] {
+        let mut request = json!({
+            "verb": "bg",
+            "from": "job",
+            "token": token,
+            "args": {"id": id, "state": "lost", "started": "2026-11-19T00:00:00Z",
+                     "out": kelir::util::path_string(&out), "kind": "job",
+                     "cmd": "forged"},
+        });
+        if let Some(capability) = capability {
+            request["capability"] = json!(capability);
+        }
+        let answer = raw(&session, request).await;
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert!(
+            answer["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("capability"),
+            "the refusal names what is missing: {answer}"
+        );
+    }
+    let log = session.log();
+    assert!(
+        !log.iter()
+            .any(|event| event["type"] == "user" && event["from"] == "job"),
+        "a forged `lost` report reached the log: {log:?}"
+    );
+    assert!(
+        !log.iter().any(|event| event["type"] == "bg_settled"),
+        "a forged report settled the job in the log: {log:?}"
+    );
+
+    // Clean up the job this test really started, and its shim.
+    let cancelled = session.ctl(&["cancel", &id]).await;
+    assert_eq!(
+        cancelled.code, 0,
+        "{}{}",
+        cancelled.stdout, cancelled.stderr
+    );
+    let (code, stderr) = session.end().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
 /// F8, second half: reaching the socket is not authorisation. A request with no
 /// token is answered and dropped at the listener — the session never sees it, so
 /// it cannot log it either.
@@ -552,11 +637,15 @@ async fn ctl_reads_the_token_file_and_the_secret_is_never_logged() {
     assert!(!stderr.contains(&token), "the token reached stderr");
 }
 
-/// The token is exported to the session's own tool children (`KELIR_TOKEN`), so
-/// a job they start can report itself — and a request that carries it is
-/// accepted.
+/// The token is exported to the session's own tool children (`KELIR_TOKEN`),
+/// together with the socket address, and it is not echoed; the file that holds
+/// it does not outlive the session that minted it (STEER-7 review S1).
+///
+/// A child that holds the token still cannot impersonate a job's shim: that is
+/// what the per-job capability is for, and `tests/review_steer7.rs` is the
+/// proof of it. This test only pins the export and the retirement.
 #[tokio::test]
-async fn a_tool_child_gets_the_token_and_can_report() {
+async fn a_tool_child_gets_the_token_and_the_file_does_not_outlive_the_session() {
     let mock = Mock::start(vec![
         Reply::Sse(sse(&tool_turn(
             "call_env",
@@ -574,9 +663,24 @@ async fn a_tool_child_gets_the_token_and_can_report() {
     let out = std::fs::read_to_string(out_path).expect("the call's output file");
     assert!(out.contains("has-token"), "{out}");
     assert!(out.contains("has-sock"), "{out}");
-    let token = kelir::trust::read_token(&run.session_dir).expect("a token file");
+    // The session has ended, and a token nobody serves is only something to
+    // find: it is gone from the session directory (review S1).
     assert!(
-        !run.stdout.contains(&token) && !out.contains(&token),
-        "the token was echoed"
+        !run.session_dir.join("token").exists(),
+        "the token file outlived the session"
     );
+    // Never echoed: no 64-character hex run in what the session printed or in
+    // the call's own output (the token is 32 random bytes, hex).
+    for text in [&out, &run.stdout, &run.stderr] {
+        let leaked = text.split(|ch: char| !ch.is_ascii_hexdigit()).find(|run| {
+            run.len() >= 64
+                && run
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        });
+        assert!(
+            leaked.is_none(),
+            "something token-shaped was printed: {text}"
+        );
+    }
 }
