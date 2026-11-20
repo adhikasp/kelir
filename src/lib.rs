@@ -8,6 +8,8 @@ pub mod activity;
 pub mod attachments;
 pub mod bg;
 pub mod chat;
+pub mod child;
+pub mod childcli;
 pub mod cli;
 pub mod commands;
 pub mod compact;

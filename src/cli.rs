@@ -40,6 +40,12 @@ pub enum Command {
     Observe(ObserveArgs),
     /// MCP servers as a CLI: `ls`, `<server> ls`, `<server> <tool> [k=v …]`.
     Mcp(McpArgs),
+    /// Ask a side question on a snapshot of this session (`brief "<question>"`).
+    Brief(BriefArgs),
+    /// List sessions as a tree: state, depth, model, cost, cache hits, task.
+    Ls(LsArgs),
+    /// Stop a child (and everything below it): `kill <session>` or `kill --tree`.
+    Kill(KillArgs),
     /// Show which key each provider would use (never the key itself).
     Doctor(DoctorArgs),
     /// Read kelir's own reference (config, CLI, verbs, files, …).
@@ -49,6 +55,10 @@ pub enum Command {
     BgShim(BgShimArgs),
     #[command(hide = true, name = "gate-guard")]
     GateGuard(GateGuardArgs),
+    /// Internal: a child session's process (its parent hands it the task on
+    /// stdin). Not for humans.
+    #[command(hide = true, name = "child-host")]
+    ChildHost,
 }
 
 #[derive(Debug, Args, Clone, Default)]
@@ -87,6 +97,14 @@ pub struct RunArgs {
     /// Continue a session from its log instead of starting one.
     #[arg(long, value_name = "ID")]
     pub resume: Option<String>,
+    /// Start the task as a child of the session this tool call runs in (it
+    /// needs `KELIR_SOCK`): the child's final text is this command's stdout.
+    #[arg(long)]
+    pub child: bool,
+    /// With `--child`: return a handle at once; the child's completion wakes
+    /// the parent at its next boundary.
+    #[arg(long, requires = "child")]
+    pub background: bool,
 }
 
 /// `kelir resume <id> [task]`: continue a session from its log.
@@ -150,7 +168,7 @@ pub struct CtlArgs {
     /// error if it is not running).
     #[arg(value_name = "SESSION")]
     pub session: String,
-    /// The verb: say, later, stop, model, tools, compact, skills, view, observe, cancel, status, end.
+    /// The verb: say, later, stop, model, tools, compact, skills, view, observe, cancel, status, brief, end.
     #[arg(value_name = "VERB")]
     pub verb: String,
     /// Text for `say`/`later`/`stop`, or one JSON object with the verb's args.
@@ -186,6 +204,38 @@ pub struct CtlArgs {
     /// `status --json`: print the answer as one JSON line instead of text.
     #[arg(long)]
     pub json: bool,
+}
+
+/// `kelir brief "<question>"`: a child on a by-value snapshot of this session.
+#[derive(Debug, Args, Clone)]
+pub struct BriefArgs {
+    /// The question. Read from stdin when omitted.
+    #[arg(value_name = "QUESTION")]
+    pub question: Vec<String>,
+}
+
+/// `kelir ls`.
+#[derive(Debug, Args, Clone)]
+pub struct LsArgs {
+    /// Print the tree as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Every session on disk (the default: this session's tree, or the newest
+    /// roots when run outside a session).
+    #[arg(long)]
+    pub all: bool,
+}
+
+/// `kelir kill`.
+#[derive(Debug, Args, Clone)]
+pub struct KillArgs {
+    /// The child (session id or a unique prefix) to stop, with everything below it.
+    #[arg(value_name = "SESSION", conflicts_with = "tree")]
+    pub session: Option<String>,
+    /// Stop every descendant of this session (from a tool call), or of the
+    /// session named.
+    #[arg(long)]
+    pub tree: bool,
 }
 
 /// `kelir view <path>`: make an image arrive in the model's next message.

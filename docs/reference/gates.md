@@ -119,6 +119,15 @@ skipped`), never queued or retried. A spawn failure is one `gate` event with `er
 never a retry. A kelir started by a gate (it inherits `KELIR_GATE_EVENT`) runs **no
 gates**: a gate never triggers gates. An empty command is a config error at load.
 
+**Child sessions** (`kelir run --child`, `kelir brief`) run the same gates with their
+own session directory (`KELIR_SESSION_DIR` is the child's), their own `gate` events in
+their own log, and the same scrubbed environment: a child's gate never sees the token,
+the socket or a provider key either. The cap is per process, so a child is limited to
+**2** live gate processes (the root keeps 8); with the default 16 live descendants a
+whole tree has at most 8 + 16 x 2 = **40** gate processes alive. A `brief` is a child
+and counts the same. A prompt a parent hands to a child (`from` `parent` or `brief`) is
+not a human prompt and goes through no `prompt_submit` gate.
+
 ## What a gate's environment holds
 
 An allow-list, not a copy: `PATH`, the home/temp/system variables, locale,
@@ -136,7 +145,9 @@ One `gate` event per run (`gate`, `event`, `decision`, `reason`, `ms`,
 is in the `tool_started`/`user`/`turn_ended` event that used it; the model's
 own `assistant` event keeps what it said. `kelir observe <session>` prints the
 effective gates (`== gates ==`, commands and `env` names only) and the runs so
-far (`== gates fired ==`).
+far (`== gates fired ==`). `kelir ctl <session> status` carries a `gates` object:
+`declared`, `runs`, `denied`, `rewritten`, `failed_open` and the `last` run (printed as one `gates` line when any gate is declared)
+(`gate`, `event`, `decision`).
 
 ## The example gates (`examples/gates/`)
 

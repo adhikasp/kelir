@@ -1056,3 +1056,109 @@ session_start = {{ name = 'again', command = '{} \"{}\" \"{}\"' }}
         .count();
     assert_eq!(with_gates, 1, "only the outer session runs gates");
 }
+
+// ------------------------------------------------------------- child sessions
+
+#[tokio::test]
+async fn a_child_session_runs_its_own_scrubbed_gates_and_status_and_observe_show_them() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "c1",
+            "bash",
+            &json!({"command": "\"$KELIR_BIN\" run --child \"kid task\""}),
+        ))),
+        Reply::Sse(sse(&text_turn("kid done", 0))),
+        Reply::Sse(sse(&tool_turn(
+            "c2",
+            "bash",
+            &json!({"command": "\"$KELIR_BIN\" ctl \"$KELIR_ROOT\" status"}),
+        ))),
+        Reply::Sse(sse(&text_turn("root done", 0))),
+    ])
+    .await;
+    let probe = Probe::new(json!({}));
+    let events = [
+        ("session_start", None),
+        ("before_tool", None),
+        ("session_end", None),
+    ];
+    let config = probe.config(&events);
+    let canaries = [
+        ("OPENROUTER_API_KEY", "canary-openrouter-77aa"),
+        ("MY_OWN_KEY_ENV", "canary-custom-91bc"),
+        ("KELIR_TOKEN", "canary-token-5d2e"),
+    ];
+    let done = drive(&mock, &config, "root task", &canaries).await;
+    assert_eq!(done.out.code, 0, "{}", done.out.stderr);
+    let ids = done.sandbox.session_ids();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    let logs: Vec<(String, Vec<Value>)> = ids
+        .iter()
+        .map(|id| (id.clone(), done.sandbox.log(id)))
+        .collect();
+    for (id, log) in &logs {
+        let fired: Vec<&Value> = log.iter().filter(|e| e["type"] == "gate").collect();
+        assert!(
+            fired.iter().any(|e| e["event"] == "session_start"),
+            "{id} never ran its session_start gate"
+        );
+        assert!(fired.iter().any(|e| e["event"] == "session_end"), "{id}");
+        assert!(
+            fired.iter().all(|e| e.get("error").is_none()),
+            "{id}: {fired:?}"
+        );
+    }
+    // The last session_start the probe saw is the child's: its own session dir,
+    // and nothing secret in its environment.
+    let child_id = logs
+        .iter()
+        .find(|(_, log)| log[0]["parent"].is_string())
+        .map(|(id, _)| id.clone())
+        .expect("a child session");
+    let env = probe.env_of("session_start");
+    assert!(
+        env["KELIR_SESSION_DIR"]
+            .as_str()
+            .unwrap()
+            .contains(&child_id),
+        "{env}"
+    );
+    for event in ["session_start", "before_tool", "session_end"] {
+        let text = probe.env_of(event).to_string();
+        for (name, value) in canaries {
+            assert!(!text.contains(value), "{event}: {name} reached a gate");
+        }
+    }
+    // The root's `ctl status` result (a tool result in its log) carries the gate counters.
+    let root_log = &logs.iter().find(|(id, _)| *id != child_id).unwrap().1;
+    let status = root_log
+        .iter()
+        .filter(|e| e["type"] == "tool_settled")
+        .map(|e| e.to_string())
+        .find(|text| text.contains("failed open"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no gate counters in ctl status: {:?}",
+                root_log
+                    .iter()
+                    .filter(|e| e["type"] == "tool_settled")
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        status.contains("3 declared") && status.contains("run(s)"),
+        "{status}"
+    );
+    // `observe` on the child lists what fired in it.
+    let out = done
+        .sandbox
+        .kelir(&mock.base_url(), &["observe", &child_id], &[])
+        .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("== gates fired"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("session_start gate_probe"),
+        "{}",
+        out.stdout
+    );
+}

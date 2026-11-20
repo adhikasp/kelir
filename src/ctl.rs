@@ -53,10 +53,21 @@ pub async fn ctl(args: CtlArgs) -> u8 {
         // only its owner can read (STEER-7): a human's terminal knows which
         // session it is steering, so it reads that file rather than the
         // environment a tool child would get.
-        match ipc::request_with_token_file(&dir, id, &request).await {
+        // `brief` answers when the side question's model does.
+        let sent = if args.verb == "brief" {
+            ipc::request_with_token_file_within(&dir, id, &request, crate::child::FOREGROUND_WAIT)
+                .await
+        } else {
+            ipc::request_with_token_file(&dir, id, &request).await
+        };
+        match sent {
             Ok(response) => {
                 // `status` reads for a human unless `--json` asks for the line.
                 match (&args.verb[..], &response.state, args.json) {
+                    // A brief's answer is the child's final text.
+                    ("brief", Some(state), false) if response.ok => {
+                        println!("{}", state["result"].as_str().unwrap_or(""));
+                    }
                     ("status", Some(state), false) if response.ok => {
                         println!("{}", crate::spend::render_text(state));
                     }

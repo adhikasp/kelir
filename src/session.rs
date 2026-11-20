@@ -60,6 +60,8 @@ const IDLE_MODELS_WAIT: Duration = Duration::from_millis(100);
 const CONTINUE_NOTE: &str = "[kelir] the session was interrupted between turns; continue the task \
                              from where it stopped.";
 
+mod children;
+
 type Inbox = mpsc::UnboundedReceiver<Incoming>;
 
 /// A `kelir mcp` call that is logged (`mcp_started`) and running on a broker
@@ -72,6 +74,21 @@ struct McpPending {
 }
 
 pub async fn run(args: RunArgs) -> u8 {
+    // `--child` starts the task as a child of the session this tool call runs
+    // in. Outside any session it is just a run (and `--background` has nothing
+    // to wake).
+    if args.child {
+        if crate::envs::var_os("KELIR_SOCK").is_some() {
+            return crate::childcli::run(args).await;
+        }
+        if args.background {
+            eprintln!(
+                "kelir: --background needs a session to wake (KELIR_SOCK is not set); \
+                 use `kelir bg run` for a detached job"
+            );
+            return 2;
+        }
+    }
     drive(Options {
         json: args.json,
         ask: false,
@@ -80,6 +97,7 @@ pub async fn run(args: RunArgs) -> u8 {
         common: args.common,
         task: args.task,
         resume: args.resume,
+        child: None,
     })
     .await
 }
@@ -94,6 +112,7 @@ pub async fn resume(args: ResumeArgs) -> u8 {
         common: args.common,
         task: args.task,
         resume: Some(args.id),
+        child: None,
     })
     .await
 }
@@ -107,6 +126,7 @@ pub async fn ask(args: AskArgs) -> u8 {
         common: args.common,
         task: args.question,
         resume: None,
+        child: None,
     })
     .await
 }
@@ -132,6 +152,41 @@ pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
         // message. `TuiArgs` has no positional, so there is none to reject.
         task: Vec::new(),
         resume: args.resume,
+        child: None,
+    })
+    .await
+}
+
+/// `kelir child-host`: a child session's process. Its parent started it and
+/// handed it the task, its place in the tree and the way back to the root on
+/// stdin; the final text goes to stdout, which the parent reads.
+pub async fn child_host() -> u8 {
+    let handoff = match crate::child::read_handoff() {
+        Ok(handoff) => handoff,
+        Err(message) => {
+            eprintln!("kelir: {message}");
+            return 2;
+        }
+    };
+    let brief = handoff.kind == crate::child::KIND_BRIEF;
+    drive(Options {
+        json: false,
+        // The parent wants the answer on stdout, nothing else.
+        ask: true,
+        keep: false,
+        tui: false,
+        common: CommonArgs {
+            model: handoff.model.clone(),
+            provider: handoff.provider.clone(),
+            cwd: Some(PathBuf::from(&handoff.cwd)),
+            config: None,
+            max_steps: None,
+        },
+        task: vec![handoff.task.clone()],
+        // A brief is the parent's log, copied and cut: it continues that log
+        // with the question.
+        resume: brief.then(|| handoff.session.clone()),
+        child: Some(handoff),
     })
     .await
 }
@@ -183,6 +238,8 @@ struct Options {
     task: Vec<String>,
     /// Continue this session (id or unique prefix) from its log.
     resume: Option<String>,
+    /// This process is a child session (M7): who started it, where the root is.
+    child: Option<crate::child::Handoff>,
 }
 
 enum Failure {
@@ -232,6 +289,8 @@ struct Prepared {
     tui: bool,
     herdr: Option<Herdr>,
     resume: Option<Reopened>,
+    /// Set when this process is a child session.
+    child: Option<crate::child::Handoff>,
     /// The window compaction measures against, and where it came from
     /// (`config`, `api`, `cache`, `default`).
     window: u64,
@@ -400,6 +459,9 @@ struct Session {
     /// log as it is written (STEER-8): the `status` verb's answer, and what the
     /// warnings are decided from.
     tally: crate::spend::Tally,
+    /// This session's place in the family of sessions and its registry of
+    /// children (M7).
+    kids: children::Kids,
     /// The retry or slot wait in progress, for `status`: when it ends, the
     /// status and attempt, and whether it is a slot wait. Set and cleared by
     /// the same `Retrying`/`RetryingDone` events the screen gets.
@@ -800,6 +862,15 @@ async fn drive(opts: Options) -> u8 {
     // servers connect now.
     session.mcp_inbox = Some(tx.clone());
     session.mcp.attach(tx.clone());
+    // The root looks for children whose process is gone once a second, so a
+    // crashed one frees its slot and a killed subtree is recorded.
+    if session.kids.is_root() {
+        watch_children(tx.clone(), session.kids.key().to_string());
+    }
+    // A child leaves with its parent: a hard-killed parent cannot signal it.
+    if let Some(handoff) = opts.child.clone() {
+        watch_parent(handoff, tx.clone(), trust.token().to_string());
+    }
 
     // The interactive session: the TUI runs as a task beside the loop, and all
     // it can do is send verbs into the same channel the socket feeds.
@@ -903,6 +974,60 @@ async fn drive(opts: Options) -> u8 {
     }
     session.print_result(code);
     code
+}
+
+/// Ask the root's own loop to reap dead children, every second.
+fn watch_children(tx: mpsc::UnboundedSender<Incoming>, key: String) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let (reply, _answer) = oneshot::channel();
+            let request = Request::new(
+                crate::child::VERB,
+                json!({"op": "reap", "key": key}),
+                crate::child::FROM_INTERNAL,
+            );
+            if tx
+                .send(Incoming {
+                    request,
+                    reply,
+                    action: None,
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+}
+
+/// A child session ends when its parent does. On Windows the parent's Job
+/// Object already takes the child down; on Unix nothing does when the parent is
+/// `kill -9`ed, so the child polls for it and ends itself (its tool calls follow
+/// through their own owner check).
+fn watch_parent(
+    handoff: crate::child::Handoff,
+    tx: mpsc::UnboundedSender<Incoming>,
+    token: String,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if crate::child::parent_alive(&handoff) {
+                continue;
+            }
+            let (reply, _answer) = oneshot::channel();
+            let _ = tx.send(Incoming {
+                request: Request::new("end", json!({}), "parent-gone").with_token(Some(token)),
+                reply,
+                action: None,
+            });
+            // The end verb stops the session cleanly; if something is stuck,
+            // leave anyway.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            std::process::exit(143);
+        }
+    });
 }
 
 /// Watch this session's `bg/` for jobs that start or settle, and push each
@@ -1182,13 +1307,19 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     // A resume takes its id, cwd, model and tool list from the log; only the
     // config (windows, prompts, provider keys) comes from today's machine.
     if let Some(spec) = &opts.resume {
-        let reopened = reopen(spec, &cfg).await?;
+        let cache_id = opts.child.as_ref().and_then(|child| child.cache_id.clone());
+        let reopened = reopen(spec, &cfg, cache_id).await?;
         let task = if opts.task.is_empty() {
             String::new()
         } else {
             task_text(&opts.task).await.map_err(Failure::Usage)?
         };
-        let herdr = Herdr::detect(opts.json);
+        // Only the root reports the Herdr status: a child never writes OSC.
+        let herdr = if opts.child.is_some() {
+            None
+        } else {
+            Herdr::detect(opts.json)
+        };
         let base_url = reopened.client.base_url();
         let (list, models_fetch) =
             begin_models(&reopened.client, &reopened.provider_name, &base_url).await;
@@ -1225,6 +1356,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             // which also replaces a stale `sock` left by the dead process.
             sock: String::new(),
             resume: Some(reopened.reopened),
+            child: opts.child.clone(),
             window,
             window_source,
             window_note,
@@ -1264,7 +1396,11 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     } else {
         task_text(&opts.task).await.map_err(Failure::Usage)?
     };
-    let id = new_session_id();
+    // A child's id was minted by the root, which already named it in its log.
+    let id = match &opts.child {
+        Some(child) => child.session.clone(),
+        None => new_session_id(),
+    };
     // The key is resolved here, at session start, and held in memory only
     // (STEER-2). `config::load` stays pure: reading opencode's store is a
     // process read, and a config load happens in tests and in `doctor` too.
@@ -1290,15 +1426,24 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     })?;
     // The one Herdr line: asked once, here, with a deadline; a pane that cannot
     // answer is a note, never a failed start.
-    let probe = tokio::task::spawn_blocking(crate::herdr_ctx::probe)
-        .await
-        .unwrap_or_default();
+    // Only the root asks: a child inherits the pane id but is not the pane's agent.
+    let probe = if opts.child.is_some() {
+        crate::herdr_ctx::Probe::default()
+    } else {
+        tokio::task::spawn_blocking(crate::herdr_ctx::probe)
+            .await
+            .unwrap_or_default()
+    };
     let mut system = render_system(&cfg, &cwd, probe.line.as_deref());
     system.warnings.extend(probe.note);
     // The address this session is expected to use; `drive` re-reads it after
     // `ipc::bind`, because Unix may fall back to a shorter socket path.
     let sock = ipc::value(&dir, &id);
-    let herdr = Herdr::detect(opts.json);
+    let herdr = if opts.child.is_some() {
+        None
+    } else {
+        Herdr::detect(opts.json)
+    };
 
     Ok(Prepared {
         json: opts.json,
@@ -1319,6 +1464,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         system,
         sock,
         resume: None,
+        child: opts.child.clone(),
         window,
         window_source,
         window_note,
@@ -1378,7 +1524,11 @@ struct ReopenedSession {
 }
 
 /// Read a session's log and prove it is not already running.
-async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
+async fn reopen(
+    spec: &str,
+    cfg: &Config,
+    cache_id: Option<String>,
+) -> Result<ReopenedSession, Failure> {
     let id = crate::paths::resolve_session(spec).map_err(Failure::Run)?;
     let dir = crate::paths::session_dir(&id);
     let events_path = dir.join("events.jsonl");
@@ -1456,8 +1606,14 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
         .map_err(|error| Failure::Usage(error.to_string()))?;
     let mut provider_cfg = provider_cfg;
     credentials::resolve(&mut provider_cfg).map_err(Failure::Usage)?;
-    let client = Client::new(provider_cfg.clone(), &id, cfg.cache_ttl.clone())
-        .map_err(|error| Failure::Usage(error.message))?;
+    // A brief shares its parent's provider cache: the snapshot is the parent's
+    // own prefix, so the parent's session key is what makes it hit.
+    let client = Client::new(
+        provider_cfg.clone(),
+        cache_id.as_deref().unwrap_or(&id),
+        cfg.cache_ttl.clone(),
+    )
+    .map_err(|error| Failure::Usage(error.message))?;
     let system_text = events
         .iter()
         .find_map(|event| match &event.body {
@@ -1605,6 +1761,7 @@ impl Session {
             refused_status: std::collections::HashSet::new(),
             seen_seq: std::collections::HashMap::new(),
             tally: crate::spend::Tally::default(),
+            kids: children::Kids::new(&prepared.id, prepared.cfg.children, prepared.child.as_ref()),
             retry_wait: std::cell::Cell::new(None),
             gates: None,
             turn_blocked: false,
@@ -1612,7 +1769,11 @@ impl Session {
             initial_task: None,
             gate_notes: Vec::new(),
         };
+        if session.kids.link.is_some() {
+            crate::gates::limit_for_child();
+        }
         session.gates = session.build_gates();
+        crate::child::set_lineage(session.kids.lineage.clone());
         session.tally = crate::spend::Tally::from_events(&session.events, session.warn());
         // The watcher re-checks the sources the frozen system was rendered
         // from; on a resume it is rebuilt from the log's `sources[]` *and* the
@@ -1633,13 +1794,14 @@ impl Session {
             // A turn that was in flight continues without a new task.
             session.has_task |= read.in_flight;
             session.reopen(read)?;
+            session.settle_lost_children();
             return Ok(session);
         }
         session.watch = crate::sources::Watch::from_rendered(&prepared.system);
         session.record(EventBody::SessionStarted {
             id: prepared.id.clone(),
-            parent: None,
-            depth: 0,
+            parent: prepared.child.as_ref().map(|child| child.parent.clone()),
+            depth: prepared.child.as_ref().map_or(0, |child| child.depth),
             cwd: crate::util::path_string(&prepared.cwd),
             os: std::env::consts::OS.to_string(),
             kelir_version: VERSION.to_string(),
@@ -2022,13 +2184,13 @@ impl Session {
     /// The command-line task: written at once, or held back for the gates
     /// (`session_start`, then `prompt_submit`) when there are any.
     fn submit_task(&mut self, text: String, delivery: &'static str) -> Result<(), String> {
-        if self.gated(crate::gates::Event::PromptSubmit, None) {
+        if self.task_from() == "cli" && self.gated(crate::gates::Event::PromptSubmit, None) {
             self.initial_task = Some((text, delivery));
             return Ok(());
         }
         self.record(EventBody::User {
             text: text.into(),
-            from: "cli".into(),
+            from: self.task_from().into(),
             delivery: delivery.to_string(),
             attachments: Vec::new(),
         })?;
@@ -2038,7 +2200,9 @@ impl Session {
     /// A human prompt through the `prompt_submit` gates: the text to record,
     /// or `None` when a gate dropped it (the person is told why).
     async fn gate_prompt(&mut self, text: String, from: &str) -> Result<Option<String>, String> {
-        if matches!(from, "job" | "gate") || !self.gated(crate::gates::Event::PromptSubmit, None) {
+        if matches!(from, "job" | "gate" | "parent" | "brief" | "child")
+            || !self.gated(crate::gates::Event::PromptSubmit, None)
+        {
             return Ok(Some(text));
         }
         let payload = json!({"text": text, "from": from});
@@ -2180,6 +2344,38 @@ impl Session {
 
     /// The `status` answer, built on the spot from the tally and the live
     /// fields. Read-only: it is never queued or logged.
+    /// The gate counters `ctl status` shows: how many are declared and what
+    /// the log's `gate` events say happened (names and counts only).
+    fn gates_status(&self) -> Value {
+        let (mut runs, mut denied, mut rewritten, mut failed_open) = (0u64, 0u64, 0u64, 0u64);
+        let mut last = Value::Null;
+        for event in &self.events {
+            if let EventBody::Gate {
+                gate,
+                event: at,
+                decision,
+                rewritten: rewrote,
+                error,
+                ..
+            } = &event.body
+            {
+                runs += 1;
+                denied += u64::from(decision == "deny");
+                rewritten += u64::from(*rewrote);
+                failed_open += u64::from(error.is_some());
+                last = json!({"gate": gate, "event": at, "decision": decision});
+            }
+        }
+        json!({
+            "declared": self.gates.as_ref().map_or(0, |g| g.defs().len()),
+            "runs": runs,
+            "denied": denied,
+            "rewritten": rewritten,
+            "failed_open": failed_open,
+            "last": last,
+        })
+    }
+
     fn status_answer(&self) -> Response {
         let retry =
             self.retry_wait
@@ -2223,6 +2419,9 @@ impl Session {
             })
             .collect();
         state["mcp"] = Value::Array(mcp);
+        state["gates"] = self.gates_status();
+        state["children"] = json!(self.live_children());
+        state["child_list"] = self.child_list();
         Response::ok("status", 0, "now", state)
     }
 
@@ -2390,6 +2589,10 @@ impl Session {
             self.mcp_verb(request, reply);
             return None;
         }
+        if name == crate::child::VERB || name == "brief" {
+            self.child_or_brief(request, reply);
+            return None;
+        }
         // `bg-spawn` is the one thing a job cannot do itself: on Windows a
         // `kelir bg run` inside a call sits in the call's Job Object, which
         // forbids breakaway (it has to — an escapable job cannot be
@@ -2465,6 +2668,10 @@ impl Session {
         }
         if crate::mcp::broker::is_mcp_verb(&name) {
             self.mcp_verb(request, reply);
+            return AtOnce::Rejected;
+        }
+        if name == crate::child::VERB || name == "brief" {
+            self.child_or_brief(request, reply);
             return AtOnce::Rejected;
         }
         if name == "bg-spawn" {
@@ -3013,6 +3220,13 @@ impl Session {
                         applied.messages += 1;
                     }
                 }
+                Verb::Child(note) => {
+                    if self.note_child(&note)? {
+                        applied.messages += 1;
+                    }
+                }
+                // Answered where it arrives (`child_or_brief`).
+                Verb::Brief { .. } => {}
                 // Answered where it arrives; it never gets this far.
                 Verb::Status => {}
                 // A job of this session's own, killed on request (STEER-7).
@@ -3332,8 +3546,10 @@ impl Session {
                 // A job report that arrived while the turn was ending: the
                 // wake message is written here, and the next turn reads it.
                 Verb::Bg(status) => woke |= self.note_bg(&status).unwrap_or(false),
+                Verb::Child(note) => woke |= self.note_child(&note).unwrap_or(false),
                 Verb::End => end = true,
-                Verb::Stop { .. }
+                Verb::Brief { .. }
+                | Verb::Stop { .. }
                 | Verb::Status
                 | Verb::Cancel { .. }
                 | Verb::Model { .. }
@@ -5528,6 +5744,13 @@ impl Session {
                 Some(ToolOutcome::denied(gate, reason))
             } else if disabled {
                 Some(ToolOutcome::disabled(&name))
+            } else if self.kids.brief && (name == "compact" || name == "edit") {
+                // The tool list is the parent's, byte for byte (that is what
+                // lets the prefix hit its cache); a brief answers, it does not
+                // change anything, so these two are refused by result.
+                Some(ToolOutcome::error(format!(
+                    "refused: this is a brief, a read-only side question on a snapshot; `{name}` is not available here. Answer from what you can read with bash"
+                )))
             } else if name == "compact" {
                 let focus = call
                     .args
@@ -5740,7 +5963,7 @@ impl Session {
             // The TUI renders its own line from `UiEvent::ToolSettled`; only the
             // headless path prints here, so the painter is the only writer.
             if !self.json && !self.tui {
-                println!(
+                let line = format!(
                     "→ {} {} · {} · {} B · {:.1}s",
                     call.name,
                     compact_input(&call.args),
@@ -5748,6 +5971,14 @@ impl Session {
                     outcome.bytes,
                     elapsed.as_secs_f64()
                 );
+                // A child's stdout is its answer, which its parent reads: the
+                // progress lines go to stderr, where the parent keeps them in
+                // the child's `host.err`.
+                if self.kids.link.is_some() {
+                    eprintln!("{line}");
+                } else {
+                    println!("{line}");
+                }
             }
             // A failed call's tail row: the last line it printed, so the
             // transcript says *why* without unfolding anything.
@@ -6035,7 +6266,7 @@ fn today() -> String {
     time::OffsetDateTime::now_utc().date().to_string()
 }
 
-async fn task_text(parts: &[String]) -> Result<String, String> {
+pub(crate) async fn task_text(parts: &[String]) -> Result<String, String> {
     if !parts.is_empty() {
         return Ok(parts.join(" "));
     }
@@ -6168,6 +6399,7 @@ mod tests {
                 retry: crate::retry::Policy::default(),
                 warn_prompt_tokens: Some(crate::spend::DEFAULT_WARN_PROMPT_TOKENS),
                 warn_cost: None,
+                children: Default::default(),
                 prices: Default::default(),
                 gates: Vec::new(),
                 project_gates: Vec::new(),
@@ -6233,6 +6465,7 @@ mod tests {
             turn_tool_calls: 0,
             initial_task: None,
             gate_notes: Vec::new(),
+            kids: children::Kids::new("ses_1", Default::default(), None),
         }
     }
 
@@ -6286,6 +6519,7 @@ mod tests {
             retry: crate::retry::Policy::default(),
             warn_prompt_tokens: Some(crate::spend::DEFAULT_WARN_PROMPT_TOKENS),
             warn_cost: None,
+            children: Default::default(),
             prices: Default::default(),
             gates: Vec::new(),
             project_gates: Vec::new(),

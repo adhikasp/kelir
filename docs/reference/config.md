@@ -53,6 +53,9 @@ keys come from the environment, `key_cmd`, or opencode's store.
 | `retry_max_attempts` | integer | unset: only the budget and `retry_max_wait` bound the retries | — | a count cap inside the budget (`3` = three tries and out) | `src/config.rs:retry_policy` |
 | `warn_prompt_tokens` | integer (tokens) | `150000`; `0` turns the warning off | — | when the last prompt is larger than this, one `warning` event and one dim line on                  the screen; it speaks again only after the prompt has fallen back under it.                  Never sent to the model | `src/config.rs:load` |
 | `warn_cost` | number (US dollars) | unset: no cost warning | — | when the session's cost passes this, one `warning` event and one dim line; never                  sent to the model. Only costs that are known count | `src/config.rs:warn_cost` |
+| `max_child_depth` | integer | `3` | — | the deepest a child may be (the root is depth 0); `kelir run --child` past it exits 3 with the count | `src/config.rs:load` |
+| `max_children` | integer | `10` | — | live children one agent may have at once (a settled child frees its slot); the root's registry decides | `src/config.rs:load` |
+| `max_live_descendants` | integer | `16` | — | live descendants one root may have at once, however deep; a child whose process is gone is reaped and frees its slot | `src/config.rs:load` |
 | `prices` | table of tables `[prices."<model>"]` with `input`, `output`, `cached_input`                (dollars per million tokens) | empty: the built-in table (`src/spend.rs`, stamped with its date) applies | — | overrides and extends the built-in price table. Used only when the provider                  reports no cost; a model with no price anywhere gets no estimate                  (`cost_source: "unknown"`). `cached_input` defaults to `input` | `src/config.rs:prices` |
 
 ### Per provider (`[providers.<name>]`)

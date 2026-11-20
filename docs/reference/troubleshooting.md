@@ -47,6 +47,15 @@ as `bg_settled` plus the wake-up message. A job killed with the machine is the
 one case with no status file: `bg ls` does not list it at all (no status file, no row) and the log has a
 `bg_started` with no settle.
 
+## "A child start was refused" or "a child is gone"
+
+`kelir run --child` exits 3 with `refused: …` and the count when a cap is full
+(`max_child_depth`, `max_children`, `max_live_descendants`; `docs/reference/children.md`).
+`kelir ls` shows what is live; `kelir kill <session>` frees a slot. A child whose process
+died shows `lost` (or `killed`) in `kelir ls` and in the root's `child_settled`. A child
+ends with its parent: after `kill -9` of a Unix parent it takes up to a second to notice.
+Read a child's trouble in `<state>/sessions/<child>/host.err` and its own log.
+
 ## "The model does not know a rule I wrote in AGENTS.md"
 
 Three causes, in order: the file is above the repository root or above home (the

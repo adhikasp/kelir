@@ -936,11 +936,12 @@ fn the_delegation_and_herdr_skills_are_valid_short_and_say_what_they_must() {
     }
     let delegation = crate::sources::BUILTIN_SKILLS[1].1;
     for needle in [
-        "kelir run",
-        "kelir ask",
-        "kelir bg run",
-        "Depth 1",
-        "no depth",
+        "kelir run --child",
+        "--background",
+        "kelir brief",
+        "kelir ls",
+        "kelir kill",
+        "kelir docs children",
     ] {
         assert!(
             delegation.contains(needle),
@@ -1070,14 +1071,32 @@ fn builtin_skills_name_only_subcommands_and_flags_kelir_help_lists() {
 #[test]
 fn the_command_scanner_catches_a_command_that_does_not_exist() {
     use clap::CommandFactory as _;
-    let found = commands_in("```sh\nkelir run --child \"x\"\nkelir brief \"y\"\n```\n");
-    assert_eq!(found.len(), 2);
+    let found = commands_in(
+        "```sh
+kelir run --child \"x\"
+kelir frobnicate --nope \"y\"
+```
+and `kelir run --warp`
+",
+    );
+    assert_eq!(found.len(), 3);
     let root = crate::cli::Cli::command();
+    // The real ones resolve (the merge of children made `--child` and `brief` real)...
     let run = root.find_subcommand("run").unwrap();
     assert!(
-        !run.get_arguments()
+        run.get_arguments()
             .any(|arg| arg.get_long() == Some("child"))
     );
-    assert!(root.get_subcommands().all(|sub| sub.get_name() != "brief"));
-    assert_eq!(found[1].1, vec!["brief".to_string()]);
+    assert!(root.get_subcommands().any(|sub| sub.get_name() == "brief"));
+    // ...and invented ones do not, which is what the skill test trips over.
+    assert_eq!(found[1].1, vec!["frobnicate".to_string()]);
+    assert!(
+        root.get_subcommands()
+            .all(|sub| sub.get_name() != "frobnicate")
+    );
+    assert!(
+        !run.get_arguments()
+            .any(|arg| arg.get_long() == Some("warp"))
+    );
+    assert_eq!(found[2].2, vec!["--warp".to_string()]);
 }

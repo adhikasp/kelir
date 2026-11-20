@@ -457,9 +457,19 @@ async fn connection(
                         let _ = reply_line(&mut write, &out).await;
                         return;
                     }
-                    match answer.await {
-                        Ok(response) => response,
-                        Err(_) => Response::error(DROPPED_REPLY),
+                    // A verb that takes long (a foreground child) is answered
+                    // when it is done; if the client goes away first, dropping
+                    // the receiver tells the session nobody is waiting (the
+                    // call that started the child was stopped).
+                    let mut answer = answer;
+                    let given = tokio::select! {
+                        result = &mut answer => Some(result),
+                        _ = peer_gone(&mut lines) => None,
+                    };
+                    match given {
+                        Some(Ok(response)) => response,
+                        Some(Err(_)) => Response::error(DROPPED_REPLY),
+                        None => return,
                     }
                 }
                 // An unauthenticated caller gets one answer and no more: it
@@ -479,6 +489,18 @@ async fn connection(
         if close {
             return;
         }
+    }
+}
+
+/// Resolves when the peer closes its end while we wait to answer. A peer that
+/// sends more (it should not) never resolves this: the answer still goes out.
+async fn peer_gone<R>(lines: &mut BufReader<R>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    match lines.fill_buf().await {
+        Ok(buffered) if !buffered.is_empty() => std::future::pending::<()>().await,
+        _ => {}
     }
 }
 
@@ -580,6 +602,22 @@ pub async fn request_with_token_file(
         None => request.clone().with_token(crate::trust::read_token(dir)),
     };
     connect_and_send(dir, id, &sent).await
+}
+
+/// [`request_with_token_file`] with its own wait for the answer, for a verb
+/// that is slow by nature (`brief` waits for a model).
+pub async fn request_with_token_file_within(
+    dir: &Path,
+    id: &str,
+    request: &Request,
+    wait: Duration,
+) -> Result<Response, String> {
+    let sent = match &request.token {
+        Some(_) => request.clone(),
+        None => request.clone().with_token(crate::trust::read_token(dir)),
+    };
+    let stream = connect(dir, id).await?;
+    round_trip(stream, &sent, wait).await
 }
 
 /// The body of [`request`], for the wrappers that add a token first (and so

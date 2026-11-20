@@ -50,6 +50,25 @@ static RUNS: AtomicU64 = AtomicU64::new(0);
 /// past the cap is skipped (fail open, logged) instead of started.
 pub const MAX_LIVE: usize = 8;
 
+/// A child session (a descendant of the root) may have at most this many gate
+/// processes alive. The cap is per process, so the root's total is bounded by
+/// [`root_bound`]: the root's own [`MAX_LIVE`] plus this for every child that
+/// may be alive at once (`max_live`, 16 by default) = 8 + 16 * 2 = 40.
+pub const MAX_LIVE_CHILD: usize = 2;
+
+/// The most gate processes one root and all its live descendants can have alive.
+pub const fn root_bound(max_live_children: usize) -> usize {
+    MAX_LIVE + max_live_children * MAX_LIVE_CHILD
+}
+
+/// The cap that applies to this process (set once by a child session).
+static CAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(MAX_LIVE);
+
+/// A session that is a child lowers its cap to [`MAX_LIVE_CHILD`].
+pub fn limit_for_child() {
+    CAP.store(MAX_LIVE_CHILD, std::sync::atomic::Ordering::SeqCst);
+}
+
 static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Gate processes alive right now (the tests assert it is back to zero).
@@ -65,9 +84,10 @@ impl Slot {
         use std::sync::atomic::Ordering::SeqCst;
         let mut now = LIVE.load(SeqCst);
         loop {
-            if now >= MAX_LIVE {
+            let cap = CAP.load(SeqCst);
+            if now >= cap {
                 return Err(format!(
-                    "{MAX_LIVE} gates are already running; this run was skipped"
+                    "{cap} gates are already running; this run was skipped"
                 ));
             }
             match LIVE.compare_exchange(now, now + 1, SeqCst, SeqCst) {
@@ -1872,6 +1892,15 @@ session_end = { command = "git push" }
         assert!(started_by_a_gate(Some("turn_end")));
         assert!(!started_by_a_gate(Some("  ")));
         assert!(!started_by_a_gate(None));
+    }
+
+    #[test]
+    fn the_gate_processes_of_a_whole_family_are_bounded() {
+        // The cap is per process; the family's total follows from the child caps.
+        let live_children = crate::child::DEFAULT_MAX_LIVE as usize;
+        assert_eq!(root_bound(live_children), 8 + 16 * 2);
+        assert!(root_bound(live_children) <= 40);
+        const { assert!(MAX_LIVE_CHILD >= 1 && MAX_LIVE_CHILD < MAX_LIVE) };
     }
 
     #[tokio::test]

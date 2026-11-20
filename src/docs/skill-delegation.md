@@ -1,6 +1,6 @@
 ---
 name: delegation
-description: start another kelir process (kelir run, kelir ask, kelir bg run) for side or parallel work, with a good task and reading results
+description: start another kelir session for side or parallel work (kelir run --child, kelir brief, kelir ls, kelir kill), with a good task and reading results
 metadata:
   builtin: true
   body: kelir docs
@@ -8,22 +8,21 @@ metadata:
 
 # Delegating to another kelir
 
-A child is another `kelir` process you start from `bash`. There is no spawn tool: the
-tools stay `bash`, `edit`, `compact`. A child is a **fresh session**: its own log, its
-own context, no memory of yours. It runs under your bash call, so it ends with the call
-(or with your session, for a background job).
-
-What exists today is plain `kelir run`, `kelir ask` and `kelir bg`. There are no depth
-or count caps and no snapshot of your context: you hold the limits yourself (below).
+A child is another kelir **session** you start from `bash`. There is no spawn tool: the
+tools stay `bash`, `edit`, `compact`. A child is a fresh session: its own log, its own
+context, no memory of yours. Starting one from a tool call makes it your child (it shows
+in `kelir ls`, it is capped, it ends with you).
 
 ## Which one
 
-- **`kelir ask "<question>"`**: one question, the final text on stdout. Use it for a
-  second read of something you can name in a sentence ("what does `parse_config` do on an
-  empty file?") without spending your own context.
-- **`kelir run "<task>"`**: a worker. It blocks until the turn ends; stdout is its
-  output, exit code 0 if it finished. `--model <name>` picks another model, `--cwd <dir>`
-  where it works, `--json` streams its events as NDJSON.
+- **`kelir brief "<question>"`**: a side question on a snapshot of *your* session, so it
+  knows what you know and hits your prompt cache. The answer is on stdout. It cannot edit
+  or start work. Use it for "given what we found, which file is the odd one out?".
+- **`kelir run --child "<task>"`**: a worker with a fresh context. It blocks until the
+  turn ends; its final text is stdout, exit 0 when it finished. `--model <name>`,
+  `--provider <name>`, `--cwd <dir>` choose model and place.
+- **`kelir ask "<question>"`** and plain **`kelir run "<task>"`** start an unrelated
+  session (no tree, no caps): use them only when you do not want a child.
 
 Do the work yourself when it is small, needs your full context, or is one edit.
 Delegate when it is wide (many files to survey), independent (no shared state with what
@@ -32,14 +31,16 @@ you do next) or slow (a long build you do not have to watch).
 ## Foreground and background
 
 ```sh
-kelir run "list every caller of parse_config and say which ignore errors"   # blocks
-kelir bg run kelir run "run the full test suite, report failures"            # returns a job id now
-kelir bg wait <id>        # until it settles       kelir bg out <id>   # its output
+kelir run --child "list every caller of parse_config and say which ignore errors"
+kelir run --child --background "run the full test suite, report failures"   # handle now
+kelir ls                      # the tree: state, cost, cache hits, task
+kelir kill <session>          # stop one child and everything below it
 ```
 
-A background job settles later and the harness wakes you with its result at your next
-boundary: keep working on something else and do not poll. Children do not inherit your
-shell state, so give them paths, not "the file I just opened".
+A background child settles later and wakes you with its answer at your next boundary:
+keep working on something else and do not poll. A parent that ends first takes its
+running children with it, so wait for what you need. Children do not inherit your shell
+state: give them paths, not "the file I just opened".
 
 ## What goes in the task
 
@@ -48,11 +49,12 @@ and facts it needs, what *not* to touch, and the exact shape of the answer ("rep
 bullet per file: path, one line"). Say whether it may edit. Two children must never edit
 the same file.
 
-## Limits you keep
+## Limits
 
-Depth 1: a child you start does not start children of its own, so say so in its task.
-No more than three running at once. `kelir bg cancel <id>` ends one and its tree. Each
-child spends tokens of its own; there is no spend cap.
+A start can be refused with exit code 3 and a line naming the cap: depth (3 by default),
+live children per agent (10) and live descendants of the whole tree (16). Wait for one to
+finish or stop one with `kelir kill`. Each child spends tokens of its own and there is no
+spend cap: `kelir ls` shows cost per session and per tree.
 
 ## Reading results
 
@@ -60,4 +62,4 @@ Treat a child's answer as a report, not proof: spot-check what matters (read the
 says it changed, rerun its test). A failed child leaves its log in the state dir
 (`kelir docs files`); `kelir observe <session>` shows what a session saw.
 
-Depth: `kelir docs cli`, `kelir docs verbs`, `kelir docs sources-and-skills`.
+Depth: `kelir docs children`, `kelir docs cli`, `kelir docs verbs`.
