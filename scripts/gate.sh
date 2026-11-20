@@ -4,7 +4,8 @@
 # stage, full output in logs, exit 1 if anything failed.
 #
 # usage: scripts/gate.sh [options] [-- <extra cargo args>]
-#   --linux[=MACHINE]   also run scripts/remote-check.sh there (default: $KELIR_LINUX, else the maintainer)
+#   --linux[=MACHINE]   also run scripts/remote-check.sh there; MACHINE comes from the flag or
+#                       $KELIR_LINUX and has no default (a host name is not repo content)
 #   --no-lock           do not take the machine-wide gate lock (you are already inside it)
 #   --jobs N            CARGO_BUILD_JOBS and nextest test threads (default 4; BUILD-INFRA rule 1)
 #   --out DIR           where the logs go (default: <scratch>/gate-<job>-<stamp>)
@@ -33,8 +34,23 @@ load=0
 extra=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --linux) linux="${KELIR_LINUX:-the maintainer}"; shift ;;
-    --linux=*) linux="${1#--linux=}"; shift ;;
+    --linux)
+      # `--linux` alone reads $KELIR_LINUX, and there is no default: which
+      # machine that is, is a property of the box, not of a public repo.
+      linux="${KELIR_LINUX:-}"
+      if [ -z "$linux" ]; then
+        echo "gate: --linux needs a machine: use --linux=MACHINE or set KELIR_LINUX" >&2
+        echo "gate:   (omit --linux to run the Windows half only)" >&2
+        exit 2
+      fi
+      shift ;;
+    --linux=*)
+      linux="${1#--linux=}"
+      if [ -z "$linux" ]; then
+        echo "gate: --linux= needs a machine name: --linux=MACHINE (or set KELIR_LINUX)" >&2
+        exit 2
+      fi
+      shift ;;
     --no-lock) use_lock=0; shift ;;
     --jobs) jobs="${2:?--jobs needs a value}"; shift 2 ;;
     --out) out="${2:?--out needs a value}"; shift 2 ;;
@@ -81,6 +97,89 @@ run_stage() { # run_stage <name> <logfile> <command...>
   return 1
 }
 
+# The tests behind nextest's status lines. nextest prints one line per attempt,
+# `TRY 2 PASS [  1.2s] (3/4) kelir::suite test_name` (no `TRY` on the first
+# attempt, `LKFAIL` when the leak check fails the test), and only the last line
+# per test says how it ended. So the names are computed once, by final status:
+#   nextest_names <log> failed   -> the tests that did not pass
+#   nextest_names <log> retried  -> the tests that passed only on a retry (the
+#                                   flakes; a test that failed every attempt is
+#                                   failed, not a flake)
+#   nextest_names <log> leaked   -> the tests whose leak check failed
+# A test's name is the last two fields of its line, which holds for both the
+# `kelir::suite test_name` and the `kelir::suite::test_name` spelling.
+nextest_names() { # <logfile> failed|retried
+  awk -v mode="$2" '
+    {
+      s = $0
+      gsub(/^[ \t]+/, "", s); gsub(/[ \t\r]+$/, "", s)
+      if (index(s, "[") == 0) next
+      n = split(s, F, " ")
+      if (n < 5) next
+      i = 1
+      if (F[1] == "TRY") { try = F[2] + 0; i = 3 } else try = 0
+      st = F[i]
+      if (st !~ /^(PASS|FAIL|FLAKY|SLOW|LEAK|LKFAIL|LEAK-FAIL|TIMEOUT|ABORT|SIGSEGV|SIGABRT|SKIP)$/) next
+      name = F[n-1] " " F[n]
+      last[name] = st
+      if (try >= 2) attempts[name] = try
+    }
+    END {
+      for (k in last) {
+        bad = (last[k] ~ /^(FAIL|LEAK|LKFAIL|LEAK-FAIL|TIMEOUT|ABORT|SIGSEGV|SIGABRT)$/)
+        if (mode == "failed" && bad) print k
+        if (mode == "retried" && !bad && (k in attempts)) print k
+        if (mode == "leaked" && last[k] ~ /^(LEAK|LKFAIL|LEAK-FAIL)$/) print k
+      }
+    }' "$1" | sort
+}
+
+# What a nextest log means for the gate. Prints the summary line, names every
+# flake (a test that only passed on a retry: STEER-9's to fix) and every leaked
+# process, and returns 1 when the gate must fail. A retry fails it only under
+# KELIR_GATE_STRICT_RETRIES=1; a leak always does, because "no leaked processes"
+# is a hard rule (AGENTS.md), not a style nit (S5).
+nextest_report() { # <logfile>
+  local file="$1" summary retried leaked n rc=0
+  summary="$(grep -E '^[[:space:]]+Summary ' "$file" | tail -1 | sed -E 's/^[[:space:]]+//')"
+  say "  result: ${summary:-no summary line}"
+  retried="$(nextest_names "$file" retried)"
+  if [ -n "$retried" ]; then
+    n="$(echo "$retried" | grep -c .)"
+    # Always named, never silent: the whole point of --retries is this line.
+    say "  RETRIED (a flake to fix, STEER-9): $n test(s)"
+    echo "$retried" | sed 's/^/    /' | tee -a "$log"
+    if [ "${KELIR_GATE_STRICT_RETRIES:-0}" = 1 ]; then
+      # Opt-in strictness for a job that has fixed its flakes: then a retry is
+      # a regression, not a known cost.
+      rc=1
+      say "  nextest: FAILED (KELIR_GATE_STRICT_RETRIES=1 and a test needed a retry)"
+    else
+      say "  nextest: ok, but the $n test(s) above are STEER-9's to fix"
+    fi
+  fi
+  leaked="$(nextest_names "$file" leaked)"
+  if [ -n "$leaked" ]; then
+    rc=1
+    say "  LEAKED PROCESSES (hard rule: no leaked processes; AGENTS.md):"
+    echo "$leaked" | sed 's/^/    /' | tee -a "$log"
+  fi
+  return "$rc"
+}
+
+# A failing run must name what failed, not only point at a log: the log is for
+# the fix, the summary is for whoever reads the gate (S11).
+nextest_names_report() { # <logfile>
+  local names
+  names="$(nextest_names "$1" failed)"
+  if [ -n "$names" ]; then
+    say "  FAILED TESTS:"
+    echo "$names" | sed 's/^/    /' | tee -a "$log"
+  else
+    say "  FAILED TESTS: none named; the run itself errored ($1)"
+  fi
+}
+
 gate_body() {
   say "gate: $(git rev-parse --short HEAD) $(git log -1 --format=%s)"
   say "gate: $root  jobs=$jobs  log=$log"
@@ -93,31 +192,19 @@ gate_body() {
   fi
 
   if ! command -v cargo-nextest >/dev/null 2>&1; then
-    say "  nextest: MISSING — install it (docs/BUILD.md)"
+    say "  nextest: MISSING — cargo nextest is a gate dependency; install it:"
+    say "    cargo install cargo-nextest --locked   (both boxes; see docs/BUILD.md)"
     failed=1
   else
     if run_stage nextest "$out/nextest.log" \
       cargo nextest run --no-fail-fast --retries 2 -j "$jobs" "${extra[@]+"${extra[@]}"}"; then
-      # A retried test is a flake: name it even when the run is green.
-      local retried
-      retried="$(grep -E '^[[:space:]]+(TRY [2-9]|FLAKY)' "$out/nextest.log" | sed -E 's/^[[:space:]]+//' | sort -u)"
-      local summary
-      summary="$(grep -E '^[[:space:]]+Summary ' "$out/nextest.log" | tail -1 | sed -E 's/^[[:space:]]+//')"
-      say "  result: ${summary:-no summary line}"
-      if [ -n "$retried" ]; then
-        # Always named, never silent: a retried test is a flake to fix
-        # (STEER-9), and the whole point of --retries is that this line exists.
-        say "  RETRIED (a flake to fix, STEER-9):"
-        echo "$retried" | sed 's/^/    /' | tee -a "$log"
-        if [ "${KELIR_GATE_STRICT_RETRIES:-0}" = 1 ]; then
-          # Opt-in strictness for a job that has fixed its flakes: then a
-          # retry is a regression, not a known cost.
-          failed=1
-          say "  nextest: FAILED (KELIR_GATE_STRICT_RETRIES=1 and a test needed a retry)"
-        else
-          say "  nextest: ok, but $(echo "$retried" | grep -c .) retried test(s) above are STEER-9's to fix"
-        fi
-      fi
+      nextest_report "$out/nextest.log" || failed=1
+    else
+      # A failing run must name what failed, not only point at a log: the log is
+      # for the fix, the summary is for whoever reads the gate (S11).
+      nextest_names_report "$out/nextest.log"
+      nextest_report "$out/nextest.log" || true
+      failed=1
     fi
     run_stage doctest "$out/doctest.log" cargo test --doc
   fi

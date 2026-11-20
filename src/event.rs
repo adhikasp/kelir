@@ -239,6 +239,7 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             sources,
             tools,
             reasoning_effort,
+            key_origin,
         } => EventBody::SessionStarted {
             id,
             parent,
@@ -255,6 +256,7 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             sources,
             tools,
             reasoning_effort,
+            key_origin,
         },
         EventBody::User {
             text,
@@ -477,6 +479,12 @@ pub enum EventBody {
         /// should not have to guess it (STEER-6).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
+        /// Where this session's key came from (`env OPENROUTER_API_KEY`,
+        /// `opencode auth export opencode`), never the key itself. A log reader
+        /// can then tell a copied env credential from opencode's own store, and
+        /// a stale one is diagnosed from the log alone (STEER-2).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_origin: Option<String>,
     },
     User {
         text: Payload,
@@ -866,6 +874,7 @@ mod tests {
             sources: vec![],
             tools: vec!["bash".into(), "edit".into()],
             reasoning_effort: None,
+            key_origin: None,
         }
     }
 

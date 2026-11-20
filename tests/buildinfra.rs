@@ -75,34 +75,46 @@ fn the_dev_and_test_profiles_keep_only_line_tables_of_debug_info() {
 /// The shipped profiles are not negotiable: `release` (and the live-drive
 /// matrix) keeps fat LTO and one codegen unit, `review` is the cheap one for
 /// reviewer binaries.
+///
+/// The values are parsed, not searched for: matching raw text let
+/// `codegen-units = 16` satisfy a `codegen-units = 1` needle and a comment
+/// satisfy `lto = true`, so the pin could not fail (buildinfra-review S1).
 #[test]
 fn the_shipped_profile_stays_fat_lto_and_review_is_thin() {
-    let manifest = read("Cargo.toml");
-    let release = manifest
-        .split("[profile.release]")
-        .nth(1)
-        .expect("a [profile.release] section")
-        .split("\n[")
-        .next()
-        .unwrap_or("");
-    for (needle, why) in [
-        ("lto = true", "release keeps fat LTO"),
-        ("codegen-units = 1", "release keeps one codegen unit"),
-        ("strip = true", "release stays stripped"),
-    ] {
-        assert!(release.contains(needle), "{why}: {needle}");
-    }
+    let manifest: toml::Value = read("Cargo.toml").parse().expect("Cargo.toml is TOML");
+    let release = &manifest["profile"]["release"];
+    assert_eq!(
+        release["lto"].as_bool(),
+        Some(true),
+        "release keeps fat LTO: {release}"
+    );
+    assert_eq!(
+        release["codegen-units"].as_integer(),
+        Some(1),
+        "release keeps one codegen unit: {release}"
+    );
+    assert_eq!(
+        release["strip"].as_bool(),
+        Some(true),
+        "release stays stripped: {release}"
+    );
 
-    let review = manifest
-        .split("[profile.review]")
-        .nth(1)
-        .expect("a [profile.review] section for reviewer binaries")
-        .split("\n[")
-        .next()
-        .unwrap_or("");
-    assert!(review.contains("inherits = \"release\""), "{review}");
-    assert!(review.contains("lto = \"thin\""), "{review}");
-    assert!(review.contains("codegen-units = 16"), "{review}");
+    let review = &manifest["profile"]["review"];
+    assert_eq!(
+        review["inherits"].as_str(),
+        Some("release"),
+        "review inherits release: {review}"
+    );
+    assert_eq!(
+        review["lto"].as_str(),
+        Some("thin"),
+        "review is the cheap build: {review}"
+    );
+    assert_eq!(
+        review["codegen-units"].as_integer(),
+        Some(16),
+        "review is the cheap build: {review}"
+    );
 }
 
 /// The Windows linker opt-in is Windows-only: Linux keeps its default linker,
@@ -314,13 +326,17 @@ fn a_second_gate_waits_for_the_first() {
 }
 
 #[test]
-fn a_lock_whose_owner_is_gone_is_taken_over() {
+fn a_lock_whose_holder_is_gone_is_taken_over() {
     let (lock, _dir) = sandbox_lock("stale");
+    // A directory with an `owner` file is the lock format of the version before
+    // the atomic one (buildinfra-review B2). A lock in that shape whose holder
+    // is provably gone is retired, so an upgrade does not wedge the queue.
     std::fs::create_dir_all(&lock).expect("lock dir");
     // A pid that cannot be alive on any platform this runs on.
     std::fs::write(
         lock.join("owner"),
-        "pid 4294967290\nstarted 2026-01-01T00:00:00Z\ncmd test\n",
+        "pid 4294967290
+started 2026-01-01T00:00:00Z\ncmd test\n",
     )
     .expect("owner file");
     let out = run_locked(&lock, 30, "echo took-over");
@@ -337,30 +353,36 @@ fn a_lock_whose_owner_is_gone_is_taken_over() {
     assert!(!lock.exists());
 }
 
-/// A gate that dies between `mkdir` and writing its owner file leaves a lock
-/// nobody owns. Without a takeover that blocks every worker until the 30-minute
-/// timeout, which is a worse failure than the crash.
+/// A lock this script did not write is never taken over, however long a waiter
+/// has been waiting: an outside gate driver that locks with a plain `mkdir` (the
+/// documented interop) is respected, and a bare path left by hand is the
+/// operator's to remove. Taking it over is exactly the "two gates at once"
+/// failure buildinfra-review B2 found; waiting costs time, not a red gate.
 #[test]
-fn a_lock_with_no_owner_file_is_taken_over() {
-    let (lock, _dir) = sandbox_lock("orphan");
+fn a_lock_this_script_did_not_write_is_never_taken_over() {
+    let (lock, _dir) = sandbox_lock("foreign");
     std::fs::create_dir_all(&lock).expect("lock dir");
     let start = Instant::now();
-    let out = run_locked(&lock, 90, "echo took-over");
-    assert!(
-        out.status.success(),
-        "an ownerless lock is taken over: {}",
+    let out = run_locked(&lock, 4, "echo must-not-run");
+    assert_eq!(
+        out.status.code(),
+        Some(75),
+        "the waiter gives up instead: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "took-over");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("no owner file"),
-        "the takeover is announced"
+        String::from_utf8_lossy(&out.stderr).contains("holds no record this script wrote"),
+        "the waiter says why it is not touching it: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        lock.exists(),
+        "the foreign lock is left exactly where it was"
     );
     assert!(
         start.elapsed() < Duration::from_secs(60),
-        "the takeover waits the short grace period, not the timeout"
+        "and it gives up on its own timeout, not a special case"
     );
-    assert!(!lock.exists());
 }
 
 #[test]
@@ -434,6 +456,15 @@ fn the_gate_script_keeps_the_measured_wins() {
             "clippy -D warnings is a stage",
         ),
         ("RETRIED", "a retried test is named in the summary"),
+        (
+            "LEAKED PROCESSES",
+            "a leaked process fails the gate (AGENTS.md hard rule)",
+        ),
+        ("FAILED TESTS", "a failing run names its tests"),
+        (
+            "nextest_names",
+            "the names come from a parsed status, not a grep",
+        ),
         (
             "KELIR_GATE_STRICT_RETRIES",
             "a retry can be made fatal for a job that fixed its flakes",
@@ -537,12 +568,34 @@ fn the_remote_script_reuses_its_work_dir_and_can_prune() {
         ("git clean -qfdx -e target", "stale files go, target/ stays"),
         ("prune", "a prune subcommand"),
         ("cargo-nextest", "the Linux gate uses nextest"),
+        (
+            ".kelir-workdir",
+            "a created work dir carries the marker prune requires",
+        ),
+        (
+            "refuse_reason",
+            "prune decides per candidate, not by name alone",
+        ),
+        ("symlink", "prune refuses a symlink"),
+        (
+            "pwd -P",
+            "prune resolves the real path before accepting one",
+        ),
     ] {
         assert!(remote.contains(needle), "{why}: {needle} is missing");
     }
     assert!(
         remote.contains("kill -0"),
         "prune skips a work dir a live run is in"
+    );
+    // No fixed /tmp log names: two jobs' Linux gates share the box (S6).
+    assert!(
+        !remote.contains("/tmp/fmt.log") && !remote.contains("/tmp/nx.log"),
+        "far-side logs live in a per-run dir, not at fixed /tmp paths"
+    );
+    assert!(
+        remote.contains("logdir="),
+        "the far side makes a log dir per run"
     );
 }
 

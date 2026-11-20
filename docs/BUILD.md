@@ -8,9 +8,10 @@ below says how many runs it averages.
 
 ## The short version
 
-- **Gate**: run `bash scripts/gate.sh --linux`. It takes the one machine-wide lock, caps itself at 4 jobs and
-  4 test threads, runs fmt, clippy, the full suite through nextest and the doctests, then Linux, and prints one
-  line per stage plus a `gate: PASS`/`gate: FAIL`. Do not assemble the pieces by hand.
+- **Gate**: run `bash scripts/gate.sh --linux=<machine>`. It takes the one machine-wide lock, caps itself at
+  4 jobs and 4 test threads, runs fmt, clippy, the full suite through nextest and the doctests, then Linux,
+  and prints one line per stage plus a `gate: PASS`/`gate: FAIL`. Do not assemble the pieces by hand. The
+  Linux machine is named on the command line (or in `KELIR_LINUX`); it is never a default in the repo.
 - **Fast loop**: `cargo test --lib <module>` for one module; `bash scripts/gate.sh --quick` for fmt + clippy
   before a commit.
 - `cargo nextest run` instead of `cargo test` for the full suite: about 20 % faster and one process per test.
@@ -33,7 +34,7 @@ changed.
 | cold `cargo build --release` (fat LTO) | 111.0 s | unchanged | untouched on purpose: shipped binaries keep fat LTO and one codegen unit |
 | cold `cargo build --profile review` | n/a | 62.8 s (94.2 s under load) | `[profile.review]`: thin LTO, 16 codegen units |
 | full suite, `cargo test` | 87.0 s | 84.5 s | — |
-| full suite, `cargo nextest run -j 4` | n/a | 69.2 s | nextest; roughly 20 % under `cargo test` |
+| full suite, `cargo nextest run -j 4` | n/a | 66-70 s ungrouped, **87-92 s as shipped** | nextest; the shipped config is the grouped one below, so 87-92 s is the number a gate pays |
 
 The `release` binary is 6.4 MB and the `review` one 7.9 MB; both are inside the 20 MB footprint budget.
 
@@ -62,7 +63,7 @@ removes the Visual Studio Build Tools requirement (rust-lld ships in the toolcha
 keeping even though the win is small on this box. Linux keeps its default linker: there `lld` is a separate
 package, not part of the toolchain, so opting in would add an install step for no measured win.
 
-### Linux (the maintainer, 12 cores)
+### Linux (the far box, 12 cores)
 
 | what | before | after | how |
 |---|---|---|---|
@@ -72,21 +73,42 @@ package, not part of the toolchain, so opting in would add an install step for n
 The suite itself dominates once the build is incremental, so the remote gate's remaining win is in the
 suite: nextest took it from a serial run to `-j 4`.
 
+## Installing what the gate needs
+
+The gate needs `cargo-nextest` on both boxes; without it, `scripts/gate.sh` fails the run and says so. Install
+it with cargo (versions in use when this was written: `cargo-nextest 0.9.152`, `rustc 1.99.1`):
+
+```bash
+cargo install cargo-nextest --locked
+cargo nextest --version          # 0.9.x or newer: `leak-timeout result = "fail"` needs >= 0.9.9x
+```
+
+On the Linux box the same command works (a login shell has `~/.cargo/bin` on `PATH`; `remote-check.sh` adds it
+when it does not). `cargo test` still works without nextest, but the gate will not: nextest is what runs each
+test in its own process, names a retry and enforces the leak rule. Nothing else in the gate needs installing
+(`rust-lld` ships with the toolchain).
+
 ## What is in the tree
 
 | file | what it sets |
 |---|---|
 | `.cargo/config.toml` | `profile.dev`/`profile.test` `debug = "line-tables-only"`; `rust-lld` for `x86_64-pc-windows-msvc` |
 | `Cargo.toml` | `[profile.review]` (inherits release, thin LTO, 16 codegen units) |
-| `.config/nextest.toml` | gate profile: `retries = 2`, `fail-fast = false`, `test-threads = 4`, `slow-timeout` |
+| `.config/nextest.toml` | gate profile: `retries = 2`, `fail-fast = false`, `test-threads = 4`, `slow-timeout`, and `leak-timeout` with `result = "fail"` so a leaked process is a failure |
 | `scripts/gate.sh` | the gate itself: lock, fmt, clippy, nextest, doctests, optional Linux, optional load |
-| `scripts/gate-lock.sh` | one gate at a time across every worktree of this clone |
+| `scripts/gate-lock.sh` | one gate at a time across every worktree of this clone (atomic publish; waits on an outside driver's lock) |
 | `scripts/gate-load.sh` | the STEER-9 stress run: the suite once under N busy loops |
-| `scripts/remote-check.sh` | the Linux gate into a reused work dir, plus `prune` |
+| `scripts/remote-check.sh` | the Linux gate into a reused work dir, plus marker-guarded, per-job `prune` |
 
 `tests/buildinfra.rs` holds these as tests: the profiles cargo resolves, the nextest numbers, the lock's
-behaviour (serializes, takes over a dead holder, gives up with 75, never removes a holder's lock), and the
-rules the scripts must keep (nextest not `cargo test`, `--no-fail-fast`, doctests, kill by pid only).
+behaviour (serializes, takes over a dead holder, gives up with 75, never removes a holder's lock, never takes
+over a lock it did not write), and the rules the scripts must keep (nextest not `cargo test`, `--no-fail-fast`,
+doctests, kill by pid only). `tests/buildinfra_review.rs` is the permanent proof of the review's findings:
+prune removes only dirs it created (decoys: a user project with the same name, a bare `mkdir`, a symlink, a
+dir with a foreign file, a nested dir), keeps per job, is a dry run without `--yes`; five gates at once run
+strictly one at a time; a wrapper killed with `-9` does not hand the lock over while its command runs; a
+reused pid is stale and a live one is not; an outside driver's `mkdir` lock is respected; a leak fails the
+gate and a failing run names its tests.
 
 ## Knobs these scripts read
 
@@ -100,7 +122,7 @@ config keys, so they do not appear in `docs/reference/config.md` (STEER-11) when
 | `KELIR_GATE_LOCK` | `<git-common-dir>/kelir-gate.lock` | the lock path, for a driver outside the repo |
 | `KELIR_GATE_TIMEOUT` | `1800` | seconds a gate waits for the lock before exiting 75 |
 | `KELIR_SCRATCH` | `$HOME/kelir-scratch` | where the gate's log directories go |
-| `KELIR_LINUX` | `the maintainer` | the machine `--linux` sends `remote-check.sh` to |
+| `KELIR_LINUX` | unset | the machine `--linux` sends `remote-check.sh` to; with neither the flag nor this, the gate says how to set it and exits 2 |
 | `KELIR_GATE_INNER` / `KELIR_GATE_OUT` | set by `gate.sh` | internal: marks the run inside the lock and reuses its log dir |
 
 ## The rules, and why
@@ -109,8 +131,17 @@ config keys, so they do not appear in `docs/reference/config.md` (STEER-11) when
    workers cannot both be in a gate by accident. The lock lives in the clone's common git dir
    (`git rev-parse --git-common-dir`), which every worktree shares — so it is one queue for every worktree on
    this machine. `KELIR_GATE_LOCK` overrides the path for a shared driver outside the repo; it must point at
-   the same file so both serialize. A holder that died (a closed pane, a killed gate) is taken over after the
-   waiter sees its pid is gone; a waiter that gives up exits 75 and leaves the lock alone.
+   the same file so both serialize.
+   The lock is a *file* whose content is the holder's record (token, pid, start time, command line), published
+   with `ln -T` so it is create-or-fail: a lock always names its owner and two gates can never both publish.
+   The gate runs its command in a process group of its own and the command's side records that group, so a
+   wrapper killed with `-9` does not free the lock while its command is still running; the next gate waits for
+   the group. A holder is taken over only when its pid is provably gone (or a *different* process has the pid:
+   the start time is part of the record) and its group is empty, re-checked after the lock has been moved aside
+   atomically. A holder only removes a lock that still carries its own token.
+   A lock this script did not write is **not** taken over: an outside driver that locks with a plain `mkdir`
+   is waited on (the script says so, and says how to clear it by hand), because the cost of a wrong "stale"
+   verdict is two gates at once. A waiter that gives up exits 75 and leaves the lock alone.
 2. **4 build jobs, 4 test threads.** Three workers on 12 cores: 12 jobs each is 3x oversubscription, and
    that is where the e2e flakes came from (STEER-9). The suites are green serially; at `-j 4` they stay
    green while three workers run.
@@ -122,8 +153,14 @@ config keys, so they do not appear in `docs/reference/config.md` (STEER-11) when
    not hide the other 18.
 4. **`cargo test --lib` stays the fast loop.** nextest builds the same binaries for a full run; for one module
    `cargo test --lib module::name` is still the quickest path and needs no nextest.
-5. **Do not delete a work dir to make a gate pass.** `remote-check.sh prune --force` is how Linux work dirs
-   are retired, and it skips anything a live run holds.
+5. **Do not delete a work dir to make a gate pass.** `remote-check.sh prune` is how Linux work dirs are
+   retired, and it is deliberately paranoid: it deletes only directories *it created*, proven by an on-disk
+   marker written when the dir is made; the name must be exactly `kelir-verify-<plain job name>`; the dir must
+   not be a symlink and its real path must be directly under `$HOME`; it must contain nothing but what a work
+   dir contains; it must not be a live run (`lock` names a running pid) and not have been written to in the
+   last hour. Everything else is reported as `skip` with the reason and left alone. Keeping is the newest
+   `--keep` (default 3) **per job**, so an idle job keeps its warm `target/` no matter how many other jobs ran
+   after it. Nothing is removed without `--yes`: the first call is always a dry run.
 
 ## Flakes seen from the gate
 
