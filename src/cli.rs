@@ -46,6 +46,10 @@ pub enum Command {
     Ls(LsArgs),
     /// Stop a child (and everything below it): `kill <session>` or `kill --tree`.
     Kill(KillArgs),
+    /// Jobs for a scheduler to call: run, status, history.
+    Job(JobArgs),
+    /// Named sessions: ls, rename, forget.
+    Sessions(SessionsArgs),
     /// Show which key each provider would use (never the key itself).
     Doctor(DoctorArgs),
     /// Read kelir's own reference (config, CLI, verbs, files, …).
@@ -105,6 +109,10 @@ pub struct RunArgs {
     /// the parent at its next boundary.
     #[arg(long, requires = "child")]
     pub background: bool,
+    /// Run in the named session: create it, or resume it and add the task as a
+    /// new message (`a-z`, `0-9`, `.`, `_`, `-`; up to 64 characters).
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["resume", "child"])]
+    pub name: Option<String>,
 }
 
 /// `kelir resume <id> [task]`: continue a session from its log.
@@ -236,6 +244,111 @@ pub struct KillArgs {
     /// session named.
     #[arg(long)]
     pub tree: bool,
+}
+
+/// `kelir job …`: what a scheduler (cron, a systemd timer, Task Scheduler) runs.
+#[derive(Debug, Args, Clone)]
+pub struct JobArgs {
+    #[command(subcommand)]
+    pub command: JobCommand,
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub enum JobCommand {
+    /// Run the job `<name>` from `jobs.toml`, resuming its named session. A run
+    /// that overlaps another exits 75.
+    Run(JobRunArgs),
+    /// Print a job's STATUS (all jobs when no name is given).
+    Status(JobStatusArgs),
+    /// List a job's last runs.
+    History(JobHistoryArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+#[command(
+    after_help = "Exit codes: 0 done (or paused), 1 error or stopped, 2 usage, 75 skipped because another run holds the lock, 124 timeout."
+)]
+pub struct JobRunArgs {
+    /// The job's name in `jobs.toml`.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// If another run of this job is in progress, wait up to this many seconds
+    /// for it instead of skipping.
+    #[arg(long, value_name = "SECONDS")]
+    pub wait: Option<u64>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct JobStatusArgs {
+    /// The job (all jobs when omitted).
+    #[arg(value_name = "NAME")]
+    pub name: Option<String>,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct JobHistoryArgs {
+    /// The job.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    /// How many runs to show.
+    #[arg(short = 'n', long, value_name = "N", default_value_t = 10)]
+    pub last: usize,
+    /// Print JSON instead of a table.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `kelir sessions …`.
+#[derive(Debug, Args, Clone)]
+pub struct SessionsArgs {
+    #[command(subcommand)]
+    pub command: SessionsCommand,
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub enum SessionsCommand {
+    /// List sessions: name, state, last activity, cost.
+    Ls(SessionsLsArgs),
+    /// Give a session's name to another name.
+    Rename(SessionsRenameArgs),
+    /// Drop a name (the session and its log stay).
+    Forget(SessionsForgetArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct SessionsLsArgs {
+    /// Print JSON instead of a table.
+    #[arg(long)]
+    pub json: bool,
+    /// Only sessions that have a name.
+    #[arg(long)]
+    pub named: bool,
+    /// Every session, children included (the default: the named ones and the
+    /// newest unnamed roots).
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct SessionsRenameArgs {
+    /// The current name.
+    #[arg(value_name = "OLD")]
+    pub old: String,
+    /// The new name (it must be free).
+    #[arg(value_name = "NEW")]
+    pub new: String,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct SessionsForgetArgs {
+    /// The name to drop.
+    #[arg(value_name = "NAME")]
+    pub name: String,
 }
 
 /// `kelir view <path>`: make an image arrive in the model's next message.

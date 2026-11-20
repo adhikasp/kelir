@@ -5,6 +5,7 @@
 //! and on resume.
 
 pub mod activity;
+pub mod atomic;
 pub mod attachments;
 pub mod bg;
 pub mod chat;
@@ -28,10 +29,15 @@ pub mod herdr;
 pub mod herdr_ctx;
 pub mod hint;
 pub mod ipc;
+pub mod joblock;
+pub mod jobrun;
+pub mod jobs;
 pub mod markdown;
 pub mod mcp;
 pub mod memory;
 pub mod models;
+pub mod names;
+pub mod notify;
 pub mod observe;
 pub mod paths;
 pub mod perm;
