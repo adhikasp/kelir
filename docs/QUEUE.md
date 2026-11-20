@@ -313,3 +313,5 @@ implementer pauses; the retro/introspective passes keep reading the transcripts 
 - 2026-11-21: usage limit reset; resumed. Running now (Claude): **M8 review** (t16y: gate-runner hammering with a process watchdog) and **m7m** (t16z: merge main into M7). Next: M7 gate + review, M8 fixes + merge, steer9, M9..M12.
 
 - 2026-11-21: **M7 and M8 merged**. Remaining: steer9 (de-flake e2e), M9 (jobs, named sessions, STATUS), M10 (Telegram through MCP channel), M11 (attach viewer + notifications), M12 (publish prep; push needs the maintainer's yes). A final post-merge reviewer pass on M8-in-main (child-session gating, the cap across a root) is still advisable.
+
+- 2026-11-21 05:40: running (Claude): **M9** (t188: named sessions, jobs, single-flight, STATUS; brief docs/tasks/M9.md) and **steer9** (t189: de-flake e2e under load). Next: M10 (channel mode: durable inbound spool, MCP channel notifications, turn_done; verify with a fake channel server; the real Telegram bridge needs the maintainer's credentials and infra), M11 (attach viewer + notifications), M12 (publish prep). Post-merge reviewer pass on M8 child-session gating still advisable.
