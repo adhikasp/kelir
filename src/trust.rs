@@ -337,13 +337,9 @@ fn is_windows_device_name(id: &str) -> bool {
     }
     // The Unicode superscript digit forms (`COM¹`, `LPT²`) are devices as well.
     let chars: Vec<char> = upper.chars().collect();
-    if chars.len() == 4
+    chars.len() == 4
         && matches!(chars[..3], ['C', 'O', 'M'] | ['L', 'P', 'T'])
         && matches!(chars[3], '\u{b9}' | '\u{b2}' | '\u{b3}')
-    {
-        return true;
-    }
-    false
 }
 
 // ------------------------------------------------------------------- paths
