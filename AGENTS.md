@@ -72,6 +72,10 @@ delete a work dir to make a gate pass.
 
 If you add Unix-only code, only that run verifies it, so run it before reporting.
 
+The gate sets `ulimit -c 0` on Unix (`gate.sh`, `gate-load.sh`, and the far-side runner in
+`remote-check.sh`) because the crash-injection tests abort on purpose and an unchecked box collected 904 MB of
+cores for them: keep it, and keep the far-side one above every test. `docs/BUILD.md` rule 6 has the numbers.
+
 ## No leaked processes, no visible windows (hard rule)
 
 The dev box is someone's desktop. A test, script or benchmark that spawns processes must kill every

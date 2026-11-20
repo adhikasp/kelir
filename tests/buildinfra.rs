@@ -634,3 +634,130 @@ fn the_scripts_name_bash_and_are_tracked() {
     let lines: Vec<&str> = listing.lines().collect();
     assert_eq!(lines.len(), 4, "all four scripts are tracked: {listing}");
 }
+
+// ------------------------------------------------------------- no core dumps
+
+/// The far side of the gate is printed by the script's own subcommands, so a
+/// test can run the exact text the Linux gate ships instead of a copy of it.
+fn far_side(what: &str, args: &[&str]) -> Output {
+    let mut command = bash_command("remote-check.sh");
+    command.arg(what).args(args);
+    command.output().expect("the far side prints")
+}
+
+fn stdout_of(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// BUILD-INFRA: the crash-injection tests abort a `kelir` on purpose, and an
+/// unchecked Linux box wrote a ~290 KB core for every one of them (2,660 cores
+/// / 904 MB on 2026-11-20). The gate must therefore hand every test binary an
+/// `ulimit -c 0`.
+///
+/// This runs the far side's own prologue — the text `remote-check.sh` writes to
+/// the box and runs there — and asserts a *child of it* reports a 0 core limit,
+/// which is the property that matters (the shell sets it, the children inherit
+/// it). It also asserts the prologue comes before the first test stage, so a
+/// later edit cannot move it below the point where it no longer helps.
+#[test]
+fn the_linux_gate_runs_with_core_dumps_off() {
+    let prologue = far_side("far-env", &[]);
+    assert!(prologue.status.success(), "far-env prints the prologue");
+    let text = stdout_of(&prologue);
+    assert!(
+        text.contains("ulimit -c 0"),
+        "the far side lowers the core limit:\n{text}"
+    );
+
+    let runner = far_side("far-runner", &[]);
+    assert!(runner.status.success(), "far-runner prints the runner");
+    let runner = stdout_of(&runner);
+    let limit_at = runner
+        .find("ulimit -c 0")
+        .expect("the runner sets the core limit");
+    for stage in [
+        "cargo fmt --check",
+        "cargo nextest run",
+        "cargo test --doc",
+        "git clone",
+    ] {
+        let at = runner
+            .find(stage)
+            .unwrap_or_else(|| panic!("the runner has a {stage} stage"));
+        assert!(
+            limit_at < at,
+            "`ulimit -c 0` must come before `{stage}`, not after it"
+        );
+    }
+
+    // The prologue as the far side runs it, with the work dir and the bundle
+    // stage cut off at the first line that touches the checkout: what is left
+    // is the environment, and the crash tests run under it.
+    let head: String = {
+        let mut out = String::new();
+        for line in runner.lines() {
+            if line.starts_with("wd=\"$HOME/$W\"") {
+                break;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    };
+    assert!(
+        head.contains("ulimit -c 0"),
+        "the prologue keeps the core limit:\n{head}"
+    );
+    assert_eq!(head.trim_end(), text.trim_end(), "one copy, not two");
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let script = dir.path().join("prologue.sh");
+    std::fs::write(&script, format!("{head}\n")).expect("write the prologue");
+    let mut command = Command::new(bash());
+    command.arg(script);
+    support::scrub_std(&mut command);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // No console window from a console-less parent, no shared group.
+        command.creation_flags(kelir::proc::win::CREATE_NO_WINDOW | 0x0000_0200);
+    }
+    let out = command.output().expect("the prologue runs");
+    let said = stdout_of(&out);
+    assert!(
+        said.contains("CORE-LIMIT: ulimit -c = 0"),
+        "a child of the far side's shell inherits a 0 core limit, not `{}`: {said}",
+        said.trim()
+    );
+}
+
+/// The local halves set it too: `gate.sh` for every Unix run, `gate-load.sh`
+/// for a direct run of the stress script, and neither may swallow a failure
+/// silently on a Unix box (the shell says so on stderr).
+#[test]
+fn the_local_gate_scripts_also_turn_core_dumps_off() {
+    for (script, why) in [
+        ("scripts/gate.sh", "the gate starts every test binary"),
+        ("scripts/gate-load.sh", "a direct load run starts them too"),
+    ] {
+        let text = read(script);
+        assert!(
+            text.contains("ulimit -c 0"),
+            "{script} turns core dumps off because {why}"
+        );
+        let at = text.find("ulimit -c 0").expect("the limit");
+        let head = &text[..at];
+        assert!(
+            head.contains("Linux | Darwin") || head.contains("Linux"),
+            "{script} sets the limit only where the shell has it (Windows first class)"
+        );
+    }
+    assert!(
+        !read("scripts/gate.sh").contains("ulimit -c unlimited"),
+        "nothing in the gate raises the limit back"
+    );
+}

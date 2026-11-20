@@ -98,7 +98,7 @@ test in its own process, names a retry and enforces the leak rule. Nothing else 
 | `scripts/gate.sh` | the gate itself: lock, fmt, clippy, nextest, doctests, optional Linux, optional load |
 | `scripts/gate-lock.sh` | one gate at a time across every worktree of this clone (atomic publish; waits on an outside driver's lock) |
 | `scripts/gate-load.sh` | the STEER-9 stress run: the suite once under N busy loops |
-| `scripts/remote-check.sh` | the Linux gate into a reused work dir, plus marker-guarded, per-job `prune` |
+| `scripts/remote-check.sh` | the Linux gate into a reused work dir (with `ulimit -c 0`), plus marker-guarded, per-job `prune` |
 
 `tests/buildinfra.rs` holds these as tests: the profiles cargo resolves, the nextest numbers, the lock's
 behaviour (serializes, takes over a dead holder, gives up with 75, never removes a holder's lock, never takes
@@ -108,7 +108,10 @@ prune removes only dirs it created (decoys: a user project with the same name, a
 dir with a foreign file, a nested dir), keeps per job, is a dry run without `--yes`; five gates at once run
 strictly one at a time; a wrapper killed with `-9` does not hand the lock over while its command runs; a
 reused pid is stale and a live one is not; an outside driver's `mkdir` lock is respected; a leak fails the
-gate and a failing run names its tests.
+gate and a failing run names its tests. The core-dump rule is held by tests too: the far side
+that actually runs is printed by `scripts/remote-check.sh far-env` (and is the top of `far-runner`), and a
+test executes that exact text and asserts a child of it prints `ulimit -c = 0` — so the prologue cannot be
+dropped, moved below the first test binary, or split into two copies that disagree.
 
 ## Knobs these scripts read
 
@@ -161,6 +164,17 @@ config keys, so they do not appear in `docs/reference/config.md` (STEER-11) when
    last hour. Everything else is reported as `skip` with the reason and left alone. Keeping is the newest
    `--keep` (default 3) **per job**, so an idle job keeps its warm `target/` no matter how many other jobs ran
    after it. Nothing is removed without `--yes`: the first call is always a dry run.
+6. **No core dumps: `ulimit -c 0` is deliberate — do not drop it.** The suite contains tests that abort a
+   `kelir` on purpose (M3's `KELIR_CRASH_AT` crash injection, and the reviews that re-run it). On a stock
+   Linux box each one wrote a core into the system store: on 2026-11-20 the gate machine held **2,660 cores,
+   904 MB, ~290 KB each**, every one a `.../target/debug/kelir` SIGABRT from the Linux gate. Whether a core is
+   written is the host's decision (`kernel.core_pattern` here is `systemd-coredump`, plus `fs.suid_dumpable`),
+   not the repo's, so the limit is set where the tests are started and inherited by every child: `gate.sh`
+   sets it in its Unix branch before the first stage, `scripts/gate-load.sh` sets it again for a direct run,
+   and `remote-check.sh` sets it in the far-side runner **before the first test binary starts**, printing the
+   live `ulimit -c` so the gate log says it is 0. It is in the scripts, not on the host, on purpose: no sudo,
+   no system configuration touched, and the same source file governs every box the gate runs on. A core from
+   an intentional abort is pure waste, and 904 MB of it is waste that fills the disk.
 
 ## Flakes seen from the gate
 
