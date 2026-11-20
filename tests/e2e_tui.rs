@@ -1698,14 +1698,16 @@ async fn a_slow_list_is_applied_to_an_idle_tui_session() {
     let state = temp.path().join("state");
     let base_url = mock.base_url();
     let run = tokio::task::spawn_blocking(move || {
-        // Nothing is typed but `/quit`: the session only idles.
+        // Nothing is typed but `/quit`: the session only idles. The line's form
+        // is not the point (the banner's if the answer beat the grace, the `»`
+        // one if it did not); that it appears at all while idle is.
         drive_idle_in_a_pty(
             cwd,
             config,
             state,
             base_url,
             vec![
-                "» window 128000 tokens (default)".into(),
+                "window 128000 tokens (default)".into(),
                 "the model list: http 503".into(),
             ],
         )
@@ -1739,7 +1741,13 @@ async fn an_offline_start_says_the_window_it_fell_back_to() {
     // Port 9 is the discard port: nothing listens on it, so a connect is
     // refused and the fetch fails. An idle session applies the answer as soon
     // as it lands (it does not wait for a turn), so this test needs no mock and
-    // no message: the banner line appears while the session sits at the prompt.
+    // no message: the fallback line appears while the session sits at the
+    // prompt. Which of the two forms it takes depends on how fast the refusal
+    // is, and both are correct: refused inside the start's 250 ms grace and the
+    // *banner* carries the line; slower (Windows takes about 2 s) and the banner
+    // could only say "fetching", so `apply_list` writes the `»` line when the
+    // answer lands. The assertions below are the invariant, not the form: the
+    // number, its source and the reason, once.
     let base_url = "http://127.0.0.1:9".to_string();
     let run = tokio::task::spawn_blocking(move || {
         drive_idle_in_a_pty(
@@ -1748,7 +1756,7 @@ async fn an_offline_start_says_the_window_it_fell_back_to() {
             state,
             base_url,
             vec![
-                "» window 128000 tokens (default)".into(),
+                "window 128000 tokens (default)".into(),
                 "the model list: offline".into(),
             ],
         )
