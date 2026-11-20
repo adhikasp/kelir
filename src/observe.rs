@@ -290,6 +290,50 @@ pub fn render(observed: &Observed) -> String {
             let _ = writeln!(out, "(none)");
         }
     }
+    let _ = writeln!(
+        out,
+        "
+== gates ({}) ==",
+        observed.gates.len()
+    );
+    if observed.gates.is_empty() {
+        let _ = writeln!(out, "(none configured)");
+    }
+    for gate in &observed.gates {
+        let _ = writeln!(
+            out,
+            "  {:<14} {:<10} {}  [{}]",
+            gate["event"].as_str().unwrap_or(""),
+            gate["name"].as_str().unwrap_or(""),
+            gate["command"].as_str().unwrap_or(""),
+            gate["origin"].as_str().unwrap_or("")
+        );
+    }
+    let _ = writeln!(
+        out,
+        "
+== gates fired ({}) ==",
+        observed.fired.len()
+    );
+    for run in observed.fired.iter().rev().take(20).rev() {
+        let _ = writeln!(
+            out,
+            "  #{} {} {} -> {} ({} ms){}{}",
+            run["seq"],
+            run["event"].as_str().unwrap_or(""),
+            run["gate"].as_str().unwrap_or(""),
+            run["decision"].as_str().unwrap_or(""),
+            run["ms"],
+            match run["reason"].as_str() {
+                Some(reason) if !reason.is_empty() => format!(": {reason}"),
+                _ => String::new(),
+            },
+            match run["error"].as_str() {
+                Some(error) => format!("  [failed open: {error}]"),
+                None => String::new(),
+            }
+        );
+    }
     let _ = writeln!(out, "\n== tools ({}) ==", observed.tools.len());
     let _ = writeln!(out, "{}", observed.tools.join(", "));
     let _ = writeln!(out, "\n== system ({} bytes) ==", observed.system.len());

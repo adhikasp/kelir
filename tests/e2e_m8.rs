@@ -41,7 +41,12 @@ impl Probe {
     }
 
     fn command(&self) -> String {
-        format!("{} \"{}\" \"{}\"", python(), fwd(PROBE), fwd(self.dir.path()))
+        format!(
+            "{} \"{}\" \"{}\"",
+            python(),
+            fwd(PROBE),
+            fwd(self.dir.path())
+        )
     }
 
     /// `[gates]` binding the probe to these events (optionally with `tools`).
@@ -147,7 +152,10 @@ async fn each_of_the_six_events_fires_with_its_document() {
         let doc = &docs[0];
         assert_eq!(doc["event"], event);
         for key in ["session", "session_dir", "log", "cwd"] {
-            assert!(doc[key].as_str().is_some_and(|s| !s.is_empty()), "{event} {key}");
+            assert!(
+                doc[key].as_str().is_some_and(|s| !s.is_empty()),
+                "{event} {key}"
+            );
         }
         assert!(doc["log"].as_str().unwrap().ends_with("events.jsonl"));
     }
@@ -156,14 +164,21 @@ async fn each_of_the_six_events_fires_with_its_document() {
     assert_eq!(before["tool"], "bash");
     assert_eq!(before["input"]["command"], "echo hello-gate");
     let after = &probe.seen("after_tool")[0];
-    assert!(after["result"].as_str().unwrap().contains("hello-gate"), "{after}");
+    assert!(
+        after["result"].as_str().unwrap().contains("hello-gate"),
+        "{after}"
+    );
     assert_eq!(after["outcome"], "ok");
     let end = &probe.seen("turn_end")[0];
     assert_eq!(end["final_text"], "done");
     assert_eq!(end["tool_calls"], 1);
     assert_eq!(probe.seen("session_end")[0]["reason"], "done");
     // The log's order: start gate first, session_end gate before session_ended.
-    let types: Vec<&str> = done.log.iter().map(|e| e["type"].as_str().unwrap()).collect();
+    let types: Vec<&str> = done
+        .log
+        .iter()
+        .map(|e| e["type"].as_str().unwrap())
+        .collect();
     assert_eq!(types.last(), Some(&"session_ended"), "{types:?}");
     assert_eq!(types[types.len() - 2], "gate", "{types:?}");
 }
@@ -192,9 +207,16 @@ async fn crashing_garbage_and_silent_gates_fail_open() {
     let before = done.gates("before_tool");
     assert_eq!(before[0]["decision"], "allow");
     let error = before[0]["error"].as_str().unwrap();
-    assert!(error.contains("exited with 3") && error.contains("crashed on purpose"), "{error}");
+    assert!(
+        error.contains("exited with 3") && error.contains("crashed on purpose"),
+        "{error}"
+    );
     let after = done.gates("after_tool");
-    assert!(after[0]["error"].as_str().unwrap().contains("not JSON"), "{:?}", after);
+    assert!(
+        after[0]["error"].as_str().unwrap().contains("not JSON"),
+        "{:?}",
+        after
+    );
     assert!(done.gates("session_start")[0].get("error").is_none());
 }
 
@@ -210,15 +232,26 @@ async fn a_gate_that_hangs_times_out_within_the_limit_and_its_tree_dies() {
     let started = Instant::now();
     let done = drive(&mock, &config, "go", &[("KELIR_GATE_TIMEOUT_MS", "2000")]).await;
     assert_eq!(done.out.code, 0, "{}", done.out.stderr);
-    assert!(started.elapsed() < Duration::from_secs(40), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(40),
+        "{:?}",
+        started.elapsed()
+    );
     let runs = done.gates("before_tool");
     assert_eq!(runs[0]["decision"], "allow");
-    assert!(runs[0]["error"].as_str().unwrap().contains("timed out"), "{}", runs[0]);
+    assert!(
+        runs[0]["error"].as_str().unwrap().contains("timed out"),
+        "{}",
+        runs[0]
+    );
     assert!(runs[0]["ms"].as_u64().unwrap() < 15_000, "{}", runs[0]);
     assert_eq!(done.events("tool_settled")[0]["outcome"], "ok");
     // The gate's child would write the flag 3 s after it started.
     tokio::time::sleep(Duration::from_secs(5)).await;
-    assert!(!flag_path.exists(), "the timed-out gate's child outlived it");
+    assert!(
+        !flag_path.exists(),
+        "the timed-out gate's child outlived it"
+    );
 }
 
 // ------------------------------------------------------------------ turn_end
@@ -232,11 +265,7 @@ async fn a_hedged_final_answer_is_blocked_once_and_the_turn_continues() {
     ])
     .await;
     let script = format!("{EXAMPLES}/verify_before_claim.py");
-    let config = format!(
-        "[gates]\nturn_end = '{} \"{}\"'\n",
-        python(),
-        fwd(script)
-    );
+    let config = format!("[gates]\nturn_end = '{} \"{}\"'\n", python(), fwd(script));
     let done = drive(&mock, &config, "is it fine?", &[]).await;
     assert_eq!(done.out.code, 0, "{}", done.out.stderr);
     assert_eq!(mock.request_count(), 2, "blocked once, then accepted");
@@ -245,21 +274,34 @@ async fn a_hedged_final_answer_is_blocked_once_and_the_turn_continues() {
     assert_eq!(runs.len(), 2, "{runs:?}");
     assert_eq!(runs[0]["decision"], "deny");
     assert!(runs[0]["reason"].as_str().unwrap().contains("hedges"));
-    assert_eq!(runs[1]["decision"], "allow", "the example allows once blocked");
+    assert_eq!(
+        runs[1]["decision"], "allow",
+        "the example allows once blocked"
+    );
     let from_gate: Vec<_> = done
         .events("user")
         .into_iter()
         .filter(|e| e["from"] == "gate")
         .collect();
     assert_eq!(from_gate.len(), 1);
-    assert!(from_gate[0]["text"].as_str().unwrap().contains("not accepted"));
+    assert!(
+        from_gate[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not accepted")
+    );
     // The second request carried the gate's message.
     let second = &mock.requests()[1];
     assert!(
-        second.messages().iter().any(|m| m["content"].as_str().is_some_and(|c| c.contains("not accepted"))),
+        second.messages().iter().any(|m| m["content"]
+            .as_str()
+            .is_some_and(|c| c.contains("not accepted"))),
         "the gate's reason never reached the model"
     );
-    assert_eq!(done.out.result().unwrap()["final_text"], "Still probably fine, I think.");
+    assert_eq!(
+        done.out.result().unwrap()["final_text"],
+        "Still probably fine, I think."
+    );
 }
 
 #[tokio::test]
@@ -277,7 +319,10 @@ async fn a_second_deny_in_one_turn_is_logged_but_not_enforced() {
     assert_eq!(done.gates("turn_end").len(), 2);
     let errors = done.events("error");
     assert!(
-        errors.iter().any(|e| e["message"].as_str().unwrap_or("").contains("already blocked")),
+        errors.iter().any(|e| e["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("already blocked")),
         "{errors:?}"
     );
 }
@@ -308,7 +353,13 @@ async fn before_tool_can_rewrite_a_calls_input() {
     let probe = Probe::new(json!({
         "before_tool": {"mode": "rewrite", "input": {"command": "echo rewritten"}},
     }));
-    let done = drive(&mock, &probe.config(&[("before_tool", Some("bash"))]), "go", &[]).await;
+    let done = drive(
+        &mock,
+        &probe.config(&[("before_tool", Some("bash"))]),
+        "go",
+        &[],
+    )
+    .await;
     assert_eq!(done.out.code, 0, "{}", done.out.stderr);
     let started = done.events("tool_started");
     assert_eq!(started[0]["input"]["command"], "echo rewritten");
@@ -316,7 +367,10 @@ async fn before_tool_can_rewrite_a_calls_input() {
     assert_eq!(settled[0]["result"], "rewritten\n");
     // What the model asked for is still what its own message says.
     let assistant = done.events("assistant");
-    assert_eq!(assistant[0]["tool_calls"][0]["args"]["command"], "echo original");
+    assert_eq!(
+        assistant[0]["tool_calls"][0]["args"]["command"],
+        "echo original"
+    );
     assert_eq!(done.gates("before_tool")[0]["rewritten"], true);
 }
 
@@ -333,25 +387,507 @@ async fn before_tool_deny_returns_the_gate_and_the_reason_and_runs_nothing() {
         result.starts_with("denied by gate gate_probe: no writes today"),
         "{result}"
     );
-    assert!(!done.sandbox.cwd.join("denied.txt").exists(), "the denied call ran");
+    assert!(
+        !done.sandbox.cwd.join("denied.txt").exists(),
+        "the denied call ran"
+    );
     // The model read the denial.
     let second = &mock.requests()[1];
-    assert!(second.messages().iter().any(|m| m["content"]
-        .as_str()
-        .is_some_and(|c| c.contains("denied by gate gate_probe"))));
+    assert!(second.messages().iter().any(|m| {
+        m["content"]
+            .as_str()
+            .is_some_and(|c| c.contains("denied by gate gate_probe"))
+    }));
 }
 
 #[tokio::test]
 async fn after_tool_can_replace_the_result_or_append_a_note() {
     let mock = Mock::start(one_call_then("done", "echo raw-output")).await;
-    let probe = Probe::new(json!({"after_tool": {"mode": "rewrite", "input": {"note": "mind the typo"}}}));
+    let probe =
+        Probe::new(json!({"after_tool": {"mode": "rewrite", "input": {"note": "mind the typo"}}}));
     let done = drive(&mock, &probe.config(&[("after_tool", None)]), "go", &[]).await;
-    let result = done.events("tool_settled")[0]["result"].as_str().unwrap().to_string();
+    let result = done.events("tool_settled")[0]["result"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(result.starts_with("raw-output\n"), "{result}");
-    assert!(result.contains("[gate gate_probe] mind the typo"), "{result}");
+    assert!(
+        result.contains("[gate gate_probe] mind the typo"),
+        "{result}"
+    );
 
     let mock = Mock::start(one_call_then("done", "echo raw-output")).await;
-    let probe = Probe::new(json!({"after_tool": {"mode": "rewrite", "input": {"result": "replaced"}}}));
+    let probe =
+        Probe::new(json!({"after_tool": {"mode": "rewrite", "input": {"result": "replaced"}}}));
     let done = drive(&mock, &probe.config(&[("after_tool", None)]), "go", &[]).await;
     assert_eq!(done.events("tool_settled")[0]["result"], "replaced");
+}
+
+// --------------------------------------------------------------- prompt_submit
+
+#[tokio::test]
+async fn prompt_submit_can_rewrite_the_task() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let probe = Probe::new(
+        json!({"prompt_submit": {"mode": "rewrite", "input": {"text": "rewritten task"}}}),
+    );
+    let done = drive(
+        &mock,
+        &probe.config(&[("prompt_submit", None)]),
+        "original task",
+        &[],
+    )
+    .await;
+    assert_eq!(done.out.code, 0, "{}", done.out.stderr);
+    assert_eq!(done.events("user")[0]["text"], "rewritten task");
+    assert_eq!(done.events("user")[0]["from"], "cli");
+    let first = &mock.requests()[0];
+    assert!(
+        first
+            .messages()
+            .iter()
+            .any(|m| m["content"] == "rewritten task")
+    );
+    assert!(
+        !first
+            .messages()
+            .iter()
+            .any(|m| m["content"] == "original task")
+    );
+}
+
+#[tokio::test]
+async fn a_denied_command_line_task_ends_the_run_with_a_reason_and_no_request() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("never", 0)))]).await;
+    let probe = Probe::new(json!({"prompt_submit": {"mode": "deny", "reason": "not today"}}));
+    let done = drive(
+        &mock,
+        &probe.config(&[("prompt_submit", None), ("session_end", None)]),
+        "task",
+        &[],
+    )
+    .await;
+    assert_eq!(done.out.code, 1, "{}", done.out.stderr);
+    assert!(
+        done.out
+            .stderr
+            .contains("prompt dropped by gate gate_probe: not today"),
+        "{}",
+        done.out.stderr
+    );
+    assert_eq!(mock.request_count(), 0);
+    assert!(done.events("user").is_empty());
+    assert_eq!(done.gates("prompt_submit")[0]["decision"], "deny");
+    let ended = done.events("session_ended");
+    assert_eq!(ended[0]["reason"], "denied");
+    assert_eq!(probe.seen("session_end")[0]["reason"], "denied");
+}
+
+// ------------------------------------------------------------------- observe
+
+#[tokio::test]
+async fn observe_lists_the_gates_and_what_fired_without_secrets() {
+    let mock = Mock::start(one_call_then("done", "echo hi")).await;
+    let probe = Probe::new(json!({"before_tool": {"mode": "crash"}}));
+    let config = probe.config(&[("before_tool", None), ("turn_end", None)]);
+    let done = drive(&mock, &config, "go", &[]).await;
+    let id = done.sandbox.only_session();
+    let out = done
+        .sandbox
+        .kelir(&mock.base_url(), &["observe", &id], &[])
+        .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("== gates (2) =="), "{}", out.stdout);
+    assert!(out.stdout.contains("before_tool") && out.stdout.contains("gate_probe"));
+    assert!(
+        out.stdout.contains("== gates fired (2) =="),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("failed open: exited with 3"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("turn_end gate_probe-2 -> allow"),
+        "{}",
+        out.stdout
+    );
+}
+
+#[tokio::test]
+async fn observe_prints_env_names_of_a_gate_but_never_their_values() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let config = "[gates]\nsession_end = { name = 'sync', command = 'true', env = { GATE_SECRET_CANARY = 'canary-value-7731' } }\n";
+    let done = drive(&mock, config, "go", &[]).await;
+    let id = done.sandbox.only_session();
+    let out = done
+        .sandbox
+        .kelir(&mock.base_url(), &["observe", &id], &[])
+        .await;
+    assert!(
+        out.stdout.contains("GATE_SECRET_CANARY") || out.stdout.contains("sync"),
+        "{}",
+        out.stdout
+    );
+    assert!(!out.stdout.contains("canary-value-7731"), "{}", out.stdout);
+    let log = std::fs::read_to_string(done.sandbox.session_dir(&id).join("events.jsonl")).unwrap();
+    assert!(!log.contains("canary-value-7731"));
+}
+
+// ------------------------------------------------------------- secrets (STEER-7)
+
+#[tokio::test]
+async fn a_gate_gets_no_token_no_socket_and_no_provider_key() {
+    let mock = Mock::start(one_call_then("done", "echo hi")).await;
+    let probe = Probe::new(json!({}));
+    let events = [
+        ("session_start", None),
+        ("prompt_submit", None),
+        ("before_tool", None),
+        ("after_tool", None),
+        ("turn_end", None),
+        ("session_end", None),
+    ];
+    let config = probe.config(&events);
+    let canaries = [
+        ("OPENROUTER_API_KEY", "canary-openrouter-5c1e"),
+        ("KELIR_GO_API_KEY", "canary-go-8d2a"),
+        ("MY_OWN_KEY_ENV", "canary-custom-3b7f"),
+        ("KELIR_TOKEN", "canary-token-1a9c"),
+        ("KELIR_SOCK", "canary-sock-6e4d"),
+    ];
+    let done = drive(&mock, &config, "go", &canaries).await;
+    assert_eq!(done.out.code, 0, "{}", done.out.stderr);
+    for (event, _) in events {
+        let env = probe.env_of(event);
+        let names: Vec<String> = env
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.to_ascii_uppercase())
+            .collect();
+        for banned in [
+            "OPENROUTER_API_KEY",
+            "KELIR_GO_API_KEY",
+            "MY_OWN_KEY_ENV",
+            "KELIR_TOKEN",
+            "KELIR_SOCK",
+        ] {
+            assert!(
+                !names.contains(&banned.to_string()),
+                "{event}: {banned} reached the gate"
+            );
+        }
+        let text = env.to_string();
+        for (_, value) in canaries {
+            assert!(
+                !text.contains(value),
+                "{event}: a canary value reached the gate's environment"
+            );
+        }
+        assert_eq!(env["KELIR_GATE_EVENT"], event);
+        assert!(
+            env["KELIR_GATE_NAME"]
+                .as_str()
+                .unwrap()
+                .starts_with("gate_probe")
+        );
+        assert!(env.get("KELIR_SESSION_DIR").is_some());
+        for doc in probe.seen(event) {
+            let text = doc.to_string();
+            for (_, value) in canaries {
+                assert!(
+                    !text.contains(value),
+                    "{event}: a canary reached the gate's stdin"
+                );
+            }
+        }
+    }
+    // And nothing the session wrote or printed holds a canary either.
+    let id = done.sandbox.only_session();
+    let log = std::fs::read_to_string(done.sandbox.session_dir(&id).join("events.jsonl")).unwrap();
+    for (_, value) in canaries {
+        assert!(
+            !log.contains(value)
+                && !done.out.stdout.contains(value)
+                && !done.out.stderr.contains(value)
+        );
+    }
+}
+
+// ------------------------------------------------------------ skill-bound gate
+
+#[tokio::test]
+async fn a_skill_script_bound_by_metadata_runs_as_a_gate() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let probe = Probe::new(json!({}));
+    let sandbox = Sandbox::new("");
+    let skill = sandbox.cwd.join(".kelir").join("skills").join("watch");
+    std::fs::create_dir_all(skill.join("scripts")).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: watch\ndescription: watches the end of a turn\nmetadata: {kelir-gate: turn_end}\n---\nBody.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        skill.join("scripts").join("turn_end.py"),
+        format!(
+            "import sys,json\nopen(r'{}','w').write(sys.stdin.read())\nprint(json.dumps({{'decision':'allow','reason':'seen'}}))\n",
+            fwd(probe.path("skill-saw.json"))
+        ),
+    )
+    .unwrap();
+    let out = sandbox
+        .kelir(&mock.base_url(), &["run", "--json", "go"], &[])
+        .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let log = sandbox.log(&sandbox.only_session());
+    let gates: Vec<_> = log.iter().filter(|e| e["type"] == "gate").collect();
+    assert_eq!(gates.len(), 1, "{log:?}");
+    assert_eq!(gates[0]["gate"], "watch.turn_end");
+    assert_eq!(gates[0]["reason"], "seen");
+    let seen: Value =
+        serde_json::from_str(&std::fs::read_to_string(probe.path("skill-saw.json")).unwrap())
+            .unwrap();
+    assert_eq!(seen["event"], "turn_end");
+}
+
+// -------------------------------------------------------------- example gates
+
+fn run_example(name: &str, stdin: &Value, env: &[(&str, &str)]) -> Value {
+    use std::io::Write;
+    let mut command = std::process::Command::new(python());
+    command
+        .arg(format!("{EXAMPLES}/{name}"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in env {
+        command.env(k, v);
+    }
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    kelir::gates::parse_decision(&text).unwrap_or_else(|e| panic!("{name}: {e}: {text}"));
+    serde_json::from_str(text.trim()).unwrap_or(Value::Null)
+}
+
+#[test]
+fn numbered_answers_resolves_do_1_4_against_the_last_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("events.jsonl");
+    let lines = [
+        json!({"seq":1,"type":"assistant","text":"1. old one\n2. old two"}),
+        json!({"seq":2,"type":"assistant","text":"Options:\n1. add the cache\n2. drop the flag\n3. rename it\n4. write the docs\n"}),
+        json!({"seq":3,"type":"assistant","text":"anything else?"}),
+    ];
+    std::fs::write(
+        &log,
+        lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    let doc = |text: &str| json!({"event":"prompt_submit","text":text,"log":fwd(&log)});
+    let answer = run_example("numbered_answers.py", &doc("do 1,4"), &[]);
+    assert_eq!(answer["decision"], "rewrite");
+    let text = answer["input"]["text"].as_str().unwrap();
+    assert!(
+        text.contains("1. add the cache") && text.contains("4. write the docs"),
+        "{text}"
+    );
+    assert!(!text.contains("rename it"));
+    let range = run_example("numbered_answers.py", &doc("2-3"), &[]);
+    assert!(
+        range["input"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("3. rename it")
+    );
+    for untouched in ["please do the thing", "do 9", "1,4 and also explain why"] {
+        assert_eq!(
+            run_example("numbered_answers.py", &doc(untouched), &[])["decision"],
+            "allow",
+            "{untouched}"
+        );
+    }
+}
+
+#[test]
+fn note_check_appends_the_checkers_output_and_is_silent_without_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("note.md");
+    std::fs::write(&file, "x").unwrap();
+    let script = dir.path().join("checker.py");
+    std::fs::write(
+        &script,
+        "import sys
+print('bad: ' + sys.argv[1][-7:])
+sys.exit(1)
+",
+    )
+    .unwrap();
+    let checker = format!("{} {}", python(), fwd(&script));
+    let doc = json!({"event":"after_tool","tool":"edit","outcome":"ok","cwd":fwd(dir.path()),"input":{"path":fwd(&file)},"result":"ok"});
+    let answer = run_example("note_check.py", &doc, &[("NOTE_CHECK_CMD", &checker)]);
+    assert_eq!(answer["decision"], "rewrite");
+    assert!(
+        answer["input"]["note"].as_str().unwrap().contains("bad:"),
+        "{answer}"
+    );
+    assert_eq!(run_example("note_check.py", &doc, &[])["decision"], "allow");
+}
+
+#[test]
+fn git_sync_commits_but_does_not_push_when_told_not_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+    };
+    if git(&["init", "-q"]).status.code() != Some(0) {
+        return;
+    }
+    git(&["config", "user.email", "t@example.invalid"]);
+    git(&["config", "user.name", "t"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let doc =
+        json!({"event":"session_end","session":"ses_x","cwd":fwd(dir.path()),"reason":"done"});
+    let answer = run_example("git_sync.py", &doc, &[("GIT_SYNC_PUSH", "0")]);
+    assert_eq!(answer["decision"], "allow");
+    let log = String::from_utf8_lossy(&git(&["log", "--oneline"]).stdout).to_string();
+    assert!(log.contains("kelir: ses_x"), "{log}");
+}
+
+// ----------------------------------------------------------------------- MCP
+
+#[tokio::test]
+async fn mcp_calls_are_gated_as_mcp_server_dot_tool() {
+    let mcp_script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mcp_server.py");
+    let files = tempfile::tempdir().unwrap();
+    let mcp_toml = files.path().join("mcp.toml");
+    std::fs::write(
+        &mcp_toml,
+        format!(
+            "[servers.demo]\ncommand = '{}'\nargs = ['{}']\n",
+            python(),
+            mcp_script
+        ),
+    )
+    .unwrap();
+    let probe = Probe::new(json!({
+        "before_tool": {"mode": "rewrite", "input": {"text": "rewritten-arg"}},
+        "after_tool": {"mode": "rewrite", "input": {"note": "mcp noted"}},
+    }));
+    let config = probe.config(&[
+        ("before_tool", Some("mcp:demo")),
+        ("after_tool", Some("mcp:*")),
+    ]);
+    let mock = Mock::start(one_call_then(
+        "done",
+        "\"$KELIR_BIN\" mcp demo echo text=original",
+    ))
+    .await;
+    let sandbox = Sandbox::new(&config);
+    let mcp = mcp_toml.to_string_lossy().into_owned();
+    let out = sandbox
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "go"],
+            &[("KELIR_MCP_CONFIG", mcp.as_str())],
+        )
+        .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let log = sandbox.log(&sandbox.only_session());
+    let before = &probe.seen("before_tool")[0];
+    assert_eq!(before["tool"], "mcp:demo.echo", "{before}");
+    assert_eq!(before["input"]["text"], "original");
+    let after = &probe.seen("after_tool")[0];
+    assert_eq!(after["tool"], "mcp:demo.echo");
+    assert_eq!(
+        after["result"], "rewritten-arg",
+        "the rewritten input reached the server"
+    );
+    let result = log.iter().find(|e| e["type"] == "tool_settled").unwrap()["result"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        result.contains("rewritten-arg") && result.contains("mcp noted"),
+        "{result}"
+    );
+    let gates: Vec<_> = log.iter().filter(|e| e["type"] == "gate").collect();
+    assert_eq!(gates.len(), 2, "{gates:?}");
+
+    // A deny returns the gate and the reason as the call's stderr, exit 1.
+    let probe =
+        Probe::new(json!({"before_tool": {"mode": "deny", "reason": "servers are closed"}}));
+    let config = probe.config(&[("before_tool", Some("mcp:demo.echo"))]);
+    let mock = Mock::start(one_call_then(
+        "done",
+        "\"$KELIR_BIN\" mcp demo echo text=x 2>&1; echo exit=$?",
+    ))
+    .await;
+    let sandbox = Sandbox::new(&config);
+    let out = sandbox
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "go"],
+            &[("KELIR_MCP_CONFIG", mcp.as_str())],
+        )
+        .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let log = sandbox.log(&sandbox.only_session());
+    let result = log.iter().find(|e| e["type"] == "tool_settled").unwrap()["result"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        result.contains("denied by gate gate_probe: servers are closed"),
+        "{result}"
+    );
+    let settled = log.iter().find(|e| e["type"] == "mcp_settled").unwrap();
+    assert_eq!(settled["outcome"], "denied");
+}
+
+// ----------------------------------------------------- a console-less session
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_session_without_a_console_runs_its_gates() {
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    let mock = Mock::start(one_call_then("done", "echo hi")).await;
+    let probe = Probe::new(json!({}));
+    let config = probe.config(&[("before_tool", None), ("turn_end", None)]);
+    let mut live = LiveSession::start_with_flags(
+        &mock,
+        &["run", "--keep", "--json", "go"],
+        &config,
+        DETACHED_PROCESS,
+    )
+    .await;
+    live.wait_for("turn_ended").await;
+    assert_eq!(probe.seen("before_tool").len(), 1);
+    assert_eq!(probe.seen("turn_end").len(), 1);
+    let (code, stderr) = live.end().await;
+    assert_eq!(code, 0, "{stderr}");
 }

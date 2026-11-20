@@ -2054,7 +2054,8 @@ impl Session {
                         format!(": {reason}")
                     }
                 );
-                if !self.tui && !self.json {
+                // stderr even under `--json` (stdout stays NDJSON), like a pause.
+                if !self.tui {
                     eprintln!("kelir: {message}");
                 }
                 self.emit(UiEvent::Info(format!("» {message}")));
