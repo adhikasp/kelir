@@ -257,3 +257,19 @@ and the final config surface), before M5-B.
 - Linux box: 25 stale verify dirs removed (~90 GB); the new `remote-check.sh prune` only prunes marker-bearing dirs (new ones).
 - Running: **steer7fix** (socket hardening, branch job/steer7fix; first review FAIL), **steer12** (measured prompt change, from the admin route's
   harness learning), launching **steer11** (self-docs; docs/reference now exists). Then steer8 (cost/status), steer9 (de-flake), M5-B, M6.
+
+- 2026-11-20 10:50: **tui3** (the maintainer's TUI calm-down pass, branch job/tui3, 1 commit 6d3d8a4, worktree kelir-wt/tui3): handed over via a
+  message file; gate PASS per the author (Windows 864, Linux ok). In review (fresh reviewer, emulator-render method); merge after PASS.
+  steer12 (measured prompt change) is done and awaiting gate/review; steer7fix and steer11 running.
+
+## Directive (maintainer, relayed 2026-11-20 ~13:00): agent work moves to Claude Code
+The OpenCode Go subscription is running low. **All new implementer, fixer and reviewer panes run on Claude Code** (`claude
+--dangerously-skip-permissions "<brief>"`, fresh pane/session per pass) through `kelir-scratch/launch-claude.sh <workdir> <prompt-file>`.
+No new `--provider opencode-go` kelir runs (if a kelir run is needed for a gate, use `--provider openrouter --model
+anthropic/claude-sonnet-4.5`). Already-running opencode-go kelir workers (steer7fix, steer11, tui3fix at this time) finish their current pass;
+nothing new starts on them. Discipline unchanged (briefs, gates, fresh reviewer, PROGRESS/QUEUE), keep driving to M11. Note: dogfooding kelir as
+implementer pauses; the retro/introspective passes keep reading the transcripts already recorded.
+
+- 2026-11-20 13:30: **steer12 merged** (89e23d6). The AFTER measurement needs kelir sessions on the new prompt; agent work moved to Claude Code (directive), so it is
+  deferred until kelir runs again (a gate-run/dogfood session on the OpenRouter fallback can supply a data point). steer7: merge resolved (steer7m, gate 897 green),
+  adversarial re-review running (Claude). tui3fix and steer11 (kelir/opencode-go) finish their current pass.
