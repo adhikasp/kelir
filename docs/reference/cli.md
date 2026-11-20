@@ -233,6 +233,7 @@ after `kelir mcp ls`).
 kelir mcp ls [--json]
 kelir mcp <server> ls [--detail name|desc|full]
 kelir mcp <server> <tool> [k=v ...] [--json '{...}'] [--schema] [--envelope]
+kelir mcp <server> call <tool> ...   (a tool named ls or call)
 ```
 
 Exit codes: 0 ok, 1 the tool reported `isError`, 2 usage, 3 server

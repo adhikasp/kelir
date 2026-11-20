@@ -69,10 +69,44 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// A TOML error without the source text. `toml`'s own `Display` quotes the
+/// offending line, and that line may be the `env` block with a secret in it;
+/// serde's type errors also quote the value (`invalid type: integer `123``).
+/// Only the line:column and the message are kept, and a quoted value is cut
+/// out of the message.
+fn safe_error(text: &str, error: &toml::de::Error) -> String {
+    let message = error.message();
+    // "invalid type: string `x`, expected a boolean" -> keep the expectation.
+    let message = match message.split_once(", expected ") {
+        Some((head, tail)) if head.starts_with("invalid ") => {
+            let kind = head.split(':').next().unwrap_or("invalid value");
+            format!("{kind} (value hidden), expected {tail}")
+        }
+        _ if message.starts_with("invalid ") && message.contains('`') => {
+            message
+                .split(':')
+                .next()
+                .unwrap_or("invalid value")
+                .to_string()
+                + " (value hidden)"
+        }
+        _ => message.to_string(),
+    };
+    match error.span() {
+        Some(span) => {
+            let before = &text[..span.start.min(text.len())];
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+            format!("line {line}, column {column}: {message}")
+        }
+        None => message,
+    }
+}
+
 /// Parse one layer. `origin` is only for the error text.
 pub fn parse_layer(text: &str, origin: &str) -> Result<BTreeMap<String, ServerConfig>, String> {
-    let raw: RawFile =
-        toml::from_str(text).map_err(|error| format!("invalid {origin}: {error}"))?;
+    let raw: RawFile = toml::from_str(text)
+        .map_err(|error| format!("invalid {origin}: {}", safe_error(text, &error)))?;
     let mut out = BTreeMap::new();
     for (name, server) in raw.servers {
         if !valid_name(&name) {
@@ -205,6 +239,31 @@ mod tests {
         ] {
             let error = parse_layer(text, "FILE").unwrap_err();
             assert!(error.contains("FILE") && error.contains(needle), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_syntax_error_never_echoes_the_source() {
+        let head = "[servers.s]\ncommand = 'x'\n";
+        for tail in [
+            r#"env = { API_TOKEN = "sk-CANARY-1" , } oops"#,
+            "env = { API_TOKEN = 12345678 }",
+            "env = { API_TOKEN = \"sk-CANARY-1\" \n",
+            r#"env = { A = "sk-CANARY-1", A = "sk-CANARY-2" }"#,
+            r#"env = "sk-CANARY-1""#,
+            r#"args = "sk-CANARY-1""#,
+            r#"channel = "sk-CANARY-1""#,
+            r#"timeout = "sk-CANARY-1""#,
+            r#"env = { A = "sk-CANARY-1\q" }"#,
+            r#"env = { A = ["sk-CANARY-1"] }"#,
+        ] {
+            let text = format!("{head}{tail}\n");
+            let error = parse_layer(&text, "FILE").unwrap_err();
+            assert!(
+                !error.contains("CANARY") && !error.contains("12345678"),
+                "{error}"
+            );
+            assert!(error.contains("FILE") && error.contains("line "), "{error}");
         }
     }
 

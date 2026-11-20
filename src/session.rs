@@ -1652,6 +1652,49 @@ impl Session {
             })?;
             unknown += 1;
         }
+        // The same for `kelir mcp` calls: `mcp_started` with no `mcp_settled`
+        // means the session died while the server was running the tool. The
+        // outcome is unknown (exit 4) and the call is not run again.
+        let settled: std::collections::HashSet<String> = self
+            .events
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::McpSettled { mcp_id, .. } => Some(mcp_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let orphans: Vec<(String, String, String, Option<String>)> = self
+            .events
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::McpStarted {
+                    mcp_id,
+                    server,
+                    tool,
+                    parent_call_id,
+                    ..
+                } if !settled.contains(mcp_id) => Some((
+                    mcp_id.clone(),
+                    server.clone(),
+                    tool.clone(),
+                    parent_call_id.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        for (mcp_id, server, tool, parent_call_id) in orphans {
+            self.record(EventBody::McpSettled {
+                mcp_id,
+                server,
+                tool,
+                outcome: "unknown".into(),
+                exit_code: crate::mcp::render::EXIT_TIMEOUT,
+                bytes: 0,
+                out_path: String::new(),
+                parent_call_id,
+            })?;
+            unknown += 1;
+        }
         if unknown > 0 {
             self.emit(UiEvent::Info(format!(
                 "kelir: resumed · {unknown} call(s) had an unknown outcome and were not re-run"

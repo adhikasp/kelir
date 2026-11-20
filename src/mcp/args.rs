@@ -41,7 +41,8 @@ pub struct CallArgs {
 pub const USAGE: &str = "\
 usage: kelir mcp ls [--json]
        kelir mcp <server> ls [--detail name|desc|full]
-       kelir mcp <server> <tool> [k=v ...] [--json '{...}'] [--schema] [--envelope]";
+       kelir mcp <server> <tool> [k=v ...] [--json '{...}'] [--schema] [--envelope]
+       kelir mcp <server> call <tool> ...   (for a tool named ls or call)";
 
 /// Parse the words after `kelir mcp`.
 pub fn parse(words: &[String]) -> Result<Command, String> {
@@ -92,15 +93,25 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
     if second.starts_with('-') {
         return Err(format!("expected a tool name, got `{second}`"));
     }
+    // `kelir mcp <server> call <tool> ...` reaches a tool that is itself named
+    // `ls` (or `call`, with `call call`), which the bare form would list.
+    let (tool, skip) = if second == "call" {
+        match words.get(2) {
+            Some(tool) if !tool.starts_with('-') => (tool.clone(), 3),
+            _ => return Err("`call` needs a tool name".into()),
+        }
+    } else {
+        (second.clone(), 2)
+    };
     let mut call = CallArgs {
         server,
-        tool: second.clone(),
+        tool,
         pairs: Vec::new(),
         json: None,
         schema: false,
         envelope: false,
     };
-    let mut rest = words[2..].iter();
+    let mut rest = words[skip..].iter();
     while let Some(word) = rest.next() {
         match word.as_str() {
             "--schema" => call.schema = true,
@@ -131,22 +142,68 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
     Ok(Command::Call(call))
 }
 
-/// A tool's declared type for one property, when it declares one string.
-fn declared_type(schema: &Value, key: &str) -> Option<String> {
-    let property = schema.get("properties")?.get(key)?;
-    match property.get("type")? {
-        Value::String(name) => Some(name.clone()),
-        _ => None,
+/// The scalar type names a property schema allows: its `type` (a string or a
+/// list) and the `type`s of its `anyOf`/`oneOf` branches, recursively.
+fn declared_types(property: &Value, out: &mut Vec<String>) {
+    match property.get("type") {
+        Some(Value::String(name)) => out.push(name.clone()),
+        Some(Value::Array(list)) => {
+            out.extend(list.iter().filter_map(Value::as_str).map(String::from))
+        }
+        _ => {}
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(Value::Array(branches)) = property.get(key) {
+            for branch in branches {
+                declared_types(branch, out);
+            }
+        }
     }
 }
 
-/// Type one `k=v` value: with a declared `string` it is the raw text; else
-/// JSON when it parses as JSON, else a string.
-pub fn type_value(raw: &str, declared: Option<&str>) -> Value {
-    if declared == Some("string") {
+/// What a tool declares for one property: the list of type names (empty when
+/// it declares none).
+fn declared_type(schema: &Value, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(property) = schema.get("properties").and_then(|p| p.get(key)) {
+        declared_types(property, &mut out);
+    }
+    out
+}
+
+/// Type one `k=v` value. The schema decides: a property that accepts a string
+/// and no other non-null scalar keeps the raw text; one that also accepts
+/// numbers/booleans/etc. reads the text as JSON when that JSON is of an
+/// accepted type, else keeps the text. Undeclared: JSON when it parses as JSON
+/// (an integer too big for 64 bits stays text, never a rounded float), else a
+/// string.
+pub fn type_value(raw: &str, declared: &[String]) -> Value {
+    let accepts_string = declared.iter().any(|name| name == "string");
+    let others: Vec<&String> = declared
+        .iter()
+        .filter(|name| !matches!(name.as_str(), "string" | "null"))
+        .collect();
+    if accepts_string && others.is_empty() {
         return Value::String(raw.to_string());
     }
-    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+    match serde_json::from_str::<Value>(raw) {
+        Ok(value) => {
+            if integer_overflows(raw, &value) {
+                return Value::String(raw.to_string());
+            }
+            if accepts_string && !others.iter().any(|name| type_matches(name, &value)) {
+                return Value::String(raw.to_string());
+            }
+            value
+        }
+        Err(_) => Value::String(raw.to_string()),
+    }
+}
+
+/// `raw` is integer text that a JSON number here would round (beyond i64/u64).
+fn integer_overflows(raw: &str, value: &Value) -> bool {
+    let digits = raw.strip_prefix('-').unwrap_or(raw);
+    value.is_f64() && !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// The call's argument object: the `--json` object first, then each `k=v`
@@ -166,7 +223,7 @@ pub fn build(
     };
     for (key, raw) in pairs {
         let declared = declared_type(schema, key);
-        object.insert(key.clone(), type_value(raw, declared.as_deref()));
+        object.insert(key.clone(), type_value(raw, &declared));
     }
     Ok(Value::Object(object))
 }
@@ -242,6 +299,23 @@ fn check(schema: &Value, value: &Value, path: &str, problems: &mut Vec<String>) 
                 at(path),
                 names.join(" or "),
                 type_name(value),
+                shown(value)
+            ));
+            return;
+        }
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(Value::Array(branches)) = schema.get(key)
+            && !branches.is_empty()
+            && !branches.iter().any(|branch| {
+                let mut own = Vec::new();
+                check(branch, value, path, &mut own);
+                own.is_empty()
+            })
+        {
+            problems.push(format!(
+                "{}: {} matches none of the `{key}` alternatives",
+                at(path),
                 shown(value)
             ));
             return;
@@ -390,17 +464,74 @@ mod tests {
 
     #[test]
     fn k_v_values_are_json_when_they_can_be_else_strings() {
-        assert_eq!(type_value("3", None), json!(3));
-        assert_eq!(type_value("2.5", None), json!(2.5));
-        assert_eq!(type_value("true", None), json!(true));
-        assert_eq!(type_value("null", None), json!(null));
-        assert_eq!(type_value("[1,2]", None), json!([1, 2]));
-        assert_eq!(type_value("{\"a\":1}", None), json!({"a": 1}));
-        assert_eq!(type_value("hello world", None), json!("hello world"));
-        assert_eq!(type_value("007x", None), json!("007x"));
+        assert_eq!(type_value("3", &[]), json!(3));
+        assert_eq!(type_value("2.5", &[]), json!(2.5));
+        assert_eq!(type_value("true", &[]), json!(true));
+        assert_eq!(type_value("null", &[]), json!(null));
+        assert_eq!(type_value("[1,2]", &[]), json!([1, 2]));
+        assert_eq!(type_value("{\"a\":1}", &[]), json!({"a": 1}));
+        assert_eq!(type_value("hello world", &[]), json!("hello world"));
+        assert_eq!(type_value("007x", &[]), json!("007x"));
         // A declared string keeps the text exactly as typed.
-        assert_eq!(type_value("3", Some("string")), json!("3"));
-        assert_eq!(type_value("true", Some("string")), json!("true"));
+        assert_eq!(type_value("3", &["string".to_string()]), json!("3"));
+        assert_eq!(type_value("true", &["string".to_string()]), json!("true"));
+    }
+
+    #[test]
+    fn nullable_and_union_strings_keep_their_text() {
+        let schema = json!({"properties": {
+            "a": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "b": {"type": ["string", "null"]},
+            "u": {"type": ["string", "integer"]},
+            "n": {"type": "integer"}}});
+        let args = build(
+            &[
+                ("a".into(), "123".into()),
+                ("b".into(), "123".into()),
+                ("u".into(), "123".into()),
+                ("n".into(), "123".into()),
+            ],
+            None,
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(args, json!({"a": "123", "b": "123", "u": 123, "n": 123}));
+        assert_eq!(
+            type_value("hi", &["string".into(), "integer".into()]),
+            json!("hi")
+        );
+    }
+
+    #[test]
+    fn a_huge_integer_stays_text() {
+        let big = "123456789012345678901234567890";
+        assert_eq!(type_value(big, &[]), json!(big));
+        assert_eq!(
+            type_value("-123456789012345678901234567890", &[]),
+            json!("-123456789012345678901234567890")
+        );
+        assert_eq!(
+            type_value("18446744073709551615", &[]),
+            json!(18446744073709551615u64)
+        );
+        assert_eq!(type_value("1.5e3", &[]), json!(1500.0));
+    }
+
+    #[test]
+    fn any_of_is_validated() {
+        let schema = json!({"anyOf": [{"type": "string"}, {"type": "null"}]});
+        assert!(validate(&schema, &json!("x")).is_ok());
+        assert!(validate(&schema, &json!(null)).is_ok());
+        assert!(validate(&schema, &json!(3)).unwrap_err().contains("anyOf"));
+    }
+
+    #[test]
+    fn call_reaches_a_tool_named_ls() {
+        let Command::Call(call) = parse(&words("demo call ls a=1")).unwrap() else {
+            panic!("a call")
+        };
+        assert_eq!((call.tool.as_str(), call.pairs.len()), ("ls", 1));
+        assert!(parse(&words("demo call")).is_err());
     }
 
     #[test]

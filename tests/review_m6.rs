@@ -158,7 +158,6 @@ async fn a_server_that_exits_after_initialize_is_exit_3() {
 /// reader must skip the bad line like any other junk, not declare the server
 /// dead.
 #[tokio::test]
-#[ignore = "M6 review F2: fails until fixed (run with --run-ignored all)"]
 async fn a_non_utf8_line_does_not_kill_the_connection() {
     let files = Files::new();
     let toml = evil("env = { MCP_EVIL = \"badutf8\" }");
@@ -242,7 +241,6 @@ async fn a_tool_named_ls_is_shadowed_by_the_listing() {
 /// declared with `anyOf` or `type: [string, null]` is not "declared string",
 /// so `a=123` is sent as the number 123 although the server wants a string.
 #[tokio::test]
-#[ignore = "M6 review F4: fails until fixed (run with --run-ignored all)"]
 async fn a_nullable_string_keeps_its_text() {
     let files = Files::new();
     let toml = evil("");
@@ -292,7 +290,6 @@ async fn json_looking_strings_follow_the_schema() {
 
 /// An integer past u64 is not silently turned into a float.
 #[tokio::test]
-#[ignore = "M6 review F7: fails until fixed (run with --run-ignored all)"]
 async fn a_huge_integer_is_not_rounded() {
     let files = Files::new();
     let toml = evil("");
@@ -315,7 +312,6 @@ async fn a_huge_integer_is_not_rounded() {
 
 /// A syntax error on a line that holds a secret must not echo the secret.
 #[tokio::test]
-#[ignore = "M6 review F1: fails until fixed (run with --run-ignored all)"]
 async fn a_bad_mcp_toml_does_not_print_the_env_block() {
     let files = Files::new();
     let toml = format!(

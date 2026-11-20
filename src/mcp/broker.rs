@@ -233,10 +233,16 @@ impl Broker {
             return Err(CallError::Unavailable(format!("unknown server `{name}`")));
         };
         let mut slot = entry.slot.lock().await;
-        if let Some(client) = &slot.client
+        if let Some(client) = slot.client.clone()
             && client.is_alive()
         {
-            return Ok((client.clone(), slot.tools.clone().unwrap_or_default()));
+            // The server said its tool list changed: read it again.
+            if client.take_tools_changed()
+                && let Ok(tools) = client.list_tools(entry.config.timeout).await
+            {
+                slot.tools = Some(tools);
+            }
+            return Ok((client, slot.tools.clone().unwrap_or_default()));
         }
         slot.client = None;
         slot.tools = None;

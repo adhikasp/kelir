@@ -10,6 +10,9 @@ Environment (all optional):
   MCP_TEST_CHANNEL   send one notifications/claude/channel with this content
                      right after the client says "initialized"
   MCP_TEST_NO_TOOLS  answer tools/list with a -32601 error
+  MCP_TEST_DIE       write this text to stderr at start and exit 1
+  MCP_TEST_LISTCHANGED  after the first tools/call add a tool `late` and
+                     send notifications/tools/list_changed
 """
 import json
 import os
@@ -47,7 +50,10 @@ TOOLS = [
     {"name": "structured", "description": "structuredContent.", "inputSchema": {"type": "object"}},
     {"name": "pid", "description": "This server's pid.", "inputSchema": {"type": "object"}},
     {"name": "crash", "description": "Exit mid-call.", "inputSchema": {"type": "object"}},
+    {"name": "envnames", "description": "Names of the environment variables.", "inputSchema": {"type": "object"}},
 ]
+LATE = {"name": "late", "description": "Appears after list_changed.", "inputSchema": {"type": "object"}}
+calls = 0
 
 
 def send(message):
@@ -96,11 +102,20 @@ def call(name, arguments):
         return text(str(os.getpid()))
     if name == "crash":
         os._exit(7)
+    if name == "envnames":
+        return text(chr(10).join(sorted(os.environ)))
+    if name == "late":
+        return text("late ok")
     return None
 
 
 def main():
     sys.stdout.reconfigure(newline="\n")
+    die = os.environ.get("MCP_TEST_DIE")
+    if die:
+        sys.stderr.write(die + "\n")
+        sys.stderr.flush()
+        sys.exit(1)
     pidfile = os.environ.get("MCP_TEST_PIDFILE")
     if pidfile:
         with open(pidfile, "w", encoding="utf-8") as handle:
@@ -145,6 +160,8 @@ def main():
         elif method == "tools/call":
             params = message.get("params", {})
             result = call(params.get("name"), params.get("arguments") or {})
+            global calls
+            calls += 1
             if result is None:
                 send(
                     {
@@ -155,6 +172,9 @@ def main():
                 )
             else:
                 send({"jsonrpc": "2.0", "id": mid, "result": result})
+                if os.environ.get("MCP_TEST_LISTCHANGED") and calls == 1:
+                    TOOLS.append(LATE)
+                    send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
         elif method == "ping":
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
         elif mid is not None:

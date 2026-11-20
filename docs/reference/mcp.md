@@ -36,6 +36,25 @@ an error that names the file (a typo must not silently do nothing). Only the
 stdio transport exists. A bad file does not stop a session: `kelir mcp` prints
 the error and exits 2.
 
+- **Errors never quote the file.** A syntax or type error prints the file, the
+  line and column and the parser's message, never the source line or the
+  offending value: `env` holds secrets, and the error text reaches the model
+  and the event log.
+- **The server's environment is an allow-list.** A server inherits `PATH`,
+  `HOME`/`USERPROFILE`, `TEMP`/`TMP`/`TMPDIR`, `SystemRoot` and the other
+  variables a process needs to start, locale (`LANG`, `LC_*`), proxy and CA
+  variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`,
+  `NODE_EXTRA_CA_CERTS`) and nothing else: not `KELIR_*`, not provider keys.
+  Anything more it needs goes in its `env` table.
+- **When the file is read.** The session reads both layers once, when it
+  starts. Editing `mcp.toml` has no effect on a running session (`kelir resume`
+  or a new session picks it up); a one-shot `kelir mcp` outside a session
+  reads it on every command.
+- **A project file is code.** `.kelir/mcp.toml` can name any `command`, and
+  `channel = true` starts it when the session starts. Only open projects you
+  trust; a trust prompt for project-defined servers belongs with the verb
+  authentication work (STEER-7).
+
 ## The commands
 
 ```text
@@ -44,12 +63,19 @@ kelir mcp <server> ls [--detail name|desc|full]    tools; full = the whole tool 
 kelir mcp <server> <tool> [k=v …] [--json '{…}'] [--schema] [--envelope]
 ```
 
-- `k=v` is typed from the tool's `inputSchema`: a property declared `string`
-  keeps the text as typed (`id=007`); anything else is JSON when it parses
-  (`n=3`, `ok=true`, `tags=["a"]`) and a string when it does not. `--json`
+- `k=v` is typed from the tool's `inputSchema`: a property that accepts a
+  string (`type: "string"`, `["string","null"]`, or an `anyOf`/`oneOf` branch
+  that is a string) and no other scalar keeps the text as typed (`id=007`,
+  `id=123`); anything else is JSON when it parses (`n=3`, `ok=true`,
+  `tags=["a"]`) and a string when it does not. An integer too big for 64 bits
+  (`id=123456789012345678901234567890`) stays text instead of being rounded to
+  a float. A property that accepts a string and a number reads `123` as the
+  number and `abc` as the text.
+- A tool named `ls` (or `call`) is reached as `kelir mcp <server> call <tool> …`. `--json`
   gives an object, `--json -` reads it from stdin; `k=v` pairs win over it.
 - The arguments are checked against the schema (`type`, `enum`, `required`,
-  `properties`, `additionalProperties: false`, `items`, `minimum`/`maximum`)
+  `properties`, `additionalProperties: false`, `items`, `minimum`/`maximum`,
+  `anyOf`/`oneOf`)
   **before** the server is asked; every problem is listed, exit 2.
 - `--schema` prints the tool's `inputSchema` and calls nothing.
 - stdout is `structuredContent` as compact JSON when the tool sent it, else the
@@ -78,6 +104,15 @@ Inside a session `KELIR_SOCK` is set, and `kelir mcp` sends every request to the
   own (a process group on Unix, a kill-on-close Job Object on Windows): ending
   the session, or killing it outright, takes the servers with it.
 - Calls to one server run concurrently; starting a server is serialised.
+- A request that fails after it reached the session (the session died or
+  closed the socket mid-call) is exit 4, not a one-shot retry: the tool may
+  have run. Only a failed *connect* falls back to starting the server in the
+  CLI. A session that is killed mid-call and resumed gets `mcp_settled` with
+  `outcome: "unknown"` (exit 4) for the call, and the call is not re-run.
+- A server that dies while starting is exit 3 with the last line of its
+  stderr in the message (`(server stderr: …)`), the one place it says why.
+- `notifications/tools/list_changed` makes the broker read the tool list again
+  at the next request.
 - Each call is an `mcp_started` / `mcp_settled` pair in the log, written by the
   session (the only writer). `parent_call_id` is the bash call it was made from,
   so a log reads `tool_started → mcp_started → mcp_settled → tool_settled`.
@@ -87,6 +122,14 @@ Inside a session `KELIR_SOCK` is set, and `kelir mcp` sends every request to the
   spill notice when the output is not piped.
 - The broker's internal verbs (`mcp-settle`, `mcp-notify`) carry a per-session
   random key, so a socket client cannot forge a settlement.
+- **Verb authentication (STEER-7).** Every request the CLI sends is the one
+  verb `mcp` (`op` = `servers`, `tools` or `call`), built and sent in one place
+  (`Backend::ask` in `cli.rs`, served by `Session::mcp_verb`). When the session
+  token lands, all three ops must carry it like `view` and `bg`: `call` runs a
+  tool, and `servers`/`tools` start servers. `mcp-settle` and `mcp-notify`
+  travel in-process, not through the listener, and keep their key as the
+  second layer. The token variable must also stay out of the servers'
+  environment (it is not on the allow-list).
 - `kelir ctl <session> tools '{"disable":"mcp:<server>.<tool>"}'` (or
   `mcp:<server>`) switches calls off: they are logged and answered
   `disabled by user` (exit 1).

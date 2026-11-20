@@ -1398,3 +1398,18 @@ follow-up commit series that restores three things the first pass lost.
 - **A new env var, `KELIR_MCP_CONFIG`,** replaces the machine `mcp.toml` path (the way
   `KELIR_CONFIG` does for `config.toml`). The brief did not ask for it; the e2e tests need a way to
   hand a session a server list without writing into the real config dir.
+- **A server gets an allow-listed environment, not the session's (m6fix, review F6).** The spec
+  says nothing about it; inheriting everything handed `KELIR_OPENROUTER_API_KEY` and `HC_*` to
+  third-party `npx` packages. `src/mcp/rpc.rs` passes `PATH`, home/temp/system variables, locale,
+  proxy and CA variables, then the server's own `env` table, and nothing else.
+- **`kelir mcp <server> call <tool>` exists (m6fix, review N3).** The spec's three shapes make a
+  tool named `ls` unreachable; `call` is the escape hatch (a tool named `call` is `call call`).
+- **A lost session after the send is exit 4, and the session reads `mcp.toml` once (m6fix).** The
+  spec says exit 4 is "unknown outcome, never retried"; a transport failure after the request
+  reached the session is exactly that, so it no longer falls back to a one-shot run. Editing
+  `mcp.toml` during a session has no effect until the next start/resume (documented in
+  `docs/reference/mcp.md`).
+- **Project-defined servers start without a trust prompt (m6fix, review S1, open).** The spec asks
+  for the project layer and `channel = true` autostart; a cloned repo's `.kelir/mcp.toml` can name
+  any `command`. Documented in `docs/reference/mcp.md`; the trust gate belongs with STEER-7
+  (`src/trust.rs`) and is not built here.

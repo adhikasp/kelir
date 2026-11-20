@@ -254,10 +254,13 @@ async fn a_call_prints_text_json_files_and_the_envelope() {
 #[tokio::test]
 async fn exit_codes_follow_the_spec() {
     let files = Files::new();
-    let toml = server("timeout = 1");
     let log = files.path("calls.log");
     let log = log.to_string_lossy().into_owned();
-    let env = [("MCP_TEST_LOG", log.as_str())];
+    let toml = server(&format!(
+        "timeout = 1
+env = {{ MCP_TEST_LOG = '{log}' }}"
+    ));
+    let env: [(&str, &str); 0] = [];
 
     let out = one_shot(&files, &toml, &["demo", "fail"], &env).await;
     assert_eq!(out.code, 1, "tool isError");
@@ -393,9 +396,9 @@ async fn the_one_shot_server_dies_with_the_command() {
     let pidfile = pidfile.to_string_lossy().into_owned();
     let out = one_shot(
         &files,
-        &server(""),
+        &server(&format!("env = {{ MCP_TEST_PIDFILE = '{pidfile}' }}")),
         &["demo", "pid"],
-        &[("MCP_TEST_PIDFILE", pidfile.as_str())],
+        &[],
     )
     .await;
     assert_eq!(out.code, 0, "{}", out.stderr);
@@ -494,7 +497,7 @@ async fn the_broker_keeps_one_server_for_the_session_and_it_dies_with_it() {
     assert_eq!(states.len(), 2, "{result}");
     assert!(states[0].contains("idle"), "{states:?}");
     assert!(
-        states[1].contains("running") && states[1].contains("8 tools"),
+        states[1].contains("running") && states[1].contains("9 tools"),
         "{states:?}"
     );
     assert_eq!(pids[0], pids[1], "one server for the whole session");
@@ -636,4 +639,259 @@ async fn a_server_does_not_outlive_a_session_that_is_killed() {
         .args(["-9", &session.to_string()])
         .output();
     wait_gone(pid).await;
+}
+
+// ------------------------------------------------------------- m6fix
+
+/// Every file under `dir`, as lossy text, for a canary scan.
+fn tree_text(dir: &std::path::Path) -> String {
+    let mut out = String::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                out.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+    }
+    out
+}
+
+/// F1 (and the guarantee behind it): a canary in the `env` block never shows up
+/// in stdout, stderr, the event log or any file of the session dir, whether the
+/// file is broken, the server will not start, or a call fails.
+#[tokio::test]
+async fn a_canary_in_env_reaches_no_output_channel() {
+    let files = Files::new();
+    let canary = "sk-CANARY-m6fix-7f3a";
+    let command = "for c in 'mcp ls' 'mcp ls --json' 'mcp demo echo text=x' 'mcp demo nope' \
+                   'mcp demo ls --detail full'; do \"$KELIR_BIN\" $c 2>&1; done; echo end";
+    let broken =
+        format!("[servers.demo]\ncommand = 'x'\nenv = {{ API_TOKEN = \"{canary}\" , }} oops\n");
+    let wrong_type = format!(
+        "[servers.demo]\ncommand = 'x'\nenv = {{ API_TOKEN = \"{canary}\", N = 5 }}\nchannel = \"{canary}\"\n"
+    );
+    let dies = server(&format!(
+        "env = {{ API_TOKEN = \"{canary}\", MCP_TEST_DIE = \"boom\" }}"
+    ));
+    let fine = server(&format!("env = {{ API_TOKEN = \"{canary}\" }}"));
+    for (label, toml) in [
+        ("broken", broken),
+        ("wrong_type", wrong_type),
+        ("dies", dies),
+        ("fine", fine),
+    ] {
+        let run = session_run(&files, &toml, command).await;
+        let everything = format!(
+            "{}{}{}{}",
+            run.stdout,
+            run.stderr,
+            serde_json::to_string(&run.events).unwrap(),
+            tree_text(&run.session_dir)
+        );
+        assert!(!everything.contains(canary), "{label}: the canary leaked");
+    }
+    // The same through the one-shot path.
+    for toml in [
+        format!("[servers.demo]\ncommand = 'x'\nenv = {{ A = \"{canary}\" }} oops\n"),
+        server(&format!(
+            "env = {{ API_TOKEN = \"{canary}\", MCP_TEST_DIE = \"boom\" }}"
+        )),
+    ] {
+        for args in [&["ls"][..], &["demo", "echo", "text=x"][..]] {
+            let out = one_shot(&files, &toml, args, &[]).await;
+            assert!(!format!("{}{}", out.stdout, out.stderr).contains(canary));
+        }
+    }
+}
+
+/// F3: a server that dies while starting says why (its stderr), through the
+/// handshake path and when the command line itself is wrong.
+#[tokio::test]
+async fn a_server_that_dies_at_start_says_why() {
+    let files = Files::new();
+    let toml = server("env = { MCP_TEST_DIE = \"boom: missing API key\" }");
+    let out = one_shot(&files, &toml, &["demo", "echo", "text=x"], &[]).await;
+    assert_eq!(out.code, 3, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("boom: missing API key"),
+        "{}",
+        out.stderr
+    );
+    let bad_path = format!(
+        "[servers.demo]\ncommand = '{}'\nargs = ['{}']\n",
+        python(),
+        files.path("nonexistent").join("server.py").display()
+    );
+    let out = one_shot(&files, &bad_path, &["demo", "ls"], &[]).await;
+    assert_eq!(out.code, 3, "{}", out.stderr);
+    assert!(out.stderr.contains("server stderr"), "{}", out.stderr);
+}
+
+/// F6a: a server gets an allow-list of the environment, plus its own `env`.
+#[tokio::test]
+async fn a_server_does_not_inherit_the_sessions_environment() {
+    let files = Files::new();
+    let toml = server("env = { OWN_TOKEN_VAR = \"1\" }");
+    let out = one_shot(
+        &files,
+        &toml,
+        &["demo", "envnames"],
+        &[
+            ("KELIR_OPENROUTER_API_KEY", "sk-not-for-servers"),
+            ("OPENROUTER_API_KEY", "sk-not-for-servers"),
+            ("HC_TERMINAL_ID", "t9"),
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let names: Vec<&str> = out.stdout.lines().collect();
+    assert!(names.contains(&"OWN_TOKEN_VAR"), "{names:?}");
+    assert!(
+        names.iter().any(|name| name.eq_ignore_ascii_case("PATH")),
+        "{names:?}"
+    );
+    for name in &names {
+        let upper = name.to_ascii_uppercase();
+        assert!(
+            !upper.starts_with("KELIR_") && !upper.starts_with("HC_") && !upper.contains("API_KEY"),
+            "{name} leaked into the server"
+        );
+    }
+}
+
+/// N2: `notifications/tools/list_changed` refreshes the broker's tool list.
+#[tokio::test]
+async fn list_changed_refreshes_the_tools() {
+    let files = Files::new();
+    let toml = server("env = { MCP_TEST_LISTCHANGED = \"1\" }");
+    let run = session_run(
+        &files,
+        &toml,
+        "\"$KELIR_BIN\" mcp demo echo text=a; sleep 1; \"$KELIR_BIN\" mcp demo late",
+    )
+    .await;
+    let settled = run.events_of("mcp_settled");
+    assert_eq!(settled.len(), 2, "{:?}", run.event_types());
+    assert!(settled.iter().all(|e| e["outcome"] == "ok"), "{settled:?}");
+}
+
+/// N3: `call` reaches a tool that the listing would shadow.
+#[tokio::test]
+async fn call_reaches_a_tool_named_like_a_keyword() {
+    let files = Files::new();
+    let toml = format!(
+        "[servers.evil]\ncommand = '{}'\nargs = ['{}']\n",
+        python(),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mcp_evil.py")
+    );
+    let out = one_shot(&files, &toml, &["evil", "call", "ls"], &[]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+}
+
+/// F5: once a call request has reached the session, a transport failure is
+/// exit 4 and the call is never run one-shot (the tool may have run).
+#[tokio::test]
+async fn a_lost_session_after_the_send_is_exit_4_and_not_run_again() {
+    let files = Files::new();
+    let log = files.path("calls.log");
+    let toml = server(&format!(
+        "env = {{ MCP_TEST_LOG = '{}' }}",
+        log.to_string_lossy()
+    ));
+    let dir = files.path("fake-session");
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = "ses_fake_m6fix";
+    let listener = kelir::ipc::bind(&dir, id).unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<kelir::ipc::Incoming>();
+    kelir::ipc::serve(listener, tx);
+    tokio::spawn(async move {
+        while let Some(incoming) = rx.recv().await {
+            match incoming.request.args["op"].as_str() {
+                Some("tools") => {
+                    let tool = json!({"name": "echo", "inputSchema": {"type": "object"}});
+                    let _ = incoming.reply.send(kelir::ipc::Response::ok(
+                        "mcp",
+                        0,
+                        "now",
+                        json!({"tools": [tool]}),
+                    ));
+                }
+                // The call: the connection drops without an answer.
+                _ => drop(incoming.reply),
+            }
+        }
+    });
+    let address = kelir::ipc::value(&dir, id);
+    let out = one_shot(
+        &files,
+        &toml,
+        &["demo", "echo", "text=a"],
+        &[("KELIR_SOCK", address.as_str())],
+    )
+    .await;
+    assert_eq!(out.code, 4, "stdout {} stderr {}", out.stdout, out.stderr);
+    assert!(out.stderr.contains("not retried"), "{}", out.stderr);
+    assert!(
+        files.lines("calls.log").is_empty(),
+        "the tool ran one-shot: {:?}",
+        files.lines("calls.log")
+    );
+}
+
+/// F8: a session killed while a server was running a tool leaves
+/// `mcp_started` without `mcp_settled`; the resume settles it as unknown.
+#[tokio::test]
+async fn resume_settles_an_orphaned_mcp_call_as_unknown() {
+    let toml = server("");
+    let mock = Mock::start(vec![Reply::Sse(sse(&tool_turn(
+        "call_o",
+        "bash",
+        &json!({"command": "\"$KELIR_BIN\" mcp demo slow seconds=60"}),
+    )))])
+    .await;
+    let mut live =
+        LiveSession::start_with_mcp(&mock, &["run", "--keep", "--json", "go"], "", &toml).await;
+    let started = live.wait_for("mcp_started").await;
+    let mcp_id = started["mcp_id"].as_str().unwrap().to_string();
+    let session = live.pid();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &session.to_string()])
+        .output();
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &session.to_string()])
+        .output();
+    let state = live
+        .session_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let id = live.id.clone();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mock2 = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let mut resumed =
+        LiveSession::start_reusing(state, &mock2, &["resume", "--json", id.as_str()], "").await;
+    let settled = resumed.wait_for("mcp_settled").await;
+    assert_eq!(settled["mcp_id"], json!(mcp_id));
+    assert_eq!(settled["outcome"], "unknown", "{settled}");
+    assert_eq!(settled["exit_code"], 4);
+    let log = live.log();
+    let settlements = log
+        .iter()
+        .filter(|e| e["type"] == "mcp_settled" && e["mcp_id"] == json!(mcp_id))
+        .count();
+    assert_eq!(settlements, 1, "exactly one settlement");
+    drop(resumed);
+    drop(live);
 }

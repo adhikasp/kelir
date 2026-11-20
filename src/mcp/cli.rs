@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use super::args::{self, CallArgs, Command, Detail};
 use super::broker;
 use super::config::{self, ServerConfig};
-use super::render::{EXIT_UNAVAILABLE, EXIT_USAGE};
+use super::render::{EXIT_TIMEOUT, EXIT_UNAVAILABLE, EXIT_USAGE};
 use super::rpc::Client;
 use super::{CallOutput, run_call};
 use crate::ipc::{self, Request};
@@ -128,13 +128,31 @@ impl Backend {
     }
 
     /// One request to the broker. `Ok(None)` means the session cannot be
-    /// reached, and the caller falls back to one-shot.
-    async fn ask(address: &str, args: Value) -> Result<Option<Value>, Fail> {
+    /// reached, and the caller falls back to one-shot. Only a failed *connect*
+    /// qualifies for a `retryable == false` request (a tool call): once the
+    /// request may have been delivered, the outcome is unknown and the call is
+    /// never run again (exit 4).
+    async fn ask(address: &str, args: Value, retryable: bool) -> Result<Option<Value>, Fail> {
         let request = Request::new(broker::VERB, args, "mcp");
         let response = match ipc::request_value_within(address, &request, BROKER_WAIT).await {
             Ok(response) => response,
-            Err(_) => return Ok(None),
+            Err(ipc::WithinError::NotConnected(_)) => return Ok(None),
+            Err(ipc::WithinError::AfterConnect(_)) if retryable => return Ok(None),
+            Err(ipc::WithinError::AfterConnect(error)) => {
+                return Err(Fail::new(
+                    EXIT_TIMEOUT,
+                    format!(
+                        "kelir mcp: lost the session while the call ran ({error}); the outcome                          is unknown and the call is not retried"
+                    ),
+                ));
+            }
         };
+        if !response.ok && !retryable && response.error.as_deref() == Some(ipc::DROPPED_REPLY) {
+            return Err(Fail::new(
+                EXIT_TIMEOUT,
+                "kelir mcp: the session ended while the call ran; the outcome is unknown and                  the call is not retried",
+            ));
+        }
         if !response.ok {
             return Err(Fail::new(
                 EXIT_UNAVAILABLE,
@@ -169,7 +187,7 @@ impl Backend {
 
     async fn servers(&mut self) -> Result<Value, Fail> {
         if let Backend::Session(address) = self {
-            match Self::ask(address, json!({"op": "servers"})).await? {
+            match Self::ask(address, json!({"op": "servers"}), true).await? {
                 Some(state) => return Ok(state),
                 None => self.degrade(),
             }
@@ -190,7 +208,7 @@ impl Backend {
 
     async fn tools(&mut self, server: &str) -> Result<Vec<Value>, Fail> {
         if let Backend::Session(address) = self {
-            match Self::ask(address, json!({"op": "tools", "server": server})).await? {
+            match Self::ask(address, json!({"op": "tools", "server": server}), true).await? {
                 Some(state) => {
                     return Ok(state
                         .get("tools")
@@ -220,7 +238,7 @@ impl Backend {
                 "op": "call", "server": server, "tool": tool, "args": arguments,
                 "envelope": envelope, "parent_call_id": parent,
             });
-            match Self::ask(address, request).await? {
+            match Self::ask(address, request, false).await? {
                 Some(state) => {
                     return serde_json::from_value(state).map_err(|error| {
                         Fail::new(

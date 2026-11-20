@@ -70,6 +70,8 @@ pub struct Client {
     next_id: AtomicU64,
     alive: Arc<AtomicBool>,
     stderr_tail: Arc<Mutex<String>>,
+    /// Set by the reader on `notifications/tools/list_changed`.
+    tools_changed: Arc<AtomicBool>,
     group: ProcessGroup,
     // Held so `kill_on_drop` fires with the client.
     _child: Mutex<Child>,
@@ -104,6 +106,60 @@ pub fn resolve_command(command: &str) -> PathBuf {
     direct.to_path_buf()
 }
 
+/// Variables a server inherits from the session (matched without regard to
+/// case, since Windows has none). Everything else, `KELIR_*` and provider keys
+/// included, is withheld.
+const INHERITED: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "HOME",
+    "USER",
+    "USERNAME",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LANGUAGE",
+    "TERM",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "TZ",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "OS",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+];
+
+fn inherited(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper.starts_with("LC_") || INHERITED.contains(&upper.as_str())
+}
+
 impl Client {
     /// Start the server and complete the `initialize` handshake.
     ///
@@ -123,13 +179,18 @@ impl Client {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // The server gets a small allow-list of the session's environment, not
+        // all of it: a third-party `npx` package must not receive the provider
+        // key (`KELIR_*`), the session's socket, or anything else ambient.
+        // What it needs beyond that goes in its `env` table.
+        command.env_clear();
+        for (key, value) in std::env::vars_os() {
+            if inherited(&key.to_string_lossy()) {
+                command.env(key, value);
+            }
+        }
         for (key, value) in &config.env {
             command.env(key, value);
-        }
-        // The server must not inherit the session's own plumbing: a server that
-        // runs `kelir` itself would otherwise talk to the wrong session.
-        for key in ["KELIR_SOCK", "KELIR_CALL_ID", "KELIR_SESSION_DIR"] {
-            command.env_remove(key);
         }
         let group = ProcessGroup::new();
         #[cfg(windows)]
@@ -168,26 +229,36 @@ impl Client {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
         let stderr_tail = Arc::new(Mutex::new(String::new()));
-        tokio::spawn(drain_stderr(stderr, stderr_tail.clone()));
+        let stderr_closed = Arc::new(AtomicBool::new(false));
+        let tools_changed = Arc::new(AtomicBool::new(false));
+        tokio::spawn(drain_stderr(
+            stderr,
+            stderr_tail.clone(),
+            stderr_closed.clone(),
+        ));
         let client = Client {
             name: config.name.clone(),
             stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
             pending: pending.clone(),
             next_id: AtomicU64::new(1),
             alive: alive.clone(),
-            stderr_tail,
+            stderr_tail: stderr_tail.clone(),
+            tools_changed: tools_changed.clone(),
             group,
             _child: Mutex::new(child),
         };
         let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<Value>();
-        tokio::spawn(read_loop(
-            config.name.clone(),
+        tokio::spawn(read_loop(ReadLoop {
+            name: config.name.clone(),
             stdout,
             pending,
             alive,
             notify,
-            reply_tx,
-        ));
+            replies: reply_tx,
+            stderr_tail,
+            stderr_closed,
+            tools_changed,
+        }));
         // Answers to the server's own requests (`ping`) go out from here, so
         // the reader never needs the writer.
         let stdin = client.stdin.clone();
@@ -232,23 +303,13 @@ impl Client {
 
     /// The last of the server's stderr, as a suffix for an error message.
     pub fn stderr_hint(&self) -> String {
-        let tail = self
-            .stderr_tail
-            .lock()
-            .map(|tail| tail.trim().to_string())
-            .unwrap_or_default();
-        if tail.is_empty() {
-            String::new()
-        } else {
-            let one_line: String = tail
-                .lines()
-                .last()
-                .unwrap_or("")
-                .chars()
-                .take(300)
-                .collect();
-            format!(" (server stderr: {one_line})")
-        }
+        hint_from(&self.stderr_tail)
+    }
+
+    /// Did the server announce `notifications/tools/list_changed` since the
+    /// last call? (Reading clears it.)
+    pub fn take_tools_changed(&self) -> bool {
+        self.tools_changed.swap(false, Ordering::SeqCst)
     }
 
     pub fn is_alive(&self) -> bool {
@@ -303,6 +364,17 @@ impl Client {
         let (tx, rx) = oneshot::channel();
         if let Ok(mut pending) = self.pending.lock() {
             pending.insert(id, tx);
+        }
+        // The reader clears `alive` before it drains the waiters, so checking
+        // after the insert cannot miss a death: either the drain finds this
+        // entry or `alive` is already false.
+        if !self.is_alive() {
+            self.forget(id);
+            return Err(CallError::Unavailable(format!(
+                "{}: the server exited{}",
+                self.name,
+                self.stderr_hint()
+            )));
         }
         let sent = self
             .send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
@@ -373,11 +445,33 @@ impl Client {
     }
 }
 
-async fn drain_stderr(mut stderr: tokio::process::ChildStderr, tail: Arc<Mutex<String>>) {
+fn hint_from(tail: &Mutex<String>) -> String {
+    let tail = tail
+        .lock()
+        .map(|tail| tail.trim().to_string())
+        .unwrap_or_default();
+    if tail.is_empty() {
+        return String::new();
+    }
+    let one_line: String = tail
+        .lines()
+        .last()
+        .unwrap_or("")
+        .chars()
+        .take(300)
+        .collect();
+    format!(" (server stderr: {one_line})")
+}
+
+async fn drain_stderr(
+    mut stderr: tokio::process::ChildStderr,
+    tail: Arc<Mutex<String>>,
+    closed: Arc<AtomicBool>,
+) {
     let mut buffer = [0u8; 1024];
     loop {
         match stderr.read(&mut buffer).await {
-            Ok(0) | Err(_) => return,
+            Ok(0) | Err(_) => break,
             Ok(n) => {
                 let text = String::from_utf8_lossy(&buffer[..n]).into_owned();
                 if let Ok(mut tail) = tail.lock() {
@@ -393,18 +487,44 @@ async fn drain_stderr(mut stderr: tokio::process::ChildStderr, tail: Arc<Mutex<S
             }
         }
     }
+    closed.store(true, Ordering::SeqCst);
 }
 
-async fn read_loop(
+struct ReadLoop {
     name: String,
     stdout: tokio::process::ChildStdout,
     pending: Pending,
     alive: Arc<AtomicBool>,
     notify: Option<mpsc::UnboundedSender<Notification>>,
     replies: mpsc::UnboundedSender<Value>,
-) {
-    let mut lines = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    stderr_tail: Arc<Mutex<String>>,
+    stderr_closed: Arc<AtomicBool>,
+    tools_changed: Arc<AtomicBool>,
+}
+
+async fn read_loop(state: ReadLoop) {
+    let ReadLoop {
+        name,
+        stdout,
+        pending,
+        alive,
+        notify,
+        replies,
+        stderr_tail,
+        stderr_closed,
+        tools_changed,
+    } = state;
+    let mut lines = BufReader::new(stdout);
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        // Bytes, not `lines()`: a line that is not UTF-8 (a stray byte in a
+        // log line) is junk to skip, not the end of the connection.
+        match lines.read_until(b'\n', &mut raw).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(&raw);
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -447,6 +567,9 @@ async fn read_loop(
                 let _ = replies.send(reply);
             }
             (None, Some(method)) => {
+                if method == "notifications/tools/list_changed" {
+                    tools_changed.store(true, Ordering::SeqCst);
+                }
                 if let Some(notify) = &notify {
                     let _ = notify.send(Notification {
                         server: name.clone(),
@@ -460,13 +583,21 @@ async fn read_loop(
     }
     // EOF: the server exited. Everyone still waiting learns it now.
     alive.store(false, Ordering::SeqCst);
+    // The reason is on stderr, which may still be draining: give it a moment.
+    for _ in 0..20 {
+        if stderr_closed.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let hint = hint_from(&stderr_tail);
     let waiters: Vec<_> = pending
         .lock()
         .map(|mut map| map.drain().collect())
         .unwrap_or_default();
     for (_, waiter) in waiters {
         let _ = waiter.send(Err(CallError::Unavailable(format!(
-            "{name}: the server exited"
+            "{name}: the server exited{hint}"
         ))));
     }
 }

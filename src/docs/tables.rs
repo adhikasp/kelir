@@ -486,12 +486,12 @@ pub const EVENTS: &[EventDoc] = &[
     EventDoc {
         name: "mcp_started",
         fields: "`mcp_id`, `server`, `tool`, `args`, `parent_call_id?`",
-        written_by: "a `kelir mcp <server> <tool>` call reached the session broker (intent:                      written before the server is asked)",
+        written_by: "a `kelir mcp <server> <tool>` call reached the session broker (intent: written before the server is asked)",
     },
     EventDoc {
         name: "mcp_settled",
-        fields: "`mcp_id`, `server`, `tool`, `outcome`, `exit_code`, `bytes`, `out_path`,                  `parent_call_id?`",
-        written_by: "the call's one commit; `outcome` is `ok`, `error`, `timeout`,                      `unavailable` or `disabled`, and the result is in the file `out_path` names",
+        fields: "`mcp_id`, `server`, `tool`, `outcome`, `exit_code`, `bytes`, `out_path`, `parent_call_id?`",
+        written_by: "the call's one commit; `outcome` is `ok`, `error`, `timeout`, `unavailable`, `disabled`, or `unknown` (a resume found no settlement), and the result is in the file `out_path` names",
     },
     EventDoc {
         name: "bg_started",

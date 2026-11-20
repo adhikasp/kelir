@@ -363,7 +363,7 @@ async fn connection(stream: LocalStream, tx: mpsc::UnboundedSender<Incoming>) {
                 }
                 match answer.await {
                     Ok(response) => response,
-                    Err(_) => Response::error("the session did not answer"),
+                    Err(_) => Response::error(DROPPED_REPLY),
                 }
             }
             Err(error) => Response::error(format!("bad request line: {error}")),
@@ -399,7 +399,31 @@ pub async fn request(dir: &Path, id: &str, request: &Request) -> Result<Response
 /// only inherited the variable (a bash child, the `kelir bg` CLI) can talk to
 /// its session without knowing the session dir or id.
 pub async fn request_value(address: &str, request: &Request) -> Result<Response, String> {
-    request_value_within(address, request, IO_TIMEOUT).await
+    request_value_within(address, request, IO_TIMEOUT)
+        .await
+        .map_err(|error| error.message().to_string())
+}
+
+/// What the listener answers when the session dropped a request's reply
+/// unanswered (it was ending): the request may have been acted on.
+pub const DROPPED_REPLY: &str = "the session did not answer";
+
+/// Why [`request_value_within`] failed, and whether the request may have
+/// reached the session.
+#[derive(Debug)]
+pub enum WithinError {
+    /// The connection was never made: nothing was sent.
+    NotConnected(String),
+    /// Connected; the request may have been delivered and run.
+    AfterConnect(String),
+}
+
+impl WithinError {
+    pub fn message(&self) -> &str {
+        match self {
+            WithinError::NotConnected(message) | WithinError::AfterConnect(message) => message,
+        }
+    }
 }
 
 /// [`request_value`] with its own wait for the answer, for a verb that is slow
@@ -408,9 +432,13 @@ pub async fn request_value_within(
     address: &str,
     request: &Request,
     wait: Duration,
-) -> Result<Response, String> {
-    let stream = connect_value(address).await?;
-    round_trip(stream, request, wait).await
+) -> Result<Response, WithinError> {
+    let stream = connect_value(address)
+        .await
+        .map_err(WithinError::NotConnected)?;
+    round_trip(stream, request, wait)
+        .await
+        .map_err(WithinError::AfterConnect)
 }
 
 async fn round_trip(

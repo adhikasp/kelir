@@ -237,7 +237,8 @@ pub struct DoctorArgs {
 #[command(
     override_usage = "kelir mcp ls [--json]
        kelir mcp <SERVER> ls [--detail name|desc|full]
-       kelir mcp <SERVER> <TOOL> [k=v ...] [--json '{...}'] [--schema] [--envelope]",
+       kelir mcp <SERVER> <TOOL> [k=v ...] [--json '{...}'] [--schema] [--envelope]
+       kelir mcp <SERVER> call <TOOL> ...   (a tool named ls or call)",
     after_help = "Exit codes: 0 ok, 1 the tool reported isError, 2 usage, 3 server unavailable, 4 timeout (unknown outcome, never retried)."
 )]
 pub struct McpArgs {
