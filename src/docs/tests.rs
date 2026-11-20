@@ -165,20 +165,22 @@ fn every_config_key_the_code_reads_is_in_the_table_and_the_other_way() {
             .map(|key| key.name.to_string())
             .collect();
         table.sort();
+        let where_ = match scope {
+            tables::KeyScope::Top => "`RawConfig`, the top level",
+            tables::KeyScope::Provider => "`RawProvider`, the `[providers.<name>]` fields",
+        };
         for name in &code {
             assert!(
                 table.contains(name),
-                "`{name}` is a field of `{struct_name}` ({}) but has no row in \
-                 docs/tables.rs, so `config.toml` documents every key but that one",
-                scope.as_str()
+                "`{name}` is a field of {where_} but has no row in docs/tables.rs, so the \
+                 reference does not document it"
             );
         }
         for name in &table {
             assert!(
                 code.contains(name),
-                "docs/tables.rs documents `{name}` in scope `{}`, which `{struct_name}` does \
-                 not have: a key nobody reads is a wrong instruction",
-                scope.as_str()
+                "docs/tables.rs documents `{name}` for {where_}, which does not have that \
+                 field: a key nobody reads is a wrong instruction"
             );
         }
     }
