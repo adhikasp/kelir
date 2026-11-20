@@ -5094,6 +5094,17 @@ impl Session {
                 if applied.messages > 0 {
                     continue;
                 }
+                // A job's declared `max_steps` caps the run itself: if this was
+                // the last allowed step, the job is `paused` even when the model
+                // answered on it, so the scheduler's next invocation resumes it.
+                // Interactive `--max-steps` keeps STEER-4's `done` on an answer
+                // that lands on the cap-th step.
+                if let Some(cap) = crate::jobs::plan().and_then(|p| p.job_step_cap)
+                    && self.turn_steps >= cap
+                {
+                    self.emit(UiEvent::Paused { steps: cap });
+                    return Ok(TurnEnd::Paused(PauseReport::steps(cap)));
+                }
                 return Ok(TurnEnd::Done);
             }
 

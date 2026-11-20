@@ -395,6 +395,49 @@ async fn a_job_run_twice_resumes_one_session_and_status_describes_each_run() {
     clean(&sb).await;
 }
 
+/// A job's `max_steps` reaches the loop: the run pauses at the cap even when
+/// the model's final answer lands on the last allowed step (B1 regression).
+/// Interactive `--max-steps` keeps STEER-4's rule that such an answer is `done`.
+#[tokio::test]
+async fn a_jobs_max_steps_pauses_the_run_at_the_cap() {
+    let mock = Mock::start(vec![text("finished"), text("never asked")]).await;
+    let sb = Sandbox::new("");
+    jobs_toml(&sb, "[jobs.capped]\ntask = \"t\"\nmax_steps = 1\n");
+    let out = kelir(&sb, &mock, &["job", "run", "capped"], &[]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let now = status(&sb, "capped");
+    assert_eq!(now["outcome"], "paused", "{now}");
+    assert_eq!(now["steps"], 1, "{now}");
+    assert!(
+        now["error"].as_str().is_some_and(|e| e.contains("paused")),
+        "{now}"
+    );
+    assert_eq!(
+        completions(&mock).len(),
+        1,
+        "the cap-th step was the last request"
+    );
+    clean(&sb).await;
+}
+
+/// `--max-steps 0` lifts a job's cap: the run finishes `done`, not `paused`.
+#[tokio::test]
+async fn a_zero_max_steps_flag_lifts_a_jobs_cap() {
+    let mock = Mock::start(vec![text("finished")]).await;
+    let sb = Sandbox::new("");
+    jobs_toml(&sb, "[jobs.uncapped]\ntask = \"t\"\nmax_steps = 1\n");
+    let out = kelir(
+        &sb,
+        &mock,
+        &["job", "run", "uncapped", "--max-steps", "0"],
+        &[],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(status(&sb, "uncapped")["outcome"], "done");
+    clean(&sb).await;
+}
+
 #[tokio::test]
 async fn the_next_day_adds_the_date_source_and_nothing_else() {
     let mock = Mock::start(vec![
