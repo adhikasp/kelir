@@ -27,6 +27,7 @@ pub mod hint;
 pub mod ipc;
 pub mod markdown;
 pub mod memory;
+pub mod mcp;
 pub mod models;
 pub mod observe;
 pub mod paths;

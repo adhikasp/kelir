@@ -44,6 +44,7 @@ async fn a_canary_in_any_argument_of_any_verb_is_never_logged_or_echoed() {
         ("bg", "job"),
         ("bg-spawn", "job"),
         ("bg-claim", "job"),
+        ("mcp", "mcp"),
         ("no-such-verb", "ctl"),
     ] {
         let args = json!({

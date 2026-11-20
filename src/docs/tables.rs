@@ -52,8 +52,9 @@ pub const VERBS: &[VerbDoc] = &[
         name: "tools",
         args: "`--disable <name>` / `--enable <name>` (repeatable)",
         applies: "`next_step`",
-        effect: "disables or enables a native tool; the tool list sent to the provider never \
-                 changes, a disabled tool's call settles `disabled`",
+        effect: "disables or enables a native tool, or MCP calls (`mcp:<server>` or \
+                 `mcp:<server>.<tool>`); the tool list sent to the provider never changes, a \
+                 disabled tool's call settles `disabled`",
     },
     VerbDoc {
         name: "skills",
@@ -96,7 +97,7 @@ pub const VERBS: &[VerbDoc] = &[
         name: "status",
         args: "none; `--json` prints the answer as one JSON line",
         applies: "`now`",
-        effect: "read-only and never logged: answers at once, even mid-request or in a retry wait,                  with steps used/limit, turn, last prompt size and context %, cache hit ratio,                  tokens, cost and its source, last error, retry in progress, running calls,                  background jobs, children. `context.window` is `null` (with `context.window_source` `default`) until the model list answers or a window is configured, and `percent` stays `null` with it. A provider-reported cost of exactly 0 on a priced model is replaced by a table estimate (`cost.source` `table`). Needs the session token like every verb",
+        effect: "read-only and never logged: answers at once, even mid-request or in a retry wait,                  with steps used/limit, turn, last prompt size and context %, cache hit ratio,                  tokens, cost and its source, last error, retry in progress, running calls,                  background jobs, children, and `mcp` (one `{name,state,tools,channel}` per configured MCP server; the state word only, never config or server output). `context.window` is `null` (with `context.window_source` `default`) until the model list answers or a window is configured, and `percent` stays `null` with it. A provider-reported cost of exactly 0 on a priced model is replaced by a table estimate (`cost.source` `table`). Needs the session token like every verb",
     },
     VerbDoc {
         name: "end",
@@ -556,6 +557,16 @@ pub const EVENTS: &[EventDoc] = &[
         name: "turn_ended",
         fields: "`outcome`, `reason?`, `final_text`",
         written_by: "the end of a turn; `reason` distinguishes `steps` from `provider` pausing",
+    },
+    EventDoc {
+        name: "mcp_started",
+        fields: "`mcp_id`, `server`, `tool`, `args`, `parent_call_id?`",
+        written_by: "a `kelir mcp <server> <tool>` call reached the session broker with the session token (intent: written before the server is asked); `args` is the arguments' shape (keys kept, each string replaced by `<string, N bytes>`), never their values",
+    },
+    EventDoc {
+        name: "mcp_settled",
+        fields: "`mcp_id`, `server`, `tool`, `outcome`, `exit_code`, `bytes`, `out_path`, `parent_call_id?`",
+        written_by: "the call's one commit; `outcome` is `ok`, `error`, `timeout`, `unavailable`, `disabled`, or `unknown` (a resume found no settlement), and the result is in the file `out_path` names",
     },
     EventDoc {
         name: "bg_started",

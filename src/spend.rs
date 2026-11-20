@@ -636,6 +636,22 @@ pub fn render_text(state: &Value) -> String {
         num(&["bg_jobs"]),
         num(&["children"]),
     ));
+    if let Some(servers) = get(&["mcp"]).as_array().filter(|a| !a.is_empty()) {
+        let parts: Vec<String> = servers
+            .iter()
+            .map(|s| {
+                let tools = s["tools"]
+                    .as_u64()
+                    .map_or(String::new(), |n| format!(", {n} tools"));
+                format!(
+                    "{} ({}{tools})",
+                    s["name"].as_str().unwrap_or("?"),
+                    s["state"].as_str().unwrap_or("?")
+                )
+            })
+            .collect();
+        lines.push(format!("mcp       {}", parts.join(" · ")));
+    }
     let warn_prompt = get(&["warn", "prompt_tokens"]).as_u64();
     let warn_cost = get(&["warn", "cost"]).as_f64();
     if warn_prompt.is_some() || warn_cost.is_some() {

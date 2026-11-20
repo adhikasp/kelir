@@ -459,7 +459,7 @@ async fn connection(
                     }
                     match answer.await {
                         Ok(response) => response,
-                        Err(_) => Response::error("the session did not answer"),
+                        Err(_) => Response::error(DROPPED_REPLY),
                     }
                 }
                 // An unauthenticated caller gets one answer and no more: it
@@ -586,7 +586,7 @@ pub async fn request_with_token_file(
 /// cannot call it without shadowing their own `request` argument).
 async fn connect_and_send(dir: &Path, id: &str, request: &Request) -> Result<Response, String> {
     let stream = connect(dir, id).await?;
-    round_trip(stream, request).await
+    round_trip(stream, request, IO_TIMEOUT).await
 }
 
 /// The same round trip to an address taken from `KELIR_SOCK`, so a process that
@@ -599,11 +599,57 @@ pub async fn request_value(address: &str, request: &Request) -> Result<Response,
         Some(_) => request.clone(),
         None => request.clone().with_token(crate::trust::token_from_env()),
     };
-    let stream = connect_value(address).await?;
-    round_trip(stream, &sent).await
+    request_value_within(address, &sent, IO_TIMEOUT)
+        .await
+        .map_err(|error| error.message().to_string())
 }
 
-async fn round_trip(stream: LocalStream, request: &Request) -> Result<Response, String> {
+/// What the listener answers when the session dropped a request's reply
+/// unanswered (it was ending): the request may have been acted on.
+pub const DROPPED_REPLY: &str = "the session did not answer";
+
+/// Why [`request_value_within`] failed, and whether the request may have
+/// reached the session.
+#[derive(Debug)]
+pub enum WithinError {
+    /// The connection was never made: nothing was sent.
+    NotConnected(String),
+    /// Connected; the request may have been delivered and run.
+    AfterConnect(String),
+}
+
+impl WithinError {
+    pub fn message(&self) -> &str {
+        match self {
+            WithinError::NotConnected(message) | WithinError::AfterConnect(message) => message,
+        }
+    }
+}
+
+/// [`request_value`] with its own wait for the answer, for a verb that is slow
+/// by nature (`kelir mcp` waits for a server's tool).
+pub async fn request_value_within(
+    address: &str,
+    request: &Request,
+    wait: Duration,
+) -> Result<Response, WithinError> {
+    let sent = match &request.token {
+        Some(_) => request.clone(),
+        None => request.clone().with_token(crate::trust::token_from_env()),
+    };
+    let stream = connect_value(address)
+        .await
+        .map_err(WithinError::NotConnected)?;
+    round_trip(stream, &sent, wait)
+        .await
+        .map_err(WithinError::AfterConnect)
+}
+
+async fn round_trip(
+    stream: LocalStream,
+    request: &Request,
+    wait: Duration,
+) -> Result<Response, String> {
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read);
     let mut line = serde_json::to_string(request)
@@ -629,7 +675,7 @@ async fn round_trip(stream: LocalStream, request: &Request) -> Result<Response, 
         serde_json::from_str(answer.trim())
             .map_err(|error| format!("the answer is not JSON: {error}"))
     };
-    match tokio::time::timeout(IO_TIMEOUT, answer).await {
+    match tokio::time::timeout(wait, answer).await {
         Ok(result) => result,
         Err(_) => Err("the session did not answer in time".to_string()),
     }

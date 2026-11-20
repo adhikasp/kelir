@@ -294,3 +294,5 @@ implementer pauses; the retro/introspective passes keep reading the transcripts 
 - 2026-11-20 18:00: Claude's 5-hour limit was hit with three Claude workers running in parallel; panes were relaunched after the reset (workers told to continue from the
   worktree state). Keep Claude concurrency at <= 3 to leave headroom for reviews; if the limit hits again, wait for the reset rather than falling back to opencode-go.
   Running: steer8 (cost/status), M5-B, M6 merge+STEER-7 token integration (m6m).
+
+- 2026-11-20 19:20: **M6 merged**, **steer8 merged**. In flight: m5bfix (M5-B review fixes; F1 credential to the hint endpoint first). Next: M7 (children as CLI + brief), steer9 (de-flake), then M8 (gates + builtin skills delegation/herdr), M9, M10, M11, M12.
