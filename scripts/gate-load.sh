@@ -9,6 +9,14 @@
 # image name, and never with a console signal (AGENTS.md hard rules). A trap
 # makes that true on failure and on interrupt too.
 set -uo pipefail
+# No core dumps (BUILD-INFRA rule 6, docs/BUILD.md). The suite this runs includes
+# the deliberate aborts of the crash-injection tests, and a box with core dumps
+# enabled wrote a ~290 KB core for each one. Set here, before any test binary
+# starts, so the load loops and nextest's children inherit it; the gate itself
+# does the same, this is for a direct run of this script.
+case "$(uname -s 2>/dev/null)" in
+  Linux | Darwin) ulimit -c 0 2>/dev/null || true ;;
+esac
 threads="${1:-4}"
 shift || true
 [ "${1:-}" = "--" ] && shift

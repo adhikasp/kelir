@@ -126,3 +126,16 @@ the property the gate needs.
   `remote-check.sh` and `gate.sh` fall back with a clear message (`nextest: MISSING`) rather than a
   confusing failure.
 
+
+## Follow-up: the Linux gate leaked core dumps (buildinfra2, 2026-11-20)
+
+The crash-injection tests (M3's `KELIR_CRASH_AT`) abort a `kelir` on purpose, and the gate box's
+`kernel.core_pattern` is `systemd-coredump`: the store had grown to **2,660 cores / 904 MB, ~290 KB each**, every
+one a `target/debug/kelir` SIGABRT from a gate run. A core from an intentional abort is pure waste. Fixed in
+`buildinfra2`: `remote-check.sh`'s far-side runner, `gate.sh` and `gate-load.sh` set `ulimit -c 0` before the
+first test binary starts (in the scripts, not on the host: no sudo, no system config, one file per property), and
+`docs/BUILD.md` rule 6 plus a line in AGENTS.md's *Linux gate* keep a future editor from dropping it. Measured on
+the box: the same 13 `e2e_m3` tests wrote 11 new cores without it and **0** with it (`coredumpctl` records the
+aborts with `COREFILE none`). Details: `docs/retros/buildinfra2-impl-notes.md`. The lesson that generalises: the
+value was invisible because nothing ever looked at the *store* — a gate's cost includes what it leaves on the box,
+not only its own wall time.
