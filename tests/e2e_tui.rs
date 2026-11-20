@@ -719,11 +719,11 @@ async fn the_tui_runs_a_turn_in_a_pty() {
         "a sync frame is never closed: {:?}",
         run.screen
     );
-    // The banner names the window compaction measures against and where it came
-    // from (STEER-1: the provider's list, fetched before the first step).
+    // The banner no longer carries the window: the startup answer is silent
+    // (it is still in `state`, for anyone who asks).
     assert!(
-        run.screen.contains("window 262144 tokens (api)"),
-        "the banner must show the window and its source; screen: {:?}",
+        !run.screen.contains("window 262144 tokens"),
+        "the window is not ambient in the banner; screen: {:?}",
         run.screen
     );
     // Herdr's status: exactly one record per change, in the only form this

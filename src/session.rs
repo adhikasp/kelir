@@ -339,6 +339,9 @@ struct Session {
     /// from (`config`, `api`, `cache`, `default`).
     window: u64,
     window_source: &'static str,
+    /// The model the window was last applied for: the startup answer is
+    /// silent, a later model's answer is announced once.
+    window_model: Option<String>,
     /// See [`Prepared::window_note`].
     window_note: Option<String>,
     /// The provider's model list as this process learned it.
@@ -723,17 +726,7 @@ async fn drive(opts: Options) -> u8 {
             format!("kelir · {} · {}", session.provider_name, session.model),
             format!("session {}", session.id),
             format!("cwd {}", crate::util::path_string(&session.ctx.cwd)),
-            format!(
-                "window {} tokens ({})",
-                session.window, session.window_source
-            ),
         ];
-        // A window that is not the provider's says why, on its own line, so a
-        // person sees a 401 or an offline endpoint without reading the log
-        // (STEER-1 review N4).
-        if let Some(note) = &session.window_note {
-            banner.push(format!("  ({note})"));
-        }
         banner.push("Enter sends · Alt-Enter adds a line · /help shows the commands".to_string());
         // The cap is worth a banner line only when one is set: the status line
         // carries the count ("step 3/5") while a turn runs.
@@ -1432,6 +1425,7 @@ impl Session {
             pending_task: prepared.task.clone(),
             window: prepared.window,
             window_source: prepared.window_source,
+            window_model: None,
             window_note: prepared.window_note.take(),
             models: prepared.models.take(),
             models_fetch: prepared.models_fetch.take(),
@@ -2313,10 +2307,13 @@ impl Session {
         let over = self.cfg.override_window(&self.model);
         let (window, source) =
             crate::models::resolve(over, self.models.as_ref(), list.fetched, &self.model);
-        // Say so once, on the boundary that changed the number: a person
-        // watching should not have to read the cache file to learn that the
-        // window became the provider's (STEER-1 review N4).
-        if window != self.window || source != self.window_source {
+        // The startup answer is silent: the banner no longer carries the window.
+        // After a `model` swap, say once, on the boundary that changed the
+        // number, so a person watching learns the window became the new
+        // provider's (STEER-1 review N4).
+        let previous = self.window_model.replace(self.model.clone());
+        let swapped = previous.is_some_and(|model| model != self.model);
+        if swapped && (window != self.window || source != self.window_source) {
             self.emit(UiEvent::Info(format!(
                 "» window {window} tokens ({source})"
             )));
@@ -4589,6 +4586,7 @@ mod tests {
             pending_task: String::new(),
             window: 1_000,
             window_source: "default",
+            window_model: None,
             window_note: None,
             models: None,
             models_fetch: None,
