@@ -107,12 +107,12 @@ pub struct Herdr {
 impl Herdr {
     /// Open the writer, or `None` when this session should not report status.
     pub fn detect(json: bool) -> Option<Self> {
-        let herdr_env = std::env::var("KELIR_HERDR").ok();
+        let herdr_env = crate::envs::var("KELIR_HERDR");
         let tty = std::io::stdout().is_terminal();
         if !wanted(herdr_env.as_deref(), tty, json) {
             return None;
         }
-        let telegram = is_telegram(std::env::var("TERM_PROGRAM").ok().as_deref());
+        let telegram = is_telegram(crate::envs::var("TERM_PROGRAM").as_deref());
         Some(Self {
             telegram,
             out: Box::new(std::io::stdout()),

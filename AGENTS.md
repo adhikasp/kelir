@@ -108,7 +108,10 @@ files) because several jobs edit `session.rs`/`config.rs`. Never kill processes 
 ## Docs are part of done
 
 Every job that adds or changes a config key, CLI flag, env var, verb, event, file location or TUI key updates
-`docs/reference/` (see docs/tasks/STEER-11.md) in the same commit series; the drift test enforces it once it exists.
+`docs/reference/` in the same commit series (a new key/verb/event is a row in `src/docs/tables.rs`, a new env var is
+one in `src/envs.rs`). Run `kelir docs --generate` and then `cargo test --lib docs`: the drift test reads
+the code both ways and fails on anything that is on one side only. Each milestone's Done list says "update
+`docs/reference/`" (docs/tasks/STEER-11.md).
 
 ## Never broadcast console signals (hard rule)
 

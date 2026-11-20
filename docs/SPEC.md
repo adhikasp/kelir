@@ -240,11 +240,18 @@ from the start because inbound messages arrive on that connection. Servers are c
 ## Self-documentation
 
 Everything user-configurable is documented in `docs/reference/` (config keys with defaults, env overrides, flags, verbs,
-files, events, providers, troubleshooting) with pointers into the source, kept honest by a **drift test** (code and docs
-must agree both ways) and partly generated from code (`kelir docs --generate`). The same text is embedded in the binary
-and readable by the agent: `kelir docs [topic]`, `kelir docs --find <words>`. A builtin skill `kelir` ("operate or configure
-kelir itself") points at it, so the pushed hint and steering rules can inject it. The base prompt carries one line that
-names `kelir docs`. Every milestone's definition of done includes updating `docs/reference/`.
+files, events, providers, troubleshooting) with pointers into the source. What a machine can know for certain is
+**generated**: `kelir docs --generate` rewrites the blocks between `<!-- generated:kind -->` markers (the CLI from clap,
+the verbs/config keys/event types from `src/docs/tables.rs`, the environment from `src/envs.rs`, which is the only place
+a variable is declared), and `kelir docs --check` fails when one is stale. The prose around the markers is hand-written.
+A **drift test** is stricter than `--check`: it reads the source as well as the files, so a verb, key, event type or
+variable that exists in one and not the other fails in **both** directions.
+
+The same text is embedded in the binary (`include_str!`) and readable by the agent, which is how a session with no
+checkout on disk learns to operate itself: `kelir docs [topic]`, `kelir docs --list`, `kelir docs --find <words>`.
+A builtin skill `kelir` ("operate or configure kelir itself", `src/docs/skill-kelir.md`, no file on disk) is discovered
+like any other skill, so the pushed hint and steering rules can inject it. The base prompt carries one line that names
+`kelir docs`. Every milestone's definition of done includes updating `docs/reference/`; the drift test is what enforces it.
 
 ## Compaction
 
