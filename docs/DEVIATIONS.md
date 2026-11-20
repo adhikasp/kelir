@@ -1489,6 +1489,18 @@ follow-up commit series that restores three things the first pass lost.
   because a line number is stale after the next edit and the drift test checks that the named
   function exists. Top-level config keys share `load`; that is a known coarse pointer.
 
+- **m5bfix: `run --attach` / `ctl attach` are not built (M5 item 6).** `kelir view` (and
+  `ctl view`) is the one attach surface: images are sent, audio and video are stored with an
+  `attachment-note`. A PDF is refused with a message that says what to do (extract text, or
+  render pages to png): a documented refusal, not a stored-with-a-note kind.
+- **m5bfix: a failed `hc` or scorer is an `error` event, not a `source` note.** A `source`
+  event renders into the conversation; an `error` (`where: source`) does not. It can show as
+  an error line in the TUI.
+- **m5bfix: `[hint] endpoint` on another origin is keyless.** The provider's key is sent only
+  to the provider's own scheme, host and port; there is no separate `[hint]` key setting.
+- **m5bfix: `observe` is read-only and unauthenticated by design (STEER-7).** It is not a
+  socket verb, so there is no token check and no `verb` event; it reads `events.jsonl`, which
+  the same user can read anyway. It builds the request with the config as of the call.
 - **`observe` reads the log, not the socket (M5-B).** The task allows "a verb over the socket"; a
   verb would be logged, token-gated and scheduled at a boundary, which is wrong for a read.
   `kelir observe` and `kelir ctl <s> observe` read `events.jsonl` and build the request with the

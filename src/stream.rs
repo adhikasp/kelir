@@ -201,7 +201,7 @@ fn text_of(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn parse_usage(usage: &Value) -> Usage {
+pub(crate) fn parse_usage(usage: &Value) -> Usage {
     let details = usage.get("prompt_tokens_details");
     let cached = details
         .and_then(|d| d.get("cached_tokens"))

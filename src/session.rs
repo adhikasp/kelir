@@ -3049,9 +3049,19 @@ impl Session {
         }
         let mime = crate::attachments::mime_of(&path);
         if mime == "application/octet-stream" {
+            // A PDF is refused on purpose (m5bfix F3): kelir sends no document
+            // formats, only images; the message says what to do instead.
+            let pdf = path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
             return Err(format!(
-                "view: {} is not an image kelir knows (png, jpg, gif, webp)",
-                crate::util::path_string(&path)
+                "view: {} is not an image kelir knows (png, jpg, gif, webp){}",
+                crate::util::path_string(&path),
+                if pdf {
+                    "; a PDF is not read: extract its text with a tool, or render pages to png and view those"
+                } else {
+                    ""
+                }
             ));
         }
         let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
@@ -3169,6 +3179,22 @@ impl Session {
                 "» source deleted on disk: {}",
                 crate::util::path_string(&removed.path)
             )));
+            // The model curates its memory, so a note it can no longer find
+            // must not stay a live fact in its context (m5bfix N2): a one-line
+            // tail message, the system prefix untouched.
+            if removed.kind == crate::sources::SourceKind::Memory {
+                // Recorded directly, not through `record_source`: that would
+                // re-arm the watcher and announce the same absence every time.
+                self.record(EventBody::Source {
+                    kind: removed.kind.event_kind().to_string(),
+                    name: removed.name.clone(),
+                    text: Some(Payload::text(format!(
+                        "memory note {} was deleted; disregard its earlier text",
+                        removed.name
+                    ))),
+                    path: Some(crate::util::path_string(&removed.path)),
+                })?;
+            }
         }
         let changes = self.watch.changes();
         let count = changes.len();
@@ -3270,6 +3296,7 @@ impl Session {
         let candidates = crate::hint::catalogue(&places);
         match crate::hint::hint_for(scorer.as_ref(), &prompt, &candidates, config.timeout).await {
             Ok(Some(text)) => {
+                self.record_hint_usage(scorer.as_ref());
                 let recorded = self.record(EventBody::Source {
                     kind: crate::hint::SOURCE_KIND.to_string(),
                     name: crate::hint::SOURCE_NAME.to_string(),
@@ -3280,9 +3307,45 @@ impl Session {
                     self.sync();
                 }
             }
-            Ok(None) => {}
-            Err(why) => self.hint_note(&format!("hint: skipped ({why})")),
+            Ok(None) => self.record_hint_usage(scorer.as_ref()),
+            Err(why) => {
+                self.record_hint_usage(scorer.as_ref());
+                self.hint_note(&format!("hint: skipped ({why})"));
+            }
         }
+    }
+
+    /// The scoring call's own spend, as a `usage` event of kind `hint` (m5bfix
+    /// F2): it counts in `ctl status` and the cost warnings, and the cache
+    /// ratio (which reads `kind: None`) stays about the main model only. The
+    /// cost is the table's estimate for the scorer's model, or the provider's.
+    fn record_hint_usage(&mut self, scorer: &dyn crate::hint::Scorer) {
+        let Some(usage) = scorer.take_usage() else {
+            return;
+        };
+        let Some(config) = self.cfg.hint.clone() else {
+            return;
+        };
+        let price = crate::spend::lookup(&config.provider, &config.model, &self.cfg.prices);
+        let (cost, source) = crate::spend::resolve(
+            usage.cost,
+            price.as_ref().map(|(price, _)| price),
+            usage.prompt_tokens,
+            usage.cached_tokens,
+            usage.completion_tokens,
+        );
+        let _ = self.record(EventBody::Usage {
+            step: 0,
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            cached_tokens: usage.cached_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            cost,
+            cost_source: Some(source.as_str().into()),
+            allowance: None,
+            kind: Some("hint".into()),
+        });
+        self.note_spend();
     }
 
     fn hint_note(&mut self, message: &str) {
@@ -3329,6 +3392,12 @@ impl Session {
             .endpoint
             .clone()
             .unwrap_or_else(|| provider.base_url.clone());
+        // A provider's key goes to that provider's origin only (m5bfix F1): a
+        // `[hint] endpoint` on another host is called without a key, as the
+        // docs say for a local server, never with the session's key.
+        if config.endpoint.is_some() && !crate::hint::same_origin(&base, &provider.base_url) {
+            provider.key = None;
+        }
         if provider.key.is_none() && config.endpoint.is_none() {
             return Err("no API key".to_string());
         }

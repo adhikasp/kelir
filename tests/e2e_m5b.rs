@@ -517,6 +517,100 @@ async fn memory_is_frozen_into_the_system_and_changes_arrive_at_the_tail() {
     assert_eq!(code, 0, "{stderr}");
 }
 
+/// m5bfix F2: the scoring call's spend is a `usage` event of kind `hint`.
+#[tokio::test]
+async fn the_scoring_calls_usage_is_recorded_as_kind_hint() {
+    let project = Project::new();
+    let scorer = Reply::Sse(
+        json!({
+            "choices": [{"message": {"role": "assistant", "content": "[\"sift\"]"}}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 70, "cost": 0.0001}
+        })
+        .to_string(),
+    );
+    let mock = Mock::start(vec![scorer, Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let run = run_task(
+        &mock,
+        &[
+            "run",
+            "--json",
+            "--cwd",
+            &project.path(),
+            "this log is too long",
+        ],
+        &[],
+        None,
+        HINT,
+    )
+    .await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let usage = run.events_of("usage");
+    let hints: Vec<&Value> = usage
+        .iter()
+        .copied()
+        .filter(|e| e["kind"] == "hint")
+        .collect();
+    assert_eq!(hints.len(), 1, "{usage:?}");
+    assert_eq!(hints[0]["prompt_tokens"], 50);
+    assert_eq!(hints[0]["completion_tokens"], 70);
+    assert_eq!(hints[0]["cost_source"], "provider");
+    assert!(
+        usage
+            .iter()
+            .any(|e| e.get("kind").is_none() || e["kind"].is_null()),
+        "the main step still has its own usage: {usage:?}"
+    );
+}
+
+/// m5bfix N2: a deleted memory note is one tail message, said once.
+#[tokio::test]
+async fn a_deleted_memory_note_is_told_to_the_model_once() {
+    let project = Project::new();
+    let notes = project.memory();
+    std::fs::write(notes.join("a.md"), "NOTE-A-ORIGINAL").unwrap();
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_wait",
+            "bash",
+            &json!({"command": "sleep 1"}),
+        ))),
+        Reply::Sse(sse(&tool_turn(
+            "call_wait2",
+            "bash",
+            &json!({"command": "sleep 1"}),
+        ))),
+        Reply::Sse(sse(&text_turn("done", 0))),
+    ])
+    .await;
+    let config = format!(
+        "memory_dir = \"{}\"
+",
+        toml_path(&notes)
+    );
+    let mut live = LiveSession::start(
+        &mock,
+        &["run", "--keep", "--json", "--cwd", &project.path(), "go"],
+        &config,
+    )
+    .await;
+    live.wait_for("tool_started").await;
+    std::fs::remove_file(notes.join("a.md")).unwrap();
+    live.wait_for("turn_ended").await;
+    let log = live.log();
+    let deleted: Vec<&Value> = of_type(&log, "source")
+        .into_iter()
+        .filter(|e| {
+            e["kind"] == "memory" && e["text"].as_str().unwrap_or("").contains("was deleted")
+        })
+        .collect();
+    assert_eq!(deleted.len(), 1, "{log:?}");
+    let requests = mock.requests();
+    let last = requests.last().unwrap().body.to_string();
+    assert!(last.contains("was deleted"), "{last}");
+    let (code, stderr) = live.end().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
 // ------------------------------------------------------------------- media
 
 #[tokio::test]

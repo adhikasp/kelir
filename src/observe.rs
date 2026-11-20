@@ -13,7 +13,10 @@
 //! 400 earlier in the *live* process (`refused_fields`) is process memory, not
 //! log, so an observe of a session that dropped one still shows it; and a
 //! `model` swap is read from the last `step_started`, so a swap not yet applied
-//! is not shown. No key is ever read for this: the body does not carry one.
+//! is not shown. It also builds the request with the config and the on-disk
+//! models cache as they are *now* (`cache_ttl`, the provider table, vision
+//! support), not the running session's: edit the config after a session starts
+//! and `--raw` can differ from that session's next wire body (m5bfix N3). No key is ever read for this: the body does not carry one.
 
 use std::fmt::Write as _;
 use std::path::Path;

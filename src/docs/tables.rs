@@ -316,7 +316,8 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
         default: "unset: the pushed hint is off",
         overrides: "—",
         effect: "`[hint]` with `model` (required to turn it on), `provider` (default: the session \
-                 provider), `endpoint` (a base URL instead of the provider's) and `timeout_ms` \
+                 provider), `endpoint` (a base URL instead of the provider's; the provider's key is sent \
+                 only when it has the same origin, else the call is keyless) and `timeout_ms` \
                  (default `2000`): one cheap scoring call per human prompt appends `might be \
                  relevant: name - description` as a `source` message of kind `hint`; it fails \
                  open",
@@ -526,7 +527,8 @@ pub const EVENTS: &[EventDoc] = &[
                  `cache_write_tokens`, `cost`, `cost_source?`, `allowance?`, `kind?`",
         written_by: "the final stream chunk; `cost_source` says whether `cost` is the provider's \
                     own (`provider`), tokens times a known price (`table`) or not known \
-                    (`unknown`, cost 0.0); `kind: \"compact\"` marks the summarising request",
+                    (`unknown`, cost 0.0); `kind: \"compact\"` marks the summarising request and `kind: \"hint\"` the \
+                    hint scorer's own call",
     },
     EventDoc {
         name: "warning",

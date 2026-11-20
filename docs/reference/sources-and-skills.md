@@ -158,7 +158,14 @@ model = "openai/gpt-4o-mini"   # required: this turns it on
 It fails open: no key (for a provider endpoint), a timeout, a non-2xx, garbage, or
 names that are not in the catalogue mean no hint and at most one `error` note
 (`source` location). Names the scorer invents are dropped. The key is held in
-memory only, like the session's.
+memory only, like the session's, and goes **only to the provider's own origin**:
+with an `endpoint` on a different scheme, host or port the call is made without a
+key (fine for a local server). The failure note is an `error` event, so the hint
+text never enters the context. The scorer is given 600 completion tokens, room for
+a reasoning model. Its spend is logged as a `usage` event of `kind: "hint"` (it
+counts in `ctl status` and the cost warnings; `observe`'s cache ratio reads only
+the main steps). The call runs before the turn's first step, so a slow scorer
+delays each human prompt by up to `timeout_ms`.
 
 ## Observing the next request
 
@@ -170,4 +177,6 @@ and the cache hit ratio from `usage`. `kelir observe <session> --raw` prints
 the loop — byte for byte what the provider would receive next. `kelir ctl <session>
 observe [raw]` is the same read (it needs no token: it never touches the session).
 Limits: a field the live process dropped after a provider 400 is process memory,
-not log, and a `model` swap not yet applied is not shown.
+not log, a `model` swap not yet applied is not shown, and the request is built
+with the config and models cache as they are when you run `observe`, so a config
+edited after the session started can make `--raw` differ from its next body.

@@ -304,7 +304,6 @@ async fn a_slow_scorer_costs_about_two_seconds_and_no_hint() {
 /// The configured `endpoint` is a different host from the provider: the session provider's key must
 /// not be sent to it (a leak of the OpenRouter key to whatever URL `[hint] endpoint` names).
 #[tokio::test]
-#[ignore = "M5-B review finding F1 (should-fix): fails until the session key stops going to [hint] endpoint; run with --ignored"]
 async fn the_session_key_is_not_sent_to_a_different_hint_endpoint() {
     let cwd = tempfile::tempdir().unwrap();
     write_skill(cwd.path());

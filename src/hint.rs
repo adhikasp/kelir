@@ -59,6 +59,12 @@ pub trait Scorer: Send + Sync {
         prompt: &'a str,
         candidates: &'a [Candidate],
     ) -> BoxFuture<'a, Result<Vec<String>, String>>;
+
+    /// The usage the last call reported, taken once (m5bfix F2). A scorer that
+    /// reports none (a test double) returns `None`.
+    fn take_usage(&self) -> Option<crate::stream::Usage> {
+        None
+    }
 }
 
 /// The catalogue: the skills a session can see, as `name - description`.
@@ -216,6 +222,17 @@ pub async fn hint_for(
     Ok(render(&select(&names, candidates)))
 }
 
+/// Whether two base URLs name the same scheme, host and port. A key that was
+/// issued for one origin is only ever sent there (m5bfix F1).
+pub fn same_origin(a: &str, b: &str) -> bool {
+    let (Ok(a), Ok(b)) = (reqwest::Url::parse(a), reqwest::Url::parse(b)) else {
+        return false;
+    };
+    a.scheme() == b.scheme()
+        && a.host_str().map(str::to_ascii_lowercase) == b.host_str().map(str::to_ascii_lowercase)
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
 // ---------------------------------------------------------------- the real one
 
 /// A scorer that asks a Chat Completions endpoint for a JSON array of names.
@@ -224,7 +241,13 @@ pub struct Chat {
     url: String,
     key: Option<String>,
     model: String,
+    usage: std::sync::Mutex<Option<crate::stream::Usage>>,
 }
+
+/// Room for a reasoning model to think and still answer (m5bfix F4): the
+/// answer itself is a few names, but a reasoning scorer spent 39-111 tokens on
+/// thinking against the old cap of 120.
+pub const SCORER_MAX_TOKENS: u64 = 600;
 
 impl Chat {
     /// `base_url` is the provider's (or the configured `endpoint`); `key` is
@@ -239,6 +262,7 @@ impl Chat {
             url: crate::provider::chat_completions_url(base_url),
             key: key.filter(|key| !key.is_empty()),
             model: model.to_string(),
+            usage: std::sync::Mutex::new(None),
         })
     }
 
@@ -256,7 +280,7 @@ impl Chat {
             "model": model,
             "stream": false,
             "temperature": 0,
-            "max_tokens": 120,
+            "max_tokens": SCORER_MAX_TOKENS,
             "messages": [
                 {
                     "role": "system",
@@ -305,12 +329,21 @@ impl Scorer for Chat {
                 .map_err(|_| "the scorer's answer was cut off".to_string())?;
             let value: Value = serde_json::from_str(&text)
                 .map_err(|_| "the scorer's answer was not JSON".to_string())?;
+            if let Some(usage) = value.get("usage").filter(|usage| usage.is_object())
+                && let Ok(mut slot) = self.usage.lock()
+            {
+                *slot = Some(crate::stream::parse_usage(usage));
+            }
             let content = value["choices"][0]["message"]["content"]
                 .as_str()
                 .ok_or_else(|| "the scorer's answer had no text".to_string())?;
             parse_reply(content)
                 .ok_or_else(|| "the scorer's answer was not a list of names".to_string())
         })
+    }
+
+    fn take_usage(&self) -> Option<crate::stream::Usage> {
+        self.usage.lock().ok().and_then(|mut slot| slot.take())
     }
 }
 
@@ -459,6 +492,28 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn same_origin_compares_scheme_host_and_port() {
+        assert!(same_origin(
+            "https://openrouter.ai/api/v1",
+            "https://OpenRouter.ai:443/other"
+        ));
+        assert!(!same_origin("https://a.example/v1", "https://b.example/v1"));
+        assert!(!same_origin("http://a.example/v1", "https://a.example/v1"));
+        assert!(!same_origin(
+            "http://127.0.0.1:8080/v1",
+            "http://127.0.0.1:9/v1"
+        ));
+        assert!(!same_origin("not a url", "https://a.example"));
+    }
+
+    #[test]
+    fn the_scorer_cap_leaves_room_to_think() {
+        let body = Chat::body("m", "p", &catalogue_of_three());
+        assert_eq!(body["max_tokens"], SCORER_MAX_TOKENS);
+        assert!(SCORER_MAX_TOKENS >= 400);
     }
 
     #[tokio::test]

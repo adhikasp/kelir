@@ -24,7 +24,7 @@ resume: `src/fold.rs` renders the frozen system message, then `user`,
 | `source` | `kind`, `name`, `text?`, `path?` | context that arrived after the start: a `hint`, a skill, an instruction or memory edit, an `attachment` or `attachment-note`, a channel message |
 | `step_started` | `step`, `provider`, `model`, `request_hash` | just before one provider request |
 | `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]`, `finish_reason?` | the model's answer to one step |
-| `usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `cost`, `cost_source?`, `allowance?`, `kind?` | the final stream chunk; `cost_source` says whether `cost` is the provider's own (`provider`), tokens times a known price (`table`) or not known (`unknown`, cost 0.0); `kind: "compact"` marks the summarising request |
+| `usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `cost`, `cost_source?`, `allowance?`, `kind?` | the final stream chunk; `cost_source` says whether `cost` is the provider's own (`provider`), tokens times a known price (`table`) or not known (`unknown`, cost 0.0); `kind: "compact"` marks the summarising request and `kind: "hint"` the hint scorer's own call |
 | `warning` | `kind`, `message`, `value`, `threshold` | the session when the last prompt passes `warn_prompt_tokens` or the cost passes `warn_cost`, once per crossing; never rendered into the conversation |
 | `verb` | `name`, `args`, `from`, `boundary`, `error?` | every verb received, applied or not (`boundary: "rejected"` for a refusal) |
 | `tool_started` | `call_id`, `name`, `input`, `pid?`, `dir?` | intent: written before the tool's process starts |
