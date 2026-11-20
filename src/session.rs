@@ -377,8 +377,11 @@ struct Session {
     /// The retry or slot wait in progress, for `status`: when it ends, the
     /// status and attempt, and whether it is a slot wait. Set and cleared by
     /// the same `Retrying`/`RetryingDone` events the screen gets.
-    retry_wait: std::cell::Cell<Option<(Instant, Option<u16>, u32, bool)>>,
+    retry_wait: std::cell::Cell<Option<RetryWait>>,
 }
+
+/// A retry or slot wait in progress: ends at, status, attempt, is-a-slot-wait.
+type RetryWait = (Instant, Option<u16>, u32, bool);
 
 /// A compaction asked for by someone; it applies at the next `before_step`.
 struct CompactRequest {
