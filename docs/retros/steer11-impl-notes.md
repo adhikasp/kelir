@@ -1,7 +1,7 @@
 # steer11 — self-documentation (impl notes)
 
 Brief: `docs/tasks/STEER-11.md`. Branch `job/steer11`, worktree `steer11`, based on
-`b7b60c6`. Ten commits: the reference + `kelir docs` + registry + drift test;
+`b7b60c6`, in small commits: the reference + `kelir docs` + registry + drift test;
 the e2e file; the prompt line; the suggestion fallback; the spec/AGENTS text;
 these notes; the `cli.md` and `sources-and-skills.md` prose; two test-message
 fixes found by deliberately breaking the tables.
