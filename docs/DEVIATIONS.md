@@ -1656,3 +1656,11 @@ side). Where the code had to choose:
   (session, parent, depth, kind, state, pid; no secret).
 - **Not here:** the delegation skill (M8), a TUI children panel (a wake is a one-line info row),
   and a spend cap (the spec says there is none).
+- **A brief cannot start children or briefs (m7fix).** The spec refuses `edit`, `compact` and
+  children in a brief; `kelir run --child` and `kelir brief` in a brief answer
+  `refused: this is a brief…` (exit 3) from `child_start`. `bash` itself stays, so this is a
+  refusal by result, not a smaller tool list (the list must stay the parent's for the cache).
+- **A brief's spend is its own (m7fix).** The copied prefix of its log is the parent's: `Tally`
+  starts the sums at the brief's question (`child::own_start`), so `ls`, `status` and
+  `warn_cost` do not count the prefix twice. `ls` takes a brief's kind and task from that
+  question, not from the copied first `user` event.

@@ -268,20 +268,26 @@ pub fn node_from(id: &str, events: &[LogEvent], alive: bool) -> Option<Node> {
             _ => None,
         })
         .unwrap_or(model);
+    // A brief's log starts with a copy of its parent's: its kind and task are
+    // those of its own question, the last `user` event from `brief`. Otherwise
+    // the first `user` event says (a child's task comes from its parent).
+    let own = child::own_start(events);
+    let first_user = |event: &LogEvent| match &event.body {
+        EventBody::User { text, from, .. } => Some((
+            match from.as_str() {
+                "brief" => child::KIND_BRIEF,
+                "parent" => child::KIND_CHILD,
+                _ => "session",
+            }
+            .to_string(),
+            text.inline_str().unwrap_or("").to_string(),
+        )),
+        _ => None,
+    };
     let (kind, task) = events
-        .iter()
-        .find_map(|event| match &event.body {
-            EventBody::User { text, from, .. } => Some((
-                match from.as_str() {
-                    "brief" => child::KIND_BRIEF,
-                    "parent" => child::KIND_CHILD,
-                    _ => "session",
-                }
-                .to_string(),
-                text.inline_str().unwrap_or("").to_string(),
-            )),
-            _ => None,
-        })
+        .get(own)
+        .and_then(first_user)
+        .or_else(|| events.iter().find_map(first_user))
         .unwrap_or_else(|| ("session".into(), String::new()));
     let tally = crate::spend::Tally::from_events(events, Default::default());
     let ended = matches!(

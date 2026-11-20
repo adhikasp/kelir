@@ -626,6 +626,64 @@ async fn a_brief_shares_the_parents_prefix_and_leaves_its_history_alone() {
     assert!(of_type(&root, "source").is_empty());
 }
 
+/// m7fix S3 (and S1 end to end): a brief cannot start children or briefs, by
+/// result with exit 3, and `ls` lists it as a brief with its own question.
+#[tokio::test]
+async fn a_brief_cannot_delegate_and_ls_lists_it_as_a_brief() {
+    let mock = Mock::start_routed(vec![], |request| {
+        if is_brief(request) {
+            let last_is_tool = request
+                .messages()
+                .last()
+                .is_some_and(|message| message["role"] == "tool");
+            return Some(match last_is_tool {
+                // The snapshot may carry an old instruction to delegate.
+                false => bash(
+                    "call_try",
+                    "\"$KELIR_BIN\" run --child \"CHILDT x\"; echo rc1=$?; \"$KELIR_BIN\" brief \"BRIEFQ nested\"; echo rc2=$?",
+                ),
+                true => say("brief done"),
+            });
+        }
+        Some(match tool_results(request).len() {
+            0 => bash("call_a", "echo prior work"),
+            1 => bash("call_brief", "\"$KELIR_BIN\" brief \"BRIEFQ outer\""),
+            2 => bash("call_ls", "\"$KELIR_BIN\" ls --json"),
+            _ => say("root done"),
+        })
+    })
+    .await;
+    let family = Family::new("");
+    let out = family.run(&mock, "ROOT").await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let requests = mock.requests();
+    let brief: Vec<&Recorded> = requests.iter().filter(|r| is_brief(r)).collect();
+    assert_eq!(brief.len(), 2, "one tool call, one answer; no nested brief");
+    let tried = tool_results(brief[1]).pop().unwrap_or_default();
+    assert_eq!(
+        tried.matches("refused: this is a brief").count(),
+        2,
+        "{tried}"
+    );
+    assert!(
+        tried.contains("rc1=3") && tried.contains("rc2=3"),
+        "{tried}"
+    );
+    assert!(
+        !requests.iter().any(|r| task_of(r) == "CHILDT x"),
+        "no child was started"
+    );
+    let (_, root) = family.session_for("ROOT");
+    assert_eq!(
+        of_type(&root, "child_started").len(),
+        1,
+        "only the outer brief"
+    );
+    let listing = result_of_call(&root, "call_ls");
+    assert!(listing.contains("\"kind\":\"brief\""), "{listing}");
+    assert!(listing.contains("BRIEFQ outer"), "{listing}");
+}
+
 // ----------------------------------------------------------- ls and kill
 
 #[tokio::test]

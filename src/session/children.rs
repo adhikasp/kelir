@@ -215,6 +215,14 @@ impl Session {
             return;
         };
         let brief = op == "brief";
+        if self.kids.brief {
+            // A side question reads; it does not start work of its own (the
+            // snapshot may carry an old instruction to delegate).
+            let _ = reply.send(Response::error(
+                "refused: this is a brief, a read-only side question; it cannot start children or briefs. Answer from what you can read with bash",
+            ));
+            return;
+        }
         let cwd = Some(text("cwd"))
             .filter(|cwd| !cwd.trim().is_empty())
             .unwrap_or_else(|| crate::util::path_string(&self.ctx.cwd));

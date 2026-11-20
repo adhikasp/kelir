@@ -47,8 +47,9 @@ kelir kill --tree             # every descendant of this session
 
 The **root session** holds the registry and decides, in one step, so two starts racing
 for the last slot cannot both win. A settled child frees its slot at once; a child whose
-process is gone (crashed, killed from outside) is reaped by liveness within a second
-and frees its slot too. A `brief` takes a slot while it runs. There is no spend cap:
+process is gone (crashed, killed from outside) is settled at once by the process that started it (`error`, or `killed` when it was
+signalled); only a child nobody reports on is reaped by liveness, after a 5 s grace and the
+root's once-a-second tick. Either way it frees its slot. A `brief` takes a slot while it runs. There is no spend cap:
 `kelir ls` shows cost per session and per tree.
 
 ## The tree
@@ -87,7 +88,10 @@ batch, copied into a new session whose `session_started` names it a child. The r
 it sends is the parent's last request plus one user message — same system prompt, same
 tool list, same messages, and the **parent's session id as the provider cache key** — so
 the prefix hits the parent's cache. `edit` and `compact` are refused by result
-(`refused: this is a brief…`); `bash` works. The parent's history is untouched: its log
+(`refused: this is a brief…`), and so are `kelir run --child` and `kelir brief` (a side question
+starts no work; exit 3); `bash` works. In `kelir ls` it is kind `brief` with its own question
+as the task, and its cost counts only what it spent after the snapshot (the copied prefix is
+the parent's, counted there). The parent's history is untouched: its log
 gains only the `child_started`/`child_settled` pair, and the answer is the command's
 stdout. The tool call that runs `kelir brief` is itself not in the snapshot (its result
 does not exist yet).

@@ -166,7 +166,7 @@ pub struct CtlArgs {
     /// error if it is not running).
     #[arg(value_name = "SESSION")]
     pub session: String,
-    /// The verb: say, later, stop, model, tools, compact, skills, view, observe, cancel, status, end.
+    /// The verb: say, later, stop, model, tools, compact, skills, view, observe, cancel, status, brief, end.
     #[arg(value_name = "VERB")]
     pub verb: String,
     /// Text for `say`/`later`/`stop`, or one JSON object with the verb's args.

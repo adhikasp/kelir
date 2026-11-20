@@ -281,7 +281,8 @@ impl Registry {
     /// Record the child's pid and start time once its process exists.
     pub fn up(&mut self, child_id: &str, pid: u32, started_ms: Option<u64>) -> bool {
         match self.find_mut(child_id) {
-            Some(entry) if entry.live() => {
+            // Once: a child's pid is told by its starter, then it stays.
+            Some(entry) if entry.live() && entry.pid.is_none() => {
                 entry.pid = Some(pid);
                 entry.started_ms = started_ms;
                 true
@@ -703,6 +704,17 @@ pub fn snapshot_cut(events: &[LogEvent]) -> usize {
         }
     }
     events.len()
+}
+
+/// Index of the first event that is a brief's own: its question (the last
+/// `user` event from `brief`). Everything before it is the parent's copied
+/// log. A log without one is not a brief's: `usize::MAX`, which matches no
+/// index, so a plain session counts everything.
+pub fn own_start(events: &[LogEvent]) -> usize {
+    events
+        .iter()
+        .rposition(|event| matches!(&event.body, EventBody::User { from, .. } if from == "brief"))
+        .unwrap_or(usize::MAX)
 }
 
 /// Seed `dest` (a new session dir) with a by-value copy of `source`'s log up to
@@ -1349,5 +1361,62 @@ mod tests {
         assert_eq!(outcome_of(1, false), "error");
         assert_eq!(outcome_of(0, true), "killed");
         assert!(succeeded("done") && succeeded("paused") && !succeeded("error"));
+    }
+
+    fn usage_event(seq: u64, cost: f64) -> LogEvent {
+        LogEvent::new(
+            seq,
+            EventBody::Usage {
+                step: 1,
+                prompt_tokens: 1000,
+                completion_tokens: 10,
+                cached_tokens: 500,
+                cache_write_tokens: 0,
+                cost,
+                cost_source: Some("provider".into()),
+                allowance: None,
+                kind: None,
+            },
+        )
+    }
+
+    /// m7fix S1/S2: a brief's log starts with its parent's. `ls` names it a
+    /// brief with its own question, and its spend is only what it added.
+    #[test]
+    fn a_brief_is_listed_as_a_brief_and_counts_only_its_own_spend() {
+        let mut events = vec![session_started("ses_brief"), user(2), usage_event(3, 0.5)];
+        let plain = crate::childcli::node_from("ses_brief", &events, false).unwrap();
+        assert_eq!(plain.kind, "session");
+        assert_eq!(own_start(&events), usize::MAX);
+        assert_eq!(plain.cost, Some(0.5));
+
+        events.push(LogEvent::new(
+            4,
+            EventBody::User {
+                text: "BRIEFQ why?".into(),
+                from: "brief".into(),
+                delivery: "next".into(),
+                attachments: Vec::new(),
+            },
+        ));
+        events.push(usage_event(5, 0.25));
+        assert_eq!(own_start(&events), 3);
+        let node = crate::childcli::node_from("ses_brief", &events, false).unwrap();
+        assert_eq!(node.kind, KIND_BRIEF);
+        assert_eq!(node.task, "BRIEFQ why?");
+        assert_eq!(node.cost, Some(0.25), "the parent's 0.5 is not the brief's");
+        let tally = crate::spend::Tally::from_events(&events, Default::default());
+        assert_eq!(tally.requests, 1);
+        assert_eq!(tally.last.as_ref().map(|last| last.prompt), Some(1000));
+    }
+
+    /// m7fix N1: a child's pid is told once; a second `up` cannot re-point it.
+    #[test]
+    fn up_is_once_only() {
+        let mut registry = registry(Caps::default());
+        let id = registry.admit(new("root", "ses_a")).unwrap().child_id;
+        assert!(registry.up(&id, 100, Some(1)));
+        assert!(!registry.up(&id, 200, Some(2)));
+        assert_eq!(registry.get(&id).unwrap().pid, Some(100));
     }
 }

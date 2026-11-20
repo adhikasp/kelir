@@ -236,15 +236,35 @@ impl Tally {
     /// Fold a whole log (what a resumed session starts from). No warning fires
     /// for a state the log was already in: the thresholds are armed against it.
     pub fn from_events(events: &[crate::event::LogEvent], warn: Warn) -> Self {
+        let own = crate::child::own_start(events);
         let mut tally = Tally {
             state: "idle".into(),
             ..Tally::default()
         };
-        for event in events {
+        for (index, event) in events.iter().enumerate() {
+            if index == own {
+                // A brief's log begins with a copy of its parent's: that spend
+                // is the parent's, already counted there. Keep the last
+                // request (the context the brief starts from), not the sums.
+                tally.reset_spend();
+            }
             tally.observe(event.seq, &event.body);
         }
         let _ = tally.warnings(warn);
         tally
+    }
+
+    /// Forget the sums, keep the last request.
+    fn reset_spend(&mut self) {
+        self.requests = 0;
+        self.prompt = 0;
+        self.completion = 0;
+        self.cached = 0;
+        self.cache_write = 0;
+        self.cost = 0.0;
+        self.by_provider = 0;
+        self.by_table = 0;
+        self.unpriced = 0;
     }
 
     /// Take one event in log order.
