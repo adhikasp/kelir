@@ -1,7 +1,7 @@
 # Dependencies
 
 The spec names `tokio`, `serde`, one HTTP client (`reqwest` + rustls), `clap`, `ratatui`/`crossterm`,
-`rmcp` and `interprocess`. Everything else, one line each explaining why it is here.
+`rmcp` and `interprocess` (`rmcp` is **not** used: M6 hand-rolls the JSON-RPC subset, see below). Everything else, one line each explaining why it is here.
 
 ## Runtime
 
@@ -27,8 +27,24 @@ The spec names `tokio`, `serde`, one HTTP client (`reqwest` + rustls), `clap`, `
 **MSRV:** `rust-version` is now 1.88, because ratatui 0.30 requires it (and the let-chains clippy
 suggests for edition 2024 are stable from 1.88). Both build hosts run 1.99/1.100.
 
+## MCP (M6)
+
+- **No new crate.** The spec names `rmcp`, but the client side of `kelir mcp` needs six things:
+  `initialize`, `tools/list`, `tools/call`, `notifications/cancelled`, a `ping` answer and inbound
+  notifications, over a child's stdin/stdout as one JSON object per line. That is about 400 lines on
+  `tokio` + `serde_json`, both already linked. `rmcp` is a full SDK (server side, macros, schema
+  generation, transports we do not use) with its own dependency tree, which the 20 MB / 30 MB
+  footprint rules and the build-time budget in `docs/BUILD.md` do not leave room for. The trade-off
+  is recorded in `docs/DEVIATIONS.md` (M6); HTTP/SSE transport, the optional stretch, is not built.
+  The base64 decoder for image and blob content is ~25 lines in `src/mcp/render.rs` rather than a
+  crate.
+- `toml`, `serde_json`, `ulid`, `tokio` (process, io-util, sync), `libc`/`windows-sys` job objects
+  are the existing ones; `mcp.toml` reuses `toml`.
+
 ## Dev only (not linked into the binary)
 
+- **Python 3** (a test tool, not a crate) — `tests/support/mcp_server.py` is the stdio MCP server the M6
+  e2e tests drive (`python` on Windows, `python3` elsewhere; standard library only).
 - **`tempfile`** — isolated state/session and working dirs for the unit and e2e tests.
 - **`portable-pty`** — the headless PTY test that drives the real binary's TUI (type a message, read
   the answer off the pty, `/quit`). It is a test dependency only; nothing in the binary uses it.

@@ -1362,3 +1362,39 @@ follow-up commit series that restores three things the first pass lost.
   `src/config.rs:LINE`; `docs/reference` uses `src/config.rs:<fn>` (`git grep -n 'fn <name>'`),
   because a line number is stale after the next edit and the drift test checks that the named
   function exists. Top-level config keys share `load`; that is a known coarse pointer.
+
+## M6
+
+- **No `rmcp`; the JSON-RPC subset is hand-rolled (`src/mcp/rpc.rs`).** The spec says "built on
+  `rmcp` (client features only)" and the brief allows hand-rolling when it is too heavy. The client
+  needs `initialize`, `tools/list` (with `nextCursor`), `tools/call`, `notifications/cancelled`, a
+  `ping` answer and inbound notifications over newline-delimited stdio JSON; that is ~400 lines on
+  crates already linked. `rmcp` brings a server half, procedural macros, schema generation and its
+  own dependency tree for none of that, against the footprint rules (binary <= 20 MB, no daemon) and
+  the build-time budget. HTTP/SSE transport (a stretch in the brief) is not built: it is the part
+  `rmcp` would have made cheap. Nothing in the CLI or the log depends on the choice.
+- **`kelir mcp` prints the whole result even when it is over 10 KB.** The brief says a result over
+  10 KB "spills to the session dir like any output". The full text is always written to
+  `commands/mcp_<id>/out` and `mcp_settled.out_path` names it (the log never holds the result), but
+  the CLI's stdout carries every byte, because `kelir mcp srv tool | jq` has to work on a big
+  result. The model still gets the spill notice: when the output is not piped, the enclosing bash
+  call's own 10 KB rule spills it. Spilling in the CLI instead would have broken the pipe use.
+- **A `tool_error` text goes to stderr, structured content to stdout.** The spec says "stdout is
+  `structuredContent` as JSON or the text blocks joined"; an `isError` result (exit 1) prints its
+  text on stderr so a downstream `jq` never parses an error message as data. In a bash call the
+  model sees both streams in the same output.
+- **`mcp_started` carries `args`, `mcp_settled` carries `exit_code`/`bytes` instead.** The spec's
+  table lists the same six fields for both events; `args` is only meaningful (and only able to be
+  large) at the start, and the exit code is only known at the end. `docs/reference/events.md` is
+  generated from the code and says exactly which event has which.
+- **The socket is not token-authenticated yet.** The brief says every state-changing verb is
+  authenticated since STEER-7; STEER-7 has not landed on this branch's base. The `mcp` verb takes
+  the same unauthenticated path as `view` and `bg`, and the broker's two internal verbs
+  (`mcp-settle`, `mcp-notify`) are protected by their own per-session random key. When STEER-7
+  merges, the `mcp` verb needs the session token on the same path as `view`.
+- **The hint and `observe` do not list the servers yet.** Neither exists on this base (M5-B owns
+  them). `Broker::descriptions()` returns `(name, description)` for every configured server, ready
+  for whoever builds the hint; `kelir mcp ls` is the pull route today.
+- **A new env var, `KELIR_MCP_CONFIG`,** replaces the machine `mcp.toml` path (the way
+  `KELIR_CONFIG` does for `config.toml`). The brief did not ask for it; the e2e tests need a way to
+  hand a session a server list without writing into the real config dir.
