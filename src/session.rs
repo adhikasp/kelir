@@ -339,6 +339,9 @@ struct Session {
     /// from (`config`, `api`, `cache`, `default`).
     window: u64,
     window_source: &'static str,
+    /// The model the window was last applied for: the startup answer is
+    /// silent, a later model's answer is announced once.
+    window_model: Option<String>,
     /// See [`Prepared::window_note`].
     window_note: Option<String>,
     /// The provider's model list as this process learned it.
@@ -720,30 +723,37 @@ async fn drive(opts: Options) -> u8 {
     if opts.tui {
         let (to_tui, from_session) = mpsc::unbounded_channel::<UiEvent>();
         let mut banner = vec![
-            format!("kelir · {} · {}", session.provider_name, session.model),
-            format!("session {}", session.id),
-            format!("cwd {}", crate::util::path_string(&session.ctx.cwd)),
-            format!(
-                "window {} tokens ({})",
-                session.window, session.window_source
-            ),
+            tui::BannerLine::plain(format!(
+                "kelir · {} · {}",
+                session.provider_name, session.model
+            )),
+            tui::BannerLine::plain(format!("session {}", session.id)),
+            tui::BannerLine::plain(format!(
+                "cwd {}",
+                crate::util::path_string(&session.ctx.cwd)
+            )),
         ];
-        // A window that is not the provider's says why, on its own line, so a
-        // person sees a 401 or an offline endpoint without reading the log
-        // (STEER-1 review N4).
-        if let Some(note) = &session.window_note {
-            banner.push(format!("  ({note})"));
+        // The window is not ambient: the number is for `state`, not the banner
+        // (tui3). What does belong here is a window that is *not* the
+        // provider's, with the reason: a 401, an offline endpoint or a default
+        // fallback silently changes the compaction threshold, and a person who
+        // cannot see that is being misled (F-window, STEER-1 review N4). One
+        // dim line, only when the start actually fell back.
+        if let Some(line) = window_banner_line(&session) {
+            banner.push(tui::BannerLine::dim(line));
         }
-        banner.push("Enter sends · Alt-Enter adds a line · /help shows the commands".to_string());
+        banner.push(tui::BannerLine::plain(
+            "Enter sends · Alt-Enter adds a line · /help shows the commands",
+        ));
         // The cap is worth a banner line only when one is set: the status line
         // carries the count ("step 3/5") while a turn runs.
         if let Some(cap) = session.cfg.max_steps {
-            banner.push(format!(
+            banner.push(tui::BannerLine::plain(format!(
                 "step cap {cap} per turn · reaching it pauses the turn (say continue)"
-            ));
+            )));
         }
         if session.resumed {
-            banner.push(format!(
+            banner.push(tui::BannerLine::plain(format!(
                 "resumed from the event log · {} turn(s) recorded{}",
                 session.turn,
                 if session.in_flight {
@@ -751,9 +761,9 @@ async fn drive(opts: Options) -> u8 {
                 } else {
                     ""
                 }
-            ));
+            )));
         }
-        banner.push(String::new());
+        banner.push(tui::BannerLine::plain(String::new()));
         match tui::start(
             from_session,
             to_tui.clone(),
@@ -1005,6 +1015,42 @@ fn cached_list(provider: &str, base_url: &str) -> ModelList {
         .and_then(|cache| cache.error.clone())
         .or_else(|| flushed.is_none().then(|| "fetching".to_string()));
     ModelList::from_cache(flushed).with_why(why)
+}
+
+/// The banner's one line about the window, when the window is *not* the
+/// provider's: a start that fell back to the default (an offline endpoint, a
+/// 401, a list that has not landed) measures compaction against
+/// [`crate::compact::DEFAULT_WINDOW`] instead of the model's real window, which
+/// changes when the session compacts. A 401 or an unreachable endpoint must
+/// reach a person without them reading the log (STEER-1 review N4), and tui3's
+/// brief still wants the banner free of the *normal* window line (F-window).
+///
+/// `None` for the provider's own answer and for a configured window: those are
+/// not surprises.
+fn window_banner_line(session: &Session) -> Option<String> {
+    if session.window_source == "api" || session.window_source == "config" {
+        return None;
+    }
+    // "fetching" is not a degradation, it is "the answer is not in yet":
+    // [`Session::apply_list`] says the real reason when it lands, so the banner
+    // does not name a window it is about to correct (and a start never sees two
+    // window lines that way).
+    if session.window_note.as_deref() == Some("the model list: fetching") {
+        return None;
+    }
+    match &session.window_note {
+        Some(note) => Some(format!(
+            "window {} tokens ({}) · {note}",
+            session.window, session.window_source
+        )),
+        // A stale cache or a configured number needs no apology; a fallback to
+        // the default with nothing to say about why does.
+        None if session.window_source == "default" => Some(format!(
+            "window {} tokens (default) · the model list did not answer",
+            session.window
+        )),
+        None => None,
+    }
 }
 
 /// The list to start with, and the fetch still running for the rest.
@@ -1432,6 +1478,11 @@ impl Session {
             pending_task: prepared.task.clone(),
             window: prepared.window,
             window_source: prepared.window_source,
+            // Seeded from the startup answer, so a later `/model` swap announces
+            // a changed window: `apply_list` must see which model the current
+            // number belongs to, and a fresh cache starts no fetch at all, so
+            // nothing else would tell it (tui3 review, F-window addendum).
+            window_model: Some(prepared.model.clone()),
             window_note: prepared.window_note.take(),
             models: prepared.models.take(),
             models_fetch: prepared.models_fetch.take(),
@@ -2278,6 +2329,18 @@ impl Session {
         let over = self.cfg.override_window(&self.model);
         let (window, source) =
             crate::models::resolve(over, self.models.as_ref(), false, &self.model);
+        // A swap is the one moment a person must be told the window changed:
+        // it is not the startup answer any more, and it sets the compaction
+        // threshold for the rest of the session. The banner no longer carries
+        // the number, so this is where it is said (F-window). A later answer
+        // for the same model that changes it again is announced by
+        // [`Session::apply_list`], which knows when the swap's own cache was
+        // already right.
+        if window != self.window || source != self.window_source {
+            self.emit(UiEvent::Info(format!(
+                "» window {window} tokens ({source})"
+            )));
+        }
         self.window = window;
         self.window_source = source;
         let why = self.models.as_ref().and_then(|cache| cache.error.clone());
@@ -2313,17 +2376,39 @@ impl Session {
         let over = self.cfg.override_window(&self.model);
         let (window, source) =
             crate::models::resolve(over, self.models.as_ref(), list.fetched, &self.model);
-        // Say so once, on the boundary that changed the number: a person
-        // watching should not have to read the cache file to learn that the
-        // window became the provider's (STEER-1 review N4).
-        if window != self.window || source != self.window_source {
-            self.emit(UiEvent::Info(format!(
-                "» window {window} tokens ({source})"
-            )));
+        // The startup answer is silent: the banner no longer carries the window
+        // (tui3). Two cases are not silent, and both are one dim line:
+        //
+        // * the start fell back (a dead endpoint, a 401): the banner's note is
+        //   written before this answer exists, so a fallback that the start
+        //   could not see is said here instead — once, when the source changes
+        //   to the fallback or its reason does (F-window);
+        // * a `/model` swap moved the number: the new model's window is what
+        //   compaction now measures against (STEER-1 review N4).
+        let note = window_note(over, list.why.as_deref(), source);
+        let previous = self.window_model.replace(self.model.clone());
+        let swapped = previous.is_some_and(|model| model != self.model);
+        let moved = swapped && (window != self.window || source != self.window_source);
+        // A start whose fetch had not landed says the fallback here instead:
+        // the banner could only say "fetching" (the answer did not exist yet),
+        // and the reason is what a person needs (F-window). Once: the same
+        // answer twice says nothing new.
+        let fell_back = source == "default"
+            && note.is_some()
+            && (note != self.window_note || source != self.window_source);
+        if moved || fell_back {
+            let mut line = format!("» window {window} tokens ({source})");
+            if let Some(note) = &note
+                && fell_back
+            {
+                line.push_str(" · ");
+                line.push_str(note);
+            }
+            self.emit(UiEvent::Info(line));
         }
         self.window = window;
         self.window_source = source;
-        self.window_note = window_note(over, list.why.as_deref(), source);
+        self.window_note = note;
     }
 
     /// Messages that should start the next turn: `later` deliveries, and any
@@ -3147,7 +3232,22 @@ impl Session {
                 self.apply_list(list);
                 continue;
             }
-            let Some(incoming) = rx.recv().await else {
+            // A fetch still running must not strand its answer: blocking on
+            // `rx.recv()` here would keep the idle session from ever applying
+            // a list that lands a second later (the offline reason the banner
+            // and `state` owe a person, STEER-1 review N4). So while one runs,
+            // wait for a verb and for the next look at the fetch, whichever
+            // comes first; with none running, wait for the verb alone.
+            let incoming = match self.models_fetch.as_ref().map(Fetch::is_running) {
+                Some(true) => {
+                    tokio::select! {
+                        incoming = rx.recv() => incoming,
+                        _ = tokio::time::sleep(IDLE_MODELS_WAIT) => continue,
+                    }
+                }
+                _ => rx.recv().await,
+            };
+            let Some(incoming) = incoming else {
                 return Idle::End;
             };
             // Nothing is running in idle, so a `stop` has nothing to stop:
@@ -4589,6 +4689,7 @@ mod tests {
             pending_task: String::new(),
             window: 1_000,
             window_source: "default",
+            window_model: Some(model.to_string()),
             window_note: None,
             models: None,
             models_fetch: None,
@@ -4693,6 +4794,105 @@ mod tests {
         assert_eq!(
             split_model_target("openrouter/", &providers),
             (None, "openrouter/")
+        );
+    }
+
+    /// F-window: the banner is silent about the window the provider answered,
+    /// and says one line when the start fell back — with the reason a person
+    /// needs (a 401, an offline endpoint) — because that fallback changes the
+    /// compaction threshold.
+    #[test]
+    fn the_banner_names_a_window_only_when_it_is_not_the_providers() {
+        let mut session = test_session("m");
+        // The provider's own answer: no line at all.
+        session.window = 262_144;
+        session.window_source = "api";
+        session.window_note = None;
+        assert_eq!(window_banner_line(&session), None);
+        // A configured number is the person's own: no apology either.
+        session.window_source = "config";
+        assert_eq!(window_banner_line(&session), None);
+        // A stale cache has numbers that are real, and `state` carries the why.
+        session.window_source = "cache";
+        session.window = 100_000;
+        assert_eq!(window_banner_line(&session), None);
+        // The fallback: the number and the reason, on one line.
+        session.window_source = "default";
+        session.window = crate::compact::DEFAULT_WINDOW;
+        session.window_note = Some("the model list: offline".into());
+        let line = window_banner_line(&session).expect("a fallback is announced");
+        assert!(line.contains("window 128000 tokens (default)"), "{line}");
+        assert!(line.contains("offline"), "{line}");
+        // A fallback with nothing to say about why still says it fell back.
+        session.window_note = None;
+        let line = window_banner_line(&session).expect("a fallback is announced");
+        assert!(line.contains("window 128000 tokens (default)"), "{line}");
+        assert!(line.contains("did not answer"), "{line}");
+    }
+
+    /// F-window (addendum): a `/model` swap after a fresh-cache startup still
+    /// announces a changed window. `window_model` is seeded from the startup
+    /// answer, so the answer that lands after the swap knows it is a different
+    /// model — the case a startup with a fresh list used to lose silently.
+    #[test]
+    fn a_window_that_changes_after_a_swap_is_announced_once() {
+        let mut session = test_session("first/model");
+        assert_eq!(
+            session.window_model.as_deref(),
+            Some("first/model"),
+            "the startup answer names its model"
+        );
+        // The swap itself is the first announcement, from `swap_model`: this
+        // test only has the constructor's seeding to check, so it drives
+        // `apply_list` the way a landed fetch does after a swap.
+        session.model = "second/model".into();
+        session.window = 1_000;
+        session.window_source = "default";
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        session.ui = Some(tx);
+        let mut cache = crate::models::Cache::new(
+            "openrouter",
+            "https://example.invalid/v1",
+            vec![crate::models::ModelInfo {
+                id: "second/model".into(),
+                context: Some(262_144),
+                tools: None,
+                vision: None,
+                parallel_calls: None,
+                reasoning_effort: None,
+            }],
+            0,
+        );
+        cache.fetched_at_ms = crate::models::now_ms();
+        session.apply_list(ModelList {
+            cache: Some(cache),
+            fetched: true,
+            why: None,
+        });
+        let announced: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                UiEvent::Info(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(announced.len(), 1, "one line, once: {announced:?}");
+        assert!(
+            announced[0].contains("262144 tokens (api)"),
+            "{announced:?}"
+        );
+        assert_eq!(session.window, 262_144);
+        assert_eq!(session.window_source, "api");
+
+        // A second answer for the same model is silent: the number did not move
+        // for a new model, so there is nothing new to say.
+        session.apply_list(ModelList {
+            cache: None,
+            fetched: true,
+            why: None,
+        });
+        assert!(
+            rx.try_recv().is_err(),
+            "the same model's answer is not announced twice"
         );
     }
 }
