@@ -245,8 +245,7 @@ and the final config surface), before M5-B.
 - **steer2 merged** (bac8851). On the maintainer's machine: `%APPDATA%\kelir\config.toml` migrated (`[providers.kelir]` -> `[providers.openrouter]`,
   `key_env = "KELIR_OPENROUTER_API_KEY"`; backup `config.toml.bak-pre-steer2`); the `max_steps` stopgap line **deleted** (unlimited is the
   default since STEER-4); the copied `KELIR_GO_API_KEY` removed from the user environment and from the private `.env` (kelir reads
-  opencode's store directly; `kelir doctor` verified: expires 2026-11-24, read in 383 ms). NOTE: the maintainer's own installed
-  `~/.cargo/bin/kelir.exe` is an OLD build (default 100 steps, old provider rules): reinstall with `cargo install --path . --locked`
-  when no kelir pane is using it.
+  opencode's store directly; `kelir doctor` verified: expires 2026-11-24, read in 383 ms). The maintainer's own installed `~/.cargo/bin/kelir.exe` was reinstalled from main (bca5a61) on 2026-11-20 and verified (kelir doctor ok,
+  no step cap by default): nothing to do. (Earlier note saying it was an old build is obsolete.)
 - Pinned binary now kelir-s5.exe (steer2, steer5, steer6, steer4).
 - Running: steer7 (t145), buildinfrafix (t148), tui2fix2 (t14d). Next: steer1fix/steer8/steer9/steer11 as slots free; then merges of buildinfrafix, tui2.
