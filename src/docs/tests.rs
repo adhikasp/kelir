@@ -658,12 +658,8 @@ fn a_misspelt_topic_suggests_the_one_that_was_meant() {
     // Nothing close: no suggestion rather than a wrong one.
     assert!(suggestions("zzzz").is_empty(), "{:?}", suggestions("zzzz"));
     assert!(suggestions("").is_empty());
-    // The fallback: a word from the *body* still points at the file.
-    let hits = matching("blobs");
-    assert!(
-        hits.iter().any(|topic| topic.name == "files"),
-        "the summary search misses `blobs`: {hits:?}"
-    );
+    // The last fallback: a word that is in a body and nowhere in a name.
+    assert_eq!(suggestions("blobs").first(), Some(&"files"));
 }
 
 #[test]

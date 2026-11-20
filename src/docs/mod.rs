@@ -105,17 +105,6 @@ pub fn topic(name: &str) -> Option<&'static Topic> {
         .find(|topic| topic.name.eq_ignore_ascii_case(name))
 }
 
-/// The topics whose name or summary holds `word`.
-fn matching(word: &str) -> Vec<&'static Topic> {
-    let word = word.to_ascii_lowercase();
-    TOPICS
-        .iter()
-        .filter(|topic| {
-            topic.name.to_ascii_lowercase().contains(&word)
-                || topic.summary.to_ascii_lowercase().contains(&word)
-        })
-        .collect()
-}
 /// The closest topic names for an unknown one, for the suggestion line. Two
 /// signals, cheapest first: a name that starts with what was typed, then a
 /// shared prefix; failing both, the terms that appear most often in the
@@ -141,7 +130,23 @@ pub fn suggestions(name: &str) -> Vec<&'static str> {
         .filter(|(score, _)| *score > 1)
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    if ranked.is_empty() {
+        // No name is close: the word may still be *in* a body, which is the
+        // last signal (`blobs` -> `files`).
+        return by_occurrences(&wanted);
+    }
     ranked.into_iter().map(|(_, name)| name).take(3).collect()
+}
+
+/// The topics whose bodies hold `word` most often, best first.
+fn by_occurrences(word: &str) -> Vec<&'static str> {
+    let mut ranked: Vec<(usize, &'static str)> = TOPICS
+        .iter()
+        .map(|topic| (occurrences(word, topic.body), topic.name))
+        .filter(|(count, _)| *count > 0)
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    ranked.into_iter().map(|(_, name)| name).take(2).collect()
 }
 
 fn common_prefix(a: &str, b: &str) -> u32 {
@@ -149,8 +154,7 @@ fn common_prefix(a: &str, b: &str) -> u32 {
 }
 
 /// How many times `word` occurs in the topic's body (case-insensitive): the
-/// last signal [`suggestions`] falls back on, so `diagnose` finds
-/// `troubleshooting`.
+/// last signal [`suggestions`] falls back on, so `blobs` finds `files`.
 pub fn occurrences(word: &str, body: &str) -> usize {
     if word.is_empty() {
         return 0;
@@ -642,8 +646,6 @@ pub fn cli(args: &crate::cli::DocsArgs) -> u8 {
             let close = suggestions(name);
             if !close.is_empty() {
                 eprintln!("  did you mean: {}?", close.join(", "));
-            } else if let Some(topic) = matching(name).first() {
-                eprintln!("  does it mention `{}`?", topic.name);
             }
             eprintln!("  `kelir docs --list` names them all");
             1

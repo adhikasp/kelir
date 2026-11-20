@@ -225,11 +225,6 @@ pub fn named(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-/// [`named`], as an OS string.
-pub fn named_os(name: &str) -> Option<OsString> {
-    std::env::var_os(name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
