@@ -434,6 +434,12 @@ struct Session {
     /// the field used to make every step a hard error until the person found
     /// the config key.
     refused_fields: BTreeSet<String>,
+    /// The seq of the newest human prompt already scored (or skipped) for the
+    /// pushed hint; a later one is scored at the next `before_step`.
+    hint_seen: u64,
+    /// The hint scorer, built on first use: `None` outer is "not tried yet",
+    /// `None` inner is "unavailable" (a note was already written).
+    hint_scorer: Option<Option<std::sync::Arc<dyn crate::hint::Scorer>>>,
     /// The sources in this context, re-checked at every boundary: an edit on
     /// disk becomes a `source` message, never a system rewrite.
     watch: crate::sources::Watch,
@@ -1406,7 +1412,18 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             dir.display()
         ))
     })?;
-    let system = render_system(&cfg, &cwd);
+    // The one Herdr line: asked once, here, with a deadline; a pane that cannot
+    // answer is a note, never a failed start.
+    // Only the root asks: a child inherits the pane id but is not the pane's agent.
+    let probe = if opts.child.is_some() {
+        crate::herdr_ctx::Probe::default()
+    } else {
+        tokio::task::spawn_blocking(crate::herdr_ctx::probe)
+            .await
+            .unwrap_or_default()
+    };
+    let mut system = render_system(&cfg, &cwd, probe.line.as_deref());
+    system.warnings.extend(probe.note);
     // The address this session is expected to use; `drive` re-reads it after
     // `ipc::bind`, because Unix may fall back to a shorter socket path.
     let sock = ipc::value(&dir, &id);
@@ -1696,6 +1713,8 @@ impl Session {
             mcp_pending: std::collections::HashMap::new(),
             mcp_channel_queue: Vec::new(),
             refused_fields: BTreeSet::new(),
+            hint_seen: 0,
+            hint_scorer: None,
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
             compact_request: None,
@@ -1742,6 +1761,15 @@ impl Session {
         // again (F8).
         if let Some(read) = prepared.resume {
             session.watch = crate::sources::Watch::rebuild(&read.events, &session.dir);
+            // Prompts the log already holds were handled by the process that
+            // wrote them.
+            session.hint_seen = read
+                .events
+                .iter()
+                .filter(|event| matches!(event.body, EventBody::User { .. }))
+                .map(|event| event.seq)
+                .max()
+                .unwrap_or(0);
             // A turn that was in flight continues without a new task.
             session.has_task |= read.in_flight;
             session.reopen(read)?;
@@ -3464,6 +3492,23 @@ impl Session {
     fn apply_view(&mut self, named: &str) -> Result<(String, u64), String> {
         let path = self.check_view(named)?;
         let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        // Audio and video are stored with a note, never sent: a `source` event
+        // of kind `attachment-note` whose text says where the file is.
+        if let Some(kind) = crate::attachments::media_kind(&path) {
+            let seq = crate::attachments::next_seq(&self.dir);
+            let rel = crate::attachments::save_media(&self.dir, seq, &path)
+                .map_err(|error| format!("view: {error}"))?;
+            self.record(EventBody::Source {
+                kind: crate::attachments::MEDIA_SOURCE_KIND.to_string(),
+                name: rel.clone(),
+                text: Some(Payload::text(crate::attachments::media_note(
+                    kind, &rel, bytes,
+                ))),
+                path: Some(rel.clone()),
+            })?;
+            self.sync();
+            return Ok((rel, bytes));
+        }
         // The image is copied into the session's attachments dir, so the
         // request does not depend on a path outside the session (and a later
         // resume still finds it).
@@ -3488,11 +3533,33 @@ impl Session {
                 crate::util::path_string(&path)
             ));
         }
+        if crate::attachments::media_kind(&path).is_some() {
+            let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+            if bytes > crate::attachments::MEDIA_MAX_BYTES {
+                return Err(format!(
+                    "view: {} is {} (the limit for audio and video is {})",
+                    crate::util::path_string(&path),
+                    crate::attachments::bytes_label(bytes),
+                    crate::attachments::bytes_label(crate::attachments::MEDIA_MAX_BYTES)
+                ));
+            }
+            return Ok(path);
+        }
         let mime = crate::attachments::mime_of(&path);
         if mime == "application/octet-stream" {
+            // A PDF is refused on purpose (m5bfix F3): kelir sends no document
+            // formats, only images; the message says what to do instead.
+            let pdf = path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
             return Err(format!(
-                "view: {} is not an image kelir knows (png, jpg, gif, webp)",
-                crate::util::path_string(&path)
+                "view: {} is not an image kelir knows (png, jpg, gif, webp){}",
+                crate::util::path_string(&path),
+                if pdf {
+                    "; a PDF is not read: extract its text with a tool, or render pages to png and view those"
+                } else {
+                    ""
+                }
             ));
         }
         let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
@@ -3610,6 +3677,22 @@ impl Session {
                 "» source deleted on disk: {}",
                 crate::util::path_string(&removed.path)
             )));
+            // The model curates its memory, so a note it can no longer find
+            // must not stay a live fact in its context (m5bfix N2): a one-line
+            // tail message, the system prefix untouched.
+            if removed.kind == crate::sources::SourceKind::Memory {
+                // Recorded directly, not through `record_source`: that would
+                // re-arm the watcher and announce the same absence every time.
+                self.record(EventBody::Source {
+                    kind: removed.kind.event_kind().to_string(),
+                    name: removed.name.clone(),
+                    text: Some(Payload::text(format!(
+                        "memory note {} was deleted; disregard its earlier text",
+                        removed.name
+                    ))),
+                    path: Some(crate::util::path_string(&removed.path)),
+                })?;
+            }
         }
         let changes = self.watch.changes();
         let count = changes.len();
@@ -3636,10 +3719,188 @@ impl Session {
                 crate::util::path_string(&path)
             )));
         }
+        // A memory note created since the start (the common case: the model
+        // wrote a new file) is announced like a changed one.
+        let mut count = count;
+        if let Some(dir) = self.cfg.memory_dir.clone() {
+            let dir = crate::memory::resolve(&dir, &self.ctx.cwd);
+            for found in crate::memory::unseen(&dir, self.watch.tracked()) {
+                self.record_source(
+                    found.kind,
+                    &found.name,
+                    &found.text,
+                    &crate::sources::SourcePath::File(found.path.clone()),
+                )?;
+                self.emit(UiEvent::Info(format!(
+                    "» new memory note: {}",
+                    crate::util::path_string(&found.path)
+                )));
+                count += 1;
+            }
+        }
         if count > 0 {
             self.sync();
         }
         Ok(count)
+    }
+
+    /// The pushed hint: one scoring call for the newest human prompt, answered
+    /// as a `source` message (kind `hint`) at the tail. Fails open in every
+    /// way: no scorer, no key, a timeout or garbage is at most one `error`
+    /// note and the turn goes on without it. The system prefix is never
+    /// touched, so the provider's cache of everything before the hint stays.
+    async fn maybe_hint(&mut self) {
+        let Some(config) = self.cfg.hint.clone() else {
+            return;
+        };
+        // The newest human prompt not scored yet. A job's wake-up is not a
+        // prompt, and a prompt is scored once however many steps it takes.
+        let Some((seq, prompt)) = self
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.body {
+                EventBody::User { text, from, .. } if from != "job" => {
+                    Some((event.seq, text.resolve_text(&self.dir).unwrap_or_default()))
+                }
+                _ => None,
+            })
+        else {
+            return;
+        };
+        if seq <= self.hint_seen {
+            return;
+        }
+        self.hint_seen = seq;
+        if self.hint_scorer.is_none() {
+            let built = self.build_scorer(&config).await;
+            self.hint_scorer = Some(match built {
+                Ok(scorer) => Some(scorer),
+                Err(why) => {
+                    self.hint_note(&format!("hint: off for this session ({why})"));
+                    None
+                }
+            });
+        }
+        let Some(Some(scorer)) = self.hint_scorer.clone() else {
+            return;
+        };
+        let mut places = crate::sources::places(
+            &self.ctx.cwd,
+            &self.cfg.skills_dirs,
+            Some(crate::paths::config_dir()),
+        );
+        places.memory_dir = None;
+        let candidates = crate::hint::catalogue(&places);
+        match crate::hint::hint_for(scorer.as_ref(), &prompt, &candidates, config.timeout).await {
+            Ok(Some(text)) => {
+                self.record_hint_usage(scorer.as_ref());
+                let recorded = self.record(EventBody::Source {
+                    kind: crate::hint::SOURCE_KIND.to_string(),
+                    name: crate::hint::SOURCE_NAME.to_string(),
+                    text: Some(Payload::text(text)),
+                    path: None,
+                });
+                if recorded.is_ok() {
+                    self.sync();
+                }
+            }
+            Ok(None) => self.record_hint_usage(scorer.as_ref()),
+            Err(why) => {
+                self.record_hint_usage(scorer.as_ref());
+                self.hint_note(&format!("hint: skipped ({why})"));
+            }
+        }
+    }
+
+    /// The scoring call's own spend, as a `usage` event of kind `hint` (m5bfix
+    /// F2): it counts in `ctl status` and the cost warnings, and the cache
+    /// ratio (which reads `kind: None`) stays about the main model only. The
+    /// cost is the table's estimate for the scorer's model, or the provider's.
+    fn record_hint_usage(&mut self, scorer: &dyn crate::hint::Scorer) {
+        let Some(usage) = scorer.take_usage() else {
+            return;
+        };
+        let Some(config) = self.cfg.hint.clone() else {
+            return;
+        };
+        let price = crate::spend::lookup(&config.provider, &config.model, &self.cfg.prices);
+        let (cost, source) = crate::spend::resolve(
+            usage.cost,
+            price.as_ref().map(|(price, _)| price),
+            usage.prompt_tokens,
+            usage.cached_tokens,
+            usage.completion_tokens,
+        );
+        let _ = self.record(EventBody::Usage {
+            step: 0,
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            cached_tokens: usage.cached_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            cost,
+            cost_source: Some(source.as_str().into()),
+            allowance: None,
+            kind: Some("hint".into()),
+        });
+        self.note_spend();
+    }
+
+    fn hint_note(&mut self, message: &str) {
+        let _ = self.record(EventBody::Error {
+            location: "source".into(),
+            message: message.to_string(),
+            retryable: false,
+            status: None,
+            attempt: None,
+            retry_in_ms: None,
+        });
+    }
+
+    /// The scorer for `[hint]`: the named provider's base URL (or the
+    /// configured `endpoint`) and key. The key is resolved off the async
+    /// thread and held in memory only. Without a key a provider endpoint is
+    /// "off"; a configured `endpoint` is tried keyless (a local server).
+    async fn build_scorer(
+        &self,
+        config: &crate::config::HintConfig,
+    ) -> Result<std::sync::Arc<dyn crate::hint::Scorer>, String> {
+        let mut provider = self
+            .cfg
+            .provider(&config.provider)
+            .map_err(|error| error.to_string())?;
+        if config.provider == self.provider_name {
+            provider.key = self.active_provider.key.clone();
+        } else {
+            let resolved = tokio::task::spawn_blocking(move || {
+                let mut provider = provider;
+                let outcome = crate::credentials::resolve(&mut provider);
+                (provider, outcome)
+            })
+            .await
+            .map_err(|_| "the key lookup failed".to_string())?;
+            provider = resolved.0;
+            if let Err(why) = resolved.1
+                && config.endpoint.is_none()
+            {
+                return Err(why);
+            }
+        }
+        let base = config
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| provider.base_url.clone());
+        // A provider's key goes to that provider's origin only (m5bfix F1): a
+        // `[hint] endpoint` on another host is called without a key, as the
+        // docs say for a local server, never with the session's key.
+        if config.endpoint.is_some() && !crate::hint::same_origin(&base, &provider.base_url) {
+            provider.key = None;
+        }
+        if provider.key.is_none() && config.endpoint.is_none() {
+            return Err("no API key".to_string());
+        }
+        let chat = crate::hint::Chat::new(&base, provider.key.clone(), &config.model)?;
+        Ok(std::sync::Arc::new(chat))
     }
 
     fn record_messages(&mut self, messages: Vec<Message>) -> Result<(), String> {
@@ -4314,6 +4575,7 @@ impl Session {
             // Sources edited on disk while the turn ran: one `source` message
             // each, at the tail. Never a system rewrite.
             self.check_sources()?;
+            self.maybe_hint().await;
             // A key that is within two minutes of its expiry is re-read before
             // the request: opencode refreshes its token whenever it runs, so a
             // copied-out one goes stale before its own `expires` does
@@ -5525,10 +5787,16 @@ fn new_session_id() -> String {
 /// conventional ones; the base prompt is the config's, the machine
 /// `prompt.md`, or the embedded default (the project's `.kelir/prompt.md` wins
 /// inside [`crate::sources::render_system`]).
-fn render_system(cfg: &Config, cwd: &Path) -> crate::sources::Rendered {
-    let places = crate::sources::places(cwd, &cfg.skills_dirs, Some(crate::paths::config_dir()));
+fn render_system(cfg: &Config, cwd: &Path, herdr: Option<&str>) -> crate::sources::Rendered {
+    let mut places =
+        crate::sources::places(cwd, &cfg.skills_dirs, Some(crate::paths::config_dir()));
+    places.memory_dir = cfg
+        .memory_dir
+        .as_deref()
+        .map(|dir| crate::memory::resolve(dir, cwd));
     let date = today();
     crate::sources::render_system(&crate::sources::Inputs {
+        herdr,
         base: &cfg.system_prompt,
         base_path: cfg.prompt_path.as_deref(),
         places: &places,
@@ -5670,6 +5938,8 @@ mod tests {
                 compact_prompt: String::new(),
                 skills_dirs: vec![],
                 compact_keep: 0,
+                memory_dir: None,
+                hint: None,
                 promote_after: std::time::Duration::from_secs(0),
                 retry: crate::retry::Policy::default(),
                 warn_prompt_tokens: Some(crate::spend::DEFAULT_WARN_PROMPT_TOKENS),
@@ -5705,6 +5975,8 @@ mod tests {
             mcp_pending: std::collections::HashMap::new(),
             mcp_channel_queue: Vec::new(),
             refused_fields: BTreeSet::new(),
+            hint_seen: 0,
+            hint_scorer: None,
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
             compact_request: None,
@@ -5743,6 +6015,7 @@ mod tests {
     #[test]
     fn system_prompt_has_a_date_and_no_time() {
         let system = crate::sources::render_system(&crate::sources::Inputs {
+            herdr: None,
             base: "base",
             base_path: None,
             places: &crate::sources::Places::default(),
@@ -5777,6 +6050,8 @@ mod tests {
             compact_prompt: String::new(),
             skills_dirs: vec![],
             compact_keep: 0,
+            memory_dir: None,
+            hint: None,
             promote_after: std::time::Duration::from_secs(0),
             retry: crate::retry::Policy::default(),
             warn_prompt_tokens: Some(crate::spend::DEFAULT_WARN_PROMPT_TOKENS),
@@ -5784,8 +6059,8 @@ mod tests {
             children: Default::default(),
             prices: Default::default(),
         };
-        let a = render_system(&cfg, Path::new("tmp"));
-        let b = render_system(&cfg, Path::new("tmp"));
+        let a = render_system(&cfg, Path::new("tmp"), None);
+        let b = render_system(&cfg, Path::new("tmp"), None);
         assert_eq!(a, b);
     }
 

@@ -36,6 +36,8 @@ pub enum Command {
     View(ViewArgs),
     /// Background jobs: run, ls, out, wait, cancel.
     Bg(BgArgs),
+    /// Print exactly what the model will see on its next request.
+    Observe(ObserveArgs),
     /// MCP servers as a CLI: `ls`, `<server> ls`, `<server> <tool> [k=v …]`.
     Mcp(McpArgs),
     /// Ask a side question on a snapshot of this session (`brief "<question>"`).
@@ -164,7 +166,7 @@ pub struct CtlArgs {
     /// error if it is not running).
     #[arg(value_name = "SESSION")]
     pub session: String,
-    /// The verb: say, later, stop, model, tools, compact, skills, view, cancel, status, end.
+    /// The verb: say, later, stop, model, tools, compact, skills, view, observe, cancel, status, end.
     #[arg(value_name = "VERB")]
     pub verb: String,
     /// Text for `say`/`later`/`stop`, or one JSON object with the verb's args.
@@ -247,6 +249,20 @@ pub struct ViewArgs {
     /// first), or any path.
     #[arg(value_name = "PATH")]
     pub path: String,
+}
+
+/// `kelir observe <session> [--raw]`: the next request, read from the log.
+#[derive(Debug, Args, Clone)]
+pub struct ObserveArgs {
+    /// Session id, a unique prefix, or `latest`.
+    #[arg(value_name = "SESSION")]
+    pub session: String,
+    /// Print only the exact JSON request body that would be sent.
+    #[arg(long)]
+    pub raw: bool,
+    /// Config file to use instead of the machine/project search.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }
 
 /// `kelir docs [topic]`: the reference, embedded in this binary, so a session

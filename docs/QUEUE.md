@@ -296,3 +296,18 @@ implementer pauses; the retro/introspective passes keep reading the transcripts 
   Running: steer8 (cost/status), M5-B, M6 merge+STEER-7 token integration (m6m).
 
 - 2026-11-20 19:20: **M6 merged**, **steer8 merged**. In flight: m5bfix (M5-B review fixes; F1 credential to the hint endpoint first). Next: M7 (children as CLI + brief), steer9 (de-flake), then M8 (gates + builtin skills delegation/herdr), M9, M10, M11, M12.
+
+- 2026-11-20 21:10: **M5-B merged** (M5 complete). M7 running (Claude). Next: steer9 (de-flake), M8 (gates + builtin skills `delegation` and `herdr`), M9 (jobs, named sessions, STATUS), M10 (Telegram), M11 (attach viewer + notifications), M12 (publish prep). The steer12 AFTER measurement can now be taken from a kelir session on the OpenRouter fallback.
+
+- 2026-11-20 21:05: **INCIDENT**: ~1000 leaked `sh.exe` (`sh <worktree>/Cargo.toml`) from the M8 worktree exhausted a Linux box's RAM (20:26-20:29; killed by an admin). Cause under investigation by the M8 worker (suspected gate runner recursion/retry or an empty/invalid gate command). M8 must not merge until the cap + recursion guard + leak assertions exist and a fresh reviewer hammers the gate runner (misbehaving gates, self-spawning gates, empty commands). Rule reminder: AGENTS.md "No leaked processes".
+
+## State when the Claude orchestrator stopped (2026-11-20 ~21:30, usage limit; Claude 5-hour limit also hit on workers, resets ~00:30 Bangkok)
+
+**On main (all gated Windows + Linux, each reviewed by a fresh reviewer, findings fixed):** M0-M6, M5-A, M5-B, STEER-1/2/4/5/6/7/8/11/12, TUI v2, tui3, BUILD-INFRA (gate.sh, nextest, safe prune, core-dump fix).
+**In flight / waiting (branches in C:/Users/the maintainer/kelir-wt/, all Claude Code panes; relaunch after the reset with `kelir-scratch/launch-claude.sh <worktree> <prompt>`):**
+- **M7** (children as CLI): worktree `m7`, branch job/m7, ready at 8c785d4 (gate green on its own base); `git merge main` conflicts in tests/support/mod.rs + docs/PROGRESS.md: the resolver job m7m (prompt kelir-scratch/jobs/m7m.prompt) was cut off by the limit, relaunch it, then gate, then a fresh reviewer (children, orphans, caps, STEER-7 trust model), then merge.
+- **M8** (gates + builtin skills delegation/herdr): worktree `m8`, ready at 01aab61 (gate green at 818c712, 1211 tests). **Do not merge before a fresh reviewer hammers the gate runner**: an incident (~1000 leaked `sh.exe`, RAM exhausted on a Linux box) came from its tests; hardening added (8-live cap, no gates inside gates, leak guards). Review focus: misbehaving/self-spawning/empty-command gates, cap holds, no leaks, env scrub, fail-open, once-per-turn block.
+**Still to do:** steer9 (de-flake e2e; every gate summary names the flakes), M9 (jobs, named sessions, STATUS), M10 (Telegram via MCP channel), M11 (attach viewer + notifications), M12 (publish prep: history scrub, CI first run, README/LICENSE; **the push needs the maintainer's explicit yes**). steer12 AFTER metrics need a kelir run on the OpenRouter fallback.
+**Housekeeping:** a watchdog (`kelir-scratch/shwatch.ps1`, hidden powershell, auto-stops after 12 h) kills only `sh.exe` processes running a `kelir-wt/*/Cargo.toml` (the incident pattern); stop it with `Get-CimInstance Win32_Process -Filter "Name='powershell.exe'"` where CommandLine matches shwatch. Keep Claude concurrency <= 3 (the limit is hit fast with more).
+
+- 2026-11-21: usage limit reset; resumed. Running now (Claude): **M8 review** (t16y: gate-runner hammering with a process watchdog) and **m7m** (t16z: merge main into M7). Next: M7 gate + review, M8 fixes + merge, steer9, M9..M12.

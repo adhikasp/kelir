@@ -125,6 +125,10 @@ pub const VARS: &[Var] = &[
         "NO_COLOR",
         "non-empty (the convention): no colours; attributes and glyphs stay",
     ),
+    read(
+        "HC_TERMINAL_ID",
+        "set by herdr-core in every pane: its presence makes kelir ask `hc get` once for the pane/space/tab line in the frozen system prompt",
+    ),
     read("TERM", "`dumb` picks the ASCII glyph set"),
     read(
         "TERM_PROGRAM",
