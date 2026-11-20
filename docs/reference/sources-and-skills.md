@@ -59,6 +59,12 @@ itself (config keys, CLI, verbs, providers, files) and points at
 no checkout on disk, which is the point — a session that cannot find the repo can
 still read how kelir works.
 
+- **Layer:** machine, so a project skill called `kelir` replaces it.
+- **No file:** `sources[]` records an empty path and `SourcePath::Builtin` is the
+  typed absence of one, so there is nothing to watch, re-read or announce as
+  changed. Editing the repo's copy takes a rebuild, and the drift test fails if
+  the file stops being a valid Agent Skill.
+
 ## Hints, memory and channels
 
 A `source` event is how *anything* that arrives after the start reaches the
