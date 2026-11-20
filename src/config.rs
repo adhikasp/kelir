@@ -130,6 +130,14 @@ pub struct Config {
     /// `[prices."<model>"]`: per-million-token prices that override and extend
     /// the built-in table.
     pub prices: BTreeMap<String, crate::spend::Price>,
+    /// Gates declared under `[gates]` (M8); skills add theirs at session start.
+    pub gates: Vec<crate::gates::GateDef>,
+    /// Gates declared by the *project's* `.kelir/config.toml` (M8 fix F6). They run
+    /// only when the project is trusted: `trusted_projects` (machine layer) names
+    /// it, or `KELIR_TRUST_PROJECT` is set.
+    pub project_gates: Vec<crate::gates::GateDef>,
+    /// `trusted_projects`: directories whose project-layer gates may run.
+    pub trusted_projects: Vec<PathBuf>,
 }
 
 /// The pushed hint, configured: which model scores, and where.
@@ -198,6 +206,11 @@ struct RawConfig {
     max_children: Option<u32>,
     max_live_descendants: Option<u32>,
     prices: BTreeMap<String, RawPrice>,
+    /// `[gates]`: event name -> command, table or list (see `crate::gates`).
+    gates: Option<toml::Value>,
+    /// Directories whose project-layer gates may run (machine layer only).
+    #[serde(default)]
+    trusted_projects: Vec<PathBuf>,
 }
 
 /// One `[prices."<model>"]` table: dollars per million tokens.
@@ -310,6 +323,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
 
     let mut merged = toml::Value::Table(Default::default());
     let mut sources: Vec<PathBuf> = Vec::new();
+    let mut project_gates: Option<toml::Value> = None;
     match explicit {
         Some(path) => {
             let value = read_toml(&path)?;
@@ -323,7 +337,18 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
                 sources.push(machine);
             }
             if let Some(project) = find_project_config() {
-                merge(&mut merged, read_toml(&project)?);
+                let mut layer = read_toml(&project)?;
+                // The project layer cannot vouch for itself, and its gates are
+                // kept apart: they run only in a trusted project (F6).
+                if let Some(table) = layer.as_table_mut() {
+                    project_gates = table.remove("gates");
+                    if table.remove("trusted_projects").is_some() {
+                        eprintln!(
+                            "kelir: warning: `trusted_projects` in a project config is ignored: it is a machine setting"
+                        );
+                    }
+                }
+                merge(&mut merged, layer);
                 sources.push(project);
             }
         }
@@ -482,6 +507,26 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
                 .unwrap_or(crate::child::DEFAULT_MAX_LIVE),
         },
         prices: prices(&raw.prices)?,
+        gates: match &raw.gates {
+            Some(value) => crate::gates::from_toml(value).map_err(ConfigError)?,
+            None => Vec::new(),
+        },
+        project_gates: match &project_gates {
+            Some(value) => crate::gates::from_toml(value)
+                .map_err(|error| ConfigError(format!("project config: {error}")))?
+                .into_iter()
+                .map(|mut def| {
+                    def.origin = "project config".into();
+                    def
+                })
+                .collect(),
+            None => Vec::new(),
+        },
+        trusted_projects: raw
+            .trusted_projects
+            .iter()
+            .map(|path| expand_home(&path.to_string_lossy()))
+            .collect(),
     })
 }
 

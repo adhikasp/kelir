@@ -280,20 +280,32 @@ const INSTRUCTION_FILES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 pub const BUILTIN_SKILL_NAME: &str = "kelir";
 pub const BUILTIN_SKILL: &str = include_str!("docs/skill-kelir.md");
 
-/// The builtin skill, if it is a valid Agent Skill (a broken one would be a
-/// build-time typo, and the drift test proves it is not).
-fn builtin_skill() -> Option<Found> {
-    // A broken builtin is a build-time typo, not a skipped skill: the drift test
-    // parses it too, so this is the assertion and not a silent `None`.
-    parse_skill(BUILTIN_SKILL).ok()?;
-    Some(Found {
-        kind: SourceKind::Skill,
-        name: BUILTIN_SKILL_NAME.to_string(),
-        path: PathBuf::new(),
-        text: BUILTIN_SKILL.to_string(),
-        layer: Layer::Machine,
-        builtin: true,
-    })
+/// The skills compiled into the binary besides `kelir` (M8): guidance on
+/// delegating to children and on living inside a Herdr pane. Each is an Agent
+/// Skill with no file on disk, discovered like any other skill (the pushed hint
+/// can name it, steering can inject it) and replaced by a skills directory
+/// entry of the same name.
+pub const BUILTIN_SKILLS: [(&str, &str); 3] = [
+    (BUILTIN_SKILL_NAME, BUILTIN_SKILL),
+    ("delegation", include_str!("docs/skill-delegation.md")),
+    ("herdr", include_str!("docs/skill-herdr.md")),
+];
+
+/// The builtin skills, each a valid Agent Skill (a broken one would be a
+/// build-time typo, and the drift test proves none is).
+fn builtin_skills() -> Vec<Found> {
+    BUILTIN_SKILLS
+        .iter()
+        .filter(|(_, text)| parse_skill(text).is_ok())
+        .map(|(name, text)| Found {
+            kind: SourceKind::Skill,
+            name: (*name).to_string(),
+            path: PathBuf::new(),
+            text: (*text).to_string(),
+            layer: Layer::Machine,
+            builtin: true,
+        })
+        .collect()
 }
 
 /// Discover every machine and project source for `places`, dropping the notes.
@@ -353,9 +365,7 @@ pub fn discover_with_notes(places: &Places, notes: &mut Vec<String>) -> Vec<Foun
     }
     // The skill kelir ships about itself: machine layer, so a project (or
     // machine) skill directory of the same name replaces it.
-    if let Some(skill) = builtin_skill() {
-        found.push(skill);
-    }
+    found.extend(builtin_skills());
     // Skills directories, machine layer then project. A skill's name is its
     // directory's name; a project skill of that name wins.
     for directory in places.skills_directories() {
@@ -617,17 +627,29 @@ pub fn render_base(base: &str, places: &Places) -> String {
         .iter()
         .map(|dir| format!("  - {}", crate::util::path_string(dir)))
         .collect();
+    // The builtin skills have no file to pull: they are named here, with what
+    // each is for and the one command that reads it (M8 fix F5).
+    let mut lines = directories;
+    lines.push(builtin_listing());
+    let listing = lines.join("\n");
     if base.contains(SKILLS_PLACEHOLDER) {
-        return base.replace(SKILLS_PLACEHOLDER, &directories.join("\n"));
+        return base.replace(SKILLS_PLACEHOLDER, &listing);
     }
-    if directories.is_empty() {
-        return base.to_string();
+    format!("{}\n\n# Skills\n{}", base.trim_end(), listing)
+}
+
+/// The builtin skills as the prompt shows them: `name: description`, and the
+/// command that prints one.
+pub fn builtin_listing() -> String {
+    let mut out =
+        String::from("  - built in (no file; read one with `kelir docs --skill <name>`):");
+    for (name, text) in BUILTIN_SKILLS {
+        let description = parse_skill(text)
+            .map(|skill| skill.description)
+            .unwrap_or_default();
+        out.push_str(&format!("\n    - {name} - {description}"));
     }
-    format!(
-        "{}\n\n# Skills\n{}",
-        base.trim_end(),
-        directories.join("\n")
-    )
+    out
 }
 
 /// Parse a `SKILL.md`: the Agent Skills front matter, and the body.
@@ -1235,6 +1257,26 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         }
     }
 
+    /// M8 fix F5: a builtin skill has no path, so the prompt itself must name
+    /// each one, say what it is for, and give the command that prints it.
+    #[test]
+    fn the_rendered_prompt_names_every_builtin_skill_and_how_to_read_it() {
+        let dir = temp_dir("builtin-listing");
+        let places = places_in(&dir);
+        let rendered = render_base(crate::config::DEFAULT_PROMPT, &places);
+        assert!(rendered.contains("kelir docs --skill <name>"), "{rendered}");
+        for (name, text) in BUILTIN_SKILLS {
+            let description = parse_skill(text).unwrap().description;
+            assert!(
+                rendered.contains(&format!("- {name} - {description}")),
+                "{name} is not advertised in:\n{rendered}"
+            );
+        }
+        // Also when a hand-written prompt has no placeholder.
+        let appended = render_base("BASE", &places);
+        assert!(appended.contains("- herdr - "), "{appended}");
+    }
+
     /// The prompt is a contract with the model: a line that survives a retro
     /// must not vanish in a later edit. This pins the *lines* (not the exact
     /// bytes, which wrap), so a rewording has to be deliberate.
@@ -1354,7 +1396,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             .iter()
             .filter(|item| item.kind == SourceKind::Skill)
             .collect();
-        assert_eq!(skills.len(), 2, "{skills:?}");
+        assert_eq!(skills.len(), 1 + BUILTIN_SKILLS.len(), "{skills:?}");
         let builtin = skills
             .iter()
             .find(|skill| skill.builtin)
@@ -1439,9 +1481,9 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         // Nothing on disk is a source: the only one is the skill the binary
         // carries, and it has no file to read or watch.
         let found = discover(&places);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].builtin, "{found:?}");
-        assert!(found[0].path.as_os_str().is_empty());
+        assert_eq!(found.len(), BUILTIN_SKILLS.len(), "{found:?}");
+        assert!(found.iter().all(|item| item.builtin), "{found:?}");
+        assert!(found.iter().all(|item| item.path.as_os_str().is_empty()));
         let rendered = render_system(&Inputs {
             herdr: None,
             base: "BASE",
@@ -1635,7 +1677,10 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         let names: Vec<&str> = rendered.sources.iter().map(|s| s.name.as_str()).collect();
         // The base prompt, the instruction file, and the builtin skill: a
         // skill's body is pull, so only its name and hash are here.
-        assert_eq!(names, vec!["prompt.md", "AGENTS.md", "kelir"]);
+        assert_eq!(
+            names,
+            vec!["prompt.md", "AGENTS.md", "delegation", "herdr", "kelir"]
+        );
         // The embedded default records an empty path and its kind, never a
         // sentinel a reader could mistake for a file (F2, F2b).
         assert_eq!(rendered.sources[0].path, "");

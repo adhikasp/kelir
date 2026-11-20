@@ -43,6 +43,10 @@ pub struct Observed {
     pub estimate: u64,
     pub steps: u32,
     pub cache: CacheStats,
+    /// The effective gate configuration (declarations only, no environment
+    /// values) and every gate run the log holds (M8).
+    pub gates: Vec<Value>,
+    pub fired: Vec<Value>,
 }
 
 /// Cache hit ratio from the `usage` events.
@@ -140,7 +144,71 @@ pub fn build(dir: &Path, id: &str, cfg: &Config) -> Result<Observed, String> {
         estimate: crate::compact::estimate_tokens(&messages),
         steps,
         cache: cache_stats(&events),
+        gates: effective_gates(&events, cfg),
+        fired: fired_gates(&events),
     })
+}
+
+/// The gates a session started with would have: `[gates]` from the config as
+/// it is now, plus skills bound with `kelir-gate` found from the session's cwd.
+fn effective_gates(events: &[LogEvent], cfg: &Config) -> Vec<Value> {
+    let cwd = events.iter().find_map(|event| match &event.body {
+        EventBody::SessionStarted { cwd, .. } => Some(std::path::PathBuf::from(cwd)),
+        _ => None,
+    });
+    let mut defs = cfg.gates.clone();
+    for def in cfg.project_gates.clone() {
+        crate::gates::push_unique(&mut defs, def);
+    }
+    let mut trusted = false;
+    if let Some(cwd) = cwd {
+        trusted = crate::gates::project_trusted(&cwd, &cfg.trusted_projects);
+        let places =
+            crate::sources::places(&cwd, &cfg.skills_dirs, Some(crate::paths::config_dir()));
+        let found = crate::sources::discover(&places);
+        for def in crate::gates::from_skills(&found, &mut Vec::new()) {
+            crate::gates::push_unique(&mut defs, def);
+        }
+    }
+    // An untrusted project's gates are listed too, marked, so `observe` shows why
+    // nothing ran.
+    let mut out = crate::gates::describe(&defs);
+    if !trusted {
+        for (value, def) in out.iter_mut().zip(&defs) {
+            if crate::gates::is_project_gate(def) {
+                value["trusted"] = serde_json::json!(false);
+            }
+        }
+    }
+    out
+}
+
+/// Every `gate` event of the log, in order.
+fn fired_gates(events: &[LogEvent]) -> Vec<Value> {
+    events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::Gate {
+                gate,
+                event: at,
+                decision,
+                reason,
+                ms,
+                rewritten,
+                error,
+            } => Some(serde_json::json!({
+                "seq": event.seq,
+                "gate": gate,
+                "event": at,
+                "decision": decision,
+                "reason": reason,
+                "ms": ms,
+                "rewritten": rewritten,
+                "error": error,
+            })),
+            _ => None,
+        })
+        .collect()
 }
 
 fn sources_of(events: &[LogEvent]) -> Vec<(String, String, bool)> {
@@ -236,6 +304,50 @@ pub fn render(observed: &Observed) -> String {
         None => {
             let _ = writeln!(out, "(none)");
         }
+    }
+    let _ = writeln!(
+        out,
+        "
+== gates ({}) ==",
+        observed.gates.len()
+    );
+    if observed.gates.is_empty() {
+        let _ = writeln!(out, "(none configured)");
+    }
+    for gate in &observed.gates {
+        let _ = writeln!(
+            out,
+            "  {:<14} {:<10} {}  [{}]",
+            gate["event"].as_str().unwrap_or(""),
+            gate["name"].as_str().unwrap_or(""),
+            gate["command"].as_str().unwrap_or(""),
+            gate["origin"].as_str().unwrap_or("")
+        );
+    }
+    let _ = writeln!(
+        out,
+        "
+== gates fired ({}) ==",
+        observed.fired.len()
+    );
+    for run in observed.fired.iter().rev().take(20).rev() {
+        let _ = writeln!(
+            out,
+            "  #{} {} {} -> {} ({} ms){}{}",
+            run["seq"],
+            run["event"].as_str().unwrap_or(""),
+            run["gate"].as_str().unwrap_or(""),
+            run["decision"].as_str().unwrap_or(""),
+            run["ms"],
+            match run["reason"].as_str() {
+                Some(reason) if !reason.is_empty() => format!(": {reason}"),
+                _ => String::new(),
+            },
+            match run["error"].as_str() {
+                Some(error) => format!("  [failed open: {error}]"),
+                None => String::new(),
+            }
+        );
     }
     let _ = writeln!(out, "\n== tools ({}) ==", observed.tools.len());
     let _ = writeln!(out, "{}", observed.tools.join(", "));

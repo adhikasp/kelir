@@ -50,6 +50,18 @@ pub fn path_string(path: &std::path::Path) -> String {
     path.display().to_string().replace('\\', "/")
 }
 
+/// `text` cut to at most `max` bytes, on a character boundary.
+pub fn truncate_bytes(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

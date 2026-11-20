@@ -278,9 +278,15 @@ async fn the_builtin_kelir_skill_is_live_in_a_session_with_no_repo() {
     // The body is not pushed (skills are pull), and the base prompt says where
     // the reference is.
     let system = started["system"]["text"].as_str().unwrap();
+    // M8 fix F5: the builtin skills are listed (name and description) because
+    // they have no file to find; the body is still never pushed.
     assert!(
-        !system.contains(&description),
-        "a skill description is a listing"
+        system.contains(&description),
+        "a builtin skill is listed by description"
+    );
+    assert!(
+        !system.contains("## The reference is inside the binary"),
+        "a skill body is pull"
     );
     assert!(system.contains("kelir docs"), "{system}");
     // `kelir docs` answers with the same text from inside a call's cwd.

@@ -466,6 +466,18 @@ struct Session {
     /// status and attempt, and whether it is a slot wait. Set and cleared by
     /// the same `Retrying`/`RetryingDone` events the screen gets.
     retry_wait: std::cell::Cell<Option<RetryWait>>,
+    /// The gates for this session (`[gates]` plus skills bound with
+    /// `kelir-gate`), `None` when there are none, which is the default.
+    gates: Option<Arc<crate::gates::Runner>>,
+    /// A `turn_end` gate already blocked this turn: it blocks at most once.
+    turn_blocked: bool,
+    /// Tool calls the turn has started, given to `turn_end` gates.
+    turn_tool_calls: u32,
+    /// The command-line task, held back until `session_start` gates ran and
+    /// `prompt_submit` gates saw it: (text, delivery).
+    initial_task: Option<(String, &'static str)>,
+    /// Problems found while reading gate declarations; logged once at start.
+    gate_notes: Vec<String>,
 }
 
 /// A retry or slot wait in progress: ends at, status, attempt, is-a-slot-wait.
@@ -1751,7 +1763,16 @@ impl Session {
             tally: crate::spend::Tally::default(),
             kids: children::Kids::new(&prepared.id, prepared.cfg.children, prepared.child.as_ref()),
             retry_wait: std::cell::Cell::new(None),
+            gates: None,
+            turn_blocked: false,
+            turn_tool_calls: 0,
+            initial_task: None,
+            gate_notes: Vec::new(),
         };
+        if session.kids.link.is_some() {
+            crate::gates::limit_for_child();
+        }
+        session.gates = session.build_gates();
         crate::child::set_lineage(session.kids.lineage.clone());
         session.tally = crate::spend::Tally::from_events(&session.events, session.warn());
         // The watcher re-checks the sources the frozen system was rendered
@@ -1817,12 +1838,7 @@ impl Session {
             })?;
         }
         if session.has_task {
-            session.record(EventBody::User {
-                text: prepared.task.clone().into(),
-                from: session.task_from().into(),
-                delivery: "now".into(),
-                attachments: Vec::new(),
-            })?;
+            session.submit_task(prepared.task.clone(), "now")?;
         }
         session.sync();
         Ok(session)
@@ -1995,12 +2011,7 @@ impl Session {
             // When a turn was in flight it lands after the unknown results the
             // model must read first, so it is `next` rather than `now`.
             let delivery = if read.in_flight { "next" } else { "now" };
-            self.record(EventBody::User {
-                text: self.pending_task.clone().into(),
-                from: self.task_from().into(),
-                delivery: delivery.to_string(),
-                attachments: Vec::new(),
-            })?;
+            self.submit_task(self.pending_task.clone(), delivery)?;
         } else {
             self.continue_a_turn_that_ends_on_an_answer()?;
         }
@@ -2075,6 +2086,198 @@ impl Session {
         Some((crate::util::path_string(&out), partial.bytes, partial.lines))
     }
 
+    // --------------------------------------------------------------- gates
+
+    /// Gates from `[gates]` and from skills bound with `kelir-gate`; `None`
+    /// when there are none (the default), so nothing below costs a thing.
+    fn build_gates(&mut self) -> Option<Arc<crate::gates::Runner>> {
+        // A kelir that a gate started runs no gates: a gate never triggers gates.
+        if crate::gates::started_by_a_gate(crate::envs::var("KELIR_GATE_EVENT").as_deref()) {
+            return None;
+        }
+        let mut defs = self.cfg.gates.clone();
+        for def in self.cfg.project_gates.clone() {
+            crate::gates::push_unique(&mut defs, def);
+        }
+        let places = crate::sources::places(
+            &self.ctx.cwd,
+            &self.cfg.skills_dirs,
+            Some(crate::paths::config_dir()),
+        );
+        let found = crate::sources::discover(&places);
+        let mut notes = Vec::new();
+        for def in crate::gates::from_skills(&found, &mut notes) {
+            crate::gates::push_unique(&mut defs, def);
+        }
+        let trusted = crate::gates::project_trusted(&self.ctx.cwd, &self.cfg.trusted_projects);
+        let defs = crate::gates::apply_trust(defs, trusted, &mut notes);
+        self.gate_notes = notes;
+        if defs.is_empty() {
+            return None;
+        }
+        Some(Arc::new(crate::gates::Runner::new(
+            defs,
+            self.ctx.shell.clone(),
+            self.ctx.cwd.clone(),
+            self.id.clone(),
+            self.dir.clone(),
+        )))
+    }
+
+    /// Whether any gate would run at `event` for `tool`.
+    fn gated(&self, event: crate::gates::Event, tool: Option<&str>) -> bool {
+        self.gates
+            .as_ref()
+            .is_some_and(|gates| gates.has(event, tool))
+    }
+
+    /// Log what the gate runner ran, one `gate` event each.
+    fn record_gate_runs(&mut self, runs: &[crate::gates::Run]) -> Result<(), String> {
+        for run in runs {
+            self.record(EventBody::Gate {
+                gate: run.gate.clone(),
+                event: run.event.clone(),
+                decision: run.decision.clone(),
+                reason: run.reason.clone(),
+                ms: run.ms,
+                rewritten: run.rewritten,
+                error: run.error.clone(),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Run the gates of one event and log every run. A session without gates
+    /// answers `Allow` without looking at the payload.
+    async fn gate(
+        &mut self,
+        event: crate::gates::Event,
+        tool: Option<&str>,
+        payload: Value,
+    ) -> Result<crate::gates::Verdict, String> {
+        let Some(gates) = self.gates.clone() else {
+            return Ok(crate::gates::Verdict::Allow);
+        };
+        if !gates.has(event, tool) {
+            return Ok(crate::gates::Verdict::Allow);
+        }
+        let chain = gates.run_event(event, tool, self.turn, payload).await;
+        self.record_gate_runs(&chain.runs)?;
+        self.sync();
+        Ok(chain.verdict)
+    }
+
+    /// Problems found reading gate declarations: logged once, never fatal.
+    fn flush_gate_notes(&mut self) {
+        for note in std::mem::take(&mut self.gate_notes) {
+            let _ = self.record(EventBody::Error {
+                location: "gate".into(),
+                message: note,
+                retryable: false,
+                status: None,
+                attempt: None,
+                retry_in_ms: None,
+            });
+        }
+    }
+
+    /// The command-line task: written at once, or held back for the gates
+    /// (`session_start`, then `prompt_submit`) when there are any.
+    fn submit_task(&mut self, text: String, delivery: &'static str) -> Result<(), String> {
+        if self.task_from() == "cli" && self.gated(crate::gates::Event::PromptSubmit, None) {
+            self.initial_task = Some((text, delivery));
+            return Ok(());
+        }
+        self.record(EventBody::User {
+            text: text.into(),
+            from: self.task_from().into(),
+            delivery: delivery.to_string(),
+            attachments: Vec::new(),
+        })?;
+        Ok(())
+    }
+
+    /// A human prompt through the `prompt_submit` gates: the text to record,
+    /// or `None` when a gate dropped it (the person is told why).
+    async fn gate_prompt(&mut self, text: String, from: &str) -> Result<Option<String>, String> {
+        if matches!(from, "job" | "gate" | "parent" | "brief" | "child")
+            || !self.gated(crate::gates::Event::PromptSubmit, None)
+        {
+            return Ok(Some(text));
+        }
+        let payload = json!({"text": text, "from": from});
+        match self
+            .gate(crate::gates::Event::PromptSubmit, None, payload)
+            .await?
+        {
+            crate::gates::Verdict::Allow => Ok(Some(text)),
+            crate::gates::Verdict::Rewrite(value) => Ok(Some(
+                value
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&text)
+                    .to_string(),
+            )),
+            crate::gates::Verdict::Deny { gate, reason } => {
+                let message = format!(
+                    "prompt dropped by gate {gate}{}",
+                    if reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {reason}")
+                    }
+                );
+                // stderr even under `--json` (stdout stays NDJSON), like a pause.
+                if !self.tui {
+                    eprintln!("kelir: {message}");
+                }
+                self.emit(UiEvent::Info(format!("» {message}")));
+                Ok(None)
+            }
+        }
+    }
+
+    /// `session_start` gates, then the held-back command-line task through
+    /// `prompt_submit`. `false` means a gate dropped the task.
+    async fn start_gates(&mut self) -> bool {
+        self.flush_gate_notes();
+        let payload = json!({
+            "provider": self.provider_name,
+            "model": self.model,
+            "resumed": self.resumed,
+        });
+        let _ = self
+            .gate(crate::gates::Event::SessionStart, None, payload)
+            .await;
+        let Some((text, delivery)) = self.initial_task.take() else {
+            return true;
+        };
+        match self.gate_prompt(text, "cli").await {
+            Ok(Some(text)) => {
+                let _ = self.record(EventBody::User {
+                    text: text.into(),
+                    from: "cli".into(),
+                    delivery: delivery.to_string(),
+                    attachments: Vec::new(),
+                });
+                self.sync();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `session_end` gates (side effects only), just before `session_ended`.
+    async fn end_gates(&mut self, reason: &str) {
+        let _ = self
+            .gate(
+                crate::gates::Event::SessionEnd,
+                None,
+                json!({"reason": reason}),
+            )
+            .await;
+    }
+
     /// Append one event. Oversized payloads go to `blobs/` first, named by the
     /// seq the event is about to get.
     fn record(&mut self, body: EventBody) -> Result<LogEvent, String> {
@@ -2141,6 +2344,38 @@ impl Session {
 
     /// The `status` answer, built on the spot from the tally and the live
     /// fields. Read-only: it is never queued or logged.
+    /// The gate counters `ctl status` shows: how many are declared and what
+    /// the log's `gate` events say happened (names and counts only).
+    fn gates_status(&self) -> Value {
+        let (mut runs, mut denied, mut rewritten, mut failed_open) = (0u64, 0u64, 0u64, 0u64);
+        let mut last = Value::Null;
+        for event in &self.events {
+            if let EventBody::Gate {
+                gate,
+                event: at,
+                decision,
+                rewritten: rewrote,
+                error,
+                ..
+            } = &event.body
+            {
+                runs += 1;
+                denied += u64::from(decision == "deny");
+                rewritten += u64::from(*rewrote);
+                failed_open += u64::from(error.is_some());
+                last = json!({"gate": gate, "event": at, "decision": decision});
+            }
+        }
+        json!({
+            "declared": self.gates.as_ref().map_or(0, |g| g.defs().len()),
+            "runs": runs,
+            "denied": denied,
+            "rewritten": rewritten,
+            "failed_open": failed_open,
+            "last": last,
+        })
+    }
+
     fn status_answer(&self) -> Response {
         let retry =
             self.retry_wait
@@ -2184,6 +2419,7 @@ impl Session {
             })
             .collect();
         state["mcp"] = Value::Array(mcp);
+        state["gates"] = self.gates_status();
         state["children"] = json!(self.live_children());
         state["child_list"] = self.child_list();
         Response::ok("status", 0, "now", state)
@@ -2590,11 +2826,25 @@ impl Session {
             return;
         }
         let broker = self.mcp.clone();
+        let gates = self.gates.clone();
+        let turn = self.turn;
         tokio::spawn(async move {
-            let output = broker
-                .call(&server, &tool, arguments, envelope, &mcp_id)
-                .await;
-            let args = json!({"key": broker.key(), "mcp_id": mcp_id, "output": output});
+            let (output, runs) = gated_mcp_call(
+                gates.as_deref(),
+                &broker,
+                (&server, &tool),
+                arguments,
+                envelope,
+                &mcp_id,
+                turn,
+            )
+            .await;
+            let args = json!({
+                "key": broker.key(),
+                "mcp_id": mcp_id,
+                "output": output,
+                "gate_runs": runs,
+            });
             let (settle_reply, _dropped) = oneshot::channel();
             let _ = inbox.send(Incoming {
                 request: Request::new(
@@ -2627,6 +2877,15 @@ impl Session {
                     "kelir mcp: the broker lost the result",
                 )
             });
+        // The gates that ran on this call (they ran off the loop, so the loop
+        // is the one that writes them down).
+        if let Some(runs) = args
+            .get("gate_runs")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Vec<crate::gates::Run>>(value).ok())
+        {
+            let _ = self.record_gate_runs(&runs);
+        }
         let recorded = self.record(EventBody::McpSettled {
             mcp_id: id.to_string(),
             server: pending.server,
@@ -2863,6 +3122,9 @@ impl Session {
         {
             match pending.verb {
                 Verb::Say { text, now } => {
+                    let Some(text) = self.gate_prompt(text, &pending.from).await? else {
+                        return Ok(());
+                    };
                     // A message from anywhere but this UI gets echoed, so a
                     // steering `ctl say` is visible in the pane it steers.
                     if pending.from != "tui" {
@@ -3903,8 +4165,12 @@ impl Session {
         Ok(std::sync::Arc::new(chat))
     }
 
-    fn record_messages(&mut self, messages: Vec<Message>) -> Result<(), String> {
-        for message in messages {
+    async fn record_messages(&mut self, messages: Vec<Message>) -> Result<(), String> {
+        for mut message in messages {
+            let Some(text) = self.gate_prompt(message.text, &message.from).await? else {
+                continue;
+            };
+            message.text = text;
             if message.from != "tui" {
                 self.emit(UiEvent::Info(format!("› {}", one_line(&message.text))));
             }
@@ -4271,7 +4537,7 @@ impl Session {
         let mut code = 0u8;
         // Every way out of the loop below sets it (the loop always runs at
         // least one turn).
-        let mut reason;
+        let mut reason: String;
         // A resumed session with nothing in flight and nothing new has no turn
         // to run: `kelir resume <id>` on a finished session reports and leaves.
         // A TUI resume still waits for the next message (`keep`).
@@ -4282,11 +4548,25 @@ impl Session {
             self.sync();
             return 0;
         }
+        // `session_start` gates, then the command-line task through
+        // `prompt_submit`. A task a gate dropped ends a one-shot run (exit 1)
+        // and leaves a TUI waiting for the next message.
+        let task_kept = self.start_gates().await;
+        if !task_kept && !self.keep {
+            self.end_gates("denied").await;
+            let _ = self.record(EventBody::SessionEnded {
+                reason: "denied".into(),
+            });
+            self.sync();
+            self.trust.retire();
+            return 1;
+        }
         // A TUI session starts with no task: wait for the first message.
-        if !self.has_task && self.keep {
+        if (!self.has_task || !task_kept) && self.keep {
             match self.idle(rx).await {
                 Idle::Turn => {}
                 Idle::End => {
+                    self.end_gates("end").await;
                     let _ = self.record(EventBody::SessionEnded {
                         reason: "end".into(),
                     });
@@ -4414,7 +4694,7 @@ impl Session {
                     break;
                 }
                 Some(TurnStart::Messages(messages)) => {
-                    if let Err(message) = self.record_messages(messages) {
+                    if let Err(message) = self.record_messages(messages).await {
                         eprintln!("kelir: {message}");
                         code = 1;
                         reason = "error".into();
@@ -4436,6 +4716,7 @@ impl Session {
                 }
             }
         }
+        self.end_gates(&reason).await;
         let _ = self.record(EventBody::SessionEnded { reason });
         self.sync();
         // The session is ending: the token it minted is no longer served by
@@ -4506,7 +4787,7 @@ impl Session {
             match self.take_turn_messages() {
                 Some(TurnStart::End) => return Idle::End,
                 Some(TurnStart::Messages(messages)) => {
-                    if self.record_messages(messages).is_err() {
+                    if self.record_messages(messages).await.is_err() {
                         return Idle::End;
                     }
                     // A `cancel` queued in the same breath must still be
@@ -4535,6 +4816,8 @@ impl Session {
         });
         self.report(HerdrState::Working);
         self.turn_steps = 0;
+        self.turn_blocked = false;
+        self.turn_tool_calls = 0;
         loop {
             // An explicit cap counts the steps of *this* turn: reaching it
             // pauses the turn (the work so far is kept, and the next message
@@ -4675,6 +4958,62 @@ impl Session {
 
             if calls.is_empty() {
                 self.final_text = text;
+                // ------------------------------------------------------ turn_end
+                // A gate can send the model back once per turn with a reason,
+                // or replace the final text. It runs on the model's answer, not
+                // on a stop or a pause.
+                if self.gated(crate::gates::Event::TurnEnd, None) {
+                    let payload = json!({
+                        "final_text": self.final_text,
+                        "tool_calls": self.turn_tool_calls,
+                        "steps": self.turn_steps,
+                        "blocked": self.turn_blocked,
+                    });
+                    match self
+                        .gate(crate::gates::Event::TurnEnd, None, payload)
+                        .await?
+                    {
+                        crate::gates::Verdict::Deny { gate, reason } if !self.turn_blocked => {
+                            self.turn_blocked = true;
+                            let reason = if reason.trim().is_empty() {
+                                "no reason given".to_string()
+                            } else {
+                                reason
+                            };
+                            self.record(EventBody::User {
+                                text: format!(
+                                    "[gate {gate}] Your answer was not accepted: {reason}"
+                                )
+                                .into(),
+                                from: "gate".into(),
+                                delivery: "next".into(),
+                                attachments: Vec::new(),
+                            })?;
+                            self.sync();
+                            continue;
+                        }
+                        crate::gates::Verdict::Deny { gate, .. } => {
+                            // Blocks at most once per turn: a second deny is
+                            // logged, not enforced.
+                            let _ = self.record(EventBody::Error {
+                                location: "gate".into(),
+                                message: format!(
+                                    "turn_end: the deny from gate {gate} was ignored (this turn was already blocked once)"
+                                ),
+                                retryable: false,
+                                status: None,
+                                attempt: None,
+                                retry_in_ms: None,
+                            });
+                        }
+                        crate::gates::Verdict::Rewrite(value) => {
+                            if let Some(new) = value.get("text").and_then(Value::as_str) {
+                                self.final_text = new.to_string();
+                            }
+                        }
+                        crate::gates::Verdict::Allow => {}
+                    }
+                }
                 // ---------------------------------------------------- after_step
                 let applied = self.apply(Boundary::AfterStep).await?;
                 if applied.end {
@@ -5323,6 +5662,35 @@ impl Session {
         step: u32,
         calls: &[ToolCall],
     ) -> Result<Batch, String> {
+        // `before_tool` gates (M8): a deny settles the call as `denied` without
+        // running it; a rewrite replaces the input the call runs with (and
+        // that `tool_started` records). The model's own `assistant` event keeps
+        // what it asked for.
+        let mut calls: Vec<ToolCall> = calls.to_vec();
+        let mut vetoed: Vec<Option<(String, String)>> = vec![None; calls.len()];
+        self.turn_tool_calls += calls.len() as u32;
+        for index in 0..calls.len() {
+            let name = calls[index].name.clone();
+            if !self.gated(crate::gates::Event::BeforeTool, Some(&name)) {
+                continue;
+            }
+            let payload = json!({
+                "tool": name,
+                "call_id": calls[index].id,
+                "input": calls[index].args,
+            });
+            match self
+                .gate(crate::gates::Event::BeforeTool, Some(&name), payload)
+                .await?
+            {
+                crate::gates::Verdict::Deny { gate, reason } => {
+                    vetoed[index] = Some((gate, reason));
+                }
+                crate::gates::Verdict::Rewrite(input) => calls[index].args = input,
+                crate::gates::Verdict::Allow => {}
+            }
+        }
+        let calls = &calls[..];
         let mut plan: Vec<(String, ToolCall)> = Vec::with_capacity(calls.len());
         for (index, call) in calls.iter().enumerate() {
             let started = self.record(EventBody::ToolStarted {
@@ -5372,7 +5740,9 @@ impl Session {
             let disabled = self.disabled.contains(&call.name);
             // `compact` is a native tool whose work is the session's: a request
             // for the next boundary, answered here like any other call.
-            let preset = if disabled {
+            let preset = if let Some((gate, reason)) = &vetoed[index] {
+                Some(ToolOutcome::denied(gate, reason))
+            } else if disabled {
                 Some(ToolOutcome::disabled(&name))
             } else if self.kids.brief && (name == "compact" || name == "edit") {
                 // The tool list is the parent's, byte for byte (that is what
@@ -5545,6 +5915,30 @@ impl Session {
                 // still use, and say where the whole of it is (M1 review N2).
                 outcome = self.stopped_outcome(dir, reason);
             }
+            // `after_tool` gates (M8) may replace the result the model reads,
+            // or append a note to it. Only a call that ran and finished.
+            if forced[index].is_none()
+                && matches!(outcome.outcome.as_str(), "ok" | "error")
+                && self.gated(crate::gates::Event::AfterTool, Some(&call.name))
+            {
+                let payload = json!({
+                    "tool": call.name,
+                    "call_id": call.id,
+                    "input": call.args,
+                    "result": outcome.result,
+                    "outcome": outcome.outcome,
+                    "exit_code": outcome.exit_code,
+                    "out_path": outcome.out_path,
+                });
+                if let crate::gates::Verdict::Rewrite(value) = self
+                    .gate(crate::gates::Event::AfterTool, Some(&call.name), payload)
+                    .await?
+                    && let Some(result) = value.get("result").and_then(Value::as_str)
+                {
+                    outcome.result =
+                        crate::util::truncate_bytes(result, self.cfg.spill_limit.max(1024));
+                }
+            }
             self.record(EventBody::ToolSettled {
                 call_id: call.id.clone(),
                 outcome: outcome.outcome.clone(),
@@ -5703,6 +6097,67 @@ impl Session {
 /// `provider/model` splits only when the prefix is a configured provider:
 /// `deepseek/deepseek-chat` is a model id on the current provider, while
 /// `openrouter/deepseek/deepseek-chat` names a provider.
+/// One MCP call through the `before_tool`/`after_tool` gates, as tool
+/// `mcp:<server>.<tool>`. Returns the output and the gate runs to log.
+async fn gated_mcp_call(
+    gates: Option<&crate::gates::Runner>,
+    broker: &crate::mcp::broker::Broker,
+    (server, tool): (&str, &str),
+    mut arguments: Value,
+    envelope: bool,
+    mcp_id: &str,
+    turn: u32,
+) -> (crate::mcp::CallOutput, Vec<crate::gates::Run>) {
+    use crate::gates::{Event, Verdict};
+    let name = format!("mcp:{server}.{tool}");
+    let mut runs = Vec::new();
+    if let Some(gates) = gates.filter(|gates| gates.has(Event::BeforeTool, Some(&name))) {
+        let payload = json!({"tool": name, "call_id": mcp_id, "input": arguments});
+        let chain = gates
+            .run_event(Event::BeforeTool, Some(&name), turn, payload)
+            .await;
+        runs.extend(chain.runs);
+        match chain.verdict {
+            Verdict::Deny { gate, reason } => {
+                let output = crate::mcp::CallOutput::failed(
+                    crate::mcp::render::EXIT_TOOL_ERROR,
+                    "denied",
+                    tools::denied_text(&gate, &reason),
+                );
+                return (output, runs);
+            }
+            Verdict::Rewrite(input) => arguments = input,
+            Verdict::Allow => {}
+        }
+    }
+    let mut output = broker
+        .call(server, tool, arguments.clone(), envelope, mcp_id)
+        .await;
+    if let Some(gates) = gates.filter(|gates| gates.has(Event::AfterTool, Some(&name)))
+        && matches!(output.outcome.as_str(), "ok" | "error")
+    {
+        let payload = json!({
+            "tool": name,
+            "call_id": mcp_id,
+            "input": arguments,
+            "result": output.stdout,
+            "outcome": output.outcome,
+            "exit_code": output.exit_code,
+        });
+        let chain = gates
+            .run_event(Event::AfterTool, Some(&name), turn, payload)
+            .await;
+        runs.extend(chain.runs);
+        if let Verdict::Rewrite(value) = chain.verdict
+            && let Some(result) = value.get("result").and_then(Value::as_str)
+        {
+            output.stdout = result.to_string();
+            output.bytes = output.stdout.len() as u64;
+        }
+    }
+    (output, runs)
+}
+
 fn split_model_target<'a>(
     target: &'a str,
     providers: &'a std::collections::BTreeMap<String, crate::config::ProviderConfig>,
@@ -5946,6 +6401,9 @@ mod tests {
                 warn_cost: None,
                 children: Default::default(),
                 prices: Default::default(),
+                gates: Vec::new(),
+                project_gates: Vec::new(),
+                trusted_projects: Vec::new(),
             },
             provider_name: "openrouter".into(),
             model: model.into(),
@@ -6002,6 +6460,11 @@ mod tests {
             seen_seq: std::collections::HashMap::new(),
             tally: Default::default(),
             retry_wait: Default::default(),
+            gates: None,
+            turn_blocked: false,
+            turn_tool_calls: 0,
+            initial_task: None,
+            gate_notes: Vec::new(),
             kids: children::Kids::new("ses_1", Default::default(), None),
         }
     }
@@ -6058,6 +6521,9 @@ mod tests {
             warn_cost: None,
             children: Default::default(),
             prices: Default::default(),
+            gates: Vec::new(),
+            project_gates: Vec::new(),
+            trusted_projects: Vec::new(),
         };
         let a = render_system(&cfg, Path::new("tmp"), None);
         let b = render_system(&cfg, Path::new("tmp"), None);

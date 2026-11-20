@@ -45,6 +45,7 @@ the value; `session_started.key_origin` records the same.
 | `PATH` | where `bash`, `rg`, `opencode` and other programs are looked for |
 | `COMSPEC` | the shell that runs a `.cmd`/`.bat` helper (`opencode`) on Windows |
 | `SHELL` | the login shell, when `bash` is not on `PATH` (Unix) |
+| `KELIR_TRUST_PROJECT` | let this run start the project's own gates (`.kelir/config.toml` `[gates]`, project skills); the machine config's `trusted_projects` is the lasting form |
 
 ### Set by kelir for its children
 
@@ -58,11 +59,15 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_DEPTH` | that session's depth in the tree (the root is 0); a start past `max_child_depth` is refused |
 | `KELIR_CALL_ID` | the provider call id of the bash call |
 | `KELIR_BIN` | the kelir binary, so `kelir bg`/`kelir view` work off `PATH` |
+| `KELIR_GATE_EVENT` | set for a gate only: the event it was started for (`turn_end`, …); a gate never gets `KELIR_TOKEN`, `KELIR_SOCK` or a provider key |
+| `KELIR_GATE_NAME` | set for a gate only: the gate's name, as the `gate` event records it |
+| `KELIR_GATE_RUN` | set for a gate only: a token unique to this gate run, so kelir can find and kill what the gate left behind (a `setsid` daemon); do not clear it |
 
 ### Set by the test suite only
 
 | variable | effect |
 |---|---|
+| `KELIR_GATE_TIMEOUT_MS` | shorten the 30 s gate timeout (the gate tests; a timed-out gate fails open) |
 | `KELIR_CRASH_AT` | abort at a named point (`before_append`, …): the crash tests |
 | `KELIR_TEST_PANIC` | panic once the TUI owns the terminal, to prove the restore path |
 | `KELIR_SHELL_RAW` | `cr`: send a POSIX script raw, keeping CRLF terminators |

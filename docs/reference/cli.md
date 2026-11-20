@@ -258,6 +258,7 @@ Read kelir's own reference (config, CLI, verbs, files, …)
 | `--find` | `<WORDS>` | Ranked search over every topic: which file mentions these words |
 | `--generate` | nothing | Rewrite the generated blocks (`cli`, `env`, `events`, `verbs`, `config`) from the code. Needs a checkout |
 | `--check` | nothing | Fail when a generated block is stale: CI and the drift test |
+| `--skill` | `<NAME>` | Print a builtin skill (`kelir`, `delegation`, `herdr`) in full: they are compiled in and have no file to read |
 
 <!-- /generated -->
 

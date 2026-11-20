@@ -46,9 +46,10 @@ directory's name; a project skill of that name replaces a machine one. A
 directory whose `SKILL.md` is missing, unreadable or malformed is skipped with a
 note (`error` event, `where: "source"`), never listed.
 
-**Skills are pull.** The base prompt names the directories and nothing else: the
-skill's body costs no token until a task needs it, and then it is `bash`
-(`cat <dir>/<name>/SKILL.md`). `sources[]` still records each skill (name, real
+**Skills are pull.** The base prompt names the directories, and the builtin skills
+by name and description (they have no file): the skill's body costs no token until
+a task needs it, and then it is `bash` (`cat <dir>/<name>/SKILL.md`, or
+`kelir docs --skill <name>` for a builtin). `sources[]` still records each skill (name, real
 path, hash), so editing one mid-session is noticed.
 
 ### The builtin `kelir` skill
@@ -65,6 +66,21 @@ still read how kelir works.
   typed absence of one, so there is nothing to watch, re-read or announce as
   changed. Editing the repo's copy takes a rebuild, and the drift test fails if
   the file stops being a valid Agent Skill.
+
+### The builtin `delegation` and `herdr` skills (M8)
+
+Two more embedded skills, discovered exactly like `kelir` (machine layer, no file,
+replaced by a skills-directory entry of the same name): `delegation`
+(`src/docs/skill-delegation.md`: when and how to start another kelir with
+`kelir run` / `kelir ask` / `kelir bg run`, foreground vs background, what to put
+in the task, the limits the model keeps for itself, reading results; it names
+only commands `kelir --help` lists, and a test fails if that stops being true) and `herdr` (`src/docs/skill-herdr.md`: inside
+a pane, `hc ls --json` with state/status/agent/where/cwd across machines, counting
+the agents that share my space by the `where` prefix, `hc get/read/send/wait`,
+`hc machine ls`, and the rule never to kill another agent's pane; outside Herdr
+the skill says to answer that it is not in Herdr). Both are short and point at
+`kelir docs` for depth; a skill's `metadata: {kelir-gate: <event>}` additionally
+binds a script as a gate (see `gates`).
 
 ## Hints, memory and channels
 

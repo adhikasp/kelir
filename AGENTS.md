@@ -121,3 +121,11 @@ that console, including the kelir/agent session running the tests (it killed two
 2026-11-19). Start the child under test in its own process group (`CREATE_NEW_PROCESS_GROUP` on Windows, `setsid`/`setpgid` on
 Unix) and signal only that pid/group; if Windows console Ctrl-C delivery cannot be tested safely, cover it with a unit test of
 the handler plus a Unix-only e2e.
+
+## Tests that spawn processes need a cap and a leak check (hard rule)
+
+Incident 2026-11-20: about a thousand `sh` processes exhausted the machine's RAM. Any test, script or
+experiment that starts processes needs (1) a hard cap on how many can be alive (a counter, not hope),
+(2) a Drop guard or Job Object that kills the tree, (3) an assertion at the end that nothing from its temp
+dir is still running, and (4) a count watchdog when you run it by hand (note the `sh.exe` count first,
+abort if it grows by more than 20). Never point an interpreter at a file you have not read.

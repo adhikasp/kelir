@@ -910,3 +910,193 @@ fn every_event_field_the_code_writes_is_in_the_table_and_the_other_way() {
         );
     }
 }
+
+// -------------------------------------------------- the delegation and herdr skills
+
+#[test]
+fn the_delegation_and_herdr_skills_are_valid_short_and_say_what_they_must() {
+    for (name, text) in crate::sources::BUILTIN_SKILLS {
+        let skill = crate::sources::parse_skill(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(skill.name, name);
+        assert!(!skill.description.is_empty(), "{name} has no description");
+        assert!(
+            text.len() <= 6 * 1024,
+            "{name} is {} bytes: keep skills short",
+            text.len()
+        );
+        // No private names, hosts or paths in a public repo's embedded text.
+        for banned in ["the maintainer", "the maintainer", "a Linux box", "a build box", "users/"] {
+            assert!(
+                !text
+                    .to_ascii_lowercase()
+                    .contains(&banned.to_ascii_lowercase()),
+                "{name}: {banned}"
+            );
+        }
+    }
+    let delegation = crate::sources::BUILTIN_SKILLS[1].1;
+    for needle in [
+        "kelir run --child",
+        "--background",
+        "kelir brief",
+        "kelir ls",
+        "kelir kill",
+        "kelir docs children",
+    ] {
+        assert!(
+            delegation.contains(needle),
+            "delegation does not mention {needle}"
+        );
+    }
+    let herdr = crate::sources::BUILTIN_SKILLS[2].1;
+    for needle in [
+        "hc ls --json",
+        "hc get",
+        "hc read",
+        "hc send",
+        "hc wait",
+        "hc machine ls",
+        "HC_TERMINAL_ID",
+        "where",
+        "Never kill",
+        "NOT in Herdr",
+    ] {
+        assert!(herdr.contains(needle), "herdr does not mention {needle}");
+    }
+}
+
+// ------------------------------------------- a skill names only commands that exist
+
+/// Every `kelir …` command a skill shows in a code span or block, as the words
+/// after `kelir` that look like a subcommand path, and the `--flags` that follow
+/// on the same command.
+fn commands_in(text: &str) -> Vec<(String, Vec<String>, Vec<String>)> {
+    let mut code = String::new();
+    let mut fenced = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            code.push_str(line);
+            code.push('\n');
+        } else {
+            let mut parts = line.split('`');
+            parts.next();
+            for (i, span) in parts.enumerate() {
+                if i % 2 == 0 {
+                    code.push_str(span);
+                    code.push('\n');
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for line in code.lines() {
+        let mut rest = line;
+        while let Some(at) = rest.find("kelir ") {
+            let before = rest[..at].chars().last();
+            let after = &rest[at + "kelir ".len()..];
+            rest = after;
+            if before.is_some_and(|c| c.is_alphanumeric() || c == '-' || c == '/') {
+                continue;
+            }
+            let mut path = Vec::new();
+            let mut flags = Vec::new();
+            for word in after.split_whitespace() {
+                if word.starts_with("--") {
+                    flags.push(word.trim_end_matches([',', ';', ')']).to_string());
+                } else if flags.is_empty()
+                    && word.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+                {
+                    path.push(word.to_string());
+                } else {
+                    break;
+                }
+            }
+            out.push((line.to_string(), path, flags));
+        }
+    }
+    out
+}
+
+#[test]
+fn builtin_skills_name_only_subcommands_and_flags_kelir_help_lists() {
+    use clap::CommandFactory as _;
+    let root = crate::cli::Cli::command();
+    let mut checked = 0;
+    for (name, text) in crate::sources::BUILTIN_SKILLS {
+        for (line, path, flags) in commands_in(text) {
+            let mut command = &root;
+            let mut walked = Vec::new();
+            for word in &path {
+                let Some(sub) = command
+                    .get_subcommands()
+                    .find(|sub| !sub.is_hide_set() && sub.get_name() == word)
+                else {
+                    // A word after the subcommand path is an argument ("kelir docs config").
+                    assert!(
+                        !walked.is_empty() || command.get_subcommands().next().is_none(),
+                        "skill {name}: `kelir {word}` is not a subcommand `kelir --help` lists (line: {line})"
+                    );
+                    break;
+                };
+                command = sub;
+                walked.push(word.clone());
+            }
+            for flag in flags {
+                let long = flag.trim_start_matches("--");
+                let long = long.split('=').next().unwrap_or(long);
+                let known = command
+                    .get_arguments()
+                    .any(|arg| arg.get_long() == Some(long))
+                    || root.get_arguments().any(|arg| arg.get_long() == Some(long))
+                    || long == "help";
+                assert!(
+                    known,
+                    "skill {name}: `kelir {} {flag}`: no such flag in `kelir --help` (line: {line})",
+                    walked.join(" ")
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 8,
+        "only {checked} commands were checked: the scanner is broken"
+    );
+}
+
+#[test]
+fn the_command_scanner_catches_a_command_that_does_not_exist() {
+    use clap::CommandFactory as _;
+    let found = commands_in(
+        "```sh
+kelir run --child \"x\"
+kelir frobnicate --nope \"y\"
+```
+and `kelir run --warp`
+",
+    );
+    assert_eq!(found.len(), 3);
+    let root = crate::cli::Cli::command();
+    // The real ones resolve (the merge of children made `--child` and `brief` real)...
+    let run = root.find_subcommand("run").unwrap();
+    assert!(
+        run.get_arguments()
+            .any(|arg| arg.get_long() == Some("child"))
+    );
+    assert!(root.get_subcommands().any(|sub| sub.get_name() == "brief"));
+    // ...and invented ones do not, which is what the skill test trips over.
+    assert_eq!(found[1].1, vec!["frobnicate".to_string()]);
+    assert!(
+        root.get_subcommands()
+            .all(|sub| sub.get_name() != "frobnicate")
+    );
+    assert!(
+        !run.get_arguments()
+            .any(|arg| arg.get_long() == Some("warp"))
+    );
+    assert_eq!(found[2].2, vec!["--warp".to_string()]);
+}

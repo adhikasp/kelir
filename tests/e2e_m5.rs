@@ -81,7 +81,14 @@ async fn session_started_carries_the_real_sources_and_the_system_has_them() {
         .collect();
     assert_eq!(
         names,
-        vec!["prompt.md", "AGENTS.md", "kelir", "sift"],
+        vec![
+            "prompt.md",
+            "AGENTS.md",
+            "delegation",
+            "herdr",
+            "kelir",
+            "sift"
+        ],
         "{sources:?}"
     );
     // The embedded default has no path at all: never the sentinel `embedded`,
@@ -90,9 +97,11 @@ async fn session_started_carries_the_real_sources_and_the_system_has_them() {
     assert_eq!(sources[0]["kind"], "prompt");
     // The builtin skill is the binary's own (STEER-11): listed like a skill,
     // with no path, so there is nothing to watch or re-read.
-    assert_eq!(sources[2]["path"], "");
-    assert_eq!(sources[2]["kind"], "skill");
-    for source in [&sources[1], &sources[3]] {
+    for builtin in &sources[2..5] {
+        assert_eq!(builtin["path"], "");
+        assert_eq!(builtin["kind"], "skill");
+    }
+    for source in [&sources[1], &sources[5]] {
         let path = Path::new(source["path"].as_str().unwrap());
         assert!(path.is_file(), "{} is not a file", path.display());
     }

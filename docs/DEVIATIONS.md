@@ -1584,6 +1584,72 @@ follow-up commit series that restores three things the first pass lost.
   request on a priced model gets one too). A crash between a `usage` event and its `warning`
   event loses that warning: a resume arms against the rebuilt state. `children` is always 0.
 
+## M8: gates and the builtin skills
+
+- **The rewrite `input` has a shape per event (M8).** The spec says `rewrite` carries `"input":{…}`
+  without saying what it holds. `prompt_submit` and `turn_end` take `{"text": …}`; `before_tool` takes the
+  tool's own input object; `after_tool` takes `{"result": …}` (replaces what the model reads, cut to
+  `spill_limit`) and/or `{"note": …}` (appends `[gate <name>] …`). A wrong shape fails open with `error`.
+  `rewrite` at `session_start`/`session_end` and `deny` at `session_start`/`after_tool`/`session_end` are
+  recorded and ignored (the SPEC table's "—"), with the reason saying so.
+- **Skill binding syntax (M8).** `metadata: {kelir-gate: <event>}` binds `scripts/<event>.*`, else
+  `scripts/gate.*`, else the only file; `kelir-gate: turn_end=scripts/a.py; after_tool=scripts/b.py` names the
+  files (inside the skill dir only). The interpreter follows the extension. Gate name: `<skill>.<event>`.
+- **A non-zero exit is a crash even if stdout holds a decision (M8).** Fail open is the rule; a gate
+  cannot veto by crashing. Empty stdout is a quiet `allow` (side-effect gates print nothing); only the whole
+  trimmed stdout is parsed, as one JSON object (no last-line fallback). More than 1 MiB is garbage.
+- **`turn_end` fires on the model's final answer only (M8)**, not on a `stop`, a pause or an error: the
+  deny/rewrite semantics need an answer. A second `deny` in one turn is logged as a `gate` event plus an
+  `error` event (`where` `gate`) and not enforced. The reason reaches the model as a `user` event
+  `from: gate`, delivery `next`.
+- **A dropped command-line task ends a one-shot run with exit 1 (M8)** (`session_ended` reason `denied`,
+  message on stderr even under `--json`); a TUI session just waits for the next message. `prompt_submit`
+  sees human prompts only (`cli`, `tui`, `ctl`, `channel`), never `job` wake-ups or `gate` messages.
+- **Gates run on the loop (M8).** A gate holds the session for up to 30 s; a `stop` verb sent meanwhile is
+  read when it ends. MCP gates run off the loop (the call is already on a broker task), so their `gate`
+  events are written when the call settles, just before `mcp_settled`.
+- **A gate's environment is an allow-list (M8)**, the MCP server list plus `SSH_AUTH_SOCK`, plus
+  `KELIR_SESSION_DIR`, `KELIR_GATE_EVENT`, `KELIR_GATE_NAME` and the gate's own `env` table. Not "the
+  environment minus secrets": a user's custom `key_env` variable is withheld too. `KELIR_GATE_TIMEOUT_MS`
+  (test hook) shortens the 30 s.
+- **Project-layer gates need a trusted project (M8 fix, review F6).** kelir has no prompt, and
+  `src/trust.rs` is the session socket's boundary, not a project-trust store, so trust is *declared*:
+  `trusted_projects = [dirs]` in the machine config (a directory covers what is under it) or
+  `KELIR_TRUST_PROJECT=1`. A project's `.kelir/config.toml` `[gates]` and project-layer skills with `kelir-gate`
+  are skipped in any other project, with an `error` event (`where` `gate`) per skipped gate; `observe` marks
+  them `trusted: false`; a project config's own `trusted_projects` is ignored with a warning. Side effect: the
+  machine and project `[gates]` tables are no longer merged per key (the project's used to replace the
+  machine's `session_start`); both sets are kept. Project `mcp.toml` (M6) is untouched and still has no trust
+  step.
+- **The `gate` event has no `tool` field (M8).** The spec's field list is kept exactly; a gate's `reason`
+  and the neighbouring `tool_started` identify the call.
+- **`delegation` describes what `main` has, not M7's CLI (M8 fix, review F7).** M7 (`kelir run --child`,
+  `kelir brief`, `kelir ls`, the depth/10/16 caps, `child_started`/`child_settled`) is on `job/m7`, not merged
+  when this was fixed, so the first version told the model to run commands that failed. The skill now teaches
+  plain `kelir run`, `kelir ask` and `kelir bg run`, with the limits (depth 1, three at a time) written as the
+  model's own discipline, since nothing enforces them. A unit test
+  (`builtin_skills_name_only_subcommands_and_flags_kelir_help_lists`) fails if any builtin skill shows a
+  `kelir <subcommand>` or `--flag` that `kelir --help` does not list. **Whoever merges M7 rewrites
+  `src/docs/skill-delegation.md` for `--child`/`brief` in the same commit**; the test then guards the new
+  spellings.
+- **Builtin skills are advertised in the prompt and read with `kelir docs --skill <name>` (M8 fix, review F5).**
+  The base prompt's skills block (rendered, outside the 1024-byte template budget) now lists each builtin as
+  `name: description` plus the command; `--skill` is a new `kelir docs` flag (`kelir docs herdr` stays "no
+  topic"). The `kelir` skill had the same gap and gains the same fix.
+- **Gates cannot outlive a run on Linux (M8 fix, review F2, F3).** Every gate gets `KELIR_GATE_RUN=<token>`.
+  After the gate ends (or times out) kelir kills the group, then every descendant and every process whose
+  environment carries the token (`/proc`), so a `setsid`/double-fork daemon goes too. A hidden
+  `kelir gate-guard` process, started beside each Unix gate, polls the session and does the same sweep if the
+  session is killed (`PR_SET_PDEATHSIG` was rejected: it reaches only the shell, not its children). Limits, in
+  `gates.md`: Linux only for the token sweep; a gate that clears its environment before detaching escapes it.
+- **`.cmd`/`.bat` gates under a POSIX shell on Windows (M8 fix, review F1).** `cmd /C x` becomes `cmd //C x`
+  when the configured shell is not cmd or PowerShell (MSYS would rewrite `/C` to `C:/`).
+- **`git_sync.py` stages tracked files only (M8 fix, review F4).** `git add -u` by default; `GIT_SYNC_ADD_NEW`
+  adds new files; a secret-like name refuses the commit; `GIT_SYNC_DRY_RUN` prints and does nothing.
+- **The builtin skills' descriptions are in the system prompt (M8 fix, F5)**, reversing STEER-11's "a skill
+  description is a listing, not in the prompt" for the three builtins only (about 130 tokens): they have no
+  file the model could find. Format `name - description` (not `name:`, which the Herdr-line tests own). Bodies
+  stay pull. `e2e_steer11` was changed to assert exactly that.
 ## M7: children as CLI, brief, caps, ls and kill (2026-11-20)
 
 The brief is `docs/tasks/M7.md`; the code is `src/child.rs` (registry, caps, hand-off,
@@ -1664,3 +1730,20 @@ side). Where the code had to choose:
   starts the sums at the brief's question (`child::own_start`), so `ls`, `status` and
   `warn_cost` do not count the prefix twice. `ls` takes a brief's kind and task from that
   question, not from the copied first `user` event.
+
+## m8m: merging main (M7 children, M6 mcp, M5-B, STEER-8) into the gates branch
+
+- **Gates in child sessions.** A child (`kelir run --child`, `kelir brief`) runs the same gates as
+  its root, with its own session directory and its own `gate` events. A gate still never runs
+  inside a gate (`KELIR_GATE_EVENT`), and the scrubbed environment is the same allow-list.
+- **The live-gate cap is per process, so it is lowered for children.** The root keeps 8; a child
+  gets 2 (`gates::MAX_LIVE_CHILD`). With the default 16 live descendants a tree has at most
+  8 + 16 x 2 = 40 gate processes alive (`gates::root_bound`, unit-tested). The spec had no
+  family-wide number; a shared counter across processes was rejected as more machinery than a
+  fixed per-child share.
+- **A task a parent hands to a child is not a human prompt.** The `user` event's `from` is
+  `parent`/`brief` (M7's `task_from`), and `prompt_submit` gates only see `cli` prompts.
+- **`ctl status` shows the gates** (`gates` object in the JSON, one `gates` line in the text).
+- **The `delegation` skill is rewritten** for `kelir run --child`, `kelir brief`, `kelir ls`,
+  `kelir kill` and the real caps; the scanner test checks every `kelir ...` command and flag in
+  the builtin skills against the clap tree.

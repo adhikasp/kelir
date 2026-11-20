@@ -53,6 +53,8 @@ pub enum Command {
     /// Internal: the background-job shim. Not for humans.
     #[command(hide = true, name = "bg-shim")]
     BgShim(BgShimArgs),
+    #[command(hide = true, name = "gate-guard")]
+    GateGuard(GateGuardArgs),
     /// Internal: a child session's process (its parent hands it the task on
     /// stdin). Not for humans.
     #[command(hide = true, name = "child-host")]
@@ -286,6 +288,10 @@ pub struct DocsArgs {
     /// Fail when a generated block is stale: CI and the drift test.
     #[arg(long)]
     pub check: bool,
+    /// Print a builtin skill (`kelir`, `delegation`, `herdr`) in full: they are compiled
+    /// in and have no file to read.
+    #[arg(long, value_name = "NAME")]
+    pub skill: Option<String>,
 }
 
 /// `kelir doctor`: what the two providers are wired to, and where each key
@@ -379,6 +385,24 @@ pub struct BgWaitArgs {
 pub struct BgCancelArgs {
     #[arg(value_name = "ID")]
     pub id: String,
+}
+
+/// `kelir gate-guard`: started by the session next to every gate run on Unix. It
+/// polls the session and, if the session dies first, kills the gate's tree.
+#[derive(Debug, Args, Clone)]
+pub struct GateGuardArgs {
+    /// The session's pid.
+    #[arg(long)]
+    pub parent: u32,
+    /// The gate shell's pid, which is also its process group.
+    #[arg(long)]
+    pub group: u32,
+    /// The run's `KELIR_GATE_RUN` token.
+    #[arg(long)]
+    pub token: String,
+    /// Give up after this many seconds.
+    #[arg(long, default_value_t = 60)]
+    pub ttl: u64,
 }
 
 /// `kelir bg-shim`: started by the session (for every bash call) and by

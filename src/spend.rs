@@ -670,6 +670,24 @@ pub fn render_text(state: &Value) -> String {
             ));
         }
     }
+    if num(&["gates", "declared"]) > 0 || num(&["gates", "runs"]) > 0 {
+        let last = get(&["gates", "last"]);
+        let last = match (last["gate"].as_str(), last["decision"].as_str()) {
+            (Some(gate), Some(decision)) => format!(
+                " · last {} {gate} -> {decision}",
+                last["event"].as_str().unwrap_or("?")
+            ),
+            _ => String::new(),
+        };
+        lines.push(format!(
+            "gates     {} declared · {} run(s) · {} denied · {} rewritten · {} failed open{last}",
+            num(&["gates", "declared"]),
+            num(&["gates", "runs"]),
+            num(&["gates", "denied"]),
+            num(&["gates", "rewritten"]),
+            num(&["gates", "failed_open"]),
+        ));
+    }
     if let Some(servers) = get(&["mcp"]).as_array().filter(|a| !a.is_empty()) {
         let parts: Vec<String> = servers
             .iter()
