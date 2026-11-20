@@ -85,3 +85,11 @@ worktree applies to reviewers as well.
 ## Files I added
 
 `tests/review_tui3.rs` (9 tests, 8 pass, F-cancel `#[ignore]`d), `scripts/live/tui3_specs.py`, this report.
+
+## Addendum: 627d882 re-check (orchestrator request)
+
+The verdict above already covers `b7b60c6..627d882` (F-window is about that commit); nothing here changes the count.
+
+- **Banner at 100/80/60/40 columns** (`ban80/60/40.final.png`, `offline.banner.png`): `kelir · provider · model`, `session`, `cwd`, the help line, nothing else; wraps cleanly at 40. No window or token line, and no window note even when the endpoint is unreachable (F-window stands).
+- **Where the window and the step state live now:** the `state` object that every `kelir ctl` verb replies with (`src/session.rs:1795-1812`: `window`, `window_source`, `window_note`, `step`, turn steps and cap). A TUI-only user has no way to see it; a `ctl` user does. Cost, cache and steps otherwise only in `events.jsonl` (N-reach).
+- **/model swap announcement (read, not driven: the mock's `/models` returns an empty list, so a window change cannot be provoked from it).** `apply_list` (`src/session.rs:2314-2316`) announces only if `window_model` was already set, and `window_model` is set only by an earlier `apply_list`. A startup with a fresh models cache starts no fetch, so `apply_list` never runs before the swap; the swap handler (`:2258-2278`) updates `window` itself and replaces `models_fetch`, so the later `apply_list` sees `previous == None` and stays silent. So the announcement the commit promises ("a post-/model swap still announces a changed window once") can be lost in that common case, and a swap before the first step loses it too. Severity: part of F-window (should-fix); I could not add a failing test because `Session` is private to `src/` (needs an in-crate unit test). Fix: seed `window_model` from `Prepared` at session construction instead of `None` (`src/session.rs:1428`).
