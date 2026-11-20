@@ -114,7 +114,7 @@ def main():
     sys.stdout.reconfigure(newline="\n")
     die = os.environ.get("MCP_TEST_DIE")
     if die:
-        sys.stderr.write(die + "\n")
+        sys.stderr.write(("boom: missing API key" if die == "key" else die) + "\n")
         sys.stderr.flush()
         sys.exit(1)
     pidfile = os.environ.get("MCP_TEST_PIDFILE")
