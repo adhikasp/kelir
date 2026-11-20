@@ -340,6 +340,10 @@ pub struct BgShimArgs {
     /// The session socket, exported to the command as `KELIR_SOCK`.
     #[arg(long, value_name = "ADDRESS")]
     pub sock: Option<String>,
+    /// The status key arrives on stdin (one line), never in argv or the
+    /// environment: it signs every status record this shim writes.
+    #[arg(long)]
+    pub key_stdin: bool,
 }
 
 #[cfg(test)]

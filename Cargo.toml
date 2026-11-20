@@ -24,6 +24,9 @@ tokio = { version = "1", features = [
     "signal",
 ] }
 toml = "0.8"
+# STEER-7 round 2: Ed25519 signatures on bg status records. Already compiled
+# (rustls' provider), so it adds no code to the binary.
+ring = "0.17"
 ulid = "1"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
@@ -47,6 +50,8 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
+    # STEER-7: the session token's randomness (BCryptGenRandom).
+    "Win32_Security_Cryptography",
     "Win32_System_Console",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
@@ -54,6 +59,9 @@ windows-sys = { version = "0.59", features = [
     # The concurrency governor's advisory slot locks.
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    # STEER-7: the session pipe's owner-only DACL, read back to prove it.
+    "Win32_Security_Authorization",
+    "Win32_System_SystemServices",
 ] }
 
 [dev-dependencies]

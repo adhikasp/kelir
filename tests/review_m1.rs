@@ -142,6 +142,9 @@ async fn a_malformed_socket_line_is_answered_and_the_session_survives() {
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     session.wait_for("turn_ended").await;
 
+    // A raw socket client, as a script would be: it reads the session's token
+    // file (STEER-7) once, and every request it sends carries it.
+    let token = kelir::trust::read_token(&session.session_dir).expect("a token file");
     let stream = kelir::ipc::connect(&session.session_dir, &session.id)
         .await
         .expect("connect");
@@ -155,7 +158,12 @@ async fn a_malformed_socket_line_is_answered_and_the_session_survives() {
 
     // The same connection still works.
     write
-        .write_all(b"{\"verb\":\"say\",\"args\":{\"text\":\"still here\"}}\n")
+        .write_all(
+            format!(
+                "{{\"verb\":\"say\",\"args\":{{\"text\":\"still here\"}},\"token\":\"{token}\"}}\n"
+            )
+            .as_bytes(),
+        )
         .await
         .unwrap();
     answer.clear();

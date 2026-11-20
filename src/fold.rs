@@ -914,6 +914,7 @@ mod tests {
                     cmd: "sleep 60".into(),
                     pid: Some(7),
                     out_path: "bg/bg_1.out".into(),
+                    pubkey: None,
                 },
             ),
             LogEvent::new(

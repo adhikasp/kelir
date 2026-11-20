@@ -361,6 +361,15 @@ struct Session {
     /// The client-side concurrency governor, when the provider config asks for
     /// one (`max_concurrent_requests`). `None` is off, the default.
     governor: Option<crate::governor::Governor>,
+    /// This session's socket trust boundary: its token and the jobs it owns
+    /// (STEER-7). The `bg`, `cancel` and `bg-spawn` verbs are refused here
+    /// when they name a job this session did not start.
+    trust: std::sync::Arc<crate::trust::Trust>,
+    /// Job ids whose status file was refused (unsigned or badly signed): the log
+    /// records each once, so a child rewriting a file cannot grow it.
+    refused_status: std::collections::HashSet<String>,
+    /// The highest signed sequence number believed per job.
+    seen_seq: std::collections::HashMap<String, u64>,
 }
 
 /// A compaction asked for by someone; it applies at the next `before_step`.
@@ -699,7 +708,29 @@ async fn drive(opts: Options) -> u8 {
     // was really bound for `KELIR_SOCK`.
     prepared.sock = ipc::value(&prepared.dir, &prepared.id);
 
-    let mut session = match Session::open(prepared) {
+    // The trust boundary (STEER-7): a token for this session, and the registry
+    // of the jobs it may be told about. Made before anything can connect, so
+    // there is no window in which the socket answers without one.
+    // The session holds every job's signing key for as long as it lives, so it
+    // is closed to its own user's memory reads before the first key exists
+    // (Windows: a DACL that keeps terminate/limited-query for the owner;
+    // Linux: not dumpable). Best effort, said on stderr, never fatal
+    // (STEER-7 review round 4, S2).
+    if let Err(error) = crate::bg::harden_process() {
+        eprintln!("kelir: warning: {error}");
+    }
+    let trust = match crate::trust::Trust::create(prepared.dir.clone()) {
+        Ok(trust) => std::sync::Arc::new(trust),
+        Err(message) => {
+            eprintln!("kelir: {message}");
+            if opts.json {
+                print_result_event("error", 1, "", 0, None, Some(&message));
+            }
+            return 1;
+        }
+    };
+
+    let mut session = match Session::open(prepared, trust.clone()) {
         Ok(session) => session,
         Err(message) => {
             eprintln!("kelir: {message}");
@@ -711,7 +742,7 @@ async fn drive(opts: Options) -> u8 {
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
-    ipc::serve(listener, tx.clone());
+    ipc::serve(listener, trust.clone(), tx.clone());
     // Background jobs: `kelir bg run` reports itself over the socket, and this
     // watcher is the safety net that also catches a promoted call settling
     // while the session runs. Both arrive as one `bg` verb (see [`Session::note_bg`]).
@@ -764,12 +795,14 @@ async fn drive(opts: Options) -> u8 {
             )));
         }
         banner.push(tui::BannerLine::plain(String::new()));
+        let token = session.ctx.token.clone();
         match tui::start(
             from_session,
             to_tui.clone(),
             tx.clone(),
             &banner,
             session.cfg.max_steps,
+            token.clone(),
             crate::theme::Theme::from_env(),
         ) {
             Ok(mut handle) => {
@@ -786,8 +819,12 @@ async fn drive(opts: Options) -> u8 {
                     let _ = task.await;
                     let (reply, _answer) = oneshot::channel();
                     let _ = verbs.send(Incoming {
-                        request: Request::new("end", json!({}), "tui"),
+                        // The UI runs inside the session, so its verb carries
+                        // the token from memory like the TUI's own dispatch.
+                        request: Request::new("end", json!({}), "tui")
+                            .with_token(Some(token.clone())),
                         reply,
+                        action: None,
                     });
                 });
                 tui = Some((watchdog, to_tui));
@@ -831,13 +868,12 @@ fn watch_bg(dir: PathBuf, tx: mpsc::UnboundedSender<Incoming>) {
                 if !seen.insert((status.id.clone(), status.state.clone())) {
                     continue;
                 }
-                let Ok(args) = serde_json::to_value(&status) else {
-                    continue;
-                };
                 let (reply, _answer) = oneshot::channel();
+                let action = crate::ipc::Action::Note(status);
                 let incoming = Incoming {
-                    request: Request::new("bg", args, "job"),
+                    request: Request::new("bg-watch", serde_json::Value::Null, "job"),
                     reply,
+                    action: Some(action),
                 };
                 if tx.send(incoming).is_err() {
                     return;
@@ -1411,7 +1447,10 @@ async fn reopen(spec: &str, cfg: &Config) -> Result<ReopenedSession, Failure> {
 }
 
 impl Session {
-    fn open(prepared: Prepared) -> Result<Self, String> {
+    fn open(
+        prepared: Prepared,
+        trust: std::sync::Arc<crate::trust::Trust>,
+    ) -> Result<Self, String> {
         let mut prepared = prepared;
         let events_path = prepared.dir.join("events.jsonl");
         let writer = EventLog::open(&events_path)
@@ -1426,6 +1465,10 @@ impl Session {
             );
             ctx.session_id = prepared.id.clone();
             ctx.promote_after = prepared.cfg.promote_after;
+            // Every tool child exports the session's token as `KELIR_TOKEN`
+            // (STEER-7), exactly as it already gets `KELIR_SOCK`.
+            ctx.token = trust.token().to_string();
+            ctx.trust = Some(trust.clone());
             ctx
         };
         let reopened = prepared.resume.is_some();
@@ -1488,6 +1531,9 @@ impl Session {
             models_fetch: prepared.models_fetch.take(),
             watch: crate::sources::Watch::default(),
             governor: prepared.governor,
+            trust,
+            refused_status: std::collections::HashSet::new(),
+            seen_seq: std::collections::HashMap::new(),
         };
         // The watcher re-checks the sources the frozen system was rendered
         // from; on a resume it is rebuilt from the log's `sources[]` *and* the
@@ -1639,6 +1685,23 @@ impl Session {
         // Background jobs that started or settled while no session was running:
         // the shim's status file is the record, and this is where it reaches the
         // log (`bg_started`, `bg_settled` and the message that wakes the model).
+        //
+        // The registry is rebuilt first, **from the log and only from the
+        // log** (STEER-7 review B1): the ids are this session's own — a
+        // `tool_started` carries the call's `commands/<dir>` name, a
+        // `bg_started` a job's id — and a file in `bg/` proves nothing,
+        // because a tool child can write one. A note is recorded only for an
+        // id already adopted here; a status file nobody minted is left alone
+        // (it is still visible to `kelir bg ls`, which reads the files).
+        for event in &self.events {
+            match &event.body {
+                EventBody::BgStarted { bg_id, pubkey, .. } => {
+                    self.trust.adopt(bg_id, pubkey.as_deref())
+                }
+                EventBody::ToolStarted { dir: Some(dir), .. } => self.trust.adopt(dir, None),
+                _ => {}
+            }
+        }
         let mut woke = false;
         for status in crate::bg::list(&self.dir.join("bg")) {
             if !status.is_job() {
@@ -1889,16 +1952,34 @@ impl Session {
     /// uses it for a `stop` that has nothing to stop: the verb is dropped, so
     /// the answer says `dropped`, not `now` (M2 review N1).
     fn accept_as(&mut self, incoming: Incoming, applies: Option<&'static str>) -> Option<Pending> {
-        let Incoming { request, reply } = incoming;
+        let Incoming {
+            request,
+            reply,
+            action,
+        } = incoming;
+        if let Some(pending) = self.note_own(action) {
+            // The session's own watcher, not a client: nothing to log and
+            // nobody to answer, but the note still waits for a boundary like
+            // the `bg` report it stands in for, so `bg_started`/`bg_settled`
+            // land in the same order whichever of the two arrives first.
+            self.scheduler.push(pending);
+            return None;
+        }
         let from = request.from.clone();
         let name = request.verb.clone();
         // `bg-spawn` is the one thing a job cannot do itself: on Windows a
         // `kelir bg run` inside a call sits in the call's Job Object, which
         // forbids breakaway (it has to — an escapable job cannot be
         // cancelled), so the session, which is outside it, starts the shim.
-        // There is nothing to log: the job's own status file is the record.
+        // There is nothing to queue: the job's own status file is the record.
         if name == "bg-spawn" {
-            let _ = reply.send(self.bg_spawn_answer(&from, &request.args));
+            let answer = self.bg_spawn_answer(&from, &request);
+            let _ = reply.send(answer);
+            return None;
+        }
+        if name == "bg-claim" {
+            let answer = self.bg_spawn_answer(&from, &request);
+            let _ = reply.send(answer);
             return None;
         }
         let parsed = self.parse_verb(&request, &from);
@@ -1907,7 +1988,14 @@ impl Session {
             Err(_) => "rejected",
         };
         let error = parsed.as_ref().err().cloned();
-        let recorded = self.log_verb(&name, &request.args, &from, scope, error);
+        // A refusal is recorded only while the refusal budget lasts: a token
+        // holder that names foreign jobs one by one cannot grow the log without
+        // bound (STEER-7 review B1). The answer still goes out.
+        let recorded = if error.is_some() && !self.trust.may_record_refusal() {
+            Err("the refusal budget is spent".to_string())
+        } else {
+            self.log_verb(&name, &request.args, &from, scope, error)
+        };
         // The ack must not outrun the log: a crash right after `{"ok": true}`
         // may not lose a verb the client believes was accepted (M1 review N1).
         self.sync();
@@ -1936,18 +2024,39 @@ impl Session {
     /// `model`): the answer goes out *after* the verb landed, so it says
     /// `applies: "now"` and `state.model` (or the queued text) is what the
     /// next request really carries (STEER-5 review N1).
-    fn accept_at_once(&mut self, incoming: Incoming) -> AtOnce {
-        let Incoming { request, reply } = incoming;
+    async fn accept_at_once(&mut self, incoming: Incoming) -> AtOnce {
+        let Incoming {
+            request,
+            reply,
+            action,
+        } = incoming;
+        if let Some(pending) = self.note_own(action) {
+            self.scheduler.push(pending);
+            return AtOnce::Rejected;
+        }
         let from = request.from.clone();
         let name = request.verb.clone();
         if name == "bg-spawn" {
-            let _ = reply.send(self.bg_spawn_answer(&from, &request.args));
+            let answer = self.bg_spawn_answer(&from, &request);
+            let _ = reply.send(answer);
+            return AtOnce::Rejected;
+        }
+        if name == "bg-claim" {
+            let answer = self.bg_spawn_answer(&from, &request);
+            let _ = reply.send(answer);
             return AtOnce::Rejected;
         }
         let parsed = self.parse_verb(&request, &from);
         let boundary = if parsed.is_ok() { "now" } else { "rejected" };
         let error = parsed.as_ref().err().cloned();
-        let recorded = self.log_verb(&name, &request.args, &from, boundary, error);
+        // The refusal budget (STEER-7 review B1) applies here too: a token
+        // holder naming foreign jobs one by one gets its answer either way, and
+        // the log grows by no more than the budget.
+        let recorded = if error.is_some() && !self.trust.may_record_refusal() {
+            Err("the refusal budget is spent".to_string())
+        } else {
+            self.log_verb(&name, &request.args, &from, boundary, error)
+        };
         self.sync();
         let (verb, event) = match (parsed, recorded) {
             (Ok(verb), Ok(event)) => (verb, event),
@@ -1963,7 +2072,7 @@ impl Session {
             from,
         };
         let mut end: Option<StreamEnd> = None;
-        let applied = self.apply_one(pending, &mut end);
+        let applied = self.apply_one(pending, &mut end).await;
         let answer = match applied {
             Ok(()) => Response::ok(&name, event.seq, "now", self.state()),
             Err(message) => Response::error(message),
@@ -1975,16 +2084,67 @@ impl Session {
     }
 
     /// The `bg-spawn` answer: the shim only ever answers a job, and a job is
-    /// the only sender allowed to ask.
-    fn bg_spawn_answer(&mut self, from: &str, args: &Value) -> Response {
-        if from == "job" {
-            match crate::bg::spawn_shim_for_client(args) {
-                Ok(id) => Response::ok("bg-spawn", 0, "now", json!({"id": id})),
-                Err(error) => Response::error(error),
-            }
-        } else {
-            Response::error("bg-spawn: an internal verb; jobs report themselves")
+    /// the only sender allowed to ask. A refusal — a foreign job directory, a
+    /// path that escapes this session's own `bg/` — is recorded like any other
+    /// refused verb, so the log says what was tried (STEER-7).
+    ///
+    /// `bg-claim` is the sibling verb a `kelir bg run` sends *before* it starts
+    /// its own shim: the session mints the id and the capability and starts
+    /// nothing. The id is the session's, never the caller's (review B1), so a
+    /// child cannot pick a name it later reports for.
+    fn bg_spawn_answer(&mut self, from: &str, request: &Request) -> Response {
+        if from != "job" {
+            return Response::error("bg-spawn: an internal verb; jobs report themselves");
         }
+        if request.verb == "bg-claim" {
+            return self.bg_claim_answer();
+        }
+        if let Err(error) = self.trust.check_spawn(request) {
+            return match self.refuse_verb("bg-spawn", &request.args, from, &error) {
+                Ok(()) => Response::error(error),
+                Err(message) => Response::error(message),
+            };
+        }
+        // Only `cmd`, `shell`, `cwd` and a filtered `env` are the caller's; the
+        // kind, the socket, the token, the job name and the call are the
+        // session's own (STEER-7 review round 4, S1).
+        let call_is_live = |call: &str| self.live_calls.iter().any(|live| live == call);
+        match crate::trust::spawn_request(request).and_then(|spawn| {
+            let spawn = spawn.pinned(&self.ctx.sock, &self.ctx.token, call_is_live);
+            crate::bg::spawn_shim_for_client(&self.trust, &spawn)
+        }) {
+            Ok(spawned) => Response::ok("bg-spawn", 0, "now", json!({"id": spawned.id})),
+            Err(error) => Response::error(error),
+        }
+    }
+
+    /// `bg-claim`, retired: nothing sends it, so it answers an id and nothing
+    /// else, from a small budget of its own (it must not spend the one
+    /// `bg-spawn` mints from).
+    fn bg_claim_answer(&mut self) -> Response {
+        match self.trust.claim_ack() {
+            Ok(id) => Response::ok("bg-claim", 0, "now", json!({"id": id})),
+            Err(error) => Response::error(error),
+        }
+    }
+
+    /// Record a refused verb, unless the refusal budget is spent: a token
+    /// holder can name foreign jobs one by one and the log must not grow by one
+    /// event per try (STEER-7 review B1).
+    fn refuse_verb(
+        &mut self,
+        name: &str,
+        args: &Value,
+        from: &str,
+        error: &str,
+    ) -> Result<(), String> {
+        if !self.trust.may_record_refusal() {
+            return Ok(());
+        }
+        let event = self.log_verb(name, args, from, "rejected", Some(error.to_string()))?;
+        self.sync();
+        let _ = event;
+        Ok(())
     }
 
     /// Validate one arrival. `bg` is internal, and `stop --call` for a call that
@@ -1995,6 +2155,9 @@ impl Session {
         if name == "bg" && from != "job" {
             return Err("bg: an internal verb; jobs report themselves".to_string());
         }
+        // Only for the session's own jobs: a foreign id is refused here, where
+        // it is recorded as a `verb` event marked refused (STEER-7).
+        self.trust.check_job(request)?;
         let parsed = verbs::parse(name, &request.args)?;
         // `view` is validated when it arrives, not when it applies: the CLI
         // prints "image queued" from the ack, so a bad path must be refused in
@@ -2025,7 +2188,9 @@ impl Session {
     ) -> Result<crate::event::LogEvent, String> {
         self.record(EventBody::Verb {
             name: name.to_string(),
-            args: Payload::value(args.clone()),
+            // Never the request's args wholesale: a whitelist per verb
+            // (STEER-7 review round 4, B1).
+            args: Payload::value(verbs::loggable_args(name, args)),
             from: from.to_string(),
             boundary: boundary.to_string(),
             error,
@@ -2033,18 +2198,39 @@ impl Session {
     }
 
     /// Apply the verbs due at `boundary`.
-    fn apply(&mut self, boundary: Boundary) -> Result<Applied, String> {
+    async fn apply(&mut self, boundary: Boundary) -> Result<Applied, String> {
         let mut applied = Applied::default();
         for pending in self.scheduler.due(boundary) {
-            self.apply_pending(pending, &mut applied)?;
+            self.apply_pending(pending, &mut applied).await?;
         }
         self.sync();
         Ok(applied)
     }
 
+    /// Apply the pending verbs that are *actions* rather than messages. A
+    /// `cancel` kills a job and records it; it never starts a turn, and while
+    /// the session is idle no boundary arrives to apply it — so it is applied
+    /// here, at once, instead of sitting in the queue for ever (STEER-7).
+    async fn apply_actions(&mut self) -> Result<(), String> {
+        let actions = self.scheduler.take_where(Verb::is_action);
+        if actions.is_empty() {
+            return Ok(());
+        }
+        let mut applied = Applied::default();
+        for pending in actions {
+            self.apply_pending(pending, &mut applied).await?;
+        }
+        self.sync();
+        Ok(())
+    }
+
     /// Apply one verb. The caller decides when: a boundary, or a wait the verb
     /// is allowed to cut short.
-    fn apply_pending(&mut self, pending: Pending, applied: &mut Applied) -> Result<(), String> {
+    async fn apply_pending(
+        &mut self,
+        pending: Pending,
+        applied: &mut Applied,
+    ) -> Result<(), String> {
         {
             match pending.verb {
                 Verb::Say { text, now } => {
@@ -2141,6 +2327,31 @@ impl Session {
                 Verb::Bg(status) => {
                     if self.note_bg(&status)? {
                         applied.messages += 1;
+                    }
+                }
+                // A job of this session's own, killed on request (STEER-7).
+                // The refusal (a foreign id) already answered the client; here
+                // the kill happens and, if it worked, the job's own settled
+                // report reaches the log through the next `bg` arrival.
+                Verb::Cancel { id } => {
+                    match crate::bg::cancel_in(
+                        &self.trust.bg_dir(),
+                        &id,
+                        self.trust.key(&id).as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(text) => self.emit(UiEvent::Info(format!("· {text}"))),
+                        Err(text) => {
+                            self.record(EventBody::Error {
+                                location: "verb".into(),
+                                message: format!("cancel {id}: {text}"),
+                                retryable: false,
+                                status: None,
+                                attempt: None,
+                                retry_in_ms: None,
+                            })?;
+                        }
                     }
                 }
                 // Adds or replaces one source, as a message at the tail: the
@@ -2417,7 +2628,10 @@ impl Session {
         let mut messages = Vec::new();
         let mut end = false;
         let mut woke = false;
-        for pending in self.scheduler.due(Boundary::TurnEnd) {
+        for pending in self
+            .scheduler
+            .take_where(|verb| verb.applies_at(Boundary::TurnEnd) && !verb.is_action())
+        {
             match pending.verb {
                 Verb::Say { text, now } => messages.push(Message {
                     text,
@@ -2434,6 +2648,7 @@ impl Session {
                 Verb::Bg(status) => woke |= self.note_bg(&status).unwrap_or(false),
                 Verb::End => end = true,
                 Verb::Stop { .. }
+                | Verb::Cancel { .. }
                 | Verb::Model { .. }
                 | Verb::Tools { .. }
                 | Verb::Compact { .. }
@@ -2461,16 +2676,96 @@ impl Session {
     /// The log is the record and the dedupe: a report that arrives twice (the
     /// socket and the watcher, or a watcher restarted by a resume) is recorded
     /// once.
-    fn note_bg(&mut self, status: &crate::bg::Status) -> Result<bool, String> {
-        // A job whose shim is gone can never settle on its own: it is recorded
-        // as `lost` rather than left running for ever (M4 review F4).
-        let status = status.observed();
+    fn note_bg(&mut self, reported: &crate::bg::Status) -> Result<bool, String> {
+        use crate::trust::Seal;
+        // The id is this session's own or nothing: a status file nobody minted
+        // never reaches the log as a job (STEER-7 review B1).
+        let id = reported.id.clone();
+        if !self.trust.owns(&id) {
+            return Ok(false);
+        }
+        // The file is the truth as of now, the argument is a snapshot from when
+        // the report was made. Re-reading matters: a job can die between the
+        // two (a `cancel` in flight kills the shim, then writes `cancelled`),
+        // and recording the snapshot after calling its dead shim `lost` put
+        // the wrong outcome in the log (STEER-7).
+        //
+        // And a file is not evidence by itself (steer7b review B1'): a tool
+        // child can write `bg/<id>.status` as easily as the shim. Only a record
+        // signed with the key the session gave that job's shim is believed;
+        // the snapshot is held to the same rule.
+        let dir = self.trust.bg_dir();
+        let file = crate::bg::Status::read(&crate::bg::status_path(&dir, &id));
+        // A final record is terminal: the shim also keeps it beside the status
+        // file, and a validly signed final record wins over whatever the status
+        // file now says, so putting an older record back cannot un-settle the
+        // job (a replay can withhold a result, never change it).
+        let last = crate::bg::Status::read(&crate::bg::final_path(&dir, &id)).filter(|last| {
+            last.id == id && last.is_job() && last.settled() && self.trust.seal(last) == Seal::Good
+        });
+        let candidate = last.as_ref().or(file.as_ref()).unwrap_or(reported);
+        let sealed = if candidate.id == id {
+            self.trust.seal(candidate)
+        } else {
+            Seal::Forged
+        };
+        // Sequence numbers only go up: a record older than one already
+        // believed is a replay.
+        if sealed == Seal::Good {
+            let seen = self.seen_seq.entry(id.clone()).or_insert(0);
+            if candidate.seq < *seen {
+                return Ok(false);
+            }
+            *seen = candidate.seq;
+        }
+        // A signed record still cannot point the session at a file outside its
+        // own `bg/`: its `out` is quoted into the wake message.
+        if sealed == Seal::Good
+            && !candidate.out.trim().is_empty()
+            && !self.trust.inside_bg(&candidate.out)
+        {
+            return Ok(false);
+        }
+        let status = match sealed {
+            Seal::Good => crate::bg::observed_in(&dir, candidate),
+            Seal::Unowned => return Ok(false),
+            // A resumed session adopted this id from its log and no longer holds
+            // the key (it died with the process that minted it), so a record
+            // cannot be authenticated. What the log already says is the only
+            // thing believed: the job is recorded as lost, with the output path
+            // the log holds, never the file's.
+            Seal::NoKey => match self.adopted_outcome(&id, candidate) {
+                Some(lost) => lost,
+                None => return Ok(false),
+            },
+            Seal::Unsigned | Seal::Forged => {
+                if self.refused_status.insert(id.clone()) {
+                    let why = if sealed == Seal::Unsigned {
+                        "its status file carries no signature"
+                    } else {
+                        "its status file's signature is not the job's"
+                    };
+                    let message = format!(
+                        "bg: the status file of `{id}` was ignored: {why}, so it was not written by that job's shim"
+                    );
+                    self.refuse_verb("bg", &json!({"id": id}), "job", &message)?;
+                }
+                return Ok(false);
+            }
+        };
+
         let status = &status;
         let started = self.events.iter().any(|event| {
             matches!(&event.body, EventBody::BgStarted { bg_id, .. } if bg_id == &status.id)
         });
         if !started {
-            self.record(crate::bg::started_body(status))?;
+            // The public key goes into the log with the job: a resume verifies
+            // a surviving shim's records under it.
+            let mut body = crate::bg::started_body(status);
+            if let EventBody::BgStarted { pubkey, .. } = &mut body {
+                *pubkey = self.trust.public(&status.id);
+            }
+            self.record(body)?;
         }
         if !status.settled() {
             self.sync();
@@ -2493,6 +2788,58 @@ impl Session {
         self.emit(UiEvent::Info(format!("» {}", one_line(&text))));
         self.sync();
         Ok(true)
+    }
+
+    /// What a resumed session may say about a job whose status it cannot
+    /// authenticate: nothing while the file says it runs, and `lost` (built
+    /// from the log's own `bg_started`) once the file says it stopped. A job the
+    /// log never recorded is left alone.
+    fn adopted_outcome(&self, id: &str, file: &crate::bg::Status) -> Option<crate::bg::Status> {
+        if !file.settled() {
+            return None;
+        }
+        let (cmd, out, call) = self.events.iter().find_map(|event| match &event.body {
+            EventBody::BgStarted {
+                bg_id,
+                cmd,
+                out_path,
+                call_id,
+                ..
+            } if bg_id == id => Some((
+                cmd.inline_str().unwrap_or("").to_string(),
+                out_path.clone(),
+                call_id.clone(),
+            )),
+            _ => None,
+        })?;
+        let mut lost =
+            crate::bg::Status::new(id, crate::bg::KIND_JOB, &cmd, std::path::Path::new(&out));
+        lost.state = crate::bg::STATE_LOST.into();
+        lost.finished = Some(crate::event::now_ts());
+        lost.call = call;
+        lost.error = Some(
+            "the session was resumed after this job started, so its result could not be authenticated; read its output"
+                .into(),
+        );
+        Some(lost)
+    }
+
+    /// A wake-up the session raised itself (its own `bg/` watcher) is not a
+    /// request: there is no `Request` to answer and nobody is waiting. It is
+    /// turned into a `Pending` here and queued through the scheduler like any
+    /// other verb, so `bg_started`/`bg_settled` keep the order the old
+    /// `bg`-verb path gave them (STEER-7: the watcher used to send a `bg`
+    /// request pretending to be `job`, which is exactly the shape a foreign
+    /// caller had).
+    fn note_own(&self, action: Option<crate::ipc::Action>) -> Option<Pending> {
+        action.map(|crate::ipc::Action::Note(status)| Pending {
+            // The watcher wrote no `verb` event, so there is no seq of its
+            // own; the scheduler keeps arrival order and `note_bg` writes
+            // the `bg_*` events in the order the notes apply.
+            seq: 0,
+            verb: Verb::Bg(Box::new(status)),
+            from: "job".into(),
+        })
     }
 
     /// One image queued by `kelir view`: resolve the path, record the `source`
@@ -3214,6 +3561,11 @@ impl Session {
         }
         let _ = self.record(EventBody::SessionEnded { reason });
         self.sync();
+        // The session is ending: the token it minted is no longer served by
+        // anything, so it must not stay on disk for whoever comes next (STEER-7
+        // review S1). Jobs that outlive the session keep their capabilities: a
+        // resume adopts them from the registry.
+        self.trust.retire();
         code
     }
 
@@ -3247,24 +3599,31 @@ impl Session {
                 }
                 _ => rx.recv().await,
             };
-            let Some(incoming) = incoming else {
+            let Some(mut incoming) = incoming else {
                 return Idle::End;
             };
-            // Nothing is running in idle, so a `stop` has nothing to stop:
-            // queueing it would stop the *next* turn at its first boundary, and
-            // answering "now" would be a lie. It is dropped, and both the
-            // screen and the client are told so (M2 review N1).
-            let bare_stop =
-                incoming.request.verb == "stop" && incoming.request.args.get("call").is_none();
-            let pending = self.accept_as(incoming, bare_stop.then_some("dropped"));
-            if let Some(pending) = pending {
-                if matches!(pending.verb, Verb::Stop { call: None, .. }) {
-                    self.emit(UiEvent::Info("» stop: nothing is running".into()));
-                } else {
-                    if matches!(pending.verb, Verb::Compact { .. }) {
-                        self.emit(UiEvent::Info("» compact: applies at the next step".into()));
+            if let Some(note) = self.note_own(incoming.action.take()) {
+                // Its own watcher: a job started or settled while idle. It is
+                // queued like the `bg` report it stands in for, and the turn it
+                // may start begins below, through `take_turn_messages`.
+                self.scheduler.push(note);
+            } else {
+                // Nothing is running in idle, so a `stop` has nothing to stop:
+                // queueing it would stop the *next* turn at its first boundary,
+                // and answering "now" would be a lie. It is dropped, and both
+                // the screen and the client are told so (M2 review N1).
+                let bare_stop =
+                    incoming.request.verb == "stop" && incoming.request.args.get("call").is_none();
+                let pending = self.accept_as(incoming, bare_stop.then_some("dropped"));
+                if let Some(pending) = pending {
+                    if matches!(pending.verb, Verb::Stop { call: None, .. }) {
+                        self.emit(UiEvent::Info("» stop: nothing is running".into()));
+                    } else {
+                        if matches!(pending.verb, Verb::Compact { .. }) {
+                            self.emit(UiEvent::Info("» compact: applies at the next step".into()));
+                        }
+                        self.scheduler.push(pending);
                     }
-                    self.scheduler.push(pending);
                 }
             }
             match self.take_turn_messages() {
@@ -3273,9 +3632,17 @@ impl Session {
                     if self.record_messages(messages).is_err() {
                         return Idle::End;
                     }
+                    // A `cancel` queued in the same breath must still be
+                    // applied (it is not a message and no boundary is coming).
+                    if self.apply_actions().await.is_err() {
+                        return Idle::End;
+                    }
                     return Idle::Turn;
                 }
                 None => {}
+            }
+            if self.apply_actions().await.is_err() {
+                return Idle::End;
             }
         }
     }
@@ -3313,7 +3680,7 @@ impl Session {
             // has had the first step's worth of time to arrive (STEER-1
             // review S2).
             self.apply_models().await;
-            let applied = self.apply(Boundary::BeforeStep)?;
+            let applied = self.apply(Boundary::BeforeStep).await?;
             if applied.end {
                 return Ok(TurnEnd::End);
             }
@@ -3428,7 +3795,7 @@ impl Session {
             if calls.is_empty() {
                 self.final_text = text;
                 // ---------------------------------------------------- after_step
-                let applied = self.apply(Boundary::AfterStep)?;
+                let applied = self.apply(Boundary::AfterStep).await?;
                 if applied.end {
                     return Ok(TurnEnd::End);
                 }
@@ -3447,7 +3814,7 @@ impl Session {
             self.live_calls = calls.iter().map(|call| call.id.clone()).collect();
             let batch = self.run_tools(rx, step, &calls).await?;
             self.live_calls.clear();
-            let applied = self.apply(Boundary::AfterTools)?;
+            let applied = self.apply(Boundary::AfterTools).await?;
             if batch.end || applied.end {
                 return Ok(TurnEnd::End);
             }
@@ -3681,7 +4048,7 @@ impl Session {
             // boundary before it built the request, and applying it again here
             // would swallow a verb the caller has already accounted for.
             if !summary && attempt > 1 {
-                let applied = self.apply(Boundary::BeforeStep)?;
+                let applied = self.apply(Boundary::BeforeStep).await?;
                 if applied.end {
                     return Ok(StreamEnd::End);
                 }
@@ -3918,7 +4285,7 @@ impl Session {
                 incoming = rx.recv(), if *inbox_open => match incoming {
                     Some(incoming) => {
                         let mut end: Option<StreamEnd> = None;
-                        let resume = self.take_wait_verb(incoming, &mut end)?;
+                        let resume = self.take_wait_verb(incoming, &mut end).await?;
                         if let Some(end) = end {
                             return Ok(Waited::End(Box::new(end)));
                         }
@@ -3934,7 +4301,7 @@ impl Session {
 
     /// Handle one verb that arrived *during* a retry or slot wait. Returns
     /// whether the wait should end with the request re-sent at once.
-    fn take_wait_verb(
+    async fn take_wait_verb(
         &mut self,
         incoming: Incoming,
         interrupt: &mut Option<StreamEnd>,
@@ -3943,7 +4310,7 @@ impl Session {
         // accepted and answered as such: `applies: "now"`, with the state the
         // next request will really see (STEER-5 review N1).
         if at_once_verb(&incoming.request) {
-            return Ok(match self.accept_at_once(incoming) {
+            return Ok(match self.accept_at_once(incoming).await {
                 AtOnce::Applied(end) => {
                     if let Some(end) = end {
                         *interrupt = Some(*end);
@@ -3973,7 +4340,7 @@ impl Session {
             // ack truthful about a swap that already happened.
             Verb::Say { .. } | Verb::Model { .. } => {
                 let mut applied = Option::<StreamEnd>::None;
-                self.apply_one(pending, &mut applied)?;
+                self.apply_one(pending, &mut applied).await?;
                 if let Some(end) = applied {
                     *interrupt = Some(end);
                 }
@@ -3990,9 +4357,13 @@ impl Session {
 
     /// Apply one verb now (the body of [`Session::apply`]'s loop for one
     /// `Pending`).
-    fn apply_one(&mut self, pending: Pending, end: &mut Option<StreamEnd>) -> Result<(), String> {
+    async fn apply_one(
+        &mut self,
+        pending: Pending,
+        end: &mut Option<StreamEnd>,
+    ) -> Result<(), String> {
         let mut applied = Applied::default();
-        self.apply_pending(pending, &mut applied)?;
+        self.apply_pending(pending, &mut applied).await?;
         if applied.end {
             *end = Some(StreamEnd::End);
         }
@@ -4078,15 +4449,24 @@ impl Session {
                 name: call.name.clone(),
                 input: Payload::value(call.args.clone()),
                 pid: None,
+                // The call's own directory name: a resume adopts the call's job
+                // id from the log, not from a directory a child could make
+                // (STEER-7 review B1).
+                dir: Some(format!("{}-{}-{}", self.writer.next_seq(), step, index + 1)),
             })?;
             self.emit(UiEvent::ToolStarted {
                 name: call.name.clone(),
                 input: call.args.clone(),
             });
-            plan.push((
-                format!("{}-{}-{}", started.seq, step, index + 1),
-                call.clone(),
-            ));
+            let dir = format!("{}-{}-{}", started.seq, step, index + 1);
+            // The job registry (STEER-7): a call's output dir name is the id
+            // its `bg` reports carry, so the session registers it — with a
+            // capability minted here and handed to that call's shim only —
+            // before the call can report anything (review B1). A machine with
+            // no secure randomness still runs the call: it simply has no job
+            // id it will answer for.
+            let _ = self.trust.issue_call(&dir, &call.id);
+            plan.push((dir, call.clone()));
         }
         self.sync();
         // Documented test hook: die after the intent is durable, before any
@@ -4695,7 +5075,18 @@ mod tests {
             models_fetch: None,
             watch: crate::sources::Watch::default(),
             governor: None,
+            // A throwaway trust state in the same temp dir: no socket here, and
+            // nothing in these tests sends a `bg` or `cancel` verb.
+            trust: std::sync::Arc::new(crate::trust::Trust::new(dir_for_trust(), String::new())),
+            refused_status: std::collections::HashSet::new(),
+            seen_seq: std::collections::HashMap::new(),
         }
+    }
+
+    fn dir_for_trust() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kelir-trust-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]

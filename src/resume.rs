@@ -217,6 +217,7 @@ mod tests {
                 name: "bash".into(),
                 input: Payload::value(json!({"command": "ls"})),
                 pid: Some(7),
+                dir: Some("7-1-1".into()),
             },
         )
     }

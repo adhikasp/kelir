@@ -19,8 +19,16 @@ pub struct Ctx {
     /// The address of the session socket, exported to every child as
     /// `KELIR_SOCK` (`kelir mcp` and `kelir bg` use it; tests assert it).
     pub sock: String,
+    /// The session's socket token, exported to every child as `KELIR_TOKEN`
+    /// (STEER-7): a verb that crosses the socket must carry it. It is never
+    /// written to the log, to stdout or to an argv.
+    pub token: String,
     /// This session's id: the bash call's job object name is derived from it.
     pub session_id: String,
+    /// The session's trust state: a bash call asks it for the status key the
+    /// session minted for that call and hands it to the call's shim over a
+    /// pipe (STEER-7 round 2). `None` outside a session (a test's `Ctx`).
+    pub trust: Option<std::sync::Arc<crate::trust::Trust>>,
     /// A call still running after this long is promoted to a background job
     /// (`promote_after` in the config; zero disables it).
     pub promote_after: std::time::Duration,
@@ -46,7 +54,9 @@ impl Ctx {
             shell,
             spill_limit,
             sock,
+            token: String::new(),
             session_id: String::new(),
+            trust: None,
             promote_after: std::time::Duration::from_secs(600),
             groups: SessionGroups::new(),
             running: Running::new(),

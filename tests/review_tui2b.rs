@@ -15,7 +15,7 @@ const VIEWPORT: u16 = 8;
 fn app(width: usize) -> App {
     let (to_tui, _events) = tokio::sync::mpsc::unbounded_channel();
     let (verbs, _incoming) = tokio::sync::mpsc::unbounded_channel();
-    App::new(width, VIEWPORT as usize, to_tui, verbs)
+    App::new(width, VIEWPORT as usize, to_tui, verbs, String::new())
 }
 
 fn line_text(line: &ratatui::text::Line<'_>) -> String {

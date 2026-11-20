@@ -166,6 +166,10 @@ pub const VARS: &[Var] = &[
         "KELIR_SOCK",
         "the session socket (a Unix socket path or a pipe name), so `kelir ctl`/`view`/`bg` reach the session",
     ),
+    set(
+        "KELIR_TOKEN",
+        "the session's socket token: a tool child sends it with every request to the session",
+    ),
     set("KELIR_SESSION_DIR", "the session's directory"),
     set("KELIR_CALL_ID", "the provider call id of the bash call"),
     set(
@@ -216,6 +220,12 @@ pub fn var_os(name: &str) -> Option<OsString> {
         "environment variable `{name}` is not in `envs::VARS`"
     );
     std::env::var_os(name)
+}
+
+/// The whole environment as (name, value) pairs, for a job that must run in
+/// exactly its starter's environment (`kelir bg run` hands it to the session).
+pub fn all() -> Vec<(String, String)> {
+    std::env::vars().collect()
 }
 
 /// A variable someone else named: a provider's `key_env` from the config, which

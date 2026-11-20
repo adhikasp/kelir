@@ -86,6 +86,12 @@ pub const VERBS: &[VerbDoc] = &[
                  `bg_settled` and, for a settled job, the wake-up `user` message",
     },
     VerbDoc {
+        name: "cancel",
+        args: "`<job id>`",
+        applies: "`now`",
+        effect: "kills one of this session's background jobs and records it `cancelled`; a job id                  the session did not start is refused",
+    },
+    VerbDoc {
         name: "end",
         args: "none",
         applies: "`now`",
@@ -468,7 +474,7 @@ pub const EVENTS: &[EventDoc] = &[
     },
     EventDoc {
         name: "tool_started",
-        fields: "`call_id`, `name`, `input`, `pid?`",
+        fields: "`call_id`, `name`, `input`, `pid?`, `dir?`",
         written_by: "intent: written before the tool's process starts",
     },
     EventDoc {
@@ -484,7 +490,7 @@ pub const EVENTS: &[EventDoc] = &[
     },
     EventDoc {
         name: "bg_started",
-        fields: "`bg_id`, `call_id?`, `cmd`, `pid?`, `out_path`",
+        fields: "`bg_id`, `call_id?`, `cmd`, `pid?`, `out_path`, `pubkey?`",
         written_by: "a promoted bash call or an explicit `kelir bg run`",
     },
     EventDoc {

@@ -91,7 +91,7 @@ fn line_text(line: &ratatui::text::Line<'_>) -> String {
 
 fn new_app() -> App {
     let (to_tui, verbs) = channels();
-    App::new(60, VIEWPORT_HEIGHT as usize, to_tui, verbs)
+    App::new(60, VIEWPORT_HEIGHT as usize, to_tui, verbs, String::new())
 }
 
 /// The text of a pty stream, with every CSI/OSC escape removed: the assertion
@@ -326,7 +326,13 @@ fn snapshot_narrow_panes_keep_every_row_inside_its_width() {
     for width in [80u16, 60, 40, 30, 20] {
         let (to_tui, _events) = tokio::sync::mpsc::unbounded_channel();
         let (verbs, _incoming) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(width as usize, VIEWPORT_HEIGHT as usize, to_tui, verbs);
+        let mut app = App::new(
+            width as usize,
+            VIEWPORT_HEIGHT as usize,
+            to_tui,
+            verbs,
+            String::new(),
+        );
         app.apply(UiEvent::TurnStarted {
             turn: 1,
             provider: "openrouter".into(),

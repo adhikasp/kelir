@@ -66,6 +66,13 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
         call: Some(call_id.to_string()),
         job: Some(bg::job_name(&ctx.session_id, dir)),
         sock: Some(ctx.sock.clone()),
+        token: Some(ctx.token.clone()).filter(|token| !token.is_empty()),
+        // The key the session minted for this call: the shim signs its status
+        // file with it, and the session ignores a status that is not. It goes
+        // down a pipe, never to an argv, the environment or a file.
+        key: ctx.trust.as_ref().and_then(|trust| trust.key(dir)),
+        capability: None,
+        env: None,
         // The call runs where the session (or `--cwd`, or a resumed session's
         // log) says, not in whatever directory the session process happens to
         // have (M4 review F2).
