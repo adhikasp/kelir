@@ -73,6 +73,14 @@ pub enum Verb {
         /// The text, inline: what a test or a script sends.
         text: Option<String>,
     },
+    /// `view <path>`: queue an image for the model's next message. It lands as
+    /// a `source` event (kind `attachment`) at the tail, never as an edit to an
+    /// earlier message, so the cached prefix stays byte-identical.
+    View {
+        /// The image as named (a path, resolved against the session dir and
+        /// then the cwd).
+        path: String,
+    },
     /// A job reported itself or changed state: `kelir bg run` sends this over
     /// the session socket, and the session's own watcher sends the same thing
     /// for a job that settled. It is bookkeeping, so it applies at the first
@@ -87,6 +95,7 @@ impl Verb {
     pub fn scope(&self) -> &'static str {
         match self {
             Verb::Say { now: true, .. } | Verb::Stop { .. } | Verb::End | Verb::Bg(..) => "now",
+            Verb::View { .. } => "now",
             Verb::Say { .. } => "queued",
             Verb::Later { .. } => "turn_end",
             Verb::Model { .. }
@@ -102,6 +111,10 @@ impl Verb {
             // `say`, `stop` and a job's own report take the first boundary they
             // can get.
             Verb::Say { .. } | Verb::Stop { .. } | Verb::End | Verb::Bg(..) => true,
+            // An attachment applies at the next boundary, like a `say` that
+            // opens a turn: it is a message, and it must not land in a tool
+            // batch.
+            Verb::View { .. } => boundary == Boundary::BeforeStep,
             Verb::Later { .. } => boundary == Boundary::TurnEnd,
             Verb::Model { .. }
             | Verb::Tools { .. }
@@ -245,6 +258,15 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
                 text,
             })
         }
+        // An image for the next message: it is a `source` event at the tail.
+        "view" => {
+            let path = string_arg(args, "path")
+                .or_else(|| args.as_str().map(str::to_string))
+                .map(|path| path.trim().to_string())
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| "view: missing `path`".to_string())?;
+            Ok(Verb::View { path })
+        }
         "end" => Ok(Verb::End),
         // Applies at the next `before_step`: the summary is a provider call and
         // must not land inside a tool batch.
@@ -263,7 +285,7 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             Ok(Verb::Bg(Box::new(status)))
         }
         other => Err(format!(
-            "unknown verb `{other}` (say, later, stop, model, tools, compact, skills, end)"
+            "unknown verb `{other}` (say, later, stop, model, tools, compact, skills, view, end)"
         )),
     }
 }

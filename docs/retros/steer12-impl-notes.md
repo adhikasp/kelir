@@ -104,3 +104,42 @@ the empty column, the same command to fill it, and the next lever if it does not
 `kelir notes` helper or a `kelir map` command — not another prompt edit). A reviewer should treat
 "AFTER is empty" as the expected state of this branch, and the claim to verify is that the BEFORE
 table reproduces from the command that is written next to it.
+
+## 6. Merging main back in (the base-prompt conflict)
+
+`git merge main` after TUI v2, STEER-1 fixes and BUILD-INFRA landed conflicted in exactly the three
+files the brief named. `docs/PROGRESS.md` was a plain union: main's three landed rows plus this
+branch's STEER-12 row, main's first because they landed while this branch was in review.
+
+The prompt was the real work and the budget was the constraint. Main's side added four things that
+branch had dropped when it rewrote the text — the `kelir view` line, `calls start in the cwd above
+and share no shell state`, `Long output goes in a file`, and "your messages are not" — and had to
+keep its own STEER-12 rules, `grep -A/-B`, the notes file, `echo === name`, `three reads in a row
+is one command`, `never a build/test`, `never chain`, `8 KB`, the pinned `Directories:` and the
+byte snapshot. Both full texts together are ~1,500 bytes; the ceiling is 1,024 and two other tests
+(`src/sources.rs::the_base_prompt_is_byte_identical_to_its_snapshot` and
+`tests/steer12.rs::the_base_prompt_carries_the_batching_and_the_notes_file`) fail on a byte that
+moves without the snapshot, so the merge had to be a re-tightening, not a concatenation.
+
+It is 1018 bytes, and every rule from both sides is in it:
+
+- main's behaviours kept verbatim as substrings, in main's own words where they fit: `cwd`,
+  `share no shell state`, `several hunks`, `kelir mcp ls`, `kelir view`, the `Directories:` cut
+  point, `check exit codes`, `never chain`, `long output to a file`, `name the proving command`;
+- branch's STEER-12 rules kept: `One \`bash\` call per read round`, `each labelled \`echo ===
+  name\``, `three reads in a row is one command`, `grep -A/-B` (with main's `not \`grep -n\` then
+  \`sed -n\``), `never a build/test`, the `notes file` + `file:line map` + `\`edit\` first` plan
+  line, `8 KB`, `never \`cat\` a big file`, `target/`;
+- the parallel-call clause stayed out: `tests/steer12.rs` pins its absence and the logs in §2 are
+  why.
+
+Two wording compromises are visible and deliberate. `calls start in the cwd above` became `cwd
+above` as a clause on the `bash` bullet rather than its own sentence, because the sentence cost 40
+bytes the plan line needed. "Long output goes in a file. Verify before claiming:" became `long
+output to a file` and `name the proving command` in the guardrail — the same two behaviours, one
+clause shorter, and `verify` survives in the opening line. Every other line is main's or the
+branch's as written.
+
+The measurement this branch exists for is unaffected: the notes-file and one-bash-call-per-read
+rules are byte-identical to what the branch shipped, so the AFTER table will be comparable with
+this one. `docs/PROMPT.md` quotes the merged prompt and its new size.

@@ -249,3 +249,15 @@ and the final config surface), before M5-B.
   no step cap by default): nothing to do. (Earlier note saying it was an old build is obsolete.)
 - Pinned binary now kelir-s5.exe (steer2, steer5, steer6, steer4).
 - Running: steer7 (t145), buildinfrafix (t148), tui2fix2 (t14d). Next: steer1fix/steer8/steer9/steer11 as slots free; then merges of buildinfrafix, tui2.
+
+## Update (2026-11-20 10:20) — tui2, steer1fix, buildinfra merged; main gate 863 green
+
+- Merged: **tui2** (8e2a6b6, TUI v2), **steer1fix** (29f5c16), **buildinfra** (+fixes, +core-dump fix). Combined main passes `scripts/gate.sh --linux`
+  (863 tests, Linux ok). The maintainer's installed binary was reinstalled earlier (before TUI v2): reinstall from main HEAD to get the new TUI.
+- Linux box: 25 stale verify dirs removed (~90 GB); the new `remote-check.sh prune` only prunes marker-bearing dirs (new ones).
+- Running: **steer7fix** (socket hardening, branch job/steer7fix; first review FAIL), **steer12** (measured prompt change, from the admin route's
+  harness learning), launching **steer11** (self-docs; docs/reference now exists). Then steer8 (cost/status), steer9 (de-flake), M5-B, M6.
+
+- 2026-11-20 10:50: **tui3** (the maintainer's TUI calm-down pass, branch job/tui3, 1 commit 6d3d8a4, worktree kelir-wt/tui3): handed over via a
+  message file; gate PASS per the author (Windows 864, Linux ok). In review (fresh reviewer, emulator-render method); merge after PASS.
+  steer12 (measured prompt change) is done and awaiting gate/review; steer7fix and steer11 running.

@@ -37,6 +37,7 @@ ratatui = { version = "0.30", default-features = false, features = [
     "underline-color",
 ] }
 unicode-width = "0.2"
+pulldown-cmark = { version = "0.13", default-features = false }
 
 
 [target.'cfg(unix)'.dependencies]

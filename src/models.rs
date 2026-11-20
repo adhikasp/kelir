@@ -9,7 +9,15 @@
 //!
 //! A configuration override (`[model_windows]`, then `window`) still wins: it is
 //! the one thing the provider cannot know. With neither a fetch nor a cache the
-//! window is [`crate::compact::DEFAULT_WINDOW`], and `session_started` says so.
+//! window is [`crate::compact::DEFAULT_WINDOW`], and the reason a start landed
+//! there is recorded (see [`Cache::error`]).
+//!
+//! The cache belongs to an *endpoint*, not to a provider name: the file is named
+//! after [`endpoint_id`] (a slug of the provider name plus a hash of the
+//! normalised base URL), so a proxy or a second gateway that shares a state dir
+//! never inherits another server's numbers (STEER-1 review S1/S5/N5). It is
+//! written temp-file-then-rename, so a reader never sees a half-written list
+//! (S3).
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,11 +30,20 @@ pub const CACHE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 /// pays the fetch timeout once an hour instead of on every start.
 pub const RETRY_AFTER_MS: u64 = 60 * 60 * 1000;
 
-/// How long the first step waits for `GET /models`. The list is metadata, not
-/// the work, so a slow answer must not hold a turn; it was 1.5 s, which a
-/// 480-model list through a proxy can miss (STEER-6 review S2), so the wait is
-/// longer and a timeout is no longer remembered as a failure.
-pub const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(4_000);
+/// How long the *background* fetch of `GET /models` is allowed to take. It is
+/// not a bound on a turn: the fetch runs beside the session, so a 1 MB list on
+/// a slow link is no longer paid for by the first request (STEER-1 review S2),
+/// and a timeout is not remembered as a failure (the next start tries again).
+pub const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a *cold* start waits for the list before its first request. The
+/// capabilities the list answers (`reasoning_effort`, `parallel_tool_calls`)
+/// are part of the first request, so the start gives a local list (or one
+/// through a proxy) this long to arrive; a slower answer keeps being fetched in
+/// the background and is applied when it lands. The *window* is only needed at
+/// the first `before_step` compaction check, which is after the first step, so
+/// this grace bounds a capability decision and never a turn.
+pub const START_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// One model, with only the fields kelir acts on: a provider adding a field
 /// cannot break a session, and a field kelir does not need is not stored.
@@ -39,6 +56,9 @@ pub struct ModelInfo {
     /// Whether the model accepts tool calls, when the provider states it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<bool>,
+    /// Whether the model accepts images, when the provider states it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
     /// Whether the model accepts several tool calls in one assistant message.
     /// Advertised by OpenRouter in `supported_parameters`; Go states it
     /// nowhere, so `None` there means "kelir asks anyway" (see
@@ -53,46 +73,84 @@ pub struct ModelInfo {
     pub reasoning_effort: Option<bool>,
 }
 
-/// The cached answer for one provider.
+/// The cached answer for one endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cache {
+    /// The provider name as configured (`openrouter`); informational, and part
+    /// of [`endpoint_id`].
     pub provider: String,
+    /// Which endpoint this answer belongs to: [`endpoint_id`] of the provider
+    /// name and the base URL it was fetched from. A cache that does not match
+    /// is ignored, so a proxy or a second gateway never inherits the first
+    /// one's numbers (STEER-1 review S1).
+    #[serde(default)]
+    pub endpoint: String,
     pub fetched_at_ms: u64,
     /// When the last fetch failed, so the next start does not retry at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed_at_ms: Option<u64>,
+    /// Why the last fetch did not land, in a few words (`http 401`, `offline`,
+    /// `malformed`, `timeout`): what `state` and the TUI banner show instead of
+    /// a silent `default` (STEER-1 review N4). Never a key, a header or a body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     #[serde(default)]
     pub models: Vec<ModelInfo>,
 }
 
 impl Cache {
-    pub fn new(provider: &str, models: Vec<ModelInfo>, now_ms: u64) -> Self {
+    pub fn new(provider: &str, base_url: &str, models: Vec<ModelInfo>, now_ms: u64) -> Self {
         Self {
             provider: provider.to_string(),
+            endpoint: endpoint_id(provider, base_url),
             fetched_at_ms: now_ms,
             failed_at_ms: None,
+            error: None,
             models,
         }
     }
 
+    /// A list fetched less than [`CACHE_TTL_MS`] ago. A stamp in the future (a
+    /// clock that was ahead when the file was written, a VM restore) is not
+    /// fresh: refetching is cheap and wrong numbers are not (N2).
     pub fn is_fresh(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.fetched_at_ms) < CACHE_TTL_MS
+        self.fetched_at_ms <= now_ms && now_ms - self.fetched_at_ms < CACHE_TTL_MS
     }
 
+    /// A fetch failed less than [`RETRY_AFTER_MS`] ago, so asking again now
+    /// would only pay the timeout once more. A failure stamped in the future is
+    /// clock skew, not an hour of backoff: the `at <= now` guard keeps it from
+    /// locking the refresh out for as long as the skew (STEER-1 review N2).
     pub fn in_backoff(&self, now_ms: u64) -> bool {
         self.failed_at_ms
-            .map(|at| now_ms.saturating_sub(at) < RETRY_AFTER_MS)
+            .map(|at| at <= now_ms && now_ms - at < RETRY_AFTER_MS)
             .unwrap_or(false)
     }
 
     pub fn context_for(&self, model: &str) -> Option<u64> {
         lookup(&self.models, model).and_then(|info| info.context)
     }
+
+    /// Whether the model takes images, when the provider says. `None` means
+    /// "not stated", which `kelir view` treats as "try it": a provider that
+    /// rejects the request says so plainly, and refusing on a missing flag
+    /// would block a model that works.
+    pub fn vision_for(&self, model: &str) -> Option<bool> {
+        lookup(&self.models, model).and_then(|info| info.vision)
+    }
 }
 
 /// The entry for `model`: the exact id first, then case-insensitively, then the
-/// same last segment (a Go id `deepseek-v4.1-flash` and an OpenRouter id
-/// `deepseek/deepseek-v4.1-flash-1017` are different models and do not match).
+/// same last segment **within the same vendor**.
+///
+/// The last step exists because a Go id (`deepseek-v4.1-flash`) and an
+/// OpenRouter id (`deepseek/deepseek-v4.1-flash-1017`) name the same family with
+/// different prefixes, and a list served by one gateway may use either shape.
+/// It never crosses vendors: `deepseek/x` does not match `fireworks/x`, even
+/// though that entry has the same last segment, because the two ids name
+/// different models that happen to share a name (STEER-1 review N3). A query
+/// with no `/` at all (the Go shape) matches either shape, which is what it is
+/// for.
 pub fn lookup<'a>(models: &'a [ModelInfo], model: &str) -> Option<&'a ModelInfo> {
     models
         .iter()
@@ -103,10 +161,18 @@ pub fn lookup<'a>(models: &'a [ModelInfo], model: &str) -> Option<&'a ModelInfo>
                 .find(|info| info.id.eq_ignore_ascii_case(model))
         })
         .or_else(|| {
+            let vendor = model.rfind('/').map(|at| &model[..at]);
             let last = model.rsplit('/').next().unwrap_or(model);
-            models
-                .iter()
-                .find(|info| info.id.rsplit('/').next() == Some(last))
+            models.iter().find(|info| {
+                info.id.rsplit('/').next() == Some(last)
+                    && match vendor {
+                        // A qualified query only matches an entry of the same
+                        // vendor (or an unqualified one, the Go shape).
+                        Some(vendor) => !info.id.contains('/') || info.id.starts_with(vendor),
+                        // An unqualified query (the Go shape) matches either.
+                        None => true,
+                    }
+            })
         })
 }
 
@@ -128,6 +194,18 @@ struct RawModel {
     supported_parameters: Option<Vec<String>>,
     #[serde(default)]
     capabilities: Option<RawCapabilities>,
+    #[serde(default)]
+    architecture: Option<RawArchitecture>,
+}
+
+/// OpenRouter's `architecture` object. Its `input_modalities` is where that
+/// provider actually says a model takes images (`["text","image"]`); the
+/// `supported_parameters` list does not carry vision at all, so a check wired
+/// to it alone would refuse every vision model on OpenRouter.
+#[derive(Deserialize)]
+struct RawArchitecture {
+    #[serde(default)]
+    input_modalities: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -140,6 +218,25 @@ struct RawLimit {
 struct RawCapabilities {
     #[serde(default)]
     tools: Option<RawTools>,
+    #[serde(default)]
+    vision: Option<RawFlag>,
+}
+
+/// A capability gate that is either a flag or an object with `supported`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawFlag {
+    Flag(bool),
+    Object(RawTools),
+}
+
+impl RawFlag {
+    fn supported(&self) -> bool {
+        match self {
+            RawFlag::Flag(flag) => *flag,
+            RawFlag::Object(object) => object.supported,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -168,6 +265,36 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
                         .as_ref()
                         .map(|names| names.iter().any(|name| name == "tools"))
                 });
+            // Three shapes say it, in this order: an explicit capability flag
+            // (the Go provider), the input modalities (OpenRouter), and a
+            // capability named in `supported_parameters`. A provider that says
+            // nothing leaves it `None`, which `kelir view` reads as "try it".
+            let modalities = model.architecture.as_ref().and_then(|architecture| {
+                architecture.input_modalities.as_ref().map(|names| {
+                    names.iter().any(|name| {
+                        name.eq_ignore_ascii_case("image") || name.eq_ignore_ascii_case("images")
+                    })
+                })
+            });
+            let vision = model
+                .capabilities
+                .as_ref()
+                .and_then(|capabilities| capabilities.vision.as_ref())
+                .map(RawFlag::supported)
+                .or(modalities)
+                // A capability named in `supported_parameters` is a *yes* when
+                // it is there; its absence is not a no. OpenRouter lists the
+                // knobs a model takes (`tools`, `reasoning`, …) and never
+                // mentions images, so reading a missing entry as "no images"
+                // would refuse every vision model on that provider.
+                .or_else(|| {
+                    model.supported_parameters.as_ref().and_then(|names| {
+                        names
+                            .iter()
+                            .any(|name| name == "vision" || name == "image" || name == "images")
+                            .then_some(true)
+                    })
+                });
             let parallel_calls = model
                 .supported_parameters
                 .as_ref()
@@ -183,6 +310,7 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
             });
             ModelInfo {
                 id: model.id,
+                vision,
                 context: model
                     .context_length
                     .or(model.limit.and_then(|limit| limit.context))
@@ -195,35 +323,127 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
         .collect())
 }
 
-/// Where the provider's list is cached: `<state>/models-<provider>.json`.
-pub fn cache_path_in(dir: &Path, provider: &str) -> PathBuf {
-    dir.join(format!("models-{provider}.json"))
+/// Which endpoint a cached list belongs to: a slug of the provider name plus a
+/// hash of the normalised base URL (`openrouter-a1b2c3d4e5f60718`).
+///
+/// The hash is what makes two endpoints distinct (a proxy, a gateway, a
+/// `KELIR_BASE_URL` stand-in), and the slug is what keeps the file name
+/// readable and *safe*: a config provider key is never interpolated into a
+/// path as-is, so a name like `..\x` cannot write outside the state dir
+/// (STEER-1 review S1/S5/N5). The normalisation is the one
+/// [`crate::provider::models_url`] uses, so two spellings of the same endpoint
+/// (`http://h/v1` and `http://h/v1/`) share one cache.
+pub fn endpoint_id(provider: &str, base_url: &str) -> String {
+    format!(
+        "{}-{}",
+        slug(provider),
+        crate::util::fnv1a64_hex(normalise_base(base_url).as_bytes())
+    )
 }
 
-pub fn cache_path(provider: &str) -> PathBuf {
-    cache_path_in(&crate::paths::state_dir(), provider)
+/// The provider name as a file-name-safe slug: ASCII alphanumerics kept, every
+/// other run collapsed to one `-`, at most 24 characters. Never empty.
+pub fn slug(name: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = true;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+        if out.len() >= 24 {
+            break;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "provider".to_string()
+    } else {
+        trimmed
+    }
 }
 
-pub fn load(provider: &str) -> Option<Cache> {
-    load_in(&crate::paths::state_dir(), provider)
+/// The base URL as the cache key and the `/models` URL both see it: trimmed,
+/// no trailing `/`, no trailing `/chat/completions`, lower-case scheme and
+/// host. Two spellings of one endpoint must not make two caches.
+pub fn normalise_base(base_url: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    let base = base.strip_suffix("/chat/completions").unwrap_or(base);
+    let base = base.trim_end_matches('/');
+    match base.split_once("://") {
+        Some((scheme, rest)) => {
+            let (host, path) = match rest.find('/') {
+                Some(at) => rest.split_at(at),
+                None => (rest, ""),
+            };
+            format!(
+                "{}://{}{}",
+                scheme.to_ascii_lowercase(),
+                host.to_ascii_lowercase(),
+                path
+            )
+        }
+        None => base.to_string(),
+    }
 }
 
-pub fn load_in(dir: &Path, provider: &str) -> Option<Cache> {
-    let text = std::fs::read_to_string(cache_path_in(dir, provider)).ok()?;
-    serde_json::from_str(&text).ok()
+/// Where one endpoint's list is cached: `<state>/models-<endpoint id>.json`.
+pub fn cache_path_in(dir: &Path, endpoint: &str) -> PathBuf {
+    dir.join(format!("models-{endpoint}.json"))
+}
+
+pub fn cache_path(endpoint: &str) -> PathBuf {
+    cache_path_in(&crate::paths::state_dir(), endpoint)
+}
+
+pub fn load(endpoint: &str) -> Option<Cache> {
+    load_in(&crate::paths::state_dir(), endpoint)
+}
+
+pub fn load_in(dir: &Path, endpoint: &str) -> Option<Cache> {
+    let text = std::fs::read_to_string(cache_path_in(dir, endpoint)).ok()?;
+    let cache: Cache = serde_json::from_str(&text).ok()?;
+    // A file that does not name this endpoint is another server's answer (a
+    // cache written before the keying changed, a hand-copied state dir):
+    // ignoring it is what makes a cold start fall back to `default` instead of
+    // reusing numbers that belong to a different gateway (STEER-1 review S1).
+    if cache.endpoint.is_empty() || cache.endpoint == endpoint {
+        Some(cache)
+    } else {
+        None
+    }
 }
 
 pub fn store(cache: &Cache) -> Result<(), String> {
     store_in(&crate::paths::state_dir(), cache)
 }
 
+/// Write the cache atomically: a temp file in the same directory, then a
+/// rename over the target. A reader sees the old list or the new one, never a
+/// truncated file, and a process killed mid-write leaves the old list intact
+/// (STEER-1 review S3). No fsync: the file is a cache, and a lost write only
+/// costs one refetch.
 pub fn store_in(dir: &Path, cache: &Cache) -> Result<(), String> {
     std::fs::create_dir_all(dir)
         .map_err(|error| format!("models: cannot create {}: {error}", dir.display()))?;
-    let path = cache_path_in(dir, &cache.provider);
+    let path = cache_path_in(dir, &cache.endpoint);
     let text = serde_json::to_string(cache).map_err(|error| format!("models: {error}"))?;
-    std::fs::write(&path, text)
-        .map_err(|error| format!("models: cannot write {}: {error}", path.display()))
+    // One temp name per write: two processes writing at once must not share it
+    // (the rename is atomic, so the last one wins and neither tears the file).
+    let temp = dir.join(format!(
+        "models-{}.{}.tmp",
+        cache.endpoint,
+        ulid::Ulid::new()
+    ));
+    std::fs::write(&temp, text)
+        .map_err(|error| format!("models: cannot write {}: {error}", temp.display()))?;
+    std::fs::rename(&temp, &path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        format!("models: cannot replace {}: {error}", path.display())
+    })
 }
 
 pub fn now_ms() -> u64 {
@@ -327,6 +547,35 @@ pub fn resolve(
     (crate::compact::DEFAULT_WINDOW, "default")
 }
 
+/// A fetch failure in a few words, for `state` and the banner (STEER-1 review
+/// N4). The provider's own message is never carried: it can hold a URL, a body
+/// fragment or a header value, and none of it belongs in a status line.
+pub fn short_reason(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return "timeout".to_string();
+    }
+    if lower.contains("refused")
+        || lower.contains("dns")
+        || lower.contains("connect")
+        || lower.contains("network")
+        || lower.contains("unreachable")
+        || lower.contains("builder error")
+        || lower.contains("error sending request")
+    {
+        return "offline".to_string();
+    }
+    if lower.contains("cannot read the list") || lower.contains("malformed") {
+        return "malformed".to_string();
+    }
+    if let Some(rest) = error.strip_prefix("http ")
+        && rest.chars().take(3).all(|ch| ch.is_ascii_digit())
+    {
+        return format!("http {}", &rest[..3]);
+    }
+    "failed".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +592,17 @@ mod tests {
          "capabilities":{"tools":{"supported":true}}}
     ]}"#;
 
+    /// OpenRouter: images are `architecture.input_modalities`, never a
+    /// `supported_parameters` entry.
+    const OPENROUTER_VISION: &str = r#"{"data":[
+        {"id":"vision/model","context_length":200000,
+         "supported_parameters":["tools"],
+         "architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}},
+        {"id":"text/only","context_length":200000,
+         "supported_parameters":["tools"],
+         "architecture":{"input_modalities":["text"]}}
+    ]}"#;
+
     #[test]
     fn the_openrouter_shape_is_read() {
         let models = parse(OPENROUTER).unwrap();
@@ -350,6 +610,10 @@ mod tests {
         assert_eq!(models[0].context, Some(1_048_576));
         assert_eq!(models[0].tools, Some(true));
         assert_eq!(models[1].tools, Some(false));
+        // Vision is not in `supported_parameters` for either of them, and that
+        // absence says nothing: OpenRouter never lists images there.
+        assert_eq!(models[0].vision, None);
+        assert_eq!(models[1].vision, None);
         // `supported_parameters` is read for both capabilities kelir acts on.
         assert_eq!(models[0].parallel_calls, Some(true));
         assert_eq!(models[0].reasoning_effort, Some(true));
@@ -452,6 +716,31 @@ mod tests {
     }
 
     #[test]
+    fn vision_is_read_from_whichever_field_the_provider_fills() {
+        // OpenRouter states it as an input modality; the parameters list does
+        // not mention images at all.
+        let models = parse(OPENROUTER_VISION).unwrap();
+        assert_eq!(models[0].vision, Some(true));
+        assert_eq!(models[1].vision, Some(false));
+        // The Go shape's capability object, as a flag and as `supported`.
+        let go = r#"{"data":[
+            {"id":"a/yes","capabilities":{"vision":{"supported":true}}},
+            {"id":"b/no","capabilities":{"vision":false}},
+            {"id":"c/silent","capabilities":{"tools":{"supported":true}}}
+        ]}"#;
+        let models = parse(go).unwrap();
+        assert_eq!(models[0].vision, Some(true));
+        assert_eq!(models[1].vision, Some(false));
+        assert_eq!(models[2].vision, None, "silence is not a refusal");
+        // And the cache answers per model.
+        let cache = Cache::new("p", "http://example.invalid/v1", models, 0);
+        assert_eq!(cache.vision_for("a/yes"), Some(true));
+        assert_eq!(cache.vision_for("b/no"), Some(false));
+        assert_eq!(cache.vision_for("c/silent"), None);
+        assert_eq!(cache.vision_for("d/unknown"), None);
+    }
+
+    #[test]
     fn a_body_without_data_or_broken_json_is_an_error() {
         assert!(parse("not json").is_err());
         assert!(parse("{}").unwrap().is_empty());
@@ -480,10 +769,13 @@ mod tests {
     fn the_cache_round_trips_and_knows_its_age() {
         let dir = std::env::temp_dir().join(format!("kelir-models-{}", ulid::Ulid::new()));
         let models = parse(GO).unwrap();
-        let cache = Cache::new("opencode-go", models, 1_000);
+        let base = "http://127.0.0.1:1234/v1";
+        let endpoint = endpoint_id("opencode-go", base);
+        let cache = Cache::new("opencode-go", base, models, 1_000);
         store_in(&dir, &cache).unwrap();
-        let read = load_in(&dir, "opencode-go").unwrap();
+        let read = load_in(&dir, &endpoint).unwrap();
         assert_eq!(read.models, cache.models);
+        assert_eq!(read.endpoint, endpoint, "the endpoint is recorded");
         assert!(read.is_fresh(1_000 + CACHE_TTL_MS - 1));
         assert!(!read.is_fresh(1_000 + CACHE_TTL_MS));
         assert!(!read.in_backoff(1_000 + RETRY_AFTER_MS));
@@ -491,13 +783,210 @@ mod tests {
         failed.failed_at_ms = Some(5_000);
         assert!(failed.in_backoff(5_000 + RETRY_AFTER_MS - 1));
         assert!(!failed.in_backoff(5_000 + RETRY_AFTER_MS));
+        // N2: a stamp in the future is clock skew, not an hour of backoff, and
+        // a list stamped in the future is not fresh either.
+        let mut skewed = read.clone();
+        skewed.failed_at_ms = Some(10_000_000);
+        assert!(!skewed.in_backoff(5_000), "a future failure is not backoff");
+        assert!(skewed.in_backoff(10_000_000 + RETRY_AFTER_MS - 1));
+        let mut ahead = read.clone();
+        ahead.fetched_at_ms = 10_000_000;
+        assert!(!ahead.is_fresh(5_000), "a future fetch is not fresh");
+        assert!(ahead.is_fresh(10_000_000));
+        // The write leaves no temp file behind.
+        let temps: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(temps.is_empty(), "a temp file was left: {temps:?}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// S1: the cache belongs to an endpoint. A list written for one base URL is
+    /// not read for another, so a proxy or a gateway cannot inherit numbers
+    /// from the server they replaced.
+    #[test]
+    fn the_cache_is_keyed_by_the_endpoint_not_the_provider_name() {
+        let dir = std::env::temp_dir().join(format!("kelir-models-{}", ulid::Ulid::new()));
+        let models = parse(OPENROUTER).unwrap();
+        let gateway = endpoint_id("openrouter", "http://gateway.local/v1");
+        let direct = endpoint_id("openrouter", "https://openrouter.ai/api/v1");
+        assert_ne!(gateway, direct);
+        store_in(
+            &dir,
+            &Cache::new(
+                "openrouter",
+                "http://gateway.local/v1",
+                models.clone(),
+                1_000,
+            ),
+        )
+        .unwrap();
+        assert!(load_in(&dir, &gateway).is_some());
+        assert!(
+            load_in(&dir, &direct).is_none(),
+            "another endpoint must not read this cache"
+        );
+        // A cache file that names a different endpoint (written before the
+        // keying changed, or copied) is ignored, not trusted.
+        let path = cache_path_in(&dir, &direct);
+        let mut wrong = Cache::new("openrouter", "http://gateway.local/v1", models, 1_000);
+        wrong.endpoint = gateway.clone();
+        std::fs::write(&path, serde_json::to_string(&wrong).unwrap()).unwrap();
+        assert!(load_in(&dir, &direct).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// S5/N5: a config provider name never reaches a path as-is, and two
+    /// spellings of one base URL share one cache.
+    #[test]
+    fn a_provider_name_is_a_slug_and_a_base_url_is_normalised() {
+        for (name, expected) in [
+            ("openrouter", "openrouter"),
+            ("opencode-go", "opencode-go"),
+            ("..\\x", "x"),
+            ("../etc/passwd", "etc-passwd"),
+            ("", "provider"),
+        ] {
+            assert_eq!(slug(name), expected, "{name}");
+        }
+        // No separator, no drive letter and no dot-dot survives.
+        for name in ["..\\x", "../x", "C:\\Windows", "a/b"] {
+            let id = endpoint_id(name, "http://h/v1");
+            assert!(
+                !id.contains('/') && !id.contains('\\') && !id.contains(".."),
+                "{name} -> {id}"
+            );
+        }
+        assert_eq!(
+            endpoint_id("openrouter", "http://h/v1"),
+            endpoint_id("openrouter", " http://H/v1/ "),
+            "case and a trailing slash are not a different endpoint"
+        );
+        assert_eq!(
+            endpoint_id("openrouter", "http://h/v1/chat/completions"),
+            endpoint_id("openrouter", "http://h/v1"),
+            "a full-path base URL is the same endpoint as its root"
+        );
+        assert_eq!(normalise_base("http://H/v1/"), "http://h/v1");
+        // The scheme and the host fold case; the path does not (a gateway's path
+        // can be case-sensitive).
+        assert_eq!(
+            normalise_base("HTTP://H/V1/chat/completions"),
+            "http://h/V1"
+        );
+    }
+
+    /// S3: a write replaces the file atomically, so a reader never sees a
+    /// truncated list.
+    #[test]
+    fn the_cache_is_written_atomically() {
+        let dir = std::env::temp_dir().join(format!("kelir-models-{}", ulid::Ulid::new()));
+        let endpoint = endpoint_id("openrouter", "http://h/v1");
+        let older = Cache::new(
+            "openrouter",
+            "http://h/v1",
+            parse(OPENROUTER).unwrap(),
+            1_000,
+        );
+        store_in(&dir, &older).unwrap();
+        // A concurrent reader sees the old list or the new one, both complete.
+        let path = cache_path_in(&dir, &endpoint);
+        let mut seen = Vec::new();
+        for index in 0..20 {
+            let newer = Cache::new(
+                "openrouter",
+                "http://h/v1",
+                parse(GO).unwrap(),
+                1_000 + index,
+            );
+            store_in(&dir, &newer).unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let cache: Cache =
+                serde_json::from_str(&text).expect("a reader never sees a partial file");
+            seen.push(cache.fetched_at_ms);
+        }
+        assert_eq!(seen.last().copied(), Some(1_019));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// N3: the last-segment fallback matches a differently-prefixed id of the
+    /// same vendor, never another vendor's entry with the same last segment.
+    #[test]
+    fn the_last_segment_fallback_does_not_cross_vendors() {
+        let models = parse(
+            r#"{"data":[
+                {"id":"fireworks/deepseek-v4.1-flash-1017","context_length":8000},
+                {"id":"deepseek-v4.1-flash","context_length":1048576}
+            ]}"#,
+        )
+        .unwrap();
+        // Same vendor, different prefix shape: the Go id answers.
+        assert_eq!(
+            lookup(&models, "deepseek/deepseek-v4.1-flash").map(|m| m.id.as_str()),
+            Some("deepseek-v4.1-flash")
+        );
+        // Another vendor with the same last segment must not answer.
+        assert_eq!(
+            lookup(&models, "acme/deepseek-v4.1-flash-1017").map(|m| m.id.as_str()),
+            None
+        );
+        // An unqualified query (the Go shape) may match either.
+        assert_eq!(
+            lookup(&models, "deepseek-v4.1-flash-1017").map(|m| m.id.as_str()),
+            Some("fireworks/deepseek-v4.1-flash-1017")
+        );
+        // The exact id always wins, whatever the vendors look like.
+        assert_eq!(
+            lookup(&models, "fireworks/deepseek-v4.1-flash-1017").map(|m| m.id.as_str()),
+            Some("fireworks/deepseek-v4.1-flash-1017")
+        );
+    }
+
+    /// N1: `/models` is derived from the same base as the completion URL, so a
+    /// `base_url` that already names a path does not get a second one.
+    #[test]
+    fn the_models_url_is_derived_from_any_base() {
+        assert_eq!(
+            crate::provider::models_url("http://127.0.0.1:8080/v1"),
+            "http://127.0.0.1:8080/v1/models"
+        );
+        assert_eq!(
+            crate::provider::models_url("http://127.0.0.1:8080/v1/"),
+            "http://127.0.0.1:8080/v1/models"
+        );
+        assert_eq!(
+            crate::provider::models_url("http://127.0.0.1:8080/v1/chat/completions"),
+            "http://127.0.0.1:8080/v1/models",
+            "a full-path base URL must not become /v1/chat/completions/models"
+        );
+    }
+
+    /// N4: a failure becomes a short reason for `state` and the banner, never
+    /// the provider's own text.
+    #[test]
+    fn a_fetch_failure_gets_a_short_reason() {
+        assert_eq!(short_reason("http 401"), "http 401");
+        assert_eq!(short_reason("http 500"), "http 500");
+        assert_eq!(
+            short_reason(
+                "error sending request for url (http://secret.example/v1/models): connection refused"
+            ),
+            "offline"
+        );
+        assert_eq!(short_reason("operation timed out"), "timeout");
+        assert_eq!(
+            short_reason("models: cannot read the list: expected value at line 1"),
+            "malformed"
+        );
+        assert_eq!(short_reason("something else entirely"), "failed");
     }
 
     #[test]
     fn the_config_wins_over_the_provider_and_the_provider_over_the_default() {
         let models = parse(OPENROUTER).unwrap();
-        let cache = Cache::new("openrouter", models, 0);
+        let cache = Cache::new("openrouter", "http://h/v1", models, 0);
         assert_eq!(
             resolve(
                 Some(32_000),

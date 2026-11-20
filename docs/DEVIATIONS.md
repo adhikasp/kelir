@@ -339,22 +339,50 @@ wait itself in `session::stream`. Where this differs from the brief:
   with its reason (F6), and a tracked source deleted mid-session is one note, not a
   `source` event and not silence (N4).
 
-## Models metadata comes from the provider (2026-11-19)
+## Models metadata comes from the provider (2026-11-19, revised by STEER-1 fixes)
 
 The built-in window table is gone. It assumed 128k for every `deepseek` model, so the 1M-token
 model kelir now defaults to would have been compacted at a tenth of its real window (the maintainer,
 2026-11-19). `src/models.rs` parses `GET {base}/models` from both providers into one normalised
-list (`context`, `tools`), caches it at `<state>/models-<provider>.json` for 24 hours, and backs off
-for an hour after a failed fetch so an offline box does not pay the timeout on every start. The
-fetch happens at session start (and never mid-turn, including on a `model` swap, which resolves
-against the list already cached) and is bounded to 1.5 s, so a start with a stale cache can cost up
-to 1.5 s once and a start with a fresh cache costs nothing.
+list (`context`, `tools`, `parallel_calls`, `reasoning_effort`), caches it for 24 hours, and backs
+off for an hour after a failed fetch so an offline box does not pay the timeout on every start.
+
+The STEER-1 review (`docs/reviews/STEER-1-review.md`) found three should-fix defects and five nits
+in that first version; the fixes and their reasons:
+
+- **The cache belongs to an endpoint, not a provider name (S1/S5/N5).** The file is
+  `models-<endpoint>.json`, where the endpoint is a slug of the provider name plus a hash of the
+  normalised base URL (`http://h/v1`, `http://H/v1/` and `http://h/v1/chat/completions` are one
+  endpoint). A proxy, a gateway or a `KELIR_BASE_URL` stand-in therefore never inherits another
+  server's numbers, an unreachable endpoint falls back to `default` even on a warm box, and a config
+  provider key (`..\x`) never reaches a path — the slug keeps ASCII alphanumerics only.
+- **The fetch is off the critical path (S2).** It is spawned at session start and its answer
+  arrives through a channel. The start waits at most `START_GRACE` (250 ms) for it, so a local list
+  still gives the first request its capability data; a slower one is applied at the first
+  `before_step` (the only place the *window* is read, after the first step) or while the session is
+  idle. The background fetch's own bound is `FETCH_TIMEOUT` (30 s) instead of a per-request 5 s, and
+  a timeout inside it is not remembered as a failure. Until a list arrives the capability gates use
+  the built-in family table and the configured effort, which is what STEER-6 already does for a cold
+  start.
+- **The write is atomic (S3).** Temp file in the same directory, then a rename; no fsync, because
+  losing a cache write only costs one refetch.
+- **N1**: `/models` is derived from the same base as the completion URL (`provider::models_url`), so
+  a full-path `base_url` does not produce `/v1/chat/completions/models`.
+- **N2**: `is_fresh`/`in_backoff` require `stamp <= now`, so a clock that was once ahead cannot lock
+  the refresh out for the length of the skew.
+- **N3**: the last-segment lookup fallback stays inside the vendor: `deepseek/x` never matches
+  `fireworks/x`. An unqualified query (the Go shape) may match either.
+- **N4**: every failure records a short reason (`http 401`, `offline`, `timeout`, `malformed`,
+  `fetching`) on the cache and in the session, so `state.window_note` and the TUI banner say why a
+  start is not on the provider's window instead of a silent `default`. The provider's own message is
+  never carried: it can hold a URL or a body fragment.
 
 `[model_windows]` and `window` still win over the provider; a model the list does not name uses
-`DEFAULT_WINDOW` (128 000). Every verb's `state` carries `window` and `window_source`
-(`config`, `api`, `cache`, `default`), and the TUI banner shows it, so which source answered is
-visible without reading the code. The test mock now serves `/models` (canned, never recorded, never
-consuming a scripted reply) so a session can start in a test.
+`DEFAULT_WINDOW` (128 000). Every verb's `state` carries `window`, `window_source`
+(`config`, `api`, `cache`, `default`), `window_note` and `models_fetching`; the TUI banner shows the
+window, its source and the note, so which source answered is visible without reading the code. The
+test mock serves `/models` (canned, never recorded, never consuming a scripted reply) so a session
+can start in a test.
 
 ## M0
 
@@ -977,6 +1005,217 @@ consuming a scripted reply) so a session can start in a test.
   keeps running, as documented for M0: the group/job is held by the session and
   by a lingering shim, so it dies when the session does.
 
+### tui2 fixes (docs/reviews/tui2-review.md): deviations
+
+- **A message is committed block by block while it streams, not only when the
+  message ends.** The design note (§6) says a finished block is "committed
+  through `insert_before` and forgotten", which is what this now does: the
+  reviewer's S1 (a long fence becoming a three-row ticker, the previous block's
+  rows vanishing) and B1 (tool lines written after the prose that followed them)
+  were both symptoms of holding everything until `Assistant`. The one thing that
+  is still held is a block that CommonMark may read as a loose list item's
+  parent (`markdown::ends_in_item` + `continues_item`): its rows are committed
+  with its continuation, so a continuation paragraph keeps its hanging indent
+  (`S7`). That is one block of latency for a list item, and nothing else.
+- **Backspace is `Key::RemoveChip` first, then `Key::Backspace`.** The review's
+  B2 was that no key ever produced `RemoveChip`. One Backspace removes a chip
+  whole and deletes its file; with no chip at the cursor the same key is an
+  ordinary Backspace, so typed text never loses a keystroke (the design note's
+  "one Backspace removes the whole chip" is a rule about chips, not about text).
+- **The Windows keystroke burst is caught at input time, not only at submit.**
+  The earlier deviation ("Windows bracketed paste arrives as keystrokes") said
+  the chip was made at submit on Windows. The review's S8 showed what that
+  costs: the raw path stayed visible and editable, and "Backspace removes the
+  chip" was Unix-only on the maintainer's own platform. Now every typed
+  character is followed by one cheap check of the text that ends at the cursor
+  (`attachments::path_tail`, no file system until the extension matches): when
+  it is a real image file the path is replaced by the same chip a paste makes.
+  The submit-time scan remains as the fallback for a path pasted into a
+  terminal that neither delivers `Event::Paste` nor types it (an image editor's
+  file list dropped as text, say).
+- **`/expand` and `/collapse` are two commands with one direction each.** The
+  design note (§4, "expand") had `/expand` toggle the policy and `/expand n`
+  append. The earlier branch made `/collapse` the toggle, which the review's S6
+  rightly called a trap: a command named `/collapse` expanded a fresh session.
+  Final shape: `/expand` = full output from now on, `/expand n|last` = append
+  that call's output, `/collapse` = one line per call from now on; all three
+  idempotent.
+- **`paused` and `error` outlive the turn.** The design note's viewport mock
+  shows `● idle · ready` for the idle viewport, and the state machine's
+  `TurnEnded` went to idle for every outcome. A turn that ended in a step-cap
+  pause or a provider error keeps its row (with the reason and the next action)
+  until the next turn starts: it is the one state a human must act on, and
+  STEER-10 req. 1 lists both (review S5). `done` and `stopped` still go idle;
+  the summary line above says which it was.
+- **The vision check reads three shapes and treats silence as "try it".** The
+  model list can state images as a Go `capabilities.vision` flag/object, as
+  OpenRouter's `architecture.input_modalities`, or as a `supported_parameters`
+  entry. OpenRouter never lists images in `supported_parameters`, so reading a
+  missing entry as "no images" would have refused every vision model on that
+  provider (the review's S2 noted exactly this trap). A model the list does not
+  name, or names without saying, is tried: the provider's own refusal is
+  clearer than a wrong guess here.
+- **`kelir view` validates bytes, not extensions.** S3: a `.png` that is text
+  or empty used to be queued and then refused by the provider on *every* later
+  request (the `source` event stays in the log). The first 64 KB are checked for
+  a signature and a readable header (`attachments::sniff`); a file that fails is
+  refused before anything is recorded.
+- **The base prompt gains one line, the pointer gains a how-to.** S4: the model
+  could not learn that `kelir view` exists, and a live run spent seven steps
+  guessing a picture. `src/prompt.md` is now 909 bytes (budget 1 KB, the byte
+  snapshot test enforces it) and a pointer reads
+  `[image: attachments/1-x.png, 1280x720, 312 KB — run: kelir view attachments/1-x.png]`,
+  which is also where the model reads it at the moment it needs it.
+- **Spacing follows the design note's rules now (N1).** One blank row between a
+  prompt echo, a tool group, prose and the turn summary; never two.
+- **A prefix is clipped to the pane (N2).** At widths below a deep list's indent
+  the hanging indent (and a quote bar) is cut back so one column is left for the
+  text: no row is ever wider than the layout at 2..120 columns.
+- **`KELIR_ASCII` covers the design note's glyph list, not every byte (N3).**
+  The banner, `›`, `»` and the ` · ` separators stay Unicode in both sets: the
+  set exists to keep *state* readable, and those are decoration. Documented in
+  `docs/reference/tui.md`.
+- **The facts row and the state row share one word per state (N4).** A finished
+  turn reads `kelir idle` (not `kelir done`) under `● idle · ready`; the summary
+  line carries the outcome. `1 step` is singular.
+- **A `user` event lists its image paths (N5).** `attachments[]` holds the paths
+  the pointers name (`attachments::paths_in`), and the text keeps the pointers.
+- **`kelir view` copy numbers count (N6).** `<session>/attachments/` files are
+  numbered by the highest number already there instead of always `1-`.
+- **The table that streams as a bordered partial table stays (unchanged
+  deviation).** Cosmetic; the committed table is the boxed one the design note
+  asks for.
+- **No machine names in PROGRESS or notes (pre-existing class, N7).** The rows
+  that named a Linux host are scrubbed in this job's row; the older ones are the
+  wave's pre-existing class, listed here rather than rewritten in someone else's
+  row.
+
+
+
+- **The viewport stays a fixed 8 rows; the inline view's height is not changed
+  at runtime.** Design note §10 asks for confirmation of ratatui 0.30's inline
+  viewport mutability. In 0.30 an inline viewport's height is fixed at
+  `try_init_with_options`; changing it means dropping and recreating the
+  terminal, which is `clear` + redraw (exactly the flicker the note forbids).
+  The eight rows are re-allocated instead (3 live / state / 3 editor / facts),
+  and a short screen gives rows up in the documented order. The idle gap is
+  therefore 3 blank live rows, not 5.
+- **The frame cap applies to bursts only.** Design note §7 asks for a ~33 ms
+  frame cap. The loop drains every queued event before painting, so a burst is
+  one frame; when two bursts (more than one event each) land closer together
+  than `FRAME_MIN` the second waits for the remainder. A single key press is
+  never delayed: a UI that lags a keystroke by 33 ms to honour an animation cap
+  is worse than one that repaints twice.
+- **The writing state's token count is an estimate** (`~N tok`, characters / 4)
+  because a real count needs a tokenizer and the binary budget is a feature.
+  The tilde says so. A provider-reported count would need a streaming
+  `completion_tokens` delta, which the OpenAI shape does not send.
+- **`Retry` is a `UiEvent` the session will send when STEER-5 lands.** This
+  branch (STEER-5 is a parallel job) carries the whole rendering path — state,
+  countdown, `say stop` hint, 1 Hz tick that stops with the state — and the
+  session's existing exponential backoff does *not* emit it yet. Merging
+  STEER-5's `error` event with `retry_in_ms` is a one-line `emit` when it
+  exists. The alternative (duplicating the retry loop here) would conflict with
+  that job for no gain.
+- **Windows bracketed paste arrives as keystrokes, so the image path is caught
+  at submit as well as on `Event::Paste`.** crossterm 0.29 decodes
+  `ESC[200~…ESC[201~` only in its Unix parser; on Windows a terminal's paste
+  comes through as ordinary key events (measured on this box's ConPTY: the same
+  bytes produce `Event::Paste` on Linux and a stream of `Key` events on
+  Windows). `App::absorb_image_paths` therefore also scans the submitted line
+  for an existing image path and turns it into the same pointer, so a drag and
+  drop and a clipboard path work on both platforms; `Event::Paste` remains the
+  path on Unix, where it arrives before submit.
+- **The clipboard image on Ctrl-V is not implemented; pasted and dropped
+  *paths* are.** Design note §10 asks whether `windows-sys`'s clipboard
+  features add under 50 KB. They add the DataExchange and Memory features plus
+  a PNG encoder with stored deflate blocks (~200 lines, ~30 KB measured on a
+  scaffold) — affordable, but it is a second, untestable-in-CI path (a test
+  cannot own the user's clipboard), and the requirement's own priority order is
+  "path first, clipboard second". The code path is a stub
+  (`attachments::clipboard_image` returns `None`) with the message the design
+  note specifies, so the feature is visible and honest rather than silently
+  missing.
+- **`/expand` appends, and a bare `/expand` toggles the policy.** The design
+  note says `/expand` with no argument toggles the policy while `/expand [n]`
+  appends. Two different meanings for one command is a trap (`/expand` after
+  `/expand 3` would silently change the policy instead of showing the next
+  call). Here: `/expand [n|last]` always appends (default: the last call), and
+  `/collapse` is the one that toggles the policy. The help text says so.
+- **The state row's working token count is an estimate** (`~120 tok`), for the
+  same reason: a streaming `completion_tokens` delta is not part of the OpenAI
+  SSE shape.
+- **A message that carries images is serialised through `ChatMessage::to_wire`**
+  (content becomes the list of parts). Every message without images serialises
+  through the same function and produces exactly the previous JSON, so the
+  prefix of an existing conversation is unchanged: `to_wire` is the identity
+  when `images` is empty (`src/chat.rs` tests, and the e2e asserts the second
+  request's messages begin with the first request's byte-for-byte).
+
+### tui2 fixes, round 2 (docs/reviews/tui2b-review.md): deviations
+
+- **A block holding a fence inside a list item is committed when the item
+  ends, not row by row.** `S1b` asks for rows that cannot change to be
+  committed as they appear; a fence nested in a list item is the exception:
+  the item's indent, marker and hanging wrap all come from that item's own
+  render, so no line of it is final until the item is. The item still leaves
+  the live area when it ends — one item's latency, not the block's. The
+  alternative (rendering the item's prefix separately, then the code with a
+  guessed indent) would re-derive the renderer's list state outside the
+  renderer and disagree with the one-shot render on a nested item.
+- **A streamed block's blank separator rows are emitted with the block, not
+  when its first line arrives.** The round-2 pty drive showed `N-echo` was
+  still there: the spacing helpers asked `scroll.is_empty()`, and the event
+  loop drains `scroll` after every paint, so "nothing committed yet" was true
+  again between two events. The decision now reads a `last_row: Option<bool>`
+  that `take_scroll` updates, so it does not depend on whether a frame was
+  drawn in between. A unit test that never drains could not see this; the new
+  `the_spacing_rules_hold_when_every_event_is_painted` drains after every
+  event, and the pty replay of a long answer shows one blank row after the
+  echo at 80 and 40 columns. Same rule for the block separators inside a
+  streamed message: they now come from `Message::rows_after`/`live_rows`
+  (where the block index is known) instead of a `block_started` flag.
+- **`/stop` typed during a rate-limited wait still does not stop; Esc and
+  Ctrl-C do.** The brief (`R5`) suggested "consider also honouring a typed
+  `/stop`": `/stop` already ends the turn when the wait takes verbs
+  (`session.rs::wait_for`), so nothing new was added. What changed is the
+  *hint*: the state row and the facts row say `esc stops`, the CLI's
+  `say stop to cancel` sentence is unchanged for NDJSON and stderr, and a
+  plain `stop` remains a `say` that the model receives (documented, not
+  silently swallowed — turning arbitrary prose into a verb would be the
+  bigger deception).
+- **The facts row and the state row both still mention the wait** (`N-count`
+  is only half fixed). The state row keeps the countdown and the attempt, the
+  facts row keeps the full sentence, and both read the same clock
+  (`as_secs_f64().round()`), so they can no longer disagree by a second. The
+  duplication itself stays: the facts row is the only row that survives on a
+  short terminal, and a wait with no countdown at all would leave the person
+  without the reason. Merging them would mean either dropping the reason or
+  dropping the model/step/token summary for the whole wait.
+- **A table too wide for the pane drops columns instead of wrapping cells**
+  (`N-table8` fixed, `N-table` not). At width < 10 the old path still emitted
+  one cell more than the frame; now the box is built from the columns that fit
+  and never overflows (`a_table_at_extreme_widths_does_not_overflow`). Wrapping
+  a cell inside a boxed table is a different layout (a row becomes several
+  lines with the borders repeated), and the scrollback cannot reflow when the
+  pane is widened, so the wide cell still ends in `…`.
+- **`⏸` stays U+23F8.** The glyph is named by the design note (§10 state
+  glyphs); whether a terminal draws it double-width is the terminal's
+  `East Asian Width` table, and both `⏸` and the alternatives are two columns
+  in `unicode-width`, so switching would not make the width predictable — only
+  different. It is in the ASCII set (`KELIR_ASCII=1` / `TERM=dumb` renders
+  `||`), which is the escape hatch the reference documents.
+- **The base prompt is main's text again, with three trims to make room for the
+  image line, not the merge's rewording.** The merge had dropped main's
+  STEER-6 wording (`do not redesign after each tool result`, `prefer it to a
+  python/sed patch, which can fail with exit 0`, `AGENTS.md and CLAUDE.md are
+  already in this system prompt`, `Batch independent reads in one call set`);
+  `N-prompt` asked whether the STEER-6 bench measured those exact lines, and it
+  did. `src/prompt.md` is now main's file plus the one `kelir view` line the
+  previous job added: three short losses (`conversation` → `chat`, `in this
+  system prompt` → `here`, `in one call set` dropped) pay for it, 1015 bytes
+  inside the 1 KB budget, and the snapshot and the rule test moved in the same
+  commit. The rules the test pins are all still there word for word.
 ## Two providers, and OpenCode Go's key from opencode itself (STEER-2, 2026-11-19)
 
 The brief is `docs/tasks/STEER-2.md`; the code is `src/credentials.rs` and `src/doctor.rs`. Where

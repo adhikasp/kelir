@@ -117,21 +117,27 @@ true — but the logs show the model still issued 1.04 calls per step, so a clai
 two calls bought nothing. The replacement asks for the move that works regardless of the capability:
 
 ```
-- One `bash` call per read round: `sed -n`/`grep`/`ls`/`git grep` joined with
-  `;`, each labelled `echo === name`; three reads in a row is one command;
-  `grep -A/-B`, not `grep -n` then `sed -n`; never `cat` a big file; no
+- `bash` runs a command; cwd above, share no shell state. `edit` (`edits`:
+  several hunks, all or none; no python/sed patch, it can exit 0); `compact`;
+  `kelir mcp ls` lists servers.
+- Skills are **pull**: read a `SKILL.md`. Directories: {{skills_dirs}}
+- Your reasoning is dropped between steps, not your messages; AGENTS.md and
+  CLAUDE.md are here; `kelir view` an image.
+- Plan once, briefly; no redesign; real thinking writes a file:line map and
+  its plan to a notes file with `edit` first.
+- One `bash` call per read round: `git grep`/`sed -n`/`grep` joined with `;`,
+  each labelled `echo === name`; three reads in a row is one command;
+  `grep -A/-B`, not `grep -n` then `sed -n`; never `cat` a big file; skip
   `target/`.
-- Plan once, briefly; real thinking writes its plan and file:line map to a
-  notes file with `edit` first; later steps read the notes, not the source.
 - Batch reads, never a build/test; check exit codes; never chain `patch &&
-  cargo test`; commands under 8 KB; name the proving command.
+  cargo test`; <8 KB; long output to a file; name the proving command.
 ```
 
 Three rules carry the change: one bash call per read round (the shell-level batching that needs no
 provider feature), the notes file (the plan is externalised before acting, because reasoning is
 dropped between steps), and the guardrails kept from the old text (never batch a build or a test
 with the reads, commands under 8 KB, exit codes still checked, the proving command named). The
-prompt stays under 1 KB (1015 bytes), pinned byte-for-byte by
+prompt stays under 1 KB (1018 bytes after the STEER-12 merge), pinned byte-for-byte by
 `tests/fixtures/prompt.md.snapshot` and line-by-line by the retro rule list in `src/sources.rs`.
 
 ## AFTER — to be filled by the first two jobs on the new prompt
