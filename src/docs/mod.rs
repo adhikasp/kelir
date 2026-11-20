@@ -368,15 +368,6 @@ pub fn docs_root() -> Option<std::path::PathBuf> {
     path.is_dir().then_some(path)
 }
 
-/// The shipped text. Away from a checkout that is the embedded copy; in one,
-/// the file on disk, so a check sees what would be committed.
-pub fn disk_text(name: &str) -> Option<String> {
-    match docs_root() {
-        Some(root) => std::fs::read_to_string(root.join(format!("{name}.md"))).ok(),
-        None => topic(name).map(|topic| topic.body.to_string()),
-    }
-}
-
 /// The generator a line names, when the line is a start marker: exactly
 /// `<!-- generated:<kind> -->`, with `<kind>` one word.
 fn marker_kind(line: &str) -> Option<&str> {
