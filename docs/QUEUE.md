@@ -296,3 +296,5 @@ implementer pauses; the retro/introspective passes keep reading the transcripts 
   Running: steer8 (cost/status), M5-B, M6 merge+STEER-7 token integration (m6m).
 
 - 2026-11-20 19:20: **M6 merged**, **steer8 merged**. In flight: m5bfix (M5-B review fixes; F1 credential to the hint endpoint first). Next: M7 (children as CLI + brief), steer9 (de-flake), then M8 (gates + builtin skills delegation/herdr), M9, M10, M11, M12.
+
+- 2026-11-20 21:10: **M5-B merged** (M5 complete). M7 running (Claude). Next: steer9 (de-flake), M8 (gates + builtin skills `delegation` and `herdr`), M9 (jobs, named sessions, STATUS), M10 (Telegram), M11 (attach viewer + notifications), M12 (publish prep). The steer12 AFTER measurement can now be taken from a kelir session on the OpenRouter fallback.
