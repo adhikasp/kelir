@@ -179,6 +179,18 @@ pub const VARS: &[Var] = &[
         "the session's socket token: a tool child sends it with every request to the session",
     ),
     set("KELIR_SESSION_DIR", "the session's directory"),
+    set(
+        "KELIR_ROOT",
+        "the root session of the tree this tool call runs in (its own id when it is the root)",
+    ),
+    set(
+        "KELIR_PARENT",
+        "the session this tool call runs in: the parent of any child it starts (`kelir run --child`)",
+    ),
+    set(
+        "KELIR_DEPTH",
+        "that session's depth in the tree (the root is 0); a start past `max_child_depth` is refused",
+    ),
     set("KELIR_CALL_ID", "the provider call id of the bash call"),
     set(
         "KELIR_BIN",

@@ -94,6 +94,12 @@ pub const VERBS: &[VerbDoc] = &[
         effect: "kills one of this session's background jobs and records it `cancelled`; a job id                  the session did not start is refused",
     },
     VerbDoc {
+        name: "brief",
+        args: "`<question>` or a JSON object with `text`",
+        applies: "`now`",
+        effect: "a side question as a child on a by-value snapshot of this session (the log up to                  the last settled tool batch, copied; `edit` and `compact` refused by result; the                  tool list and the provider cache key are the parent's, so the prefix hits its                  cache). The history is untouched; the answer is the reply's `result`. The tool                  call `kelir brief \"<question>\"` is the same thing",
+    },
+    VerbDoc {
         name: "status",
         args: "none; `--json` prints the answer as one JSON line",
         applies: "`now`",
@@ -391,6 +397,33 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
     },
     KeyDoc {
         scope: KeyScope::Top,
+        name: "max_child_depth",
+        kind: "integer",
+        default: "`3`",
+        overrides: "—",
+        effect: "the deepest a child may be (the root is depth 0); `kelir run --child` past it exits 3 with the count",
+        field_fn: "load",
+    },
+    KeyDoc {
+        scope: KeyScope::Top,
+        name: "max_children",
+        kind: "integer",
+        default: "`10`",
+        overrides: "—",
+        effect: "live children one agent may have at once (a settled child frees its slot); the root's registry decides",
+        field_fn: "load",
+    },
+    KeyDoc {
+        scope: KeyScope::Top,
+        name: "max_live_descendants",
+        kind: "integer",
+        default: "`16`",
+        overrides: "—",
+        effect: "live descendants one root may have at once, however deep; a child whose process is gone is reaped and frees its slot",
+        field_fn: "load",
+    },
+    KeyDoc {
+        scope: KeyScope::Top,
         name: "prices",
         kind: "table of tables `[prices.\"<model>\"]` with `input`, `output`, `cached_input`                (dollars per million tokens)",
         default: "empty: the built-in table (`src/spend.rs`, stamped with its date) applies",
@@ -578,6 +611,16 @@ pub const EVENTS: &[EventDoc] = &[
         fields: "`bg_id`, `call_id?`, `cmd`, `exit_code?`, `state`, `out_path`",
         written_by: "a job that settled while this session owned its log (`state`: `exited` or \
                      `cancelled`)",
+    },
+    EventDoc {
+        name: "child_started",
+        fields: "`child_id`, `session`, `parent`, `depth`, `kind`, `task`, `background`, `model`",
+        written_by: "a child was admitted to the root's registry (`kelir run --child`, `kelir brief`); the root writes one for every descendant, a parent that is not the root writes its own children's too. `kind` is `child` or `brief`",
+    },
+    EventDoc {
+        name: "child_settled",
+        fields: "`child_id`, `session`, `parent`, `depth`, `outcome`, `exit_code?`, `result`",
+        written_by: "a child ended (`outcome`: `done`, `paused`, `error`, `stopped`, `killed` or `lost`); `result` is its final text. A background child's settlement is followed by the `user` message (from `child`) that wakes the parent",
     },
     EventDoc {
         name: "compacted",

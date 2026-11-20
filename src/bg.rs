@@ -610,6 +610,11 @@ pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> 
     if let Some(token) = &launch.token {
         command.env(crate::trust::TOKEN_ENV, token);
     }
+    // Where this session sits in the family of sessions (M7): a command that
+    // runs `kelir ls` or `kelir run --child` knows its root, parent and depth.
+    for (name, value) in crate::child::lineage_env() {
+        command.env(name, value);
+    }
     // The status key goes down a pipe: written here (a few dozen bytes, far
     // below the pipe's buffer, so nothing blocks) and closed before the shim
     // exists. An environment variable or an argv would be readable by any

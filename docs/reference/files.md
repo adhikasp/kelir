@@ -33,11 +33,14 @@ variables above still win when set. Isolate a run with the two `*_DIR` variables
   attachments/<n>-<name>  # an image `kelir view` queued
   bg/<bg-id>.status       # a job's state, written by its shim: survives kelir exiting
   bg/<bg-id>.out          # a job's output
+  host.err                # a child session only: its progress lines and errors (its stdout is its answer)
 ```
 
 Session ids are ULIDs, so the directory names sort into creation order and
-`ctl latest` can pick the newest (there is no `kelir ls`). The id is also the provider's
-prompt-cache key.
+`ctl latest` can pick the newest; `kelir ls` shows them as a tree (a child's
+`session_started` names its `parent`). The id is also the provider's prompt-cache key
+(a `brief` uses its parent's). A child is a session of its own and lives in the same
+`sessions/` directory as its parent.
 
 ## State root, outside a session
 
@@ -78,6 +81,7 @@ name (`docs/reference/mcp.md`).
 | `commands/<call-id>/out` | `src/tools/bash.rs`, `src/spill.rs` | a tool call's whole output |
 | `commands/mcp_<ulid>/` | `src/mcp/broker.rs`, `src/mcp/mod.rs` | a `kelir mcp` call's text and decoded blobs |
 | `bg/` | `src/bg.rs` | background jobs (they outlive the session on purpose) |
+| `host.err` | `src/child.rs` | a child session's stderr (written by its parent's spawn) |
 | `attachments/` | `src/attachments.rs` | images `kelir view` queued |
 | `sock` | `src/ipc.rs` | verbs in, status out |
 | `models-*.json` | `src/models.rs` | the provider's model metadata |

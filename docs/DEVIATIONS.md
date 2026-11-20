@@ -1583,3 +1583,84 @@ follow-up commit series that restores three things the first pass lost.
   priced model is replaced by a table estimate labelled `table` (intended for Go; a free/BYOK
   request on a priced model gets one too). A crash between a `usage` event and its `warning`
   event loses that warning: a resume arms against the rebuilt state. `children` is always 0.
+
+## M7: children as CLI, brief, caps, ls and kill (2026-11-20)
+
+The brief is `docs/tasks/M7.md`; the code is `src/child.rs` (registry, caps, hand-off,
+snapshot), `src/childcli.rs` (the four commands), `src/session/children.rs` (the session
+side). Where the code had to choose:
+
+- **The session starts every child, not the CLI.** The brief says the CLI "registers with the
+  root's socket" and "starts a child as a separate OS process". A tool call on Windows sits in
+  its call's Job Object, which forbids breakaway and dies with the call, so a background child
+  started by the CLI could not outlive its `bash` call, and nothing outside the call could
+  hold it in the *parent session's* group. The CLI therefore sends one verb (`child`, `op:
+  run|brief`) to the session it runs in, and the session spawns `kelir child-host` in its own
+  process group / kill-on-close Job Object (`SessionGroups`, as MCP servers are). A foreground
+  child's answer is the verb's reply, which waits for it; if the `bash` call is stopped the
+  connection drops (`ipc::peer_gone`) and the session kills the child (`stopped`).
+- **Root token plus a per-child link, not the token alone.** A descendant reaches the root's
+  socket with the root's token (so the listener lets it in) and a *link* the root minted for
+  that child. Both reach the child host over its stdin pipe; neither is in argv, the
+  environment or a log, and a tool call gets only its own session's token. `admit`, `up`,
+  `settle` and a descendant's `kill` need a live child's link and act only for it: the parent
+  of a child it settles, the subtree it may kill. The session's own tasks use a private random
+  key instead of a link. Not defended (as everywhere in STEER-7): a same-user process that reads
+  the root's token *file* can drive the root like `kelir ctl` (it can `run` or `kill` there).
+- **No `verb` event for `child`.** Like `mcp`, the `child` verb is intercepted before the verb
+  log (its arguments hold a task, and the registry operations hold secrets); `child_started`
+  and `child_settled` are its record. `brief` through `kelir ctl` is logged as a verb (its
+  question only).
+- **`max_children` is *live* children, and a brief counts.** The brief says "10 children per
+  agent" without saying live; a lifetime count would make a long-lived TUI session unable to
+  delegate after ten tasks, and the brief speaks of a crashed child leaking a "slot", which only
+  a live count has. The same holds for the other two caps. A `brief` takes a slot while it runs.
+- **The caps are three top-level keys** (`max_child_depth`, `max_children`,
+  `max_live_descendants`), not a `[children]` table: the drift test reads `RawConfig`'s fields.
+- **`child_started`/`child_settled` carry more than the spec's list**: `session`, `parent`,
+  `kind` (`child`/`brief`), `model`, and `exit_code?` on settle. The root writes the pair for
+  every descendant (that is the registry); a parent that is not the root writes the same pair
+  for its own direct children (it wakes and resumes from its own log). A deeper descendant's
+  settlement never wakes the root.
+- **A killed or crashed subtree settles by liveness.** The root checks registered pids once a
+  second and at every admission (`process_alive`: start time must match, a zombie is gone) and
+  settles what is gone `lost` (`killed` if a `kill` was aimed at it, at once). A child that
+  exited on its own is first given 5 s to be settled by whoever started it with its real outcome:
+  reaping it at once called a finished grandchild `lost` when the reaper's tick fell between its
+  exit and its starter's report. `kill` signals the pid the
+  registry recorded (`killpg` on Unix, `terminate_tree` on Windows) after re-checking its start
+  time; a caller never names a pid.
+- **Unix parents that die hard.** Windows children die with the parent's Job Object at once. On
+  Unix a child polls its parent (`parent_alive`, 500 ms) and ends its own session, which stops
+  its tool calls; the worst case after `kill -9` is about a second. (MCP uses an `sh` watcher
+  for the same reason.)
+- **`brief` waits for its answer** (the spec's table says `async`): the verb's reply and the
+  command's stdout are the child's final text. The snapshot is the log up to the last settled
+  tool batch: the assistant message that called `kelir brief` (its result does not exist yet) and
+  its siblings are cut, which is also exactly the parent's last request, so the first brief
+  request is that request plus the question. `blobs/` and `attachments/` are copied; the copy's
+  `session_started` names the child and drops `key_origin`. The provider cache key is the
+  parent's session id (`Client::new(.., cache_id)`).
+- **A child's progress lines go to stderr** (`host.err` in its session directory); stdout is
+  the answer the parent reads. Everything the CLI prints for a refusal is one line starting
+  `refused:`, exit 3.
+- **`kelir ls` reads the logs, not the registry.** It works from a terminal, for dead sessions
+  and for a root that is not running. A session that is not running shows the settlement its
+  parent recorded (`killed`, `lost`, …), else `ended`/`crashed`. Outside a session it shows the
+  ten newest roots and their descendants; `--all` shows every session. Costs are the tally of
+  the logs (provider cost, else the price table; `-` when unknown).
+- **A resumed child is a root again.** `kelir resume <child>` reopens its log as an ordinary
+  session (the link and the root's socket died with the parent). A resumed *root* settles the
+  children its log shows unsettled as `lost`.
+- **`ctl status`** now reports `children` (live descendants; it was always 0) and `child_list`
+  (session, parent, depth, kind, state, pid; no secret).
+- **Not here:** the delegation skill (M8), a TUI children panel (a wake is a one-line info row),
+  and a spend cap (the spec says there is none).
+- **A brief cannot start children or briefs (m7fix).** The spec refuses `edit`, `compact` and
+  children in a brief; `kelir run --child` and `kelir brief` in a brief answer
+  `refused: this is a brief…` (exit 3) from `child_start`. `bash` itself stays, so this is a
+  refusal by result, not a smaller tool list (the list must stay the parent's for the cache).
+- **A brief's spend is its own (m7fix).** The copied prefix of its log is the parent's: `Tally`
+  starts the sums at the brief's question (`child::own_start`), so `ls`, `status` and
+  `warn_cost` do not count the prefix twice. `ls` takes a brief's kind and task from that
+  question, not from the copied first `user` event.

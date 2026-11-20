@@ -66,6 +66,11 @@ pub const TOPICS: &[Topic] = &[
         body: include_str!("../../docs/reference/mcp.md"),
     },
     Topic {
+        name: "children",
+        summary: "`kelir run --child`, `brief`, `ls`, `kill`: delegating to other sessions, the caps, the tree",
+        body: include_str!("../../docs/reference/children.md"),
+    },
+    Topic {
         name: "providers",
         summary: "the two providers: keys, retries, limits, model metadata",
         body: include_str!("../../docs/reference/providers.md"),

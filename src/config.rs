@@ -124,6 +124,9 @@ pub struct Config {
     /// Warn once when the session's cost passes this many dollars (`warn_cost`,
     /// default unset).
     pub warn_cost: Option<f64>,
+    /// The child caps (`max_child_depth`, `max_children`, `max_live_descendants`):
+    /// enforced by the root session's registry (M7).
+    pub children: crate::child::Caps,
     /// `[prices."<model>"]`: per-million-token prices that override and extend
     /// the built-in table.
     pub prices: BTreeMap<String, crate::spend::Price>,
@@ -191,6 +194,9 @@ struct RawConfig {
     retry_max_attempts: Option<u32>,
     warn_prompt_tokens: Option<u64>,
     warn_cost: Option<f64>,
+    max_child_depth: Option<u32>,
+    max_children: Option<u32>,
+    max_live_descendants: Option<u32>,
     prices: BTreeMap<String, RawPrice>,
 }
 
@@ -464,6 +470,17 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             None => Some(crate::spend::DEFAULT_WARN_PROMPT_TOKENS),
         },
         warn_cost: warn_cost(raw.warn_cost)?,
+        children: crate::child::Caps {
+            depth: raw
+                .max_child_depth
+                .unwrap_or(crate::child::DEFAULT_MAX_DEPTH),
+            per_agent: raw
+                .max_children
+                .unwrap_or(crate::child::DEFAULT_MAX_CHILDREN),
+            live: raw
+                .max_live_descendants
+                .unwrap_or(crate::child::DEFAULT_MAX_LIVE),
+        },
         prices: prices(&raw.prices)?,
     })
 }

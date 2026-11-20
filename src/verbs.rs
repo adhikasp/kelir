@@ -93,6 +93,17 @@ pub enum Verb {
     Cancel {
         id: String,
     },
+    /// `brief <question>`: a side question as a child on a by-value snapshot of
+    /// the session (M7). The session answers it where it arrives (the answer is
+    /// the child's, so it waits), and the history is untouched.
+    Brief {
+        question: String,
+    },
+    /// A child of this session settled (or the root reaped it): the session's
+    /// own bookkeeping, raised by the task that waited for it. It applies at the
+    /// first boundary; the wake-up message for a background child is what it
+    /// writes.
+    Child(Box<crate::child::ChildNote>),
     End,
     /// `status`: read-only. The session answers it where it is read (it never
     /// queues, never logs and never waits for a boundary), so this variant only
@@ -109,6 +120,8 @@ impl Verb {
             | Verb::End
             | Verb::Bg(..)
             | Verb::Cancel { .. }
+            | Verb::Brief { .. }
+            | Verb::Child(..)
             | Verb::Status
             | Verb::View { .. } => "now",
             Verb::Say { .. } => "queued",
@@ -137,6 +150,8 @@ impl Verb {
             | Verb::Stop { .. }
             | Verb::End
             | Verb::Bg(..)
+            | Verb::Brief { .. }
+            | Verb::Child(..)
             | Verb::Status
             | Verb::Cancel { .. } => true,
             // An attachment applies at the next boundary, like a `say` that
@@ -317,6 +332,9 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
         }
         "end" => Ok(Verb::End),
         "status" => Ok(Verb::Status),
+        "brief" => Ok(Verb::Brief {
+            question: text_arg(args, "brief")?,
+        }),
         // Applies at the next `before_step`: the summary is a provider call and
         // must not land inside a tool batch.
         "compact" => Ok(Verb::Compact {
@@ -340,7 +358,7 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             id: cancel_id(args)?,
         }),
         other => Err(format!(
-            "unknown verb `{other}` (say, later, stop, model, tools, compact, skills, view, end, cancel, status)"
+            "unknown verb `{other}` (say, later, stop, model, tools, compact, skills, view, end, cancel, status, brief)"
         )),
     }
 }
@@ -362,6 +380,7 @@ pub fn loggable_args(name: &str, args: &Value) -> Value {
         "view" => &["path"],
         "compact" => &["focus"],
         "cancel" => &["id", "job"],
+        "brief" => &["text"],
         "bg" => {
             // A job status, re-serialised: only the fields the type knows.
             return serde_json::from_value::<crate::bg::Status>(args.clone())
@@ -376,7 +395,7 @@ pub fn loggable_args(name: &str, args: &Value) -> Value {
         Value::String(_)
             if matches!(
                 name,
-                "say" | "later" | "model" | "skills" | "view" | "cancel"
+                "say" | "later" | "model" | "skills" | "view" | "cancel" | "brief"
             ) =>
         {
             args.clone()
@@ -439,8 +458,8 @@ pub fn cli_args(verb: &str, words: &[String], flags: &CliFlags) -> Result<Value,
         None => {
             let text = words.join(" ");
             match verb {
-                "say" | "later" if text.trim().is_empty() => json!({}),
-                "say" | "later" => json!({"text": text}),
+                "say" | "later" | "brief" if text.trim().is_empty() => json!({}),
+                "say" | "later" | "brief" => json!({"text": text}),
                 "stop" => {
                     let mut args = json!({});
                     if !text.trim().is_empty() {

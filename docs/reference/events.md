@@ -34,6 +34,8 @@ resume: `src/fold.rs` renders the frozen system message, then `user`,
 | `mcp_settled` | `mcp_id`, `server`, `tool`, `outcome`, `exit_code`, `bytes`, `out_path`, `parent_call_id?` | the call's one commit; `outcome` is `ok`, `error`, `timeout`, `unavailable`, `disabled`, or `unknown` (a resume found no settlement), and the result is in the file `out_path` names |
 | `bg_started` | `bg_id`, `call_id?`, `cmd`, `pid?`, `out_path`, `pubkey?` | a promoted bash call or an explicit `kelir bg run` |
 | `bg_settled` | `bg_id`, `call_id?`, `cmd`, `exit_code?`, `state`, `out_path` | a job that settled while this session owned its log (`state`: `exited` or `cancelled`) |
+| `child_started` | `child_id`, `session`, `parent`, `depth`, `kind`, `task`, `background`, `model` | a child was admitted to the root's registry (`kelir run --child`, `kelir brief`); the root writes one for every descendant, a parent that is not the root writes its own children's too. `kind` is `child` or `brief` |
+| `child_settled` | `child_id`, `session`, `parent`, `depth`, `outcome`, `exit_code?`, `result` | a child ended (`outcome`: `done`, `paused`, `error`, `stopped`, `killed` or `lost`); `result` is its final text. A background child's settlement is followed by the `user` message (from `child`) that wakes the parent |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by`, `tokens_before`, `tokens_after`, `cache_restart` | a compaction; the fold replaces everything up to `through_seq` except the pins |
 | `resumed` | `from_seq`, `unsettled[]` | a session reopened from its log |
 | `error` | `where`, `message`, `retryable`, `status?`, `attempt?`, `retry_in_ms?` | provider errors, broken sources, refused verbs; never a response body and never a key |

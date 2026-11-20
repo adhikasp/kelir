@@ -53,6 +53,9 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_SOCK` | the session socket (a Unix socket path or a pipe name), so `kelir ctl`/`view`/`bg` reach the session |
 | `KELIR_TOKEN` | the session's socket token: a tool child sends it with every request to the session |
 | `KELIR_SESSION_DIR` | the session's directory |
+| `KELIR_ROOT` | the root session of the tree this tool call runs in (its own id when it is the root) |
+| `KELIR_PARENT` | the session this tool call runs in: the parent of any child it starts (`kelir run --child`) |
+| `KELIR_DEPTH` | that session's depth in the tree (the root is 0); a start past `max_child_depth` is refused |
 | `KELIR_CALL_ID` | the provider call id of the bash call |
 | `KELIR_BIN` | the kelir binary, so `kelir bg`/`kelir view` work off `PATH` |
 
