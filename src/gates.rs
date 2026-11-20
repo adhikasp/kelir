@@ -1,0 +1,961 @@
+//! Gates (M8): the only way a veto or a nudge enters the core.
+//!
+//! A gate is an executable the session runs at one of six named events. It
+//! gets the event as JSON on stdin and may answer `allow`, `deny` or `rewrite`
+//! as JSON on stdout. Opinions ("verify before you claim", "check the note
+//! you edited") live in gates, never in the core.
+//!
+//! **Fail open.** A gate that cannot start, crashes (non-zero exit), times out
+//! (30 s), prints garbage or prints more than [`OUTPUT_MAX`] bytes is logged
+//! (`gate` event with `error`) and treated as `allow`. A broken gate must
+//! never wedge a session.
+//!
+//! **Trust.** A gate is a child of the session, like a `bash` call, so it gets
+//! the *same* secret-free environment an MCP server does (STEER-7): an
+//! allow-list of ordinary variables ([`crate::mcp::rpc::inherited`] plus
+//! `SSH_AUTH_SOCK`), then `KELIR_SESSION_DIR`, `KELIR_GATE_EVENT` and
+//! `KELIR_GATE_NAME`. It never receives `KELIR_TOKEN`, `KELIR_SOCK`, a
+//! provider key or a user's `key_env` variable. A gate's own `env` table in
+//! `config.toml` adds to that, explicitly.
+//!
+//! **Process handling.** Unix: the gate leads its own process group and the
+//! group is killed when the gate ends (so `cmd &` leaves nothing). Windows: a
+//! named Job Object with kill-on-close, created suspended and resumed once it
+//! is inside the job; `CREATE_NO_WINDOW` when the session has no console. The
+//! command string goes to the configured shell through `shellcmd` (a file on
+//! Windows), so `.cmd`/`.ps1` gates work with a `cmd.exe`/PowerShell shell.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
+
+use crate::proc::ProcessGroup;
+
+/// A gate that has not answered after this long is killed and allowed.
+pub const TIMEOUT: Duration = Duration::from_secs(30);
+/// More stdout than this is garbage (and the rest is discarded).
+pub const OUTPUT_MAX: usize = 1024 * 1024;
+/// The longest `reason` kept in a `gate` event or shown to the model.
+pub const REASON_MAX: usize = 2000;
+/// How much of a crashed gate's stderr goes into the `error` field.
+const STDERR_TAIL: usize = 300;
+/// After the gate ended, how long its output pipes get to close.
+const DRAIN: Duration = Duration::from_secs(2);
+
+/// The gate timeout: [`TIMEOUT`], unless a test shortened it.
+pub fn timeout() -> Duration {
+    crate::envs::var("KELIR_GATE_TIMEOUT_MS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(TIMEOUT)
+}
+
+/// The six events a gate can be bound to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Event {
+    SessionStart,
+    PromptSubmit,
+    BeforeTool,
+    AfterTool,
+    TurnEnd,
+    SessionEnd,
+}
+
+impl Event {
+    pub const ALL: [Event; 6] = [
+        Event::SessionStart,
+        Event::PromptSubmit,
+        Event::BeforeTool,
+        Event::AfterTool,
+        Event::TurnEnd,
+        Event::SessionEnd,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Event::SessionStart => "session_start",
+            Event::PromptSubmit => "prompt_submit",
+            Event::BeforeTool => "before_tool",
+            Event::AfterTool => "after_tool",
+            Event::TurnEnd => "turn_end",
+            Event::SessionEnd => "session_end",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Event> {
+        let name = name.trim().replace('-', "_").to_ascii_lowercase();
+        Event::ALL.into_iter().find(|event| event.name() == name)
+    }
+
+    /// Whether `deny` does anything at this event (the SPEC table).
+    pub fn can_deny(self) -> bool {
+        matches!(
+            self,
+            Event::PromptSubmit | Event::BeforeTool | Event::TurnEnd
+        )
+    }
+
+    /// Whether `rewrite` does anything at this event.
+    pub fn can_rewrite(self) -> bool {
+        !matches!(self, Event::SessionStart | Event::SessionEnd)
+    }
+}
+
+/// One declared gate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateDef {
+    pub name: String,
+    pub event: Event,
+    /// What the shell runs.
+    pub command: String,
+    /// `before_tool`/`after_tool` only: the tool names this gate sees (empty
+    /// is every tool). `mcp:<server>` covers every tool of a server and a
+    /// trailing `*` is a prefix match.
+    pub tools: Vec<String>,
+    /// Extra environment, from the gate's own `env` table.
+    pub env: BTreeMap<String, String>,
+    /// Where the declaration came from: `config` or `skill <name>`.
+    pub origin: String,
+}
+
+impl GateDef {
+    /// Whether this gate runs for `tool` (always true for events without one).
+    pub fn matches(&self, tool: Option<&str>) -> bool {
+        let Some(tool) = tool else { return true };
+        self.tools.is_empty() || self.tools.iter().any(|pattern| tool_matches(pattern, tool))
+    }
+}
+
+fn tool_matches(pattern: &str, tool: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return tool.starts_with(prefix);
+    }
+    if pattern == tool {
+        return true;
+    }
+    // `mcp:server` names every tool of the server.
+    pattern.starts_with("mcp:")
+        && !pattern.contains('.')
+        && tool
+            .strip_prefix(pattern)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+// ------------------------------------------------------------------- config
+
+/// Read the `[gates]` table: each key an event name, each value a command
+/// string, a table, or a list of those.
+///
+/// ```toml
+/// [gates]
+/// turn_end = "python gates/verify.py"
+/// before_tool = [{ name = "no-rm", command = "sh gates/no-rm.sh", tools = ["bash"] }]
+/// ```
+pub fn from_toml(value: &toml::Value) -> Result<Vec<GateDef>, String> {
+    let table = value
+        .as_table()
+        .ok_or_else(|| "`gates` must be a table of event names".to_string())?;
+    let mut defs: Vec<GateDef> = Vec::new();
+    for (key, entry) in table {
+        let event = Event::parse(key).ok_or_else(|| {
+            format!(
+                "[gates]: `{key}` is not an event (the six are {})",
+                Event::ALL.map(Event::name).join(", ")
+            )
+        })?;
+        let items: Vec<&toml::Value> = match entry {
+            toml::Value::Array(items) => items.iter().collect(),
+            other => vec![other],
+        };
+        for item in items {
+            let def = one_from_toml(event, item)?;
+            push_unique(&mut defs, def);
+        }
+    }
+    Ok(defs)
+}
+
+fn one_from_toml(event: Event, item: &toml::Value) -> Result<GateDef, String> {
+    let at = event.name();
+    match item {
+        toml::Value::String(command) => {
+            if command.trim().is_empty() {
+                return Err(format!("[gates].{at}: an empty command"));
+            }
+            Ok(GateDef {
+                name: name_from_command(command),
+                event,
+                command: command.clone(),
+                tools: Vec::new(),
+                env: BTreeMap::new(),
+                origin: "config".into(),
+            })
+        }
+        toml::Value::Table(table) => {
+            for key in table.keys() {
+                if !["command", "name", "tool", "tools", "env"].contains(&key.as_str()) {
+                    return Err(format!(
+                        "[gates].{at}: unknown key `{key}` (command, name, tools, env)"
+                    ));
+                }
+            }
+            let command = table
+                .get("command")
+                .and_then(toml::Value::as_str)
+                .filter(|command| !command.trim().is_empty())
+                .ok_or_else(|| format!("[gates].{at}: a table needs a `command` string"))?;
+            let name = match table.get("name") {
+                Some(toml::Value::String(name)) if valid_name(name) => name.clone(),
+                Some(_) => {
+                    return Err(format!(
+                        "[gates].{at}: `name` is letters, digits, `-`, `_`, `.`"
+                    ));
+                }
+                None => name_from_command(command),
+            };
+            let mut tools = Vec::new();
+            for key in ["tool", "tools"] {
+                match table.get(key) {
+                    None => {}
+                    Some(toml::Value::String(tool)) => tools.push(tool.clone()),
+                    Some(toml::Value::Array(list)) => {
+                        for tool in list {
+                            tools.push(
+                                tool.as_str()
+                                    .ok_or_else(|| format!("[gates].{at}: `{key}` holds strings"))?
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    Some(_) => return Err(format!("[gates].{at}: `{key}` is a string or a list")),
+                }
+            }
+            if !tools.is_empty() && !matches!(event, Event::BeforeTool | Event::AfterTool) {
+                return Err(format!(
+                    "[gates].{at}: `tools` applies to before_tool/after_tool"
+                ));
+            }
+            let mut env = BTreeMap::new();
+            if let Some(value) = table.get("env") {
+                let map = value
+                    .as_table()
+                    .ok_or_else(|| format!("[gates].{at}: `env` is a table of strings"))?;
+                for (name, value) in map {
+                    let value = value
+                        .as_str()
+                        .ok_or_else(|| format!("[gates].{at}: env `{name}` is not a string"))?;
+                    if !valid_env_name(name) {
+                        return Err(format!("[gates].{at}: `{name}` is not a variable name"));
+                    }
+                    env.insert(name.clone(), value.to_string());
+                }
+            }
+            Ok(GateDef {
+                name,
+                event,
+                command: command.to_string(),
+                tools,
+                env,
+                origin: "config".into(),
+            })
+        }
+        _ => Err(format!(
+            "[gates].{at}: a command string, a table or a list of them"
+        )),
+    }
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn valid_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// A name for a gate that did not give one: the stem of the last path-like
+/// word of its command (`python gates/verify.py --x` is `verify`).
+pub fn name_from_command(command: &str) -> String {
+    let word = command
+        .split_whitespace()
+        .rev()
+        .find(|word| !word.starts_with('-') && !word.contains('='))
+        .or_else(|| command.split_whitespace().next())
+        .unwrap_or("gate");
+    let word = word.trim_matches(|c| c == '"' || c == '\'');
+    let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    let stem = file.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(file);
+    let name: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() { "gate".into() } else { name }
+}
+
+/// Add a gate; a name already used gets `-2`, `-3`… so a `gate` event always
+/// says which one ran.
+pub fn push_unique(defs: &mut Vec<GateDef>, mut def: GateDef) {
+    let base = def.name.clone();
+    let mut n = 1;
+    while defs.iter().any(|other| other.name == def.name) {
+        n += 1;
+        def.name = format!("{base}-{n}");
+    }
+    defs.push(def);
+}
+
+// -------------------------------------------------------------- skill gates
+
+/// The key a skill's `metadata` uses to bind a script to events.
+pub const SKILL_KEY: &str = "kelir-gate";
+
+/// The `kelir-gate` value of a skill's metadata block (block or flow form).
+pub fn skill_binding(metadata: &str) -> Option<String> {
+    for line in metadata.lines() {
+        let line = line.trim().trim_start_matches('{').trim_end_matches('}');
+        for part in line.split(',') {
+            let part = part.trim();
+            if let Some(rest) = part.strip_prefix(SKILL_KEY) {
+                let rest = rest.trim_start();
+                if let Some(value) = rest.strip_prefix(':') {
+                    let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Gates declared by the skills in `found`: a skill whose metadata says
+/// `kelir-gate: <event>[=<script>][; <event>=<script>…]` binds a file under its
+/// own `scripts/` directory. Without `=<script>` the file is
+/// `scripts/<event>.*`, then `scripts/gate.*`, then the only file there.
+/// Problems come back as notes, never as a refusal to start.
+pub fn from_skills(found: &[crate::sources::Found], notes: &mut Vec<String>) -> Vec<GateDef> {
+    let mut defs = Vec::new();
+    for source in found {
+        if source.builtin || source.kind != crate::sources::SourceKind::Skill {
+            continue;
+        }
+        let Ok(skill) = crate::sources::parse_skill(&source.text) else {
+            continue;
+        };
+        let Some(metadata) = skill.metadata.as_deref() else {
+            continue;
+        };
+        let Some(binding) = skill_binding(metadata) else {
+            continue;
+        };
+        let Some(dir) = source.path.parent() else {
+            continue;
+        };
+        for part in binding.split(';') {
+            let (event_name, script) = match part.split_once('=') {
+                Some((event, script)) => (event.trim(), Some(script.trim())),
+                None => (part.trim(), None),
+            };
+            let Some(event) = Event::parse(event_name) else {
+                notes.push(format!(
+                    "skill {}: kelir-gate `{event_name}` is not an event",
+                    skill.name
+                ));
+                continue;
+            };
+            match resolve_script(dir, event, script) {
+                Ok(path) => push_unique(
+                    &mut defs,
+                    GateDef {
+                        name: format!("{}.{}", skill.name, event.name()),
+                        event,
+                        command: script_command(&path),
+                        tools: Vec::new(),
+                        env: BTreeMap::new(),
+                        origin: format!("skill {}", skill.name),
+                    },
+                ),
+                Err(why) => notes.push(format!("skill {}: kelir-gate: {why}", skill.name)),
+            }
+        }
+    }
+    defs
+}
+
+fn resolve_script(dir: &Path, event: Event, named: Option<&str>) -> Result<PathBuf, String> {
+    let scripts = dir.join("scripts");
+    if let Some(name) = named {
+        let relative = Path::new(name);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(format!("`{name}` must stay inside the skill directory"));
+        }
+        let path = dir.join(relative);
+        return if path.is_file() {
+            Ok(path)
+        } else {
+            Err(format!("`{name}` is not a file"))
+        };
+    }
+    let files: Vec<PathBuf> = std::fs::read_dir(&scripts)
+        .map_err(|_| "the skill has no scripts/ directory".to_string())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    let stem = |path: &PathBuf| {
+        path.file_stem()
+            .map(|stem| stem.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    let wanted = event.name().replace('_', "-");
+    for candidate in [event.name(), wanted.as_str(), "gate"] {
+        if let Some(path) = files.iter().find(|path| stem(path) == candidate) {
+            return Ok(path.clone());
+        }
+    }
+    match files.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => Err("scripts/ is empty".into()),
+        _ => Err(format!(
+            "scripts/ holds several files and none is `{}.*` or `gate.*`: name one with `{}=scripts/<file>`",
+            event.name(),
+            event.name()
+        )),
+    }
+}
+
+/// The shell command that runs a script file, chosen by extension.
+pub fn script_command(path: &Path) -> String {
+    let shown = crate::util::path_string(path).replace('\\', "/");
+    let quoted = format!("\"{shown}\"");
+    let ext = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "py" => format!("{} {quoted}", python()),
+        "sh" => format!("bash {quoted}"),
+        "js" | "mjs" => format!("node {quoted}"),
+        "ps1" => format!("powershell -NoProfile -ExecutionPolicy Bypass -File {quoted}"),
+        "cmd" | "bat" => format!("cmd /C {quoted}"),
+        _ => quoted,
+    }
+}
+
+/// `python3` where it exists, else `python` (on Windows the `python3` on PATH
+/// is often a Store stub).
+pub fn python() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
+// ---------------------------------------------------------------- decisions
+
+/// What a gate said.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Parsed {
+    Allow { reason: String },
+    Deny { reason: String },
+    Rewrite { reason: String, input: Value },
+}
+
+/// Parse a gate's stdout. Empty is `allow` (a gate that only has side effects
+/// prints nothing); anything else must be one JSON object with a known
+/// `decision`. Everything wrong is an `Err` the caller logs and fails open on.
+pub fn parse_decision(stdout: &str) -> Result<Parsed, String> {
+    let text = stdout.trim();
+    if text.is_empty() {
+        return Ok(Parsed::Allow {
+            reason: String::new(),
+        });
+    }
+    if text.len() > OUTPUT_MAX {
+        return Err(format!("output over {OUTPUT_MAX} bytes"));
+    }
+    let value: Value = serde_json::from_str(text).map_err(|error| {
+        format!(
+            "not JSON ({error}): {}",
+            crate::util::truncate_chars(text, 80)
+        )
+    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "not a JSON object".to_string())?;
+    let decision = object
+        .get("decision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "no `decision` string".to_string())?;
+    let reason = match object.get("reason") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(reason)) => crate::util::truncate_chars(reason, REASON_MAX),
+        Some(_) => return Err("`reason` is not a string".into()),
+    };
+    match decision {
+        "allow" => Ok(Parsed::Allow { reason }),
+        "deny" => Ok(Parsed::Deny { reason }),
+        "rewrite" => {
+            let input = object
+                .get("input")
+                .filter(|input| input.is_object())
+                .ok_or_else(|| "`rewrite` needs an `input` object".to_string())?;
+            Ok(Parsed::Rewrite {
+                reason,
+                input: input.clone(),
+            })
+        }
+        other => Err(format!(
+            "unknown decision `{}`",
+            crate::util::truncate_chars(other, 20)
+        )),
+    }
+}
+
+/// One gate run, as the `gate` event records it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Run {
+    pub gate: String,
+    pub event: String,
+    pub decision: String,
+    pub reason: String,
+    pub ms: u64,
+    pub rewritten: bool,
+    pub error: Option<String>,
+}
+
+/// What the chain of gates at one event concluded.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Verdict {
+    Allow,
+    Deny {
+        gate: String,
+        reason: String,
+    },
+    /// The event's value after every rewrite: `{"text"}` for a prompt or a
+    /// final answer, the tool input for `before_tool`, `{"result"}` for
+    /// `after_tool`.
+    Rewrite(Value),
+}
+
+/// Every run of one event, and what they add up to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chain {
+    pub runs: Vec<Run>,
+    pub verdict: Verdict,
+}
+
+impl Chain {
+    pub fn allow() -> Chain {
+        Chain {
+            runs: Vec::new(),
+            verdict: Verdict::Allow,
+        }
+    }
+}
+
+/// Apply a rewrite's `input` to the event's current payload, if its shape fits
+/// the event. Returns the new payload and the rewritten value.
+pub fn apply_rewrite(
+    event: Event,
+    gate: &str,
+    payload: &mut Value,
+    input: &Value,
+) -> Result<Value, String> {
+    let text = |key: &str| {
+        input
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("`rewrite` at {} needs input.{key} (a string)", event.name()))
+    };
+    match event {
+        Event::PromptSubmit => {
+            let new = text("text")?;
+            payload["text"] = json!(new);
+            Ok(json!({"text": new}))
+        }
+        Event::TurnEnd => {
+            let new = text("text")?;
+            payload["final_text"] = json!(new);
+            Ok(json!({"text": new}))
+        }
+        Event::BeforeTool => {
+            payload["input"] = input.clone();
+            Ok(input.clone())
+        }
+        Event::AfterTool => {
+            // `result` replaces what the model sees; `note` appends a line.
+            let mut result = payload
+                .get("result")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let mut changed = false;
+            if let Some(new) = input.get("result").and_then(Value::as_str) {
+                result = new.to_string();
+                changed = true;
+            }
+            if let Some(note) = input.get("note").and_then(Value::as_str) {
+                if !result.is_empty() && !result.ends_with('\n') {
+                    result.push('\n');
+                }
+                result.push_str(&format!("[gate {gate}] {note}"));
+                changed = true;
+            }
+            if !changed {
+                return Err("`rewrite` at after_tool needs input.result or input.note".into());
+            }
+            payload["result"] = json!(result);
+            Ok(json!({"result": result}))
+        }
+        Event::SessionStart | Event::SessionEnd => {
+            Err(format!("{} has nothing to rewrite", event.name()))
+        }
+    }
+}
+
+// ------------------------------------------------------------------- runner
+
+/// The session's gates and what a run needs to know about the session.
+pub struct Runner {
+    defs: Vec<GateDef>,
+    shell: Vec<String>,
+    cwd: PathBuf,
+    session_id: String,
+    session_dir: PathBuf,
+    runs: AtomicU64,
+}
+
+impl Runner {
+    pub fn new(
+        defs: Vec<GateDef>,
+        shell: Vec<String>,
+        cwd: PathBuf,
+        session_id: String,
+        session_dir: PathBuf,
+    ) -> Runner {
+        Runner {
+            defs,
+            shell,
+            cwd,
+            session_id,
+            session_dir,
+            runs: AtomicU64::new(0),
+        }
+    }
+
+    pub fn defs(&self) -> &[GateDef] {
+        &self.defs
+    }
+
+    /// Whether any gate would run at `event` for `tool`.
+    pub fn has(&self, event: Event, tool: Option<&str>) -> bool {
+        self.defs
+            .iter()
+            .any(|def| def.event == event && def.matches(tool))
+    }
+
+    /// Run every gate bound to `event` (for `tool`), in declaration order. A
+    /// rewrite is seen by the gates after it; the first `deny` ends the chain
+    /// (where `deny` means something). `payload` is an object with the event's
+    /// own fields; the session fields are added here.
+    pub async fn run_event(
+        &self,
+        event: Event,
+        tool: Option<&str>,
+        turn: u32,
+        mut payload: Value,
+    ) -> Chain {
+        let mut chain = Chain::allow();
+        let mut rewritten: Option<Value> = None;
+        for (index, def) in self.defs.iter().enumerate() {
+            if def.event != event || !def.matches(tool) {
+                continue;
+            }
+            let stdin = self.stdin_for(event, turn, &payload);
+            let started = Instant::now();
+            let outcome = self.execute(index, def, &stdin).await;
+            let ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            let mut run = Run {
+                gate: def.name.clone(),
+                event: event.name().into(),
+                decision: "allow".into(),
+                reason: String::new(),
+                ms,
+                rewritten: false,
+                error: None,
+            };
+            let parsed = match outcome.and_then(|stdout| parse_decision(&stdout)) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    run.error = Some(error);
+                    chain.runs.push(run);
+                    continue;
+                }
+            };
+            match parsed {
+                Parsed::Allow { reason } => run.reason = reason,
+                Parsed::Deny { reason } => {
+                    run.decision = "deny".into();
+                    run.reason = reason.clone();
+                    if event.can_deny() {
+                        chain.verdict = Verdict::Deny {
+                            gate: def.name.clone(),
+                            reason,
+                        };
+                        chain.runs.push(run);
+                        return chain;
+                    }
+                    run.reason =
+                        format!("{reason} (ignored: deny means nothing at {})", event.name());
+                }
+                Parsed::Rewrite { reason, input } => {
+                    run.reason = reason;
+                    if !event.can_rewrite() {
+                        run.error = Some(format!("rewrite means nothing at {}", event.name()));
+                    } else {
+                        match apply_rewrite(event, &def.name, &mut payload, &input) {
+                            Ok(value) => {
+                                run.decision = "rewrite".into();
+                                run.rewritten = true;
+                                rewritten = Some(value);
+                            }
+                            Err(error) => run.error = Some(error),
+                        }
+                    }
+                }
+            }
+            chain.runs.push(run);
+        }
+        if let Some(value) = rewritten {
+            chain.verdict = Verdict::Rewrite(value);
+        }
+        chain
+    }
+
+    /// The JSON a gate reads on stdin: the session's fields, then the event's.
+    pub fn stdin_for(&self, event: Event, turn: u32, payload: &Value) -> String {
+        let mut object = serde_json::Map::new();
+        object.insert("event".into(), json!(event.name()));
+        object.insert("session".into(), json!(self.session_id));
+        object.insert(
+            "session_dir".into(),
+            json!(crate::util::path_string(&self.session_dir)),
+        );
+        object.insert(
+            "log".into(),
+            json!(crate::util::path_string(
+                &self.session_dir.join("events.jsonl")
+            )),
+        );
+        object.insert("cwd".into(), json!(crate::util::path_string(&self.cwd)));
+        object.insert("turn".into(), json!(turn));
+        if let Some(fields) = payload.as_object() {
+            for (key, value) in fields {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+        Value::Object(object).to_string()
+    }
+
+    /// Start the gate, feed it `stdin`, and return its stdout, or why that
+    /// failed (every `Err` is a fail-open).
+    async fn execute(&self, index: usize, def: &GateDef, stdin: &str) -> Result<String, String> {
+        let Some(program) = self.shell.first() else {
+            return Err("no shell configured".into());
+        };
+        let shell_args: Vec<String> = self.shell.iter().skip(1).cloned().collect();
+        let dir = self.session_dir.join("gates");
+        let input = crate::shellcmd::input(&def.command, &shell_args, &dir, &format!("g{index}"))?;
+        let mut command = Command::new(program);
+        match &input {
+            crate::shellcmd::ShellInput::Argument(text) => {
+                command.args(&shell_args).arg(text);
+            }
+            crate::shellcmd::ShellInput::Script { path, keep_switch } => {
+                command.args(crate::shellcmd::script_args(
+                    &shell_args,
+                    keep_switch.as_deref(),
+                    path,
+                ));
+            }
+        }
+        command
+            .current_dir(&self.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        self.scrub(&mut command, def);
+
+        let group = ProcessGroup::new();
+        #[cfg(windows)]
+        let group = {
+            let n = self.runs.fetch_add(1, Ordering::SeqCst);
+            let name = crate::bg::job_name(&self.session_id, &format!("gate-{n}"));
+            let job = crate::proc::win::Job::create_named(&name, true)
+                .ok_or_else(|| "cannot create a job object".to_string())?;
+            group.with_job(job)
+        };
+        #[cfg(not(windows))]
+        let _ = self.runs.fetch_add(1, Ordering::SeqCst);
+        group.configure(&mut command);
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("cannot start the gate: {error}"))?;
+        let Some(pid) = child.id() else {
+            return Err("the gate exited at once".into());
+        };
+        if let Err(error) = group.spawned(pid) {
+            let _ = child.kill().await;
+            return Err(error);
+        }
+        let mut pipe = child.stdin.take();
+        let stdout = child.stdout.take().ok_or("no stdout pipe")?;
+        let stderr = child.stderr.take().ok_or("no stderr pipe")?;
+        let body = stdin.to_string();
+        // A gate that never reads stdin must not block the write: it runs in
+        // its own task, and a closed pipe is not an error.
+        tokio::spawn(async move {
+            if let Some(mut pipe) = pipe.take() {
+                let _ = pipe.write_all(body.as_bytes()).await;
+                let _ = pipe.shutdown().await;
+            }
+        });
+        let out_task = tokio::spawn(read_capped(stdout, OUTPUT_MAX));
+        let err_task = tokio::spawn(read_capped(stderr, 8 * 1024));
+
+        let limit = timeout();
+        let waited = tokio::time::timeout(limit, child.wait()).await;
+        // The tree dies with the gate whatever happened: a gate that left a
+        // background process behind leaves nothing.
+        group.kill();
+        let status = match waited {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => return Err(format!("cannot wait for the gate: {error}")),
+            Err(_) => {
+                let _ = tokio::time::timeout(DRAIN, child.wait()).await;
+                out_task.abort();
+                err_task.abort();
+                return Err(format!("timed out after {} ms", limit.as_millis()));
+            }
+        };
+        let (out, overflow) = tokio::time::timeout(DRAIN, out_task)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        let (err, _) = tokio::time::timeout(DRAIN, err_task)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        if !status.success() {
+            let tail = String::from_utf8_lossy(&err);
+            let tail = tail.trim();
+            let code = status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "a signal".into());
+            return Err(if tail.is_empty() {
+                format!("exited with {code}")
+            } else {
+                format!(
+                    "exited with {code}: {}",
+                    crate::util::truncate_chars(&tail.replace(['\r', '\n'], " "), STDERR_TAIL)
+                )
+            });
+        }
+        if overflow {
+            return Err(format!("output over {OUTPUT_MAX} bytes"));
+        }
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// The gate's environment: the allow-list, kelir's three, then the gate's
+    /// own `env`. Nothing else is inherited.
+    fn scrub(&self, command: &mut Command, def: &GateDef) {
+        command.env_clear();
+        for (key, value) in crate::envs::all_os() {
+            if allowed_env(&key.to_string_lossy()) {
+                command.env(key, value);
+            }
+        }
+        command.env("KELIR_SESSION_DIR", &self.session_dir);
+        command.env("KELIR_GATE_EVENT", def.event.name());
+        command.env("KELIR_GATE_NAME", &def.name);
+        for (key, value) in &def.env {
+            command.env(key, value);
+        }
+    }
+}
+
+/// Whether a variable of the session's own environment reaches a gate.
+pub fn allowed_env(name: &str) -> bool {
+    crate::mcp::rpc::inherited(name) || name.eq_ignore_ascii_case("SSH_AUTH_SOCK")
+}
+
+/// Read to the end, keeping at most `max` bytes; the rest is read and thrown
+/// away so a chatty gate never blocks on a full pipe. The flag says it ran over.
+async fn read_capped<R: AsyncRead + Unpin>(mut reader: R, max: usize) -> (Vec<u8>, bool) {
+    let mut kept = Vec::new();
+    let mut over = false;
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if kept.len() < max {
+                    let room = (max - kept.len()).min(n);
+                    kept.extend_from_slice(&chunk[..room]);
+                    over |= room < n;
+                } else {
+                    over = true;
+                }
+            }
+        }
+    }
+    (kept, over)
+}
+
+// ----------------------------------------------------------------- describe
+
+/// The effective gate configuration as `observe` prints it: one line per
+/// gate, never an environment value (the `env` table is named by key only).
+pub fn describe(defs: &[GateDef]) -> Vec<Value> {
+    defs.iter()
+        .map(|def| {
+            json!({
+                "name": def.name,
+                "event": def.event.name(),
+                "origin": def.origin,
+                "command": crate::util::truncate_chars(&def.command, 200),
+                "tools": def.tools,
+                "env": def.env.keys().collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}

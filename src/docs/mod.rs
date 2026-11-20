@@ -66,6 +66,11 @@ pub const TOPICS: &[Topic] = &[
         body: include_str!("../../docs/reference/mcp.md"),
     },
     Topic {
+        name: "gates",
+        summary: "gates: allow/deny/rewrite executables at six events, declaring them, fail-open, the example gates",
+        body: include_str!("../../docs/reference/gates.md"),
+    },
+    Topic {
         name: "providers",
         summary: "the two providers: keys, retries, limits, model metadata",
         body: include_str!("../../docs/reference/providers.md"),

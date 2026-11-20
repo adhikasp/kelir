@@ -157,7 +157,7 @@ const INHERITED: &[&str] = &[
     "ALL_PROXY",
 ];
 
-fn inherited(key: &str) -> bool {
+pub(crate) fn inherited(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
     upper.starts_with("LC_") || INHERITED.contains(&upper.as_str())
 }

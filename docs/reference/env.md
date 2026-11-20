@@ -55,11 +55,14 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_SESSION_DIR` | the session's directory |
 | `KELIR_CALL_ID` | the provider call id of the bash call |
 | `KELIR_BIN` | the kelir binary, so `kelir bg`/`kelir view` work off `PATH` |
+| `KELIR_GATE_EVENT` | set for a gate only: the event it was started for (`turn_end`, …); a gate never gets `KELIR_TOKEN`, `KELIR_SOCK` or a provider key |
+| `KELIR_GATE_NAME` | set for a gate only: the gate's name, as the `gate` event records it |
 
 ### Set by the test suite only
 
 | variable | effect |
 |---|---|
+| `KELIR_GATE_TIMEOUT_MS` | shorten the 30 s gate timeout (the gate tests; a timed-out gate fails open) |
 | `KELIR_CRASH_AT` | abort at a named point (`before_append`, …): the crash tests |
 | `KELIR_TEST_PANIC` | panic once the TUI owns the terminal, to prove the restore path |
 | `KELIR_SHELL_RAW` | `cr`: send a POSIX script raw, keeping CRLF terminators |

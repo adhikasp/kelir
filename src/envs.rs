@@ -184,7 +184,19 @@ pub const VARS: &[Var] = &[
         "KELIR_BIN",
         "the kelir binary, so `kelir bg`/`kelir view` work off `PATH`",
     ),
+    set(
+        "KELIR_GATE_EVENT",
+        "set for a gate only: the event it was started for (`turn_end`, …); a gate never gets `KELIR_TOKEN`, `KELIR_SOCK` or a provider key",
+    ),
+    set(
+        "KELIR_GATE_NAME",
+        "set for a gate only: the gate's name, as the `gate` event records it",
+    ),
     // ------------------------------------------------------------- test hooks
+    hook(
+        "KELIR_GATE_TIMEOUT_MS",
+        "shorten the 30 s gate timeout (the gate tests; a timed-out gate fails open)",
+    ),
     hook(
         "KELIR_CRASH_AT",
         "abort at a named point (`before_append`, …): the crash tests",

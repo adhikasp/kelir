@@ -707,6 +707,19 @@ pub enum EventBody {
     SessionEnded {
         reason: String,
     },
+    /// One gate run (M8): every run, including the ones that failed open
+    /// (`error` says why). `rewritten` is only present when the gate rewrote.
+    Gate {
+        gate: String,
+        event: String,
+        decision: String,
+        reason: String,
+        ms: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        rewritten: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// A threshold the human or the driver set was crossed (`warn_prompt_tokens`,
     /// `warn_cost`). It informs whoever watches; it is never part of the
     /// conversation the model reads, so it renders nothing in the fold.
@@ -758,6 +771,7 @@ impl LogEvent {
             EventBody::Error { .. } => "error",
             EventBody::SessionEnded { .. } => "session_ended",
             EventBody::Warning { .. } => "warning",
+            EventBody::Gate { .. } => "gate",
         }
     }
 }

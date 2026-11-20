@@ -46,6 +46,7 @@ The tree is flat on purpose: a file is a subject.
 | `src/herdr_ctx.rs` | the one Herdr line in the frozen system (`hc get`, fail open) |
 | `src/hint.rs` | the pushed hint: catalogue, scorer trait, `Chat` scorer, parser |
 | `src/memory.rs` | `memory_dir` notes as sources |
+| `src/gates.rs` | gates (M8): declarations, the runner (env scrub, process tree, timeout, fail-open), decision parsing |
 | `src/observe.rs` | `kelir observe`: the next request, human and `--raw` |
 | `src/compact.rs` | the summary prompt and the compaction fold |
 | `src/prompt.md` | the base prompt itself (1 KB, snapshot-pinned) |

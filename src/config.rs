@@ -127,6 +127,8 @@ pub struct Config {
     /// `[prices."<model>"]`: per-million-token prices that override and extend
     /// the built-in table.
     pub prices: BTreeMap<String, crate::spend::Price>,
+    /// Gates declared under `[gates]` (M8); skills add theirs at session start.
+    pub gates: Vec<crate::gates::GateDef>,
 }
 
 /// The pushed hint, configured: which model scores, and where.
@@ -192,6 +194,8 @@ struct RawConfig {
     warn_prompt_tokens: Option<u64>,
     warn_cost: Option<f64>,
     prices: BTreeMap<String, RawPrice>,
+    /// `[gates]`: event name -> command, table or list (see `crate::gates`).
+    gates: Option<toml::Value>,
 }
 
 /// One `[prices."<model>"]` table: dollars per million tokens.
@@ -465,6 +469,10 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         },
         warn_cost: warn_cost(raw.warn_cost)?,
         prices: prices(&raw.prices)?,
+        gates: match &raw.gates {
+            Some(value) => crate::gates::from_toml(value).map_err(ConfigError)?,
+            None => Vec::new(),
+        },
     })
 }
 

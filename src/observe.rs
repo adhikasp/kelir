@@ -43,6 +43,10 @@ pub struct Observed {
     pub estimate: u64,
     pub steps: u32,
     pub cache: CacheStats,
+    /// The effective gate configuration (declarations only, no environment
+    /// values) and every gate run the log holds (M8).
+    pub gates: Vec<Value>,
+    pub fired: Vec<Value>,
 }
 
 /// Cache hit ratio from the `usage` events.
@@ -140,7 +144,56 @@ pub fn build(dir: &Path, id: &str, cfg: &Config) -> Result<Observed, String> {
         estimate: crate::compact::estimate_tokens(&messages),
         steps,
         cache: cache_stats(&events),
+        gates: effective_gates(&events, cfg),
+        fired: fired_gates(&events),
     })
+}
+
+/// The gates a session started with would have: `[gates]` from the config as
+/// it is now, plus skills bound with `kelir-gate` found from the session's cwd.
+fn effective_gates(events: &[LogEvent], cfg: &Config) -> Vec<Value> {
+    let cwd = events.iter().find_map(|event| match &event.body {
+        EventBody::SessionStarted { cwd, .. } => Some(std::path::PathBuf::from(cwd)),
+        _ => None,
+    });
+    let mut defs = cfg.gates.clone();
+    if let Some(cwd) = cwd {
+        let places =
+            crate::sources::places(&cwd, &cfg.skills_dirs, Some(crate::paths::config_dir()));
+        let found = crate::sources::discover(&places);
+        for def in crate::gates::from_skills(&found, &mut Vec::new()) {
+            crate::gates::push_unique(&mut defs, def);
+        }
+    }
+    crate::gates::describe(&defs)
+}
+
+/// Every `gate` event of the log, in order.
+fn fired_gates(events: &[LogEvent]) -> Vec<Value> {
+    events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::Gate {
+                gate,
+                event: at,
+                decision,
+                reason,
+                ms,
+                rewritten,
+                error,
+            } => Some(serde_json::json!({
+                "seq": event.seq,
+                "gate": gate,
+                "event": at,
+                "decision": decision,
+                "reason": reason,
+                "ms": ms,
+                "rewritten": rewritten,
+                "error": error,
+            })),
+            _ => None,
+        })
+        .collect()
 }
 
 fn sources_of(events: &[LogEvent]) -> Vec<(String, String, bool)> {

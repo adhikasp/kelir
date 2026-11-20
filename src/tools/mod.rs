@@ -146,6 +146,11 @@ impl ToolOutcome {
 
     /// The tool is turned off for this session; the list sent to the provider
     /// never changed.
+    /// A call a `before_tool` gate vetoed: the model reads who and why.
+    pub fn denied(gate: &str, reason: &str) -> Self {
+        Self::new("denied", denied_text(gate, reason), None)
+    }
+
     pub fn disabled(name: &str) -> Self {
         Self::new(
             "disabled",
@@ -274,6 +279,16 @@ pub async fn dispatch(
         },
         "edit" => edit::run(args, ctx, dir),
         other => ToolOutcome::error(format!("unknown tool: {other}")),
+    }
+}
+
+/// `denied by gate <name>: <reason>`: the one sentence both a native call and
+/// an MCP call get (the SPEC's wording).
+pub fn denied_text(gate: &str, reason: &str) -> String {
+    if reason.trim().is_empty() {
+        format!("denied by gate {gate}")
+    } else {
+        format!("denied by gate {gate}: {}", reason.trim())
     }
 }
 

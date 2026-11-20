@@ -23,7 +23,7 @@ kelir docs config                 # every config.toml key: type, default, overri
 kelir docs --find retry max wait  # ranked search: which file mentions these words
 ```
 
-Topics: `README`, `config`, `cli`, `env`, `verbs`, `mcp`, `providers`,
+Topics: `README`, `config`, `cli`, `env`, `verbs`, `mcp`, `gates`, `providers`,
 `sources-and-skills`, `files`, `events`, `tui`, `troubleshooting`, `source-map`.
 
 ## The five things worth knowing by heart

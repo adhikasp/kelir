@@ -326,6 +326,15 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
     },
     KeyDoc {
         scope: KeyScope::Top,
+        name: "gates",
+        kind: "table",
+        default: "unset: no gates",
+        overrides: "—",
+        effect: "`[gates]`: executables run at `session_start`, `prompt_submit`, `before_tool`,                  `after_tool`, `turn_end`, `session_end`; each key takes a command string, a table                  (`command`, `name`, `tools`, `env`) or a list of them; a gate answers `allow`,                  `deny` or `rewrite` as JSON and fails open (see `gates`)",
+        field_fn: "load",
+    },
+    KeyDoc {
+        scope: KeyScope::Top,
         name: "promote_after",
         kind: "integer (seconds)",
         default: "`600`; `0` disables promotion",
@@ -578,6 +587,11 @@ pub const EVENTS: &[EventDoc] = &[
         fields: "`bg_id`, `call_id?`, `cmd`, `exit_code?`, `state`, `out_path`",
         written_by: "a job that settled while this session owned its log (`state`: `exited` or \
                      `cancelled`)",
+    },
+    EventDoc {
+        name: "gate",
+        fields: "`gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?`",
+        written_by: "every gate run, including the ones that failed open (`error` says why:                      crash, timeout, garbage)",
     },
     EventDoc {
         name: "compacted",

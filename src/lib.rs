@@ -20,6 +20,7 @@ pub mod editor;
 pub mod envs;
 pub mod event;
 pub mod fold;
+pub mod gates;
 pub mod governor;
 pub mod herdr;
 pub mod herdr_ctx;
