@@ -1,9 +1,10 @@
 # steer11 — self-documentation (impl notes)
 
 Brief: `docs/tasks/STEER-11.md`. Branch `job/steer11`, worktree `steer11`, based on
-`b7b60c6`. Seven commits: the reference + `kelir docs` + registry + drift test;
+`b7b60c6`. Ten commits: the reference + `kelir docs` + registry + drift test;
 the e2e file; the prompt line; the suggestion fallback; the spec/AGENTS text;
-these notes; the `cli.md` prose.
+these notes; the `cli.md` and `sources-and-skills.md` prose; two test-message
+fixes found by deliberately breaking the tables.
 
 ## What shipped
 
@@ -75,6 +76,13 @@ these notes; the `cli.md` prose.
 
 ## Where the tools slowed me down
 
+- **A drift test that only ever passes proves nothing.** Every direction was
+  checked by breaking the tables on purpose and reading the failure: delete a
+  verb row (`end`), add a row the code does not parse (`frob`), rename a config
+  key, rename an event type, declare a variable nothing names. All five fail
+  with a sentence that says which side to fix; the first version of the config
+  message interpolated an empty scope string ("a field of `RawConfig` ()"),
+  which is how those two message fixes got in.
 - **`edit` with a large `edits` array:** one hunk whose context had drifted
   applied nothing (all-or-none, as documented) and the build then failed with
   `E0599` a long way from the cause. The fix was a `python` replace, which is
