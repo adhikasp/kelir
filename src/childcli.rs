@@ -434,6 +434,7 @@ pub async fn ls(args: LsArgs) -> u8 {
     let in_tree = crate::envs::var("KELIR_ROOT").filter(|root| !root.is_empty());
     let wanted = select(&heads, in_tree.as_deref(), args.all);
     let mut nodes = Vec::new();
+    let mut settled: Vec<(String, String)> = Vec::new();
     for id in &wanted {
         let dir = crate::paths::session_dir(id);
         let Ok(read) = crate::event::read_events(&dir.join("events.jsonl")) else {
@@ -443,9 +444,29 @@ pub async fn ls(args: LsArgs) -> u8 {
             read.events.last().map(|event| &event.body),
             Some(EventBody::SessionEnded { .. })
         );
+        for event in &read.events {
+            if let EventBody::ChildSettled {
+                session, outcome, ..
+            } = &event.body
+            {
+                settled.push((session.clone(), outcome.clone()));
+            }
+        }
         let alive = !ended && ipc::connect(&dir, id).await.is_ok();
         if let Some(node) = node_from(id, &read.events, alive) {
             nodes.push(node);
+        }
+    }
+    // A session that is not running ended however its parent's registry says it
+    // did (a kill leaves no `session_ended` behind).
+    let outcomes: std::collections::HashMap<String, String> = settled
+        .into_iter()
+        .collect();
+    for node in &mut nodes {
+        if matches!(node.state.as_str(), "crashed" | "ended")
+            && let Some(outcome) = outcomes.get(&node.id)
+        {
+            node.state = outcome.clone();
         }
     }
     // Oldest first inside a tree so a parent reads before what it started.

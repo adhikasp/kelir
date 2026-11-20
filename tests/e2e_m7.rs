@@ -103,10 +103,15 @@ impl Family {
     }
 
     fn session_for(&self, task_prefix: &str) -> (String, Vec<Value>) {
+        // A brief's log starts with a copy of its parent's, task included: the
+        // session that is the task's own is the one with no parent.
         let found: Vec<_> = self
             .by_task()
             .into_iter()
-            .filter(|(_, task, _)| task.starts_with(task_prefix))
+            .filter(|(_, task, log)| {
+                task.starts_with(task_prefix)
+                    && !(log[0]["parent"].is_string() && log[0]["depth"] != 0 && task == "ROOT")
+            })
             .collect();
         assert_eq!(
             found.len(),
@@ -343,4 +348,334 @@ async fn outside_a_session_the_child_flags_say_so() {
         .await;
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(out.stdout.trim(), "[]");
+}
+
+// -------------------------------------------------------------------- caps
+
+/// Processes a test's sessions left behind. Windows: the harness's Job Object
+/// knows (everything the test started is in it). Elsewhere: any process whose
+/// environment names this test's state dir.
+fn leftovers(family: &Family) -> Vec<u32> {
+    #[cfg(windows)]
+    {
+        vec![0; family.sandbox.guard.active() as usize]
+    }
+    #[cfg(not(windows))]
+    {
+        let needle = format!("KELIR_STATE_DIR={}", family.sandbox.state.display());
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&environ);
+            if text.split('\0').any(|var| var == needle) && pid_alive(pid) {
+                found.push(pid);
+            }
+        }
+        found
+    }
+}
+
+async fn no_leftovers(family: &Family) {
+    let started = Instant::now();
+    loop {
+        let left = leftovers(family);
+        if left.is_empty() {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "processes left after the root ended: {left:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[tokio::test]
+async fn the_eleventh_live_child_of_one_agent_is_refused_and_nothing_outlives_the_root() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let held_gate = gate.clone();
+    let mock = Mock::start_routed(vec![], move |request| {
+        let task = task_of(request);
+        let results = tool_results(request).len();
+        Some(match (task.as_str(), results) {
+            ("ROOT", 0) => bash(
+                "call_loop",
+                "for i in 1 2 3 4 5 6 7 8 9 10 11; do out=$(\"$KELIR_BIN\" run --child --background \"SLEEP $i\" 2>&1); echo \"rc=$? $out\"; done",
+            ),
+            ("ROOT", _) => say("root done"),
+            (sleeper, _) if sleeper.starts_with("SLEEP") => held(&held_gate),
+            _ => return None,
+        })
+    })
+    .await;
+    let family = Family::new("");
+    let out = family.run(&mock, "ROOT").await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let (_, root) = family.session_for("ROOT");
+    let lines = result_of_call(&root, "call_loop");
+    let rcs: Vec<&str> = lines.lines().filter(|line| line.starts_with("rc=")).collect();
+    assert_eq!(rcs.len(), 11, "{lines}");
+    assert!(rcs[..10].iter().all(|line| line.starts_with("rc=0 ")), "{lines}");
+    assert!(rcs[10].starts_with("rc=3 "), "the 11th: {}", rcs[10]);
+    assert!(rcs[10].contains("10 live children"), "{}", rcs[10]);
+    assert!(rcs[10].contains("limit 10"), "{}", rcs[10]);
+    assert_eq!(of_type(&root, "child_started").len(), 10);
+    gate.notify_waiters();
+    // The sleepers were still thinking when the root ended: none may survive it.
+    no_leftovers(&family).await;
+    // The root's end killed them; each is settled in its log, not left running.
+    let settled = of_type(&root, "child_settled");
+    assert_eq!(settled.len(), 0, "the root exited before they settled");
+}
+
+#[tokio::test]
+async fn the_seventeenth_live_descendant_is_refused() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let held_gate = gate.clone();
+    let mock = Mock::start_routed(vec![], move |request| {
+        let task = task_of(request);
+        let results = tool_results(request).len();
+        Some(match (task.as_str(), results) {
+            ("ROOT", 0) => bash(
+                "call_loop",
+                "for i in 1 2 3 4 5 6 7 8 9; do \"$KELIR_BIN\" run --child --background \"SLEEP $i\" >/dev/null 2>&1; done; \"$KELIR_BIN\" run --child --background \"NEST all\"",
+            ),
+            ("ROOT", 1) => bash("call_wait", "sleep 8; echo waited"),
+            ("ROOT", _) => say("root done"),
+            (nest, 0) if nest.starts_with("NEST") => bash(
+                "call_nest",
+                "for i in 1 2 3 4 5 6 7; do out=$(\"$KELIR_BIN\" run --child --background \"DEEP $i\" 2>&1); echo \"rc=$? $out\"; done",
+            ),
+            (nest, _) if nest.starts_with("NEST") => say("nest done"),
+            (other, _) if other.starts_with("SLEEP") || other.starts_with("DEEP") => {
+                held(&held_gate)
+            }
+            _ => return None,
+        })
+    })
+    .await;
+    let family = Family::new("");
+    let out = family.run(&mock, "ROOT").await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let (_, nest) = family.session_for("NEST");
+    let lines = result_of_call(&nest, "call_nest");
+    let rcs: Vec<&str> = lines.lines().filter(|line| line.starts_with("rc=")).collect();
+    assert_eq!(rcs.len(), 7, "{lines}");
+    assert!(rcs[..6].iter().all(|line| line.starts_with("rc=0 ")), "{lines}");
+    assert!(rcs[6].starts_with("rc=3 "), "the 17th: {}", rcs[6]);
+    assert!(rcs[6].contains("16 live descendants"), "{}", rcs[6]);
+    gate.notify_waiters();
+    no_leftovers(&family).await;
+}
+
+#[tokio::test]
+async fn depth_four_is_refused() {
+    let mock = Mock::start_routed(vec![], |request| {
+        let task = task_of(request);
+        let done = !tool_results(request).is_empty();
+        Some(match (task.as_str(), done) {
+            ("L1", false) => bash("call_1", &child_cmd("", "L2 x")),
+            ("L2 x", false) => bash("call_2", &child_cmd("", "L3 x")),
+            ("L3 x", false) => bash("call_3", &child_cmd("", "L4 x")),
+            ("L4 x", false) => bash(
+                "call_4",
+                "out=$(\"$KELIR_BIN\" run --child \"L5 x\" 2>&1); echo \"rc=$? $out\"",
+            ),
+            (_, true) => say("done"),
+            (leaf, _) if leaf.starts_with("L5") => say("never runs"),
+            _ => return None,
+        })
+    })
+    .await;
+    let family = Family::new("");
+    let out = family.run(&mock, "L1").await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let (_, l4) = family.session_for("L4 x");
+    let result = result_of_call(&l4, "call_4");
+    assert!(result.contains("rc=3"), "{result}");
+    assert!(result.contains("depth 4"), "{result}");
+    assert!(result.contains("max_child_depth"), "{result}");
+    assert!(
+        family.by_task().iter().all(|(_, task, _)| !task.starts_with("L5")),
+        "no depth-4 session may exist"
+    );
+    let (_, l1) = family.session_for("L1");
+    assert_eq!(of_type(&l1, "child_started").len(), 3, "L2, L3, L4 and nothing for L5");
+    let started = family.session_for("L4 x").1;
+    assert_eq!(started[0]["depth"], 3);
+}
+
+// ------------------------------------------------------------------- brief
+
+fn last_text(request: &Recorded) -> String {
+    request.messages().last().map(text_of).unwrap_or_default()
+}
+
+fn is_brief(request: &Recorded) -> bool {
+    request
+        .messages()
+        .iter()
+        .any(|message| message["role"] == "user" && text_of(message).starts_with("BRIEFQ"))
+}
+
+#[tokio::test]
+async fn a_brief_shares_the_parents_prefix_and_leaves_its_history_alone() {
+    let mock = Mock::start_routed(vec![], |request| {
+        // The brief: the parent's history, then the question.
+        if is_brief(request) {
+            let last_is_tool = request
+                .messages()
+                .last()
+                .is_some_and(|message| message["role"] == "tool");
+            return Some(if last_is_tool {
+                say("the brief answer")
+            } else {
+                Reply::Sse(sse(&tool_turn(
+                    "call_edit",
+                    "edit",
+                    &json!({"path": "x.txt", "old": "", "new": "nope"}),
+                )))
+            });
+        }
+        Some(match tool_results(request).len() {
+            0 => bash("call_a", "echo prior work"),
+            1 => bash(
+                "call_brief",
+                "\"$KELIR_BIN\" brief \"BRIEFQ what is the answer\"",
+            ),
+            _ => say("root done"),
+        })
+    })
+    .await;
+    let family = Family::new("");
+    let out = family.run(&mock, "ROOT").await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let requests = mock.requests();
+    let parent: Vec<&Recorded> = requests.iter().filter(|r| !is_brief(r)).collect();
+    let brief: Vec<&Recorded> = requests.iter().filter(|r| is_brief(r)).collect();
+    assert_eq!(parent.len(), 3, "root steps");
+    assert_eq!(brief.len(), 2, "the brief asked, was refused an edit, answered");
+
+    // The first brief request is the parent's last settled request plus the
+    // question: same system, same tools, same messages, one more at the tail.
+    let prefix = parent[1];
+    let first = brief[0];
+    assert_eq!(first.body["tools"], prefix.body["tools"]);
+    assert_eq!(first.body["model"], prefix.body["model"]);
+    let shared = prefix.messages().len();
+    assert_eq!(&first.messages()[..shared], prefix.messages());
+    assert_eq!(first.messages().len(), shared + 1);
+    assert!(last_text(first).starts_with("BRIEFQ"));
+    // ... and it keys the provider's cache by the parent's session.
+    let parent_key = prefix.body["session_id"].as_str().expect("a session_id");
+    assert_eq!(first.body["session_id"].as_str(), Some(parent_key));
+
+    // `edit` is refused by result, not by a different tool list.
+    let refusal = tool_results(brief[1]).pop().unwrap_or_default();
+    assert!(refusal.starts_with("refused:"), "{refusal}");
+    assert!(refusal.contains("edit"), "{refusal}");
+
+    // The answer is the bash call's stdout.
+    let (root_id, root) = family.session_for("ROOT");
+    assert!(
+        result_of_call(&root, "call_brief").contains("the brief answer"),
+        "{}",
+        result_of_call(&root, "call_brief")
+    );
+    // The parent's history is untouched: the child_* pair, nothing else new.
+    assert_eq!(of_type(&root, "user").len(), 1);
+    assert_eq!(of_type(&root, "assistant").len(), 3);
+    let started = of_type(&root, "child_started");
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0]["kind"], "brief");
+    assert_eq!(started[0]["parent"], root_id.as_str());
+    assert_eq!(of_type(&root, "child_settled")[0]["outcome"], "done");
+    assert!(of_type(&root, "source").is_empty());
+}
+
+// ----------------------------------------------------------- ls and kill
+
+#[tokio::test]
+async fn ls_shows_the_tree_and_kill_takes_a_subtree_but_only_from_above() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let held_gate = gate.clone();
+    let mock = Mock::start_routed(vec![], move |request| {
+        let task = task_of(request);
+        let results = tool_results(request).len();
+        Some(match (task.as_str(), results) {
+            ("ROOT", 0) => bash(
+                "call_main",
+                "for t in NESTK SIB ATTACK; do \"$KELIR_BIN\" run --child --background \"$t x\" >/dev/null; done; sleep 6; \
+                 \"$KELIR_BIN\" ls --json; \
+                 nk=$(\"$KELIR_BIN\" ls | grep NESTK | grep -o 'ses_[a-z0-9]*' | head -1); \
+                 \"$KELIR_BIN\" kill $nk; echo killrc=$?; sleep 2; \"$KELIR_BIN\" ls",
+            ),
+            ("ROOT", _) => say("root done"),
+            (nest, 0) if nest.starts_with("NESTK") => bash(
+                "call_nest",
+                "\"$KELIR_BIN\" run --child --background \"SLEEP deep\" >/dev/null; sleep 40",
+            ),
+            (attack, 0) if attack.starts_with("ATTACK") => bash(
+                "call_attack",
+                "sleep 3; for s in $(\"$KELIR_BIN\" ls | grep -o 'ses_[a-z0-9]*' | sort -u); do out=$(\"$KELIR_BIN\" kill $s 2>&1); echo \"$s rc=$? $out\"; done",
+            ),
+            (attack, _) if attack.starts_with("ATTACK") => say("attack done"),
+            (other, _) if other.starts_with("SIB") || other.starts_with("SLEEP") => {
+                held(&held_gate)
+            }
+            _ => return None,
+        })
+    })
+    .await;
+    let family = Family::new("");
+    let out = family.run(&mock, "ROOT").await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let (root_id, root) = family.session_for("ROOT");
+    let text = result_of_call(&root, "call_main");
+
+    // `ls --json` is one line holding the tree: the root, with its children.
+    let json_line = text.lines().find(|line| line.starts_with('[')).expect("ls --json");
+    let tree: Value = serde_json::from_str(json_line).unwrap();
+    assert_eq!(tree[0]["id"], root_id.as_str());
+    let kids = tree[0]["children"].as_array().unwrap();
+    assert_eq!(kids.len(), 3, "{tree}");
+    assert!(kids.iter().all(|kid| kid["depth"] == 1 && kid["kind"] == "child"));
+    let nest = kids
+        .iter()
+        .find(|kid| kid["task"].as_str().unwrap().starts_with("NESTK"))
+        .unwrap();
+    assert_eq!(nest["children"][0]["depth"], 2);
+    for key in ["state", "model", "cost_usd", "cache_hit_ratio", "task", "tree_cost_usd"] {
+        assert!(tree[0].get(key).is_some(), "missing {key}");
+    }
+
+    // Killing the nest stops it and the sleeper below it.
+    assert!(text.contains("killrc=0"), "{text}");
+    let settled = of_type(&root, "child_settled");
+    let killed: Vec<_> = settled.iter().filter(|e| e["outcome"] == "killed").collect();
+    assert_eq!(killed.len(), 2, "{settled:?}");
+    let after = text.split("killrc=").nth(1).unwrap();
+    assert!(after.contains("killed"), "{after}");
+    assert!(after.contains("SIB x"), "{after}");
+
+    // A child can stop only what is below it: every try from ATTACK is refused.
+    let (attack_id, attack) = family.session_for("ATTACK");
+    let tries = result_of_call(&attack, "call_attack");
+    let lines: Vec<&str> = tries.lines().filter(|l| l.contains(" rc=")).collect();
+    assert!(lines.len() >= 4, "{tries}");
+    assert!(
+        lines.iter().all(|line| line.contains("rc=1") && line.contains("refused")),
+        "{tries}"
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with(&attack_id)),
+        "it tried itself too: {tries}"
+    );
+    gate.notify_waiters();
+    no_leftovers(&family).await;
 }

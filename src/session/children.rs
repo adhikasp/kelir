@@ -74,6 +74,10 @@ impl Kids {
     pub fn is_root(&self) -> bool {
         self.lineage.parent.is_none()
     }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
 }
 
 /// Everything the spawning task needs, copied out of the session so the task
@@ -161,7 +165,7 @@ impl Session {
                 .is_some_and(|key| crate::trust::same(key, &self.kids.key));
         match op.as_str() {
             "admit-local" | "up-local" | "settle-local" | "note-started" | "note-settled"
-            | "running" => {
+            | "running" | "reap" => {
                 if !own {
                     let _ = reply.send(Response::error("child: an internal operation"));
                     return;
@@ -261,13 +265,14 @@ impl Session {
             .registry
             .reap(&|entry| child::process_alive(entry.pid.unwrap_or(0), entry.started_ms));
         for entry in reaped {
-            self.log_child_settled(
-                &entry,
-                "lost",
-                None,
-                "the child process is gone (it crashed or was killed from outside)",
-            );
-            self.queue_child_note(&entry, "lost", None, "the child process is gone");
+            let outcome = entry.outcome.clone().unwrap_or_else(|| "lost".into());
+            let why = if outcome == "killed" {
+                "stopped by `kelir kill`"
+            } else {
+                "the child process is gone (it crashed or was killed from outside)"
+            };
+            self.log_child_settled(&entry, &outcome, None, why);
+            self.queue_child_note(&entry, &outcome, None, why);
         }
     }
 
@@ -282,6 +287,10 @@ impl Session {
             "admit-local" => {
                 let me = self.id.clone();
                 self.registry_admit(&me, args)
+            }
+            "reap" => {
+                self.reap_children();
+                Response::ok(child::VERB, 0, "now", json!({}))
             }
             "running" => {
                 self.kids.running.insert(text("child_id"), text("session"));

@@ -844,6 +844,11 @@ async fn drive(opts: Options) -> u8 {
     // servers connect now.
     session.mcp_inbox = Some(tx.clone());
     session.mcp.attach(tx.clone());
+    // The root looks for children whose process is gone once a second, so a
+    // crashed one frees its slot and a killed subtree is recorded.
+    if session.kids.is_root() {
+        watch_children(tx.clone(), session.kids.key().to_string());
+    }
     // A child leaves with its parent: a hard-killed parent cannot signal it.
     if let Some(handoff) = opts.child.clone() {
         watch_parent(handoff, tx.clone(), trust.token().to_string());
@@ -951,6 +956,31 @@ async fn drive(opts: Options) -> u8 {
     }
     session.print_result(code);
     code
+}
+
+/// Ask the root's own loop to reap dead children, every second.
+fn watch_children(tx: mpsc::UnboundedSender<Incoming>, key: String) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let (reply, _answer) = oneshot::channel();
+            let request = Request::new(
+                crate::child::VERB,
+                json!({"op": "reap", "key": key}),
+                crate::child::FROM_INTERNAL,
+            );
+            if tx
+                .send(Incoming {
+                    request,
+                    reply,
+                    action: None,
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
 }
 
 /// A child session ends when its parent does. On Windows the parent's Job
@@ -5277,7 +5307,7 @@ impl Session {
             // The TUI renders its own line from `UiEvent::ToolSettled`; only the
             // headless path prints here, so the painter is the only writer.
             if !self.json && !self.tui {
-                println!(
+                let line = format!(
                     "→ {} {} · {} · {} B · {:.1}s",
                     call.name,
                     compact_input(&call.args),
@@ -5285,6 +5315,14 @@ impl Session {
                     outcome.bytes,
                     elapsed.as_secs_f64()
                 );
+                // A child's stdout is its answer, which its parent reads: the
+                // progress lines go to stderr, where the parent keeps them in
+                // the child's `host.err`.
+                if self.kids.link.is_some() {
+                    eprintln!("{line}");
+                } else {
+                    println!("{line}");
+                }
             }
             // A failed call's tail row: the last line it printed, so the
             // transcript says *why* without unfolding anything.
