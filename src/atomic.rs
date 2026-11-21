@@ -1,16 +1,5 @@
 //! Small file primitives shared by the names store, the job lock and STATUS.
-//!
 //! Two operations, both all-or-nothing as far as a reader can tell:
-//!
-//! * [`write_atomic`]: replace a file with new content (temp file in the same
-//!   directory, then a rename), so a reader sees the old file or the new one,
-//!   never half of either.
-//! * [`publish_new`]: create a file that does not exist yet **with its content
-//!   already in place**. The content is written to a temp file and *linked* to
-//!   the final name; a link refuses an existing name, so exactly one publisher
-//!   wins and a file that exists is never observed empty (the lock lesson of
-//!   `docs/reviews/buildinfra-review.md` B2: a lock created and then written
-//!   has a window in which it names no owner).
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -65,10 +54,7 @@ pub enum Published {
     Exists,
 }
 
-/// Create `path` with `bytes` unless it exists. Never replaces, never shows a
-/// reader an empty file (on a filesystem that can link; elsewhere it falls back
-/// to create-new-then-write, and a reader must treat a young unreadable file as
-/// somebody's, not as nobody's).
+/// Create `path` with `bytes` unless it exists.
 pub fn publish_new(path: &Path, bytes: &[u8]) -> io::Result<Published> {
     let tmp = write_temp(path, bytes)?;
     let linked = std::fs::hard_link(&tmp, path);

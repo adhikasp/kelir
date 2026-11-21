@@ -1,9 +1,8 @@
-//! Replay the event log through the TUI's row model (M11).
-//!
-//! The same [`crate::tui::UiEvent`] the session sends to the TUI is produced
-//! here from a log line, then applied to a real [`crate::tui::App`]. That is how
-//! the viewer shows the state row, collapsed tool calls, markdown and outcome
-//! lines without a second renderer.
+//! Replay the event log through the TUI's row model.
+//! The same [`crate::tui::UiEvent`] the session sends to the TUI is produced here from a log line,
+//! then applied to a real [`crate::tui::App`].
+//! That is how the viewer shows the state row, collapsed tool calls, markdown and outcome lines
+//! without a second renderer.
 
 use std::collections::VecDeque;
 
@@ -24,7 +23,6 @@ pub struct Viewer {
     pub app: App,
     /// The rows already shown (bounded).
     rows: VecDeque<Line<'static>>,
-    /// The last lines emitted, for plain text output.
     plain: Vec<String>,
     /// Which events were applied (for tests and diagnostics).
     pub applied: u64,
@@ -55,8 +53,6 @@ impl Viewer {
         self.height
     }
 
-    /// Apply a parsed log event. Returns the rows newly written to the
-    /// scrollback (the caller decides where to print them).
     pub fn apply(&mut self, event: &LogEvent) -> Vec<Line<'static>> {
         self.applied += 1;
         for ui in from_event(event) {
@@ -72,7 +68,6 @@ impl Viewer {
         fresh
     }
 
-    /// All rows in the bounded backlog, oldest first.
     pub fn rows(&self) -> Vec<Line<'static>> {
         self.rows.iter().cloned().collect()
     }
@@ -90,7 +85,6 @@ impl Viewer {
             .collect()
     }
 
-    /// Append the plain text of newly written rows, trimming repeated blanks.
     pub fn push_plain(&mut self, fresh: &[Line<'static>]) {
         for line in fresh {
             let text: String = line
@@ -282,7 +276,7 @@ pub fn parse_line(line: &str) -> Option<LogEvent> {
     serde_json::from_str(line).ok()
 }
 
-// The `kelir attach` command (M11): read-only by default, optional token-gated
+// The `kelir attach` command: read-only by default, optional token-gated
 // steering behind `--steer`.
 
 use std::io::Write as _;
@@ -299,7 +293,7 @@ const POLL: Duration = Duration::from_millis(150);
 /// loaded into one `Vec<String>`.
 const DRAIN_LINES: usize = 2048;
 
-/// Resolve a session id, prefix, `latest` or an M9 name into a session dir.
+/// Resolve a session id, prefix, `latest` or an name into a session dir.
 fn resolve(spec: &str) -> Result<(String, PathBuf), String> {
     // A name is checked first: it is a small file under `<state>/names/`, and
     // a name can be any of the characters a session id prefix uses.
@@ -361,10 +355,8 @@ pub async fn run(args: AttachArgs) -> u8 {
     };
     let _ = available;
 
-    // Replay what is there now. `--raw` prints the original NDJSON (no row
-    // model at all); the other modes feed the same App the TUI uses.
-    // Replay what is there now, a page at a time: a 100k-event log must never
-    // become a 100k-element `Vec<String>` in memory.
+    // Replay what is there now. `--raw` prints the original NDJSON (no row model at all); the
+    // other modes feed the same App the TUI uses.
     if drain(&mut tail, &log_path, &mut viewer, args.raw, args.plain).is_none() {
         return 1;
     }
@@ -402,9 +394,8 @@ pub async fn run(args: AttachArgs) -> u8 {
         } else {
             return 1;
         }
-        // Liveness: an `owner` file with a dead pid means the session exited
-        // without writing `session_ended` (a crash). Stop following then: the
-        // log has nothing more to say.
+        // Liveness: an `owner` file with a dead pid means the session exited without writing
+        // `session_ended` (a crash). Stop following then: the log has nothing more to say.
         let live = crate::names::holder(&dir).is_some();
         if ended || !live {
             // One last read: events can land between the poll and the liveness
@@ -419,10 +410,8 @@ pub async fn run(args: AttachArgs) -> u8 {
     0
 }
 
-/// Read and render every line currently in the log, in bounded pages. The
-/// tail cursor advances per page, so memory stays at one page plus the
-/// viewer's bounded backlog. Returns `None` on a read/print error, or the
-/// `session_ended` flag collected from the pages read.
+/// Read and render every line currently in the log, in bounded pages. The tail cursor
+/// advances per page, so memory stays at one page plus the viewer's bounded backlog.
 fn drain(
     tail: &mut crate::tail::Tail,
     path: &std::path::Path,
@@ -481,9 +470,7 @@ fn render_lines(viewer: &mut Viewer, lines: &[String], raw: bool, plain: bool) -
                 }
             }
         } else {
-            // Styled rows, one per scrollback line, with colour stripped only
-            // when the terminal is not a TTY. No viewport is reserved: the
-            // rows go to normal scrollback, the same text the TUI commits.
+            // Styled rows, one per scrollback line, with colour stripped only when the terminal is not a TTY.
             for row in &fresh {
                 let text: String = row.spans.iter().map(|span| span.content.as_ref()).collect();
                 if writeln!(out, "{text}").is_err() {

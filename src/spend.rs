@@ -1,18 +1,5 @@
-//! Spend and status you can see (STEER-8).
-//!
+//! Spend and status you can see.
 //! Three small things live here, none of them in the request path:
-//!
-//! * the **price table** and the cost arithmetic: when the provider reports no
-//!   cost, a model with a known price gets an estimate, and a model without one
-//!   gets *no* estimate (never a wrong one). A provider's own cost always wins.
-//! * the **[`Tally`]**: what a session has spent and what state it is in, folded
-//!   from the event log (so a resumed session starts where the log left off).
-//! * the **`status` verb's answer**: the tally plus the live fields only the
-//!   process knows, as JSON, and the text a human reads from it.
-//!
-//! Warnings (`warn_prompt_tokens`, `warn_cost`) are decided by the tally and
-//! only ever go to the log and the screen. They are never put in the model's
-//! context.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,7 +14,6 @@ pub const PRICES_AS_OF: &str = "2026-11-20";
 /// The prompt size above which the session warns (`warn_prompt_tokens`).
 pub const DEFAULT_WARN_PROMPT_TOKENS: u64 = 150_000;
 
-/// US dollars per million tokens.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Price {
     pub input: f64,
@@ -51,13 +37,7 @@ const fn price(input: f64, cached_input: f64, output: f64) -> Price {
     }
 }
 
-/// The built-in table. Data, not logic: add a row, never an `if`. Only
-/// models whose price the provider publishes are here; everything else is
-/// "unknown", which is an honest answer (Go bills against an allowance, so it
-/// has no rows). Models priced by time of day (`deepseek-v4.1-flash-1017`:
-/// peak and off-peak) are left out on purpose: a peak figure was 1.3x-4.5x too
-/// high against what OpenRouter billed (STEER-8 review F1). `[prices."<model>"]` in `config.toml` overrides a row and adds
-/// models.
+/// The built-in table. Data, not logic: add a row, never an `if`.
 const TABLE: &[Entry] = &[
     Entry {
         provider: "openrouter",
@@ -84,8 +64,6 @@ pub enum PriceFrom {
 }
 
 /// The price of `model` on `provider`: the config's, then the built-in table's.
-/// Matching is on the whole id (case-insensitive): a `:batch` variant is a
-/// different price and must not borrow its parent's.
 pub fn lookup(
     provider: &str,
     model: &str,
@@ -103,10 +81,8 @@ pub fn lookup(
         .map(|entry| (entry.price, PriceFrom::Table))
 }
 
-/// What a request cost at `price`. Cached tokens are part of `prompt_tokens`
-/// (that is how both providers report them), so the plain input rate applies
-/// to the rest. Rounded to a billionth of a dollar, which removes float noise
-/// and nothing a person could see.
+/// What a request cost at `price`. Cached tokens are part of `prompt_tokens` (that is how
+/// both providers report them), so the plain input rate applies to the rest.
 pub fn estimate(price: &Price, prompt: u64, cached: u64, completion: u64) -> f64 {
     let cached = cached.min(prompt);
     let plain = prompt - cached;
@@ -142,9 +118,6 @@ impl CostSource {
     }
 }
 
-/// The cost to record for one request. A provider cost above zero always wins;
-/// a reported zero (Go says `0.0` for everything) is not a cost, so the price
-/// table is tried, and a model it does not know stays `unknown`.
 pub fn resolve(
     reported: f64,
     price: Option<&Price>,
@@ -178,7 +151,6 @@ pub fn source_of(cost: f64, recorded: Option<&str>) -> CostSource {
 
 // ---------------------------------------------------------------- the tally
 
-/// The most recent model request.
 #[derive(Debug, Clone, Default)]
 pub struct LastUsage {
     pub prompt: u64,
@@ -208,7 +180,6 @@ pub struct Tally {
     pub completion: u64,
     pub cached: u64,
     pub cache_write: u64,
-    /// The sum of the costs that are known.
     pub cost: f64,
     pub by_provider: u32,
     pub by_table: u32,
@@ -243,9 +214,8 @@ impl Tally {
         };
         for (index, event) in events.iter().enumerate() {
             if index == own {
-                // A brief's log begins with a copy of its parent's: that spend
-                // is the parent's, already counted there. Keep the last
-                // request (the context the brief starts from), not the sums.
+                // A brief's log begins with a copy of its parent's: that spend is the parent's, already
+                // counted there. Keep the last request (the context the brief starts from), not the sums.
                 tally.reset_spend();
             }
             tally.observe(event.seq, &event.body);
@@ -254,7 +224,6 @@ impl Tally {
         tally
     }
 
-    /// Forget the sums, keep the last request.
     fn reset_spend(&mut self) {
         self.requests = 0;
         self.prompt = 0;
@@ -267,7 +236,6 @@ impl Tally {
         self.unpriced = 0;
     }
 
-    /// Take one event in log order.
     pub fn observe(&mut self, seq: u64, body: &EventBody) {
         match body {
             EventBody::Usage {
@@ -347,9 +315,7 @@ impl Tally {
         }
     }
 
-    /// The warnings the log now owes: each threshold speaks **once per
-    /// crossing**. The prompt threshold re-arms when the prompt falls back under
-    /// it (a compaction); spend only grows, so the cost threshold speaks once.
+    /// The warnings the log now owes: each threshold speaks **once per crossing**.
     pub fn warnings(&mut self, warn: Warn) -> Vec<Warning> {
         let mut out = Vec::new();
         if let (Some(limit), Some(last)) = (warn.prompt_tokens, &self.last) {
@@ -408,7 +374,6 @@ impl Tally {
     }
 }
 
-/// One warning, as the log records it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Warning {
     pub kind: &'static str,
@@ -424,7 +389,6 @@ pub struct Warning {
 pub struct RetryNote {
     pub status: Option<u16>,
     pub attempt: u32,
-    /// Milliseconds left on the wait at the moment of the answer.
     pub remaining_ms: u64,
     /// A wait for a local provider slot, not a provider failure.
     pub slot: bool,
@@ -950,7 +914,7 @@ mod tests {
 
     #[test]
     fn status_window_is_null_until_known() {
-        // review F2: a defaulted window is a guess, so it is null, with its source.
+        // : a defaulted window is a guess, so it is null, with its source.
         let mut tally = Tally::default();
         tally.observe(2, &usage(100_000, 0, 0.0, None, None));
         let mut l = live(None, &[]);
@@ -966,7 +930,7 @@ mod tests {
 
     #[test]
     fn time_priced_default_model_has_no_table_row() {
-        // review F1: no wrong estimate for a model priced by time of day.
+        // : no wrong estimate for a model priced by time of day.
         assert!(
             lookup(
                 "openrouter",
@@ -980,7 +944,7 @@ mod tests {
 
     #[test]
     fn small_cost_warning_shows_distinct_figures() {
-        // review F4: "$0.0003 over $0.0003" told nothing.
+        // : "$0.0003 over $0.0003" told nothing.
         let warn = Warn {
             prompt_tokens: None,
             cost: Some(0.0003),

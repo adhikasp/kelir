@@ -1,26 +1,8 @@
 //! `mcp.toml`: which MCP servers exist.
-//!
-//! Two layers, machine then project, merged **by server name**: a project's
-//! `[servers.x]` replaces the machine's `[servers.x]` whole (a half-merged
-//! `command` from one file and `args` from the other would run something
-//! neither file asked for). The machine file is `<config dir>/mcp.toml`
-//! (`KELIR_MCP_CONFIG` replaces that path); the project file is the nearest
-//! `.kelir/mcp.toml` walking up from the working directory.
-//!
-//! ```toml
-//! [servers.notes]
-//! command = "npx"
-//! args = ["-y", "some-mcp-server"]
-//! env = { TOKEN_FILE = "C:/x/token" }   # never printed by kelir
-//! description = "my notes"              # one line, shown in `kelir mcp ls`
-//! channel = false                       # true: connected at session start
-//! timeout = 60                          # seconds per call; 0 is not allowed
-//! reply_tool = "reply"                  # channel: tool used to answer (channel mode)
-//! declare_capabilities = ["claude/channel"] # channel: capabilities sent at initialize
-//! ```
-//!
-//! A permission-relay capability (`claude/channel/permission`) is refused: kelir
-//! has no approvals to offer (M10).
+//! Two layers, machine then project, merged **by server name**: a project's `[servers.x]` replaces
+//! the machine's `[servers.x]` whole (a half-merged `command` from one file and `args` from the
+//! other would run something neither file asked for).
+//! The machine file is `<config dir>/mcp.toml` (`KELIR_MCP_CONFIG` replaces that path); the
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -40,7 +22,7 @@ pub struct ServerConfig {
     pub description: String,
     pub channel: bool,
     pub timeout: Duration,
-    /// Channel mode: the tool on this server used to send an answer.
+    /// Channel mode: the tool this server declares for sending an answer.
     pub reply_tool: String,
     /// Channel mode: capabilities declared at `initialize` so the bridge knows
     /// to send inbound messages. Never a permission relay.
@@ -83,11 +65,7 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// A TOML error without the source text. `toml`'s own `Display` quotes the
-/// offending line, and that line may be the `env` block with a secret in it;
-/// serde's type errors also quote the value (`invalid type: integer `123``).
-/// Only the line:column and the message are kept, and a quoted value is cut
-/// out of the message.
+/// A TOML error without the source text.
 fn safe_error(text: &str, error: &toml::de::Error) -> String {
     let message = error.message();
     // "invalid type: string `x`, expected a boolean" -> keep the expectation.
@@ -181,7 +159,6 @@ pub fn layer(
     merged
 }
 
-/// The machine layer's path.
 pub fn machine_path() -> PathBuf {
     match crate::envs::var_os("KELIR_MCP_CONFIG") {
         Some(path) if !path.is_empty() => PathBuf::from(path),

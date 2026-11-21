@@ -1,9 +1,8 @@
 //! Big outputs: over the limit, the model sees a notice instead of the bytes.
-//!
-//! The full output always goes to `commands/<n>/out`; memory holds only what
-//! the model could see anyway: the first `limit` bytes (inline result), the
-//! first 1 KB (head) and a 1 KB tail ring, plus byte and line counts. Output
-//! of any size therefore costs the same ~11 KB of memory.
+//! The full output always goes to `commands/<n>/out`; memory holds only what the model could see
+//! anyway: the first `limit` bytes (inline result), the first 1 KB (head) and a 1 KB tail ring,
+//! plus byte and line counts.
+//! Output of any size therefore costs the same ~11 KB of memory.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -25,20 +24,15 @@ pub fn count_lines(bytes: &[u8]) -> u64 {
     }
 }
 
-/// Markers a shell prints when it ran a command that was cut short: Git bash's
-/// heredoc warning is the one seen in the wild (M5-A seq 344, STEER-4 seq 613:
-/// a 9 KB heredoc wrote an 8 KB file and **exited 0**). The other two are what
-/// a truncated one-liner usually dies with.
+/// Markers a shell prints when it ran a command that was cut short: Git bash's heredoc warning is the
+/// one seen in the wild ( seq 344, seq 613: a 9 KB heredoc wrote an 8 KB file and **exited 0**).
 const TRUNCATION_MARKERS: [&str; 3] = [
     "delimited by end-of-file",
     "unexpected EOF",
     "unexpected end of file",
 ];
 
-/// The notice the model gets when its output looks truncated. It is *appended*
-/// to the result (never in place of it), so the shell's own warning and the
-/// explanation are read together: the dogfood model spent 12 steps blaming its
-/// own heredoc body for a cut it could not see.
+/// The notice the model gets when its output looks truncated.
 pub fn truncation_notice(text: &str, exit_code: Option<i32>) -> Option<&'static str> {
     if looks_cut(text, exit_code) {
         return Some(
@@ -49,24 +43,8 @@ pub fn truncation_notice(text: &str, exit_code: Option<i32>) -> Option<&'static 
     None
 }
 
-/// Does this output look like a command that was **cut**, rather than one that
-/// merely printed a marker (STEER-6 review N1: `git grep "unexpected EOF" src`
-/// made the model re-read a command that was never cut)?
-///
-/// Three signals, and a marker alone is not one:
-///
-/// * a shell **diagnostic**: a line that has a marker and looks like
-///   `program: message` — `bash: warning: here-document at line 1 delimited by
-///   end-of-file (wanted 'X')`, `sh: -c: line 1: unexpected EOF while looking
-///   for matching ...`. Bash prints the heredoc warning *before* the body it did
-///   read, so where the line is does not matter;
-/// * a **failure**: exit code != 0 with a marker anywhere in the output — a
-///   truncated one-liner dies with a syntax error;
-/// * for a successful command, a marker in the last [`NOTICE_LINES`] lines.
-///
-/// A `git grep` hit (`src/spill.rs:33: "delimited by end-of-file"`) has no shell
-/// prefix, is not at the end of the output, and does not fail, so a search that
-/// finds these very strings stays quiet.
+/// Does this output look like a command that was **cut**, rather than one that merely printed a marker
+/// (: `git grep "unexpected EOF" src` made the model re-read a command that was never cut)?
 fn looks_cut(text: &str, exit_code: Option<i32>) -> bool {
     let failed = exit_code.is_some_and(|code| code != 0);
     let lines: Vec<&str> = text
@@ -85,9 +63,8 @@ fn looks_cut(text: &str, exit_code: Option<i32>) -> bool {
     })
 }
 
-/// Is this line a shell's own message about the command (`bash: …`,
-/// `sh: -c: line 3: …`) rather than program output? A shell names itself before
-/// the colon, and its heredoc warning carries `warning:`.
+/// Is this line a shell's own message about the command (`bash: …`, `sh: -c: line 3: …`) rather than
+/// program output?
 fn shell_diagnostic(line: &str) -> bool {
     let Some((prefix, rest)) = line.split_once(": ") else {
         return false;
@@ -106,9 +83,7 @@ fn shell_diagnostic(line: &str) -> bool {
     known || rest.to_ascii_lowercase().starts_with("warning:")
 }
 
-/// How many trailing lines count as "the end" of a command's output when the
-/// command succeeded. The shell's heredoc warning is the last thing it prints
-/// for a cut *script*, so three is generous; the whole output is not.
+/// How many trailing lines count as "the end" of a command's output when the command succeeded.
 pub const NOTICE_LINES: usize = 3;
 
 /// Line count from a streaming read: newlines, plus one for an unterminated
@@ -132,9 +107,8 @@ pub struct Partial {
     pub tail: String,
 }
 
-/// Read a tool's output file to describe its partial output: counts, and a tail
-/// of at most [`TAIL_BYTES`]. Streamed in 8 KB chunks, so memory stays bounded
-/// whatever the file size.
+/// Read a tool's output file to describe its partial output: counts, and a tail of at most
+/// [`TAIL_BYTES`]. Streamed in 8 KB chunks, so memory stays bounded whatever the file size.
 pub fn partial(path: &Path) -> std::io::Result<Partial> {
     use std::io::Read as _;
     let mut file = std::fs::File::open(path)?;
@@ -170,7 +144,6 @@ pub fn partial(path: &Path) -> std::io::Result<Partial> {
     })
 }
 
-/// A bounded view of one command's output.
 #[derive(Debug)]
 pub struct Capture {
     limit: usize,
@@ -183,7 +156,6 @@ pub struct Capture {
     last: Option<u8>,
     /// `=== label` lines seen anywhere in the stream: (byte offset, label).
     sections: Vec<(u64, String)>,
-    /// The start (offset, first bytes) of the line being read.
     line_start: u64,
     line_head: Vec<u8>,
 }
@@ -620,14 +592,10 @@ mod tests {
         assert!(partial(&path).is_err());
     }
 
-    /// N1: the notice is for output that *was* cut. A marker in the middle of a
-    /// successful command's output (a search result that quotes the warning) is
-    /// not truncation, and the model was being told its command was cut when it
-    /// was not.
+    /// the notice is for output that *was* cut.
     #[test]
     fn a_marker_in_the_middle_of_a_successful_output_is_not_truncation() {
-        // The exact case the review found: a `git grep` for the marker itself
-        // matches inside `src/`, in the middle of a long successful output.
+        // A marker inside a long successful output is not evidence of truncation.
         let mut lines = vec![
             "src/spill.rs:33: const TRUNCATION_MARKERS: [&str; 3] = [".to_string(),
             "src/spill.rs:34: \"delimited by end-of-file\",".to_string(),
@@ -642,17 +610,14 @@ mod tests {
         // From a command that failed, a marker anywhere is the notice's case: a
         // failure is at least worth a look at the bytes that ran.
         assert!(truncation_notice(&text, Some(1)).is_some());
-        // A grep hit is not a shell diagnostic, but a marker in a successful
-        // command's *last* lines still counts: the notice is a cheap hint at the
-        // tail, and that is enough (the reviewer's wording: "exit code != 0 or
-        // the marker in the last lines").
+        // A grep hit is not a shell diagnostic, but a marker in a successful command's *last* lines still
+        // counts: the notice is a cheap hint at the tail, and that is enough (the reviewer's wording: "exit
         let last = ["a", "b", "c", "d", "src/x.rs:1: \"unexpected EOF\""].join("\n");
         assert!(truncation_notice(&last, Some(0)).is_some());
     }
 
-    /// A cut heredoc is the case the notice is for: the shell says so, it
-    /// usually still exits 0, and bash prints the warning *before* the body it
-    /// did read, so the marker is nowhere near the end.
+    /// A cut heredoc is the case the notice is for: the shell says so, it usually still exits 0, and bash
+    /// prints the warning *before* the body it did read, so the marker is nowhere near the end.
     #[test]
     fn a_shell_diagnostic_is_noticed_wherever_the_shell_printed_it() {
         let early = [

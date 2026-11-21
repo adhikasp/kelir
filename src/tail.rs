@@ -1,18 +1,15 @@
-//! Bounded tail reader for `kelir attach` (M11).
-//!
-//! The viewer must follow a growing `events.jsonl` with a bounded working set:
-//! read the file a chunk at a time, hand out whole lines, tolerate a torn last
-//! line (the writer may be mid-write) and skip a line that is absurdly large
-//! rather than allocate it. No file is ever read whole.
+//! Bounded tail reader for `kelir attach`.
+//! The viewer must follow a growing `events.jsonl` with a bounded working set: read the file a
+//! chunk at a time, hand out whole lines, tolerate a torn last line (the writer may be mid-write)
+//! and skip a line that is absurdly large rather than allocate it.
+//! No file is ever read whole.
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// The largest line accepted from the event log. A log line is an event; normal
-/// ones are a few KB (payloads over 10 KB spill to a blob). Bigger lines are
-/// either corruption or somebody appending a blob by hand: skip them.
+/// The largest line accepted from the event log. A log line is an event; normal ones are a
+/// few KB (payloads over 10 KB spill to a blob).
 pub const MAX_LINE: usize = 1024 * 1024;
-/// Bytes read per step of the tail.
 const CHUNK: usize = 32 * 1024;
 
 /// A cursor over one file. `offset` is the byte position of the next unread
@@ -26,16 +23,12 @@ pub struct Tail {
 }
 
 impl Tail {
-    /// Start at the beginning of the file.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Start just before the last `n` *complete* lines. Returns how many lines
-    /// were actually available (fewer than `n` in a short log).
-    ///
-    /// The file is scanned backwards in chunks, never held in memory beyond
-    /// one chunk. `n = 0` means the whole log.
+    /// Start just before the last `n` *complete* lines. Returns how many lines were actually
+    /// available (fewer than `n` in a short log).
     pub fn from_last_lines(path: &Path, n: usize) -> io::Result<(Self, usize)> {
         let mut file = std::fs::File::open(path)?;
         let len = file.seek(SeekFrom::End(0))?;
@@ -68,16 +61,14 @@ impl Tail {
                 }
             }
         }
-        // A newline at byte 0.. starts a line too: scanning backwards only
-        // counts the newlines that *close* a later line, so the first line of
-        // the file has to be added once when we scanned the whole file.
+        // A newline at byte 0.. starts a line too: scanning backwards only counts the newlines that *close* a
+        // later line, so the first line of the file has to be added once when we scanned the whole file.
         if !stopped_at_line {
             found += 1;
         }
         Ok((Self::at(start), found.min(n)))
     }
 
-    /// A cursor at a known byte offset.
     pub fn at(offset: u64) -> Self {
         Self {
             offset,
@@ -86,18 +77,12 @@ impl Tail {
         }
     }
 
-    /// Read from `path` everything appended since the last call, returning
-    /// whole lines as owned `String`s. A final line without a newline is held
-    /// back (torn-line tolerance): the next call completes it when the writer
-    /// appends the rest. Invalid UTF-8 is skipped as a bad line, not fatal.
+    /// Read from `path` everything appended since the last call, returning whole lines as owned `String`s.
     pub fn poll(&mut self, path: &Path) -> io::Result<Vec<String>> {
         self.poll_capped(path, usize::MAX)
     }
 
-    /// The same, but return at most `max` lines per call. The cursor stops at
-    /// the last line returned, so the next call resumes there: a viewer can
-    /// consume a huge log a page at a time without ever holding the whole thing
-    /// as a `Vec<String>`.
+    /// The same, but return at most `max` lines per call.
     pub fn poll_capped(&mut self, path: &Path, max: usize) -> io::Result<Vec<String>> {
         let mut file = match std::fs::File::open(path) {
             Ok(file) => file,
@@ -128,9 +113,8 @@ impl Tail {
             self.pending.extend_from_slice(&buf[..read]);
             self.take_lines(&mut out, max);
             if self.pending.len() > MAX_LINE {
-                // A line that grows without a newline (a runaway writer): drop
-                // up to the last newline, or all of it, and keep the cursor
-                // bounded.
+                // A line that grows without a newline (a runaway writer): drop up to the last newline, or
+                // all of it, and keep the cursor bounded.
                 self.skipped += 1;
                 self.pending.clear();
             }
@@ -299,9 +283,8 @@ mod tests {
             tail.poll(file.path()).unwrap(),
             ["old-line", "another-stale-line"]
         );
-        // A restored snapshot or rotated log is shorter than the cursor we
-        // held into the old one. Start over instead of reading unrelated
-        // bytes at that offset.
+        // A restored snapshot or rotated log is shorter than the cursor we held into the old one.
+        // Start over instead of reading unrelated bytes at that offset.
         std::fs::write(file.path(), b"new-content-here\n").unwrap();
         assert_eq!(tail.poll(file.path()).unwrap(), ["new-content-here"]);
     }

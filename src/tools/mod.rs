@@ -1,5 +1,6 @@
-//! The native tools. Fixed for the life of a session so the request prefix
-//! (and therefore the cache) stays stable.
+//! The native tools.
+//! Fixed for the life of a session so the request prefix (and therefore the cache) stays
+//! stable.
 
 pub mod bash;
 pub mod edit;
@@ -19,22 +20,18 @@ pub struct Ctx {
     /// The address of the session socket, exported to every child as
     /// `KELIR_SOCK` (`kelir mcp` and `kelir bg` use it; tests assert it).
     pub sock: String,
-    /// The session's socket token, exported to every child as `KELIR_TOKEN`
-    /// (STEER-7): a verb that crosses the socket must carry it. It is never
-    /// written to the log, to stdout or to an argv.
+    /// The session's socket token, exported to every child as `KELIR_TOKEN` : a verb that crosses
+    /// the socket must carry it. It is never written to the log, to stdout or to an argv.
     pub token: String,
     /// This session's id: the bash call's job object name is derived from it.
     pub session_id: String,
-    /// The session's trust state: a bash call asks it for the status key the
-    /// session minted for that call and hands it to the call's shim over a
-    /// pipe (STEER-7 round 2). `None` outside a session (a test's `Ctx`).
+    /// The session's trust state: a bash call asks it for the status key the session minted for that call
+    /// and hands it to the call's shim over a pipe.
     pub trust: Option<std::sync::Arc<crate::trust::Trust>>,
     /// A call still running after this long is promoted to a background job
     /// (`promote_after` in the config; zero disables it).
     pub promote_after: std::time::Duration,
-    /// Process groups of every call this session started. Holding them keeps
-    /// the Windows Job Objects open past the call (a leftover background child
-    /// is not killed by returning) and closes them when the session ends.
+    /// Process groups of every call this session started.
     pub groups: SessionGroups,
     /// The calls running right now, so a verb can kill one or all of them.
     pub running: Running,
@@ -63,9 +60,8 @@ impl Ctx {
         }
     }
 
-    /// `<session>/commands/<dir>`, where `<dir>` is kelir's own
-    /// `<seq>-<step>-<n>` name: monotonic, filesystem-safe, and never derived
-    /// from a provider-supplied id.
+    /// `<session>/commands/<dir>`, where `<dir>` is kelir's own `<seq>-<step>-<n>` name:
+    /// monotonic, filesystem-safe, and never derived from a provider-supplied id.
     pub fn call_dir(&self, dir: &str) -> PathBuf {
         self.session_dir.join("commands").join(dir)
     }
@@ -102,9 +98,8 @@ impl ToolOutcome {
         Self::new("stopped", stopped_text(reason), None)
     }
 
-    /// The same, for a call that had already written output: the model gets the
-    /// byte and line counts, the file and its tail, so the partial work is not
-    /// lost (M1 review N2).
+    /// The same, for a call that had already written output: the model gets the byte and line
+    /// counts, the file and its tail, so the partial work is not lost.
     pub fn stopped_with_output(
         reason: &str,
         out_path: &str,
@@ -144,9 +139,8 @@ impl ToolOutcome {
         Self::new("skipped", result, None)
     }
 
-    /// The tool is turned off for this session; the list sent to the provider
-    /// never changed.
-    /// A call a `before_tool` gate vetoed: the model reads who and why.
+    /// The tool is turned off for this session; the list sent to the provider never changed. A
+    /// call a `before_tool` gate vetoed: the model reads who and why.
     pub fn denied(gate: &str, reason: &str) -> Self {
         Self::new("denied", denied_text(gate, reason), None)
     }
@@ -263,9 +257,7 @@ pub fn names() -> Vec<String> {
         .collect()
 }
 
-/// Run one tool call. Never fails: any problem becomes an `error` outcome the
-/// model can read. `dir` is kelir's `<seq>-<step>-<n>` output directory name and
-/// `call_id` is the provider's call id (recorded with a promoted job).
+/// Run one tool call. Never fails: any problem becomes an `error` outcome the model can read.
 pub async fn dispatch(
     name: &str,
     args: &Value,

@@ -1,17 +1,8 @@
-//! `kelir docs`: the reference, embedded in the binary and readable by the
-//! agent.
-//!
-//! Every file in `docs/reference/` is compiled in with `include_str!`, so the
-//! model can read how to operate kelir from inside a session that has no repo
-//! on disk. Three of those files carry a *generated* block (the CLI from clap,
-//! the verbs and event types from [`tables`], the environment from
-//! [`crate::envs::VARS`]) between markers; `kelir docs --generate` rewrites
-//! those blocks, `--check` fails when one is stale, and the drift test
-//! ([`tests`]) also reads the *code* so a flag, verb, key, variable or event
-//! that exists in one and not the other is an error, in both directions.
-//!
-//! The hand-written prose stays where it is: only what a machine can know for
-//! certain is generated.
+//! `kelir docs`: the reference, embedded in the binary and readable by the agent.
+//! Every file in `docs/reference/` is compiled in with `include_str!`, so the model can read how
+//! to operate kelir from inside a session that has no repo on disk.
+//! Three of those files carry a *generated* block (the CLI from clap, the verbs and event types
+//! from [`tables`], the environment from [`crate::envs::VARS`]) between markers; `kelir docs
 
 pub mod tables;
 
@@ -140,10 +131,6 @@ pub fn topic(name: &str) -> Option<&'static Topic> {
         .find(|topic| topic.name.eq_ignore_ascii_case(name))
 }
 
-/// The closest topic names for an unknown one, for the suggestion line. Two
-/// signals, cheapest first: a name that starts with what was typed, then a
-/// shared prefix; failing both, the terms that appear most often in the
-/// reference's own bodies.
 pub fn suggestions(name: &str) -> Vec<&'static str> {
     let wanted = name.trim().to_ascii_lowercase();
     if wanted.is_empty() {
@@ -206,16 +193,11 @@ pub struct Hit {
     pub summary: &'static str,
     /// `(1-based line number, the line)` for the best few matches.
     pub lines: Vec<(usize, String)>,
-    /// The score the ranking used.
     pub score: usize,
 }
 
-/// Ranked search over the reference: a hit is a body line holding a term, and
-/// the score is the number of terms it holds (word boundaries count double,
-/// because `key` in prose is weaker than `key_cmd`).
-///
-/// Deliberately simple, and documented as such: this is not full-text search,
-/// it is "which file do I open".
+/// Ranked search over the reference: a hit is a body line holding a term, and the score is the number
+/// of terms it holds (word boundaries count double, because `key` in prose is weaker than `key_cmd`).
 pub fn find(query: &str) -> Vec<Hit> {
     let terms: Vec<String> = query
         .split_whitespace()
@@ -287,10 +269,8 @@ pub fn find(query: &str) -> Vec<Hit> {
 /// The marker that opens a generated block. The line after it names the
 /// generator (`cli`, `verbs`, `env`); the block ends at [`END_MARKER`].
 pub const START_MARKER: &str = "<!-- generated:";
-/// The marker that closes a generated block.
 pub const END_MARKER: &str = "<!-- /generated -->";
 
-/// The generators, by the name a marker carries.
 pub fn generate(kind: &str) -> Option<String> {
     match kind {
         "cli" => Some(render_cli()),
@@ -306,19 +286,14 @@ pub fn generate(kind: &str) -> Option<String> {
 pub const GENERATORS: [&str; 5] = ["config", "cli", "env", "events", "verbs"];
 
 /// Rewrite every generated block in `text`, and say which ones changed.
-///
-/// The prose outside the markers is untouched byte for byte, so a hand edit
-/// survives a `--generate`; a block whose marker names no generator is an
-/// error rather than a silent no-op.
 pub fn regenerate(text: &str) -> Result<(String, Vec<String>), String> {
     let mut out = String::with_capacity(text.len());
     let mut changed: Vec<String> = Vec::new();
     let mut lines = text.split_inclusive('\n').peekable();
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
-        // A marker is exactly `<!-- generated:<kind> -->` on its own line: any
-        // other mention of the marker in prose (the index explains the format)
-        // is text, not a block.
+        // A marker is exactly `<!-- generated:<kind> -->` on its own line: any other mention of the
+        // marker in prose (the index explains the format) is text, not a block.
         if let Some(kind) = marker_kind(trimmed) {
             let Some(generated) = generate(kind) else {
                 return Err(format!("unknown generator `{kind}` in {START_MARKER}"));
@@ -351,9 +326,8 @@ pub fn regenerate(text: &str) -> Result<(String, Vec<String>), String> {
     Ok((out, changed))
 }
 
-/// Everything wrong with the reference's generated blocks, empty when the
-/// files on disk are what the generators produce. This is `--check`: CI, the
-/// drift test and a pre-commit read it the same way.
+/// Everything wrong with the reference's generated blocks, empty when the files on disk are what the
+/// generators produce.
 pub fn check() -> Vec<String> {
     let mut problems = Vec::new();
     let Some(root) = docs_root() else {
@@ -390,10 +364,8 @@ pub fn check() -> Vec<String> {
     problems
 }
 
-/// Where the reference files live when a developer runs `--check` or
-/// `--generate`: `KELIR_DOCS_ROOT`, else `docs/reference` under the current
-/// directory. `None` when neither exists, which is the normal case for a
-/// binary away from its checkout (the embedded copy is what a session reads).
+/// Where the reference files live when a developer runs `--check` or `--generate`: `KELIR_DOCS_ROOT`,
+/// else `docs/reference` under the current directory.
 pub fn docs_root() -> Option<std::path::PathBuf> {
     if let Some(root) = crate::envs::var("KELIR_DOCS_ROOT") {
         let path = std::path::PathBuf::from(root);
@@ -622,9 +594,6 @@ pub fn render_config() -> String {
 // ------------------------------------------------------------------ the CLI
 
 /// `kelir docs [topic]`, `--list`, `--find <words>`, `--generate`, `--check`.
-///
-/// Exit 0 on a successful read or a clean `--check`; 1 for an unknown topic, a
-/// `--find` with no hit and a stale block; 2 for a usage error.
 pub fn cli(args: &crate::cli::DocsArgs) -> u8 {
     if args.generate && args.check {
         eprintln!("kelir docs: `--generate` and `--check` are different jobs; pick one");
@@ -710,9 +679,6 @@ fn print_find(words: &str) -> u8 {
 }
 
 /// Rewrite the generated blocks in `docs/reference/` in place.
-///
-/// An unchanged file is not rewritten, so running it twice changes nothing
-/// (and a build tool watching the directory is not woken for nothing).
 fn write_generated() -> u8 {
     let Some(root) = docs_root() else {
         eprintln!(

@@ -1,30 +1,7 @@
 //! Tool-child process grouping, so a stop can kill a whole tree.
-//!
-//! Every tool child is `kelir bg-shim`, which owns the command it runs (M4):
-//! the shim puts the command in its own process group on Unix and in a Job
-//! Object on Windows, so the shim can take the tree down by itself, and its
-//! owner can signal intent by killing the shim's group / job.
-//!
-//! *Unix:* the shim leads its own process group (`process_group(0)`), which
-//! `killpg` signals; the command and everything it spawns inherit that group.
-//!
-//! *Windows:* the session creates a **named** Job Object per call, assigns the
-//! suspended shim to it and only then resumes it, so the shim cannot run user
-//! code before it is inside the job (M0 review N2). The shim opens the same job
-//! by name, assigns the command to it and keeps its own handle: a promoted job
-//! therefore survives the session closing its handle, and `kelir bg cancel` can
-//! open the job by name from another process. The job is **not** breakaway-OK —
-//! an msys `spawn` asks for `CREATE_BREAKAWAY_FROM_JOB` whenever the job allows
-//! it, which is exactly how exec'd grandchildren (`sleep.exe`, a nested
-//! `bash.exe`) used to escape a cancel (M4 review F1). It **is**
-//! `KILL_ON_JOB_CLOSE` until promotion, so a session that is killed outright
-//! still takes a leftover `cmd &` child with it (M4 review F6); promotion
-//! clears the flag before the session closes its handle. A shim also watches
-//! its owner, which is the same guarantee on both platforms.
-//!
-//! A [`ProcessGroup`] is a cheap, cloneable handle: the call holds one to kill
-//! its own tree, and the session keeps another so a leftover background child
-//! survives the call and is cleaned up when the session ends.
+//! Every tool child is `kelir bg-shim`, which owns the command it runs: the shim puts the command
+//! in its own process group on Unix and in a Job Object on Windows, so the shim can take the tree
+//! down by itself, and its owner can signal intent by killing the shim's group / job.
 
 use std::collections::HashMap;
 #[cfg(windows)]
@@ -33,6 +10,41 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::process::Command;
+
+/// Is `pid` still a process? Pid 0 is never a process we own: on Unix it means
+/// the caller's whole process group, so asking must not answer "alive" for it.
+/// A process owned by another user is still alive: `kill(pid, 0)` reports EPERM
+/// for it, and liveness must not depend on our right to signal it.
+pub fn alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks that the process exists.
+        (unsafe { libc::kill(pid as libc::pid_t, 0) }) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        match win::OwnerWatch::open(pid) {
+            Some(watch) => !watch.gone(),
+            None => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+/// A start time as the status file writes it: RFC 3339, or `None` where the platform cannot
+/// say (macOS) — in which case nothing is signalled on the strength of a pid.
+pub fn start_time_text(pid: u32) -> Option<String> {
+    time::OffsetDateTime::from(start_time(pid)?)
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
 
 #[derive(Debug, Clone)]
 pub struct ProcessGroup {
@@ -86,12 +98,8 @@ impl ProcessGroup {
         {
             use std::os::windows::process::CommandExt as _;
             let mut flags = win::CREATE_SUSPENDED | win::CREATE_NEW_PROCESS_GROUP;
-            // A session without a console (a tool shell, a service) must not
-            // leave the call's shell to allocate one: msys `bash.exe` then
-            // creates a *visible* console window — one per call — and can stall
-            // for seconds at start-up (M4 review round 2, G3). A session that
-            // has a console passes it on, which costs nothing and shows no
-            // window.
+            // A session without a console (a tool shell, a service) must not leave the call's shell to allocate
+            // one: msys `bash.exe` then creates a *visible* console window — one per call — and can stall for
             if !win::has_console() {
                 flags |= win::CREATE_NO_WINDOW;
             }
@@ -118,8 +126,7 @@ impl ProcessGroup {
             };
             if let Err(error) = assigned {
                 // A call outside its Job Object cannot be stopped, so it is
-                // taken down here rather than left running unreachable
-                // (M1 review N7). The child is still suspended.
+                // taken down here rather than left running unreachable. The child is still suspended.
                 win::terminate(pid);
                 self.kill();
                 return Err(format!(
@@ -142,8 +149,6 @@ impl ProcessGroup {
         Ok(())
     }
 
-    /// Kill the whole tree. Idempotent; returns true the first time. A
-    /// detached (promoted) group is left alone.
     pub fn kill(&self) -> bool {
         if self.state.detached.load(Ordering::SeqCst) {
             return false;
@@ -155,11 +160,8 @@ impl ProcessGroup {
         true
     }
 
-    /// The session stops owning the tree: a promoted job keeps running after
-    /// the session exits, so neither `Drop` nor a late `kill` may take it down.
-    /// On Windows the job stops being kill-on-close (the session's handle is
-    /// about to close, and the tree must outlive it) and the session's handle
-    /// is closed here; the shim holds its own, so the job survives.
+    /// The session stops owning the tree: a promoted job keeps running after the session exits, so neither
+    /// `Drop` nor a late `kill` may take it down.
     pub fn detach(&self) {
         self.state.detached.store(true, Ordering::SeqCst);
         #[cfg(windows)]
@@ -214,9 +216,7 @@ impl Default for ProcessGroup {
     }
 }
 
-/// Every process group the session started. Holding them keeps a leftover
-/// background child alive after its call returns; dropping the last handle
-/// (the session exiting) kills what is still in them, as the spec requires.
+/// Every process group the session started.
 #[derive(Debug, Clone, Default)]
 pub struct SessionGroups(Arc<GroupsInner>);
 
@@ -248,9 +248,8 @@ impl SessionGroups {
     }
 }
 
-/// The calls running right now, keyed by output directory, so a verb can kill
-/// exactly one of them (or all of them) and the batch can tell a killed call
-/// (`stopped`) from one that never started (`skipped`).
+/// The calls running right now, keyed by output directory, so a verb can kill exactly one of them (or
+/// all of them) and the batch can tell a killed call (`stopped`) from one that never started
 #[derive(Debug, Clone, Default)]
 pub struct Running(Arc<Mutex<HashMap<String, ProcessGroup>>>);
 
@@ -271,7 +270,6 @@ impl Running {
         }
     }
 
-    /// The keys of the calls that are running this instant.
     pub fn keys(&self) -> Vec<String> {
         self.0
             .lock()
@@ -309,13 +307,6 @@ impl Running {
 }
 
 /// When the process `pid` started, as the OS records it.
-///
-/// A status file outlives its shim (`taskkill /F`, an OOM kill, a reboot) and
-/// the pid can belong to something else by the time a reader asks, so a reader
-/// that is about to signal a pid compares this with the status's `started`
-/// first (M4 review F5). `None` when the process is gone, or when the platform
-/// cannot say (there is no `/proc` on macOS), in which case the caller falls
-/// back to plain liveness.
 pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
     #[cfg(windows)]
     {
@@ -327,9 +318,7 @@ pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
     }
     #[cfg(target_os = "macos")]
     {
-        // macOS has no /proc. `ps -o lstart=` gives the process start as
-        // "Mon Jan  1 12:00:00 2026" in the local timezone; RFC 3339 records
-        // the same instant with an offset, so compare instants, not strings.
+        // macOS has no /proc.
         let output = std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "lstart="])
             .output()
@@ -341,9 +330,7 @@ pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
         if text.is_empty() {
             return None;
         }
-        // `ps lstart` is local time. Let the system's `date` convert it to a
-        // Unix timestamp using its own timezone rules — parsing the wall
-        // clock in Rust needs an offset that is unreliable in sandboxes.
+        // `ps lstart` is local time.
         let converted = std::process::Command::new("date")
             .args(["-j", "-f", "%a %b %e %T %Y", &text, "+%s"])
             .output()
@@ -387,12 +374,6 @@ fn linux_start_time(pid: u32) -> Option<std::time::SystemTime> {
 }
 
 /// How many processes are in process group `pgid`, **not counting the caller**.
-/// `None` when the platform cannot say, so a caller never mistakes "I cannot
-/// tell" for "the group is empty".
-///
-/// This is what lets a finished call's shim stay behind as its tree's owner: it
-/// exits as soon as nothing is left, and while something is left a `SIGKILL` of
-/// the session still takes the tree down (M4 review F6).
 #[cfg(target_os = "linux")]
 pub fn group_others(pgid: u32) -> Option<usize> {
     if pgid == 0 {
@@ -435,13 +416,7 @@ pub fn group_others(_pgid: u32) -> Option<usize> {
     None
 }
 
-/// The pids still in process group `pgid` on Linux. `None` when the platform
-/// cannot say.
-///
-/// `cancel` uses it to reach a *lost* job's tree: the group is led by the dead
-/// shim's pid, and a pid number cannot be reused while a group with that number
-/// still has a member, so a non-empty group is that job's tree and nothing
-/// else's (M4 review round 2, G2).
+/// The pids still in process group `pgid` on Linux. `None` when the platform cannot say.
 #[cfg(target_os = "linux")]
 pub fn group_members(pgid: u32) -> Option<Vec<u32>> {
     if pgid == 0 {
@@ -508,16 +483,8 @@ pub fn group_members(_pgid: u32) -> Option<Vec<u32>> {
     None
 }
 
-/// Kill `pid` and every process the OS still reports as its descendant,
-/// deepest first. Returns how many were signalled.
-///
-/// This is how `cancel` reaches a *lost* job's tree on Windows (M4 review round
-/// 2, G2): the job object keeps no name once its last handle is gone, but the
-/// processes are still there and their parent links say where. The caller must
-/// have proved that `pid` is the command's own process first (its recorded
-/// start time); a child is only walked into when it is not older than its
-/// parent, so a recycled pid whose new holder has children of its own is left
-/// alone.
+/// Kill `pid` and every process the OS still reports as its descendant, deepest first.
+/// Returns how many were signalled.
 #[cfg(windows)]
 pub fn terminate_tree(pid: u32) -> usize {
     if pid == 0 {
@@ -590,19 +557,8 @@ pub mod win {
         TerminateProcess, WaitForSingleObject,
     };
 
-    /// Close this process to the rest of its user: no `PROCESS_VM_READ`,
-    /// `VM_WRITE`, `CREATE_THREAD`, `DUP_HANDLE` or `QUERY_INFORMATION`, and no
-    /// `WRITE_DAC` to take them back. The DACL names `SYSTEM` (everything) and
-    /// *Owner Rights* with only terminate / set-quota / query-information /
-    /// synchronize (`taskkill` is refused without query-information), which is what `cancel` and the liveness checks use; an
-    /// explicit Owner Rights entry is what removes the owner's implicit
-    /// `READ_CONTROL | WRITE_DAC`.
-    ///
-    /// This closes the plain `ReadProcessMemory` read of a shim's signing key by
-    /// a sibling tool child. It does not close an elevated administrator that
-    /// enables `SeDebugPrivilege`, a kernel debugger, or the user's own
-    /// ability to log in as `SYSTEM`: those are outside the boundary (SPEC,
-    /// STEER-7).
+    /// Close this process to the rest of its user: no `PROCESS_VM_READ`, `VM_WRITE`, `CREATE_THREAD`,
+    /// `DUP_HANDLE` or `QUERY_INFORMATION`, and no `WRITE_DAC` to take them back.
     pub fn deny_same_user_memory_access() -> Result<(), String> {
         use windows_sys::Win32::Foundation::LocalFree;
         use windows_sys::Win32::Security::Authorization::{
@@ -649,18 +605,11 @@ pub mod win {
     pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
     pub const DETACHED_PROCESS: u32 = 0x0000_0008;
-    /// A console of its own, with no window: a console-subsystem child gets a
-    /// console it can use, without the cost (and the visible window) of a
-    /// detached process allocating one per job (M4 review round 2, G3).
+    /// A console of its own, with no window: a console-subsystem child gets a console it can use,
+    /// without the cost (and the visible window) of a detached process allocating one per job.
     pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
-    /// Does this process have a console at all? A hidden console answers yes
-    /// (`GetConsoleOutputCP` works); a process without one gets 0, however it
-    /// was started (`DETACHED_PROCESS`, a service, a tool shell). This is what
-    /// tells a call's shim whether its shell would have to allocate a console
-    /// — and a console-subsystem child of a console-less parent allocates a
-    /// **visible** one (M4 review round 2, G3).
     pub fn has_console() -> bool {
         use windows_sys::Win32::System::Console::GetConsoleOutputCP;
         unsafe { GetConsoleOutputCP() != 0 }
@@ -670,9 +619,6 @@ pub mod win {
     /// canceller need by name (`JOB_OBJECT_ALL_ACCESS`).
     const JOB_ACCESS: u32 = 0x001F_001F;
 
-    /// A Job Object handle. The session holds one per call; the call's shim
-    /// opens its own by name, which is what lets a promoted job outlive the
-    /// session's handle.
     #[derive(Debug)]
     pub struct Job(HANDLE);
 
@@ -682,11 +628,6 @@ pub mod win {
 
     impl Job {
         /// Create (or open) the named job for one call.
-        ///
-        /// `kill_on_close` is on for a call's job (a session that is killed
-        /// outright still has its job handles closed by the kernel, which takes
-        /// a leftover `cmd &` child with it) and off for a job that has to
-        /// outlive anything (`kelir bg run`, a promoted call).
         pub fn create_named(name: &str, kill_on_close: bool) -> Option<Job> {
             let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
             let job = unsafe {
@@ -702,14 +643,12 @@ pub mod win {
             Some(job)
         }
 
-        /// Turn kill-on-close on or off. On is the default for a call: closing
-        /// the last handle terminates the job's processes. Off is what a
-        /// promotion does, because the tree is handed to the shim from then on.
+        /// Turn kill-on-close on or off. On is the default for a call: closing the last handle
+        /// terminates the job's processes.
         pub fn set_kill_on_close(&self, on: bool) -> bool {
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-            // Nothing else is set on purpose: no breakaway (a descendant that
-            // could leave the job could not be cancelled — M4 review F1), no
-            // memory or process limits.
+            // Nothing else is set on purpose: no breakaway (a descendant that could leave the job could
+            // not be cancelled —), no memory or process limits.
             info.BasicLimitInformation.LimitFlags = if on {
                 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
             } else {
@@ -725,7 +664,6 @@ pub mod win {
             }
         }
 
-        /// Open a job another process created, by name.
         pub fn open(name: &str) -> Option<Job> {
             let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
             unsafe {
@@ -764,9 +702,7 @@ pub mod win {
             }
         }
 
-        /// How many processes the job holds right now (`None` when the query
-        /// fails). A test harness asserts this is 0 after it terminates the
-        /// job, so a leaked tree fails the test instead of outliving it.
+        /// How many processes the job holds right now (`None` when the query fails).
         pub fn active_processes(&self) -> Option<u32> {
             use windows_sys::Win32::System::JobObjects::{
                 JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
@@ -786,16 +722,8 @@ pub mod win {
             (queried != 0).then_some(info.ActiveProcesses)
         }
 
-        /// Hand a copy of this job handle to another process — the job's own
-        /// command — so the job object, and with it the **name** that `cancel`
-        /// opens, outlives the shim that made it.
-        ///
-        /// A job's name is removed when its last handle closes, and a killed
-        /// shim closes the last one; the job body lives on, unreachable. The
-        /// command is in the job and outlives the shim in the ordinary case
-        /// (`bash -c 'sleep … & wait'`), so a handle of its own keeps the name
-        /// (M4 review round 2, G2). Only a job that must survive its shim gets
-        /// one: a call's job before promotion must stay kill-on-close.
+        /// Hand a copy of this job handle to another process — the job's own command — so the job
+        /// object, and with it the **name** that `cancel` opens, outlives the shim that made it.
         pub fn lend_to(&self, pid: u32) -> Result<(), String> {
             use windows_sys::Win32::Foundation::{DuplicateHandle, HANDLE};
             use windows_sys::Win32::System::Threading::{GetCurrentProcess, PROCESS_DUP_HANDLE};
@@ -838,7 +766,6 @@ pub mod win {
         }
     }
 
-    /// Kill one process by id.
     pub fn terminate(pid: u32) {
         unsafe {
             let process = OpenProcess(PROCESS_TERMINATE, 0, pid);
@@ -858,10 +785,6 @@ pub mod win {
     }
 
     /// Every process on the machine: pid, parent pid and creation time.
-    ///
-    /// `cancel` uses it to reach a *lost* job's tree (M4 review round 2, G2):
-    /// the job object's name dies with its last handle, but the tree is still
-    /// there, and the parent links say which processes are its.
     pub fn snapshot() -> Vec<ProcInfo> {
         use windows_sys::Win32::System::Diagnostics::ToolHelp::{
             PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS,
@@ -892,9 +815,8 @@ pub mod win {
         out
     }
 
-    /// When the process was created: the kernel's own answer, which is the same
-    /// clock a status file's `started` comes from. `None` when the process is
-    /// gone or not ours to look at.
+    /// When the process was created: the kernel's own answer, which is the same clock a status
+    /// file's `started` comes from. `None` when the process is gone or not ours to look at.
     pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
         use windows_sys::Win32::Foundation::FILETIME;
         use windows_sys::Win32::System::Threading::GetProcessTimes;
@@ -930,9 +852,7 @@ pub mod win {
         }
     }
 
-    /// Watch another process without polling: the handle is signalled when it
-    /// exits. Used by the shim to tell a session that died (a `kill -9`, a
-    /// closed terminal) from one that promoted it and walked away.
+    /// Watch another process without polling: the handle is signalled when it exits.
     #[derive(Debug)]
     pub struct OwnerWatch(HANDLE);
 
@@ -964,10 +884,6 @@ pub mod win {
     }
 
     /// Resume the main thread of a child created with `CREATE_SUSPENDED`.
-    ///
-    /// `std::process::Child` does not expose the thread handle, so the thread
-    /// is found by walking a snapshot of the system's threads; a suspended
-    /// process has exactly one, and it cannot have started anything else.
     pub fn resume(pid: u32) -> io::Result<()> {
         unsafe {
             let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);

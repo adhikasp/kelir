@@ -1,19 +1,16 @@
 //! `kelir ctl <session> <verb> [args…]`: send one verb to a running session.
-//!
-//! The session is resolved from the state dir: an exact id, a unique prefix, or
-//! `latest` (the newest session only, and an error when it is not running — a
-//! verb never lands on an older session by accident). The verb is validated
-//! locally, and the answer is printed as one JSON line. Exit 0 for `ok`, 1 for
-//! a refusal, 2 for a bad invocation.
+//! The session is resolved from the state dir: an exact id, a unique prefix, or `latest` (the
+//! newest session only, and an error when it is not running — a verb never lands on an older
+//! session by accident).
+//! The verb is validated locally, and the answer is printed as one JSON line.
 
 use crate::cli::CtlArgs;
 use crate::ipc::{self, Request};
 use crate::{paths, verbs};
 
 pub async fn ctl(args: CtlArgs) -> u8 {
-    // `observe` is a read, not a steer: it needs no boundary, no token and no
-    // log line, so it is answered from the session's log (same as
-    // `kelir observe`; `ctl <s> observe raw` prints the exact body).
+    // `observe` is a read, not a steer: it needs no boundary, no token and no log line, so it is answered
+    // from the session's log (same as `kelir observe`; `ctl <s> observe raw` prints the exact body).
     if args.verb == "observe" {
         let raw = args.args.iter().any(|arg| arg == "raw" || arg == "--raw");
         return crate::observe::run(&args.session, raw, None);
@@ -49,11 +46,8 @@ pub async fn ctl(args: CtlArgs) -> u8 {
     let mut last: Option<(String, String)> = None;
     for id in &candidates {
         let dir = paths::session_dir(id);
-        // The token comes from the session's own `<session dir>/token`, which
-        // only its owner can read (STEER-7): a human's terminal knows which
-        // session it is steering, so it reads that file rather than the
-        // environment a tool child would get.
-        // `brief` answers when the side question's model does.
+        // The token comes from the session's own `<session dir>/token`, which only its owner can read: a
+        // human's terminal knows which session it is steering, so it reads that file rather than the
         let sent = if args.verb == "brief" {
             ipc::request_with_token_file_within(&dir, id, &request, crate::child::FOREGROUND_WAIT)
                 .await

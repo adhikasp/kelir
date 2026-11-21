@@ -1,25 +1,5 @@
-//! Where each provider's key comes from (STEER-2).
-//!
+//! Where each provider's key comes from.
 //! Exactly two providers, and each one has its own first-match-wins list:
-//!
-//! * **OpenRouter** — `OPENROUTER_API_KEY`, then the variable `key_env` names,
-//!   then `key_cmd` (a command whose stdout is the key). `key_env` is a
-//!   *fallback*, never a replacement: a config that names a variable which
-//!   happens to be unset must not hide the machine's usual one (STEER-2
-//!   fix).
-//! * **OpenCode Go** — the same two as an *explicit override*, then opencode's
-//!   own credential store, read through the supported `opencode auth export
-//!   opencode` CLI. No SQLite, no reading `opencode.db`, and no OAuth refresh of
-//!   our own: opencode rotates the refresh token, so a second refresher would
-//!   break the account it shares with us.
-//!
-//! A key is read once at session start and lives in memory only. It is never
-//! written to the log, a status file, an error message or this process's
-//! command line: the only thing that ever leaves this module besides the key
-//! itself is [`Origin::describe`], which names the *source*, never the secret.
-//!
-//! The read is bounded ([`AUTH_TIMEOUT`]) and silent (no window on Windows, no
-//! inherited console, output never printed) — it runs on someone's desktop.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -29,15 +9,11 @@ use std::time::{Duration, Instant};
 
 use crate::config::{ProviderConfig, ProviderKind};
 
-/// How long `opencode auth export` (or a `key_cmd`) may take before the whole
-/// process tree is killed. It talks to opencode's background service, so it is
-/// not instantaneous; 5 s is a bound, not an expectation (the dev box measures
-/// ~0.34 s).
+/// How long `opencode auth export` (or a `key_cmd`) may take before the whole process tree is killed.
 pub const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A credential this close to its expiry is worth re-reading before it is used:
-/// opencode refreshes its own token when it runs, so a second read may already
-/// carry the new one.
+/// A credential this close to its expiry is worth re-reading before it is used: opencode
+/// refreshes its own token when it runs, so a second read may already carry the new one.
 pub const EXPIRY_MARGIN: Duration = Duration::from_secs(120);
 
 /// The environment variable OpenRouter's key is read from when `key_env` says
@@ -48,22 +24,19 @@ pub const OPENROUTER_ENV: &str = "OPENROUTER_API_KEY";
 /// opencode's own store. It is also the `key_env` a config leaves unset.
 pub const GO_ENV: &str = "KELIR_GO_API_KEY";
 
-/// The variables a tool child (a `bash` call, a `kelir bg run` job) does not
-/// inherit: the built-in providers' keys. A key set through a provider's own
-/// `key_env` under another name is the user's variable and is not touched.
+/// The variables a tool child (a `bash` call, a `kelir bg run` job) does not inherit: the built-in
+/// providers' keys.
 pub const PROVIDER_KEY_ENVS: [&str; 2] = [OPENROUTER_ENV, GO_ENV];
 
-/// How long to wait before re-reading a store entry that is already expired:
-/// opencode rotates a token as a side effect of running, and the CLI call that
-/// produced the parse may have been racing exactly that write.
+/// How long to wait before re-reading a store entry that is already expired: opencode rotates a token
+/// as a side effect of running, and the CLI call that produced the parse may have been racing exactly
 pub const REREAD_DELAY: Duration = Duration::from_millis(250);
 
 /**
- * The most of a helper's stdout kelir reads (64 MiB). It is a memory bound, not a
- * size expectation: opencode's export is kilobytes (a 30 MB one was measured
- * during review and is handled), and a helper that streams past this is not
- * answering with a credential. Without a bound a misbehaving helper could grow
- * this process's memory until the machine swaps (STEER-2 review, nit 6).
+ * The most of a helper's stdout kelir reads (64 MiB): a memory bound, not a
+ * size expectation. A helper that streams past this is not answering with a
+ * credential; without the bound a misbehaving helper could grow this process
+ * until the machine swaps.
  */
 pub const MAX_HELPER_STDOUT: usize = 64 * 1024 * 1024;
 
@@ -175,10 +148,6 @@ pub const REFRESH_FIX: &str =
     "run any `opencode` command once so it refreshes its credential, then retry";
 
 /// Resolve the key for one provider and store it on the config (in memory).
-///
-/// Blocking on purpose: it is a process read (opencode's own CLI), so an async
-/// caller wraps it in `spawn_blocking` and a sync caller (a `model` verb that
-/// swaps provider) may simply pay the bounded wait.
 pub fn resolve(provider: &mut ProviderConfig) -> Result<Credential, String> {
     let env = |name: &str| crate::envs::named(name);
     let run = |argv: &[String]| run_command(argv, AUTH_TIMEOUT);
@@ -191,23 +160,15 @@ pub fn resolve(provider: &mut ProviderConfig) -> Result<Credential, String> {
     Ok(credential)
 }
 
-/// The resolution with the environment and the command runner injected, so the
-/// precedence rules are unit-testable without touching this process's env or
-/// spawning anything.
-///
-/// First match wins. For OpenRouter that is the env var, then `key_cmd`. For
-/// OpenCode Go an explicit env var or `key_cmd` is an override and comes first,
-/// and opencode's own store is the default last resort — which is the point of
-/// STEER-2: nobody has to copy opencode's token into a variable that goes
-/// stale.
+/// The resolution with the environment and the command runner injected, so the precedence
+/// rules are unit-testable without touching this process's env or spawning anything.
 pub fn resolve_with(
     provider: &ProviderConfig,
     env: &dyn Fn(&str) -> Option<String>,
     run: &dyn Fn(&[String]) -> Result<String, String>,
 ) -> Result<Credential, String> {
-    // The default variable first, then the one `key_env` names (when that is a
-    // different name), then `key_cmd`: SPEC.md, "first match wins". For Go the
-    // default is the explicit override and the store answers after it.
+    // The default variable first, then the one `key_env` names (when that is a different name), then
+    // `key_cmd`: SPEC.md, "first match wins".
     let default_env = match provider.kind {
         ProviderKind::OpenRouter => OPENROUTER_ENV,
         ProviderKind::OpencodeGo => GO_ENV,
@@ -259,10 +220,8 @@ pub fn resolve_with(
     }
 }
 
-/// opencode's own credential, read through its supported CLI and re-read once
-/// when it is already about to expire — expired on the first read included:
-/// opencode refreshes its token when it runs, so the second read may be the
-/// fresh one. Exactly one re-read; past that the expiry is the answer.
+/// opencode's own credential, read through its supported CLI and re-read once when it is already about
+/// to expire — expired on the first read included: opencode refreshes its token when it runs, so the
 fn store_credential(
     run: &dyn Fn(&[String]) -> Result<String, String>,
 ) -> Result<Credential, String> {
@@ -291,10 +250,8 @@ fn store_credential(
     Ok(credential)
 }
 
-/// A short, quiet pause before the one re-read: opencode writes the rotated
-/// token as a side effect of running, so an immediate second read can win the
-/// race against that write. Unit tests skip it (they inject the runner, so
-/// there is no CLI to race); the real binary pays 250 ms once, at most.
+/// A short, quiet pause before the one re-read: opencode writes the rotated token as a side effect of
+/// running, so an immediate second read can win the race against that write.
 fn pause_before_reread() {
     #[cfg(not(test))]
     std::thread::sleep(REREAD_DELAY);
@@ -308,7 +265,7 @@ fn read_store(run: &dyn Fn(&[String]) -> Result<String, String>) -> Result<Crede
         .collect();
     let stdout = run(&argv).map_err(|error| {
         // The fix belongs in the message: a machine without opencode has two
-        // answers, install it or name the key explicitly (STEER-2).
+        // answers, install it or name the key explicitly.
         format!(
             "provider `opencode-go`: opencode's credential store: {error}\
              (install opencode and run `opencode auth login`, or set {GO_ENV}\
@@ -334,13 +291,8 @@ pub struct StoreToken {
     pub expires_at_ms: Option<u64>,
 }
 
-/// Parse `opencode auth export opencode` (a JSON array; the entry whose
-/// `integrationID` is `opencode` and whose `active` is true; the token is
-/// `value.access` and `value.expires` is epoch milliseconds).
-///
-/// An expired entry parses; the caller ([`store_credential`]) re-reads once and
-/// only then fails with the expiry time — never a request with a token that
-/// cannot work.
+/// Parse `opencode auth export opencode` (a JSON array; the entry whose `integrationID` is `opencode`
+/// and whose `active` is true; the token is `value.access` and `value.expires` is epoch milliseconds).
 pub fn parse_auth_export(json: &str) -> Result<StoreToken, String> {
     let value: serde_json::Value = serde_json::from_str(json.trim())
         .map_err(|error| format!("auth export is not JSON ({error})"))?;
@@ -366,27 +318,21 @@ pub fn parse_auth_export(json: &str) -> Result<StoreToken, String> {
             "the active `opencode` entry carries no `value.access` (log in again with `opencode auth login`)"
                 .to_string()
         })?;
-    // `expires` is epoch milliseconds. A string of digits is accepted too: the
-    // CLI's JSON is stable, but the store is opencode's to change, and a
-    // numeric string must not become "no expiry" (that would be a key held long
-    // past its life).
+    // `expires` is epoch milliseconds.
     let expires_at_ms = value["expires"].as_u64().or_else(|| {
         value["expires"]
             .as_str()
             .and_then(|text| text.trim().parse().ok())
     });
-    // A stale entry parses: the *caller* decides whether to re-read once before
-    // failing, because an entry that is expired on the first read may already
-    // have been rotated by the time the second one runs (STEER-2 fix 1).
+    // A stale entry parses: the *caller* decides whether to re-read once before failing, because an entry
+    // that is expired on the first read may already have been rotated by the time the second one runs.
     Ok(StoreToken {
         access: access.to_string(),
         expires_at_ms,
     })
 }
 
-/// The first element of an argv, for a message that names the command but not
-/// what it printed. Only its file name: `key_cmd ["C:/Users/someone/bin/getkey"]`
-/// must not put a private path into the log (`session_started.key_origin`).
+/// The first element of an argv, for a message that names the command but not what it printed.
 fn program_name(argv: &[String]) -> String {
     let program = argv.first().map(String::as_str).unwrap_or("<empty>").trim();
     Path::new(program)
@@ -399,22 +345,6 @@ fn program_name(argv: &[String]) -> String {
 // ------------------------------------------------------------- running it
 
 /// Run one helper command and return its trimmed stdout.
-///
-/// Bounded, silent and reaping:
-///
-/// * the child is in a process group of its own (Unix `setpgid`, Windows
-///   `CREATE_NEW_PROCESS_GROUP`), and on Windows it never gets a console
-///   window ([`crate::proc::win::CREATE_NO_WINDOW`]) even when kelir has none —
-///   a console-subsystem child of a console-less parent would otherwise flash
-///   one up;
-/// * no stdin (the helper must never inherit a pipe a person is typing into);
-/// * past `timeout` the **tree** is killed by pid/group and reaped, so a hung
-///   helper cannot outlive the read (AGENTS.md: no leaked processes);
-/// * a failure is a one-line sentence: the helper's own output is never echoed,
-///   because a credential manager prints credentials;
-/// * stdout is read up to [`MAX_HELPER_STDOUT`] and no further: a helper that
-///   streams past that is not printing a credential, and an unbounded read
-///   would let it dictate this process's memory.
 pub fn run_command(argv: &[String], timeout: Duration) -> Result<String, String> {
     run_command_bounded(argv, timeout, MAX_HELPER_STDOUT)
 }
@@ -504,9 +434,8 @@ fn run_command_bounded(
     let stdout = out_reader.join().unwrap_or_default();
     let _ = err_reader.join();
     if stdout.len() > max_stdout {
-        // Reading stopped at the bound, so the helper may still be writing into
-        // a pipe nobody drains: it must not outlive the read. Only a child that
-        // is still alive is killed (a reaped pid may belong to someone else).
+        // Reading stopped at the bound, so the helper may still be writing into a pipe nobody drains: it must
+        // not outlive the read.
         if matches!(child.try_wait(), Ok(None)) {
             kill_tree(pid);
             let _ = child.wait();
@@ -529,9 +458,8 @@ fn run_command_bounded(
     }
 }
 
-/// The `Command` for a program: a `.cmd`/`.bat` shim on Windows is not an
-/// executable, so it runs through `cmd.exe /C` (the npm-style `opencode.cmd`
-/// that most installs have); everything else starts directly.
+/// The `Command` for a program: a `.cmd`/`.bat` shim on Windows is not an executable, so it runs
+/// through `cmd.exe /C` (the npm-style `opencode.cmd` that most installs have); everything else starts
 fn process_command(path: &Path) -> std::process::Command {
     #[cfg(windows)]
     {
@@ -544,9 +472,8 @@ fn process_command(path: &Path) -> std::process::Command {
             let shell = crate::envs::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
             let mut command = std::process::Command::new(shell);
             command.arg("/C");
-            // `raw_arg` so the program's own quoting survives: `cmd /C` treats
-            // a quoted first word as the whole command line, so the doubled
-            // quotes are the documented spelling for a path with a space in it.
+            // `raw_arg` so the program's own quoting survives: `cmd /C` treats a quoted first word as the whole
+            // command line, so the doubled quotes are the documented spelling for a path with a space in it.
             command.raw_arg(format!("\"{}\"", path.display()));
             return command;
         }
@@ -555,9 +482,7 @@ fn process_command(path: &Path) -> std::process::Command {
 }
 
 /// Find a program the way a shell would: `<name>` on Unix (executable bit) and
-/// `<name>.exe`/`.cmd`/`.bat`/`.com` on Windows. A bare, extensionless file on
-/// Windows is skipped: it is a sh script (npm ships one), and `CreateProcess`
-/// cannot run it.
+/// `<name>.exe`/`.cmd`/`.bat`/`.com` on Windows.
 pub fn find_program(name: &str) -> Option<PathBuf> {
     let path = Path::new(name);
     if path.components().count() > 1 {
@@ -604,10 +529,8 @@ fn is_executable(path: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // A Windows executable's permission bits mean nothing; clippy's
-        // `needless_bool` sees the guard plus this literal and suggests
-        // `metadata.is_file()`, which would drop the Unix permission check.
-        // Split the guard into a helper call so neither toolchain flags it.
+        // A Windows executable's permission bits mean nothing; clippy's `needless_bool` sees the guard plus
+        // this literal and suggests `metadata.is_file()`, which would drop the Unix permission check.
         is_executable_non_unix(&metadata)
     }
 }
@@ -717,9 +640,8 @@ mod tests {
 
     #[test]
     fn a_stale_entry_parses_and_the_caller_decides_what_to_do() {
-        // `expires` in the past still parses: the re-read decision belongs to
-        // `store_credential`, so that an entry which is expired on the first
-        // read gets its one re-read before kelir gives up (STEER-2 fix 1).
+        // `expires` in the past still parses: the re-read decision belongs to `store_credential`, so that an
+        // entry which is expired on the first read gets its one re-read before kelir gives up.
         let token = parse_auth_export(EXPORT).unwrap();
         assert_eq!(token.access, "oc_sk_live");
         assert_eq!(token.expires_at_ms, Some(1_795_513_914_282));
@@ -936,7 +858,7 @@ mod tests {
     }
 
     /// A `key_cmd` is named by its file name: a message and the log must not
-    /// carry a private path (STEER-2).
+    /// carry a private path.
     #[test]
     fn a_command_is_named_without_its_directory() {
         let argv =
@@ -946,9 +868,8 @@ mod tests {
             program_name(&argv(&["/home/someone/bin/getkey", "--flag"])),
             "getkey"
         );
-        // A Windows path is split by `Path` on Windows; on Unix a backslash is
-        // an ordinary character in a name, so only the separator-bearing form
-        // is portable.
+        // A Windows path is split by `Path` on Windows; on Unix a backslash is an ordinary character
+        // in a name, so only the separator-bearing form is portable.
         assert_eq!(
             program_name(&argv(&["C:/Users/someone/bin/getkey.cmd"])),
             "getkey.cmd"
@@ -1144,9 +1065,8 @@ mod tests {
     #[test]
     fn a_helper_that_floods_stdout_is_stopped_at_the_bound() {
         let started = Instant::now();
-        // A small bound through the same code path the real one uses: the
-        // message must name the bound, and the helper must not be left
-        // writing into a pipe nobody drains.
+        // A small bound through the same code path the real one uses: the message must name the
+        // bound, and the helper must not be left writing into a pipe nobody drains.
         #[cfg(unix)]
         let argv = ["cat".to_string(), "/dev/zero".to_string()];
         #[cfg(windows)]

@@ -1,10 +1,8 @@
 //! One OpenAI Chat Completions client for both providers.
-//!
-//! OpenRouter wants the session id in the body (`session_id`) for sticky
-//! routing; OpenCode Go wants `x-opencode-session` and a `kelir/<version>`
-//! User-Agent header. Neither ever gets `provider.order` (it would undo
-//! stickiness). `stream_options.include_usage` is always on so cache hits are
-//! measured rather than assumed.
+//! OpenRouter wants the session id in the body (`session_id`) for sticky routing; OpenCode Go
+//! wants `x-opencode-session` and a `kelir/<version>` User-Agent header.
+//! Neither ever gets `provider.order` (it would undo stickiness).
+//! `stream_options.include_usage` is always on so cache hits are measured rather than assumed.
 
 use std::time::Duration;
 
@@ -24,10 +22,7 @@ pub struct BuiltRequest {
 }
 
 impl BuiltRequest {
-    /// The same request without one body field: what a retry sends when the
-    /// provider answered 400 *because* of that field (STEER-6 review S3). The
-    /// headers and everything else stay byte-identical, so the cache prefix
-    /// does not move.
+    /// The same request without one body field: what a retry sends when the provider answered 400 *because*
     pub fn without_field(&self, field: &str) -> BuiltRequest {
         let mut body = self.body.clone();
         if let Some(object) = body.as_object_mut() {
@@ -45,10 +40,7 @@ impl BuiltRequest {
     }
 }
 
-/// Does an error message name `field` as the thing it refused? Providers answer
-/// an unknown or unsupported body field with a 400 whose `param`/`message` names
-/// it (`"param": "reasoning_effort"` on OpenRouter, "unsupported parameter" in
-/// the text elsewhere), so the name has to appear somewhere in the body.
+/// Does an error message name `field` as the thing it refused?
 pub fn names_field(message: &str, field: &str) -> bool {
     message.to_ascii_lowercase().contains(field)
 }
@@ -63,9 +55,8 @@ pub struct ProviderError {
     /// What the response's own headers asked for (`Retry-After`, a reset
     /// header), when they said anything kelir could read.
     pub retry_after: Option<Duration>,
-    /// The stream had already begun a tool call: that step may have work ahead
-    /// of it, so it is not re-sent (an assistant message with a half-read call
-    /// is not a request any provider would take twice).
+    /// The stream had already begun a tool call: that step may have work ahead of it, so it is not re-sent
+    /// (an assistant message with a half-read call is not a request any provider would take twice).
     pub tool_call_started: bool,
 }
 
@@ -92,14 +83,12 @@ impl ProviderError {
         }
     }
 
-    /// A failure of the request itself (DNS, TLS, connect, a socket that died
-    /// mid-stream). Always worth another request — unless a tool call of the
-    /// step had already begun.
+    /// A failure of the request itself (DNS, TLS, connect, a socket that died mid-stream). Always
+    /// worth another request — unless a tool call of the step had already begun.
     pub fn transport(message: impl Into<String>) -> Self {
         Self::new(message, true)
     }
 
-    /// The short reason for a wait's visible line.
     pub fn reason(&self) -> String {
         match self.status {
             Some(code) => format!("{} ({code})", crate::retry::status_reason(code)),
@@ -116,24 +105,17 @@ impl std::fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
-/// How many times a *resumed turn* is tried again after a retryable failure:
-/// surviving an outage is what `resume` is for. A step's own retries are bounded
-/// by [`crate::retry::Budget`], which is a waiting budget rather than a count.
+/// How many times a *resumed turn* is tried again after a retryable failure: surviving an outage is
+/// what `resume` is for.
 pub const TURN_ATTEMPTS: u32 = 3;
 
 /// Backoff before attempt `attempt + 1`: 200 ms, 400 ms, 800 ms…
-///
-/// Kept for the parts that still want a short, fixed schedule (a resumed
-/// *turn* is tried again while this lasts). A step's own retries use
-/// [`crate::retry`], which honours the provider's hints and fills the waiting
-/// budget.
 pub fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(200u64.saturating_mul(1u64 << attempt.min(5)))
 }
 
-/// Models that need an explicit, forward-moving cache breakpoint on
-/// OpenRouter (DeepSeek, OpenAI, Grok, Moonshot, Z.AI and Gemini 2.5+ cache
-/// automatically).
+/// Models that need an explicit, forward-moving cache breakpoint on OpenRouter (DeepSeek,
+/// OpenAI, Grok, Moonshot, Z.AI and Gemini 2.5+ cache automatically).
 pub fn needs_explicit_cache_control(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
     model.contains("anthropic/") || model.contains("claude") || model.contains("qwen")
@@ -148,24 +130,13 @@ pub fn chat_completions_url(base_url: &str) -> String {
     }
 }
 
-/// The provider's model-list URL, derived from the same base as the completion
-/// URL: a `base_url` that already names a full path — `…/v1/chat/completions`,
-/// which [`chat_completions_url`] accepts, or a gateway's `/v1/responses` — must
-/// not have `/models` appended to it, or the request goes to
-/// `/v1/chat/completions/models` and the list silently never arrives
-/// (STEER-1 review N1).
+/// The provider's model-list URL, derived from the same base as the completion URL: a `base_url` that
+/// already names a full path — `…/v1/chat/completions`, which [`chat_completions_url`] accepts, or a
 pub fn models_url(base_url: &str) -> String {
     format!("{}/models", crate::models::normalise_base(base_url))
 }
 
-/// Build the request for one step. `messages` already starts with the frozen
-/// system message.
-///
-/// `parallel_calls` says whether the model advertises `parallel_tool_calls`.
-/// When it does, the field is set: the loop already runs the calls of one
-/// assistant message concurrently and appends the results in call order, and
-/// nothing else told the model so — 47 % of M5-A's steps were a single
-/// read-only call, and batching them 3-wide would have saved 5M prompt tokens.
+/// Build the request for one step. `messages` already starts with the frozen system message.
 pub fn build_request(
     cfg: &ProviderConfig,
     session_id: &str,
@@ -192,10 +163,8 @@ pub fn build_request(
         headers.push((name.to_ascii_lowercase(), value.clone()));
     }
 
-    // A message that carries images puts them in `content` as a list of
-    // parts; every other message serialises exactly as before, so a request
-    // without images is byte-identical to what it was (`to_wire` keeps the
-    // plain shape when `images` is empty).
+    // A message that carries images puts them in `content` as a list of parts; every other message
+    // serialises exactly as before, so a request without images is byte-identical to what it was
     let wire: Vec<Value> = messages.iter().map(|message| message.to_wire()).collect();
     let mut body = json!({
         "model": model,
@@ -209,11 +178,7 @@ pub fn build_request(
     if parallel_calls && cfg.kind == ProviderKind::OpenRouter {
         body["parallel_tool_calls"] = Value::Bool(true);
     }
-    // Hidden reasoning is asked for explicitly. Dogfood runs on the provider's
-    // default effort re-derived the whole design every step (M5-A steps 38-62:
-    // 49 % of all completion tokens in 29 % of the wall clock); `medium` is the
-    // loop's default and the knob is per provider, because only the gateway
-    // knows what it honours.
+    // Hidden reasoning is asked for explicitly.
     if let Some(effort) = cfg.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
         body["reasoning_effort"] = Value::String(effort.to_string());
     }
@@ -281,12 +246,6 @@ impl Client {
     }
 
     /// What the `error` event and the screen say about a refused request.
-    ///
-    /// An outage (a retryable status) gets the status and its class and nothing
-    /// else: it is a wait, and no part of the body helps a person or a script
-    /// decide anything. A refusal (400/401/403/404/422) keeps its (bounded,
-    /// secret-redacted) body, because "unknown model" is the answer that lets a
-    /// human fix the invocation.
     fn message_for(&self, code: u16, body: &str) -> String {
         let reason = crate::retry::status_reason(code);
         if crate::retry::status_is_retryable(code) {
@@ -301,15 +260,8 @@ impl Client {
         }
     }
 
-    /// The provider's own model list, for the metadata kelir does not hardcode
-    /// (context window, tool support, the capability gates). Both providers
-    /// serve `GET /models`; OpenRouter's is public, Go's wants the same key as a
-    /// completion.
-    ///
-    /// No bound of its own: the list is fetched beside the session, and the
-    /// caller's budget ([`crate::models::FETCH_TIMEOUT`]) is the only one — a
-    /// ~1 MB catalogue must not be cut off by a second timeout
-    /// (STEER-1 review S2).
+    /// The provider's own model list, for the metadata kelir does not hardcode (context window, tool
+    /// support, the capability gates).
     pub async fn models(&self) -> Result<Vec<crate::models::ModelInfo>, String> {
         let url = models_url(&self.cfg.base_url);
         let mut request = self.http.get(&url).header("accept", "application/json");
@@ -368,14 +320,8 @@ impl Client {
         self.stream_with(request, &mut |_| {}).await
     }
 
-    /// The same, handing each new piece of text to `on_delta` as it arrives.
-    /// The callback must return quickly: it runs on the stream's own task.
-    ///
-    /// A failure carries what the retry policy needs: the HTTP status (when
-    /// there was a response), what the response's headers asked for, and
-    /// whether a tool call of that step had already begun — a step whose tool
-    /// call is in flight is not re-sent, because it may already have had an
-    /// effect.
+    /// The same, handing each new piece of text to `on_delta` as it arrives. The callback must
+    /// return quickly: it runs on the stream's own task.
     pub async fn stream_with(
         &self,
         request: &BuiltRequest,
@@ -403,10 +349,8 @@ impl Client {
                     .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?))),
                 std::time::SystemTime::now(),
             );
-            // The body is read to drain the connection, and it is *not* put on
-            // the event: a gateway that quotes the request (or a 4xx that
-            // prints the key) would write a credential into `events.jsonl` and
-            // into NDJSON stdout (STEER-5 review S3).
+            // The body is read to drain the connection, and it is *not* put on the event: a gateway that quotes
+            // the request (or a 4xx that prints the key) would write a credential into `events.jsonl` and into
             let body = response.text().await.unwrap_or_default();
             return Err(ProviderError::http(
                 code,
@@ -458,10 +402,6 @@ impl Client {
     }
 }
 
-/// A failure part-way through a response. Retryable — the request can simply
-/// be re-sent — unless a tool call of the step had already been streamed, in
-/// which case the step may have work ahead of it and is not re-run (the tool
-/// layer settles the call as `unknown`).
 fn partial_error(message: impl Into<String>, assembler: &Assembler) -> ProviderError {
     let tool_call_started = !assembler.tool_calls().is_empty();
     let mut error = ProviderError::transport(message);

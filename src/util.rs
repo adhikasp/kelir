@@ -1,9 +1,7 @@
 //! Small helpers shared across modules.
+//! Deduped text and process helpers.
 
 /// FNV-1a, 64 bit, rendered as 16 lowercase hex characters.
-///
-/// Used for request and system-prompt hashes: stable across runs and
-/// processes, unlike `DefaultHasher`.
 pub fn fnv1a64_hex(bytes: &[u8]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in bytes {
@@ -18,22 +16,46 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = text.floor_char_boundary(max);
     let mut out = text[..end].to_string();
     out.push('…');
     out
 }
 
+/// Cut to at most `max` bytes on a char boundary, and say whether it was cut.
+pub fn truncate_bytes_boundary(text: &str, max: usize) -> (&str, bool) {
+    if text.len() <= max {
+        return (text, false);
+    }
+    let end = text.floor_char_boundary(max);
+    (&text[..end], true)
+}
+
+/// First line of `text`, trimmed.
+pub fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or("").trim()
+}
+
+/// Fold whitespace into single spaces and cut to `max` bytes.
+pub fn one_line(text: &str, max: usize) -> String {
+    truncate_chars(&text.split_whitespace().collect::<Vec<_>>().join(" "), max)
+}
+
+/// Fold newlines into a visible marker and cut to `max` bytes.
+pub fn one_line_visible(text: &str, max: usize) -> String {
+    truncate_chars(&text.replace('\n', " ↵ "), max)
+}
+
+/// Fold all control characters into spaces, then whitespace, for a safe label.
+pub fn one_line_clean(text: &str, max: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    one_line(&flat, max)
+}
+
 /// Replace every occurrence of a secret with `[redacted]`.
-///
-/// A provider (or the gateway in front of it) can echo the request, and a 4xx
-/// that quotes the `Authorization` header would otherwise write a credential
-/// into `events.jsonl` and into NDJSON stdout. Only the live key value is
-/// known, so that is what is replaced; a key shorter than eight characters is
-/// left alone because a two-letter "secret" would redact the whole message.
 pub fn redact(text: &str, secret: Option<&str>) -> String {
     let Some(secret) = secret.filter(|secret| secret.len() >= 8) else {
         return text.to_string();
@@ -52,31 +74,15 @@ pub fn path_string(path: &std::path::Path) -> String {
 
 /// `text` cut to at most `max` bytes, on a character boundary.
 pub fn truncate_bytes(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_string()
+    truncate_bytes_boundary(text, max).0.to_string()
 }
 
-/// A path we can actually spawn as the current kelir binary.
-///
-/// `current_exe()` on Linux reads `/proc/self/exe`. After `cargo install
-/// --force` replaces the on-disk binary, that read becomes a literal path
-/// ending in ` (deleted)` and the file is gone, so `Command::new` on it fails
-/// ENOENT — every self-spawn (bash shim, child host, gate guard) then dies and
-/// the live session looks broken. Detect that and resolve `kelir` on PATH
-/// instead, which now points at the replacement binary.
 fn usable_exe(path: &std::path::Path) -> bool {
     !path.to_string_lossy().ends_with(" (deleted)") && path.is_file()
 }
 
-/// Resolve a runnable path to this binary for self-spawns, falling back to a
-/// PATH lookup when `current_exe()` is stale (binary replaced under a live
-/// session). See [`usable_exe`].
+/// Resolve a runnable path to this binary for self-spawns, falling back to a PATH lookup when
+/// `current_exe()` is stale (binary replaced under a live session). See [`usable_exe`].
 pub fn self_binary() -> Result<std::path::PathBuf, String> {
     let current = std::env::current_exe().ok();
     resolve_binary(

@@ -1,7 +1,7 @@
-//! The command-line side of children: `kelir run --child`, `kelir brief`,
-//! `kelir kill` and `kelir ls`. Each runs in a tool call (or a terminal), holds
-//! only that session's token, and asks the session to do the work; none of them
-//! starts a process or reads a secret.
+//! The command-line side of children: `kelir run --child`, `kelir brief`, `kelir kill` and
+//! `kelir ls`.
+//! Each runs in a tool call (or a terminal), holds only that session's token, and asks the
+//! session to do the work; none of them starts a process or reads a secret.
 
 use std::path::Path;
 
@@ -268,9 +268,8 @@ pub fn node_from(id: &str, events: &[LogEvent], alive: bool) -> Option<Node> {
             _ => None,
         })
         .unwrap_or(model);
-    // A brief's log starts with a copy of its parent's: its kind and task are
-    // those of its own question, the last `user` event from `brief`. Otherwise
-    // the first `user` event says (a child's task comes from its parent).
+    // A brief's log starts with a copy of its parent's: its kind and task are those of its own question,
+    // the last `user` event from `brief`.
     let own = child::own_start(events);
     let first_user = |event: &LogEvent| match &event.body {
         EventBody::User { text, from, .. } => Some((
@@ -315,7 +314,7 @@ pub fn node_from(id: &str, events: &[LogEvent], alive: bool) -> Option<Node> {
         model,
         cost: (tally.by_provider + tally.by_table > 0).then_some(tally.cost),
         hit_ratio,
-        task: child::one_line(&task, 80),
+        task: crate::util::one_line(&task, 80),
         children: Vec::new(),
     })
 }
@@ -485,9 +484,8 @@ pub async fn ls(args: LsArgs) -> u8 {
     0
 }
 
-/// Which sessions to show: the tree under `root` (inside a session), every
-/// session (`--all`), or the newest roots and what is below them. `heads` is
-/// newest first.
+/// Which sessions to show: the tree under `root` (inside a session), every session (`--all`),
+/// or the newest roots and what is below them. `heads` is newest first.
 pub fn select(heads: &[(String, Option<String>)], root: Option<&str>, all: bool) -> Vec<String> {
     let below = |top: &[String]| -> Vec<String> {
         let mut set: Vec<String> = top.to_vec();

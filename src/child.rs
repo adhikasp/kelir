@@ -1,14 +1,8 @@
-//! Children as a CLI (M7): the registry, the caps, the hand-off to a child
-//! process and the pieces of `kelir run --child`, `kelir brief`, `kelir ls` and
-//! `kelir kill` that do not need the session.
-//!
-//! There is no spawn tool. A child is a `kelir` process the **session** starts
-//! on behalf of a `bash` call, so it lands in the session's process group (Unix)
-//! or Job Object (Windows) and dies with it. The root session holds the only
-//! registry of its descendants and enforces the caps; a descendant reaches it
-//! with the root's socket token **and** a per-child *link* the root minted for
-//! it and the parent handed it over a pipe (never argv, never the environment,
-//! never a tool child's reach).
+//! Children as a CLI: the registry, the caps, the hand-off to a child process and the pieces of
+//! `kelir run --child`, `kelir brief`, `kelir ls` and `kelir kill` that do not need the session.
+//! There is no spawn tool.
+//! A child is a `kelir` process the **session** starts on behalf of a `bash` call, so it lands in
+//! the session's process group (Unix) or Job Object (Windows) and dies with it.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -35,7 +29,6 @@ pub const EXIT_REFUSED: u8 = 3;
 pub const FOREGROUND_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 /// A child that was admitted but never reported a pid is reaped after this.
 const NO_PID_GRACE: Duration = Duration::from_secs(120);
-/// The most result text one answer carries; the child's own log has the rest.
 pub const RESULT_LIMIT: usize = 1024 * 1024;
 
 // ------------------------------------------------------------------ lineage
@@ -75,9 +68,7 @@ pub fn lineage_env() -> Vec<(&'static str, String)> {
 pub struct Caps {
     /// The deepest a child may be (the root is 0).
     pub depth: u32,
-    /// Live children one agent may have.
     pub per_agent: u32,
-    /// Live descendants one root may have.
     pub live: u32,
 }
 
@@ -154,7 +145,6 @@ impl Entry {
     }
 }
 
-/// What an admission hands back to the session that asked.
 #[derive(Debug, Clone)]
 pub struct Admission {
     pub child_id: String,
@@ -202,9 +192,7 @@ impl Registry {
         &self.entries
     }
 
-    /// The depth of a session in this tree: the root is 0, a descendant is its
-    /// entry's depth. `None` for a session the registry has not got, or one that
-    /// already settled (a settled agent starts nothing).
+    /// The depth of a session in this tree: the root is 0, a descendant is its entry's depth.
     pub fn depth_of(&self, session: &str) -> Option<u32> {
         if session == self.root {
             return Some(0);
@@ -303,14 +291,8 @@ impl Registry {
         Some(entry.clone())
     }
 
-    /// Settle every live child `alive` says is gone (or never got a pid in
-    /// time): a crashed child must not leak its slot. Returns what was reaped.
-    ///
-    /// A child that exited normally is settled by whoever started it a moment
-    /// later, with its real outcome; reaping it first would call a finished
-    /// child `lost`. So a process seen gone is given `grace` to be settled the
-    /// proper way before it is reaped. A child a `kill` was aimed at has no
-    /// outcome to wait for and is reaped at once.
+    /// Settle every live child `alive` says is gone (or never got a pid in time): a crashed child
+    /// must not leak its slot. Returns what was reaped.
     pub fn reap(&mut self, alive: &dyn Fn(&Entry) -> bool, grace: Duration) -> Vec<Entry> {
         let mut reaped = Vec::new();
         for entry in &mut self.entries {
@@ -380,7 +362,6 @@ impl Registry {
             .any(|entry| entry.session == target || entry.child_id == target)
     }
 
-    /// Mark an entry as the target of a kill; the caller then terminates it.
     pub fn mark_killed(&mut self, child_id: &str) -> Option<Entry> {
         let entry = self.find_mut(child_id)?;
         if !entry.live() {
@@ -390,9 +371,8 @@ impl Registry {
         Some(entry.clone())
     }
 
-    /// Rebuild the live entries a log still holds as unsettled, as `lost`: a
-    /// resumed root cannot authenticate or reach what an earlier process
-    /// started. Returns the children to settle in the log.
+    /// Rebuild the live entries a log still holds as unsettled, as `lost`: a resumed root cannot
+    /// authenticate or reach what an earlier process started.
     pub fn from_log(root: &str, caps: Caps, events: &[LogEvent]) -> (Registry, Vec<Entry>) {
         let mut registry = Registry::new(root, caps);
         let mut open: Vec<Entry> = Vec::new();
@@ -477,28 +457,15 @@ pub fn process_alive(pid: u32, started_ms: Option<u64>) -> bool {
     if pid == 0 {
         return false;
     }
-    #[cfg(windows)]
-    {
-        match crate::proc::win::OwnerWatch::open(pid) {
-            Some(watch) if !watch.gone() => {}
-            _ => return false,
-        }
+    if !crate::proc::alive(pid) {
+        return false;
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        && let Some(after) = stat.rsplit_once(')').map(|(_, rest)| rest)
+        && after.trim_start().starts_with('Z')
     {
-        // SAFETY: signal 0 only checks that the process exists.
-        let exists = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-        if !exists {
-            return false;
-        }
-        #[cfg(target_os = "linux")]
-        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            && let Some(after) = stat.rsplit_once(')').map(|(_, rest)| rest)
-            && after.trim_start().starts_with('Z')
-        {
-            return false;
-        }
+        return false;
     }
     match (started_ms, start_ms(pid)) {
         (Some(was), Some(now)) => was.abs_diff(now) <= 2_000,
@@ -508,9 +475,8 @@ pub fn process_alive(pid: u32, started_ms: Option<u64>) -> bool {
     }
 }
 
-/// Kill a registered child's process tree. The pid comes from the registry (the
-/// spawner reported it), never from a caller, and its start time must still
-/// match. Returns whether a signal was sent.
+/// Kill a registered child's process tree. The pid comes from the registry (the spawner
+/// reported it), never from a caller, and its start time must still match.
 pub fn kill_registered(pid: u32, started_ms: Option<u64>) -> bool {
     if !process_alive(pid, started_ms) {
         return false;
@@ -538,7 +504,6 @@ pub fn kill_registered(pid: u32, started_ms: Option<u64>) -> bool {
 pub struct Handoff {
     pub kind: String,
     pub child_id: String,
-    /// The child's own session id, minted by the root.
     pub session: String,
     pub task: String,
     #[serde(default)]
@@ -598,9 +563,6 @@ pub struct Host {
 }
 
 /// Start `kelir child-host` for `handoff` and give it the hand-off on stdin.
-/// The child is in its own process group, and on Windows in a kill-on-close Job
-/// Object the caller keeps alive (`Ctx::groups`), so the parent session ending
-/// takes it down. No secret goes through argv or the environment.
 pub async fn spawn_host(handoff: &Handoff, stderr_to: &Path) -> Result<Host, String> {
     use tokio::io::AsyncWriteExt as _;
     let binary = crate::util::self_binary()?;
@@ -663,7 +625,6 @@ pub async fn spawn_host(handoff: &Handoff, stderr_to: &Path) -> Result<Host, Str
     Ok(Host { child, group, pid })
 }
 
-/// Read the hand-off a spawner wrote to stdin (the first line).
 pub fn read_handoff() -> Result<Handoff, String> {
     let mut line = String::new();
     std::io::stdin()
@@ -680,11 +641,8 @@ pub fn parent_alive(handoff: &Handoff) -> bool {
 
 // ----------------------------------------------------------------- snapshot
 
-/// How many events of `events` a brief copies: everything before the first
-/// assistant message whose tool calls have not all settled (the call that is
-/// running `kelir brief` itself, and its siblings). The request the parent sent
-/// for that message is the longest prefix of the parent's next request that a
-/// brief can share, so it is also the one that hits the parent's cache.
+/// How many events of `events` a brief copies: everything before the first assistant message whose tool
+/// calls have not all settled (the call that is running `kelir brief` itself, and its siblings).
 pub fn snapshot_cut(events: &[LogEvent]) -> usize {
     let settled: std::collections::HashSet<&str> = events
         .iter()
@@ -705,10 +663,8 @@ pub fn snapshot_cut(events: &[LogEvent]) -> usize {
     events.len()
 }
 
-/// Index of the first event that is a brief's own: its question (the last
-/// `user` event from `brief`). Everything before it is the parent's copied
-/// log. A log without one is not a brief's: `usize::MAX`, which matches no
-/// index, so a plain session counts everything.
+/// Index of the first event that is a brief's own: its question (the last `user` event from
+/// `brief`). Everything before it is the parent's copied log.
 pub fn own_start(events: &[LogEvent]) -> usize {
     events
         .iter()
@@ -716,11 +672,8 @@ pub fn own_start(events: &[LogEvent]) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-/// Seed `dest` (a new session dir) with a by-value copy of `source`'s log up to
-/// the snapshot cut, made to read as the child's own: its `session_started`
-/// names the child, its parent and its depth. The frozen system text, the tool
-/// list and every message stay byte-identical, which is what makes the first
-/// request share the parent's prefix. Returns the number of events copied.
+/// Seed `dest` (a new session dir) with a by-value copy of `source`'s log up to the snapshot cut, made
+/// to read as the child's own: its `session_started` names the child, its parent and its depth.
 pub fn seed_snapshot(
     source: &Path,
     dest: &Path,
@@ -817,7 +770,7 @@ pub struct ChildNote {
 /// The answer to a `kelir run --child` / `kelir brief` call, as the session
 /// sends it and the CLI prints it.
 pub fn answer(child_id: &str, session: &str, outcome: &str, exit_code: i32, result: &str) -> Value {
-    let (text, truncated) = truncate_bytes(result, RESULT_LIMIT);
+    let (text, truncated) = crate::util::truncate_bytes_boundary(result, RESULT_LIMIT);
     json!({
         "child_id": child_id,
         "session": session,
@@ -828,23 +781,10 @@ pub fn answer(child_id: &str, session: &str, outcome: &str, exit_code: i32, resu
     })
 }
 
-/// `text` cut to at most `max` bytes on a character boundary.
-fn truncate_bytes(text: &str, max: usize) -> (&str, bool) {
-    if text.len() <= max {
-        return (text, false);
-    }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (&text[..end], true)
-}
-
-/// `text` for a request line to the root, which reads at most 64 KB of one: cut
-/// on a character boundary with a marker. The root's registry keeps this much;
-/// the parent's own log keeps the whole text.
+/// `text` cut to at most `max` bytes on a character boundary. `text` for a request line to
+/// the root, which reads at most 64 KB of one: cut on a character boundary with a marker.
 pub fn clip(text: &str, max: usize) -> String {
-    let (kept, cut) = truncate_bytes(text, max);
+    let (kept, cut) = crate::util::truncate_bytes_boundary(text, max);
     if cut {
         format!("{kept} … [cut]")
     } else {
@@ -852,7 +792,6 @@ pub fn clip(text: &str, max: usize) -> String {
     }
 }
 
-/// The outcome word for a child host's exit.
 pub fn outcome_of(exit_code: i32, signalled: bool) -> &'static str {
     if signalled {
         "killed"
@@ -863,17 +802,11 @@ pub fn outcome_of(exit_code: i32, signalled: bool) -> &'static str {
     }
 }
 
-/// Is this outcome a success for the exit code of the CLI?
 pub fn succeeded(outcome: &str) -> bool {
     matches!(outcome, "done" | "paused")
 }
 
 /// A short, one-line form of a task for `ls` and the events' readers.
-pub fn one_line(text: &str, max: usize) -> String {
-    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    crate::util::truncate_chars(&flat, max)
-}
-
 /// The directory of a child's session.
 pub fn session_dir(session: &str) -> PathBuf {
     crate::paths::session_dir(session)
@@ -1246,9 +1179,8 @@ mod tests {
         )
     }
 
-    /// A snapshot is a copy by value: the child's log folds to the parent's
-    /// prefix exactly, names the child and its parent, and changing either log
-    /// afterwards touches only that log.
+    /// A snapshot is a copy by value: the child's log folds to the parent's prefix exactly, names
+    /// the child and its parent, and changing either log afterwards touches only that log.
     #[test]
     fn a_snapshot_folds_to_the_parents_prefix_and_is_a_copy() {
         let base = std::env::temp_dir().join(format!("kelir-snap-{}", ulid::Ulid::generate()));
@@ -1379,7 +1311,7 @@ mod tests {
         )
     }
 
-    /// m7fix S1/S2: a brief's log starts with its parent's. `ls` names it a
+    /// A brief's log starts with its parent's. `ls` names it a
     /// brief with its own question, and its spend is only what it added.
     #[test]
     fn a_brief_is_listed_as_a_brief_and_counts_only_its_own_spend() {
@@ -1409,7 +1341,7 @@ mod tests {
         assert_eq!(tally.last.as_ref().map(|last| last.prompt), Some(1000));
     }
 
-    /// m7fix N1: a child's pid is told once; a second `up` cannot re-point it.
+    /// A child's pid is told once; a second `up` cannot re-point it.
     #[test]
     fn up_is_once_only() {
         let mut registry = registry(Caps::default());

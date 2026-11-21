@@ -1,21 +1,17 @@
-//! The tables `docs/reference/` is generated from: verbs, config keys and
-//! event types, each with the sentence its docs row carries.
-//!
-//! These are *data*, not prose: the prose lives in `docs/reference/*.md` and a
-//! marker says where the table goes. A drift test ([`crate::docs::tests`])
-//! reads the source and fails when code and table disagree in either
-//! direction, so a new verb, key or event cannot ship undocumented.
+//! The tables `docs/reference/` is generated from: verbs, config keys and event types, each with
+//! the sentence its docs row carries.
+//! These are *data*, not prose: the prose lives in `docs/reference/*.md` and a marker says where
+//! the table goes.
+//! A drift test ([`crate::docs::tests`]) reads the source and fails when code and table disagree
 
 /// One verb: how it is called, when it applies, and what it writes.
 #[derive(Debug, Clone, Copy)]
 pub struct VerbDoc {
     /// The name `kelir ctl <session> <name>` and `verbs::parse` accept.
     pub name: &'static str,
-    /// The arguments, as a person types them.
     pub args: &'static str,
     /// The `verb` event's `boundary`: when it takes effect.
     pub applies: &'static str,
-    /// What it does, including the event it writes.
     pub effect: &'static str,
 }
 
@@ -126,7 +122,6 @@ pub struct KeyDoc {
     pub default: &'static str,
     /// A CLI flag or environment variable that overrides it, if any.
     pub overrides: &'static str,
-    /// What it does.
     pub effect: &'static str,
     /// `fn` in `src/config.rs` whose reading gives the field its line.
     pub field_fn: &'static str,

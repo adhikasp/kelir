@@ -1,10 +1,8 @@
-//! Job notify hooks (M9) and event notifications (M11).
-//!
-//! Gate-like: a hook runs through the configured shell with a scrubbed
-//! environment (the platform allow-list, never a provider key or a session
-//! token), at most [`TIMEOUT`] seconds, its whole tree killed when it ends, and
-//! whatever it does or fails to do never changes the session's outcome.
-//! Nothing is enabled by default.
+//! Job notify hooks and event notifications.
+//! Gate-like: a hook runs through the configured shell with a scrubbed environment (the platform
+//! allow-list, never a provider key or a session token), at most [`TIMEOUT`] seconds, its whole
+//! tree killed when it ends, and whatever it does or fails to do never changes the session's
+//! outcome.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -14,7 +12,6 @@ use tokio::process::Command;
 
 use crate::proc::ProcessGroup;
 
-/// How long a hook may run.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// How much of a failing hook's stderr is kept.
 const STDERR_TAIL: usize = 200;
@@ -175,23 +172,20 @@ async fn run_one(
     })
 }
 
-// ------------------------------------------------------------- M11 notifications
+// ------------------------------------------------------------- notifications
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-/// Hooks that are still running, so a one-shot session can give them a short
-/// grace period at exit. A long-running `--keep` session never waits: they
-/// finish on its runtime while it is idle.
+/// Hooks that are still running, so a one-shot session can give them a short grace period at exit.
 static PENDING: OnceLock<Mutex<Vec<tokio::task::JoinHandle<()>>>> = OnceLock::new();
 
 fn pending() -> &'static Mutex<Vec<tokio::task::JoinHandle<()>>> {
     PENDING.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// The five event kinds a notification can be attached to.
 pub const KINDS: [&str; 5] = [
     "turn_done",
     "error",
@@ -203,7 +197,6 @@ pub const KINDS: [&str; 5] = [
 /// Nothing is enabled by default: no hooks, no terminal records.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
-    /// Event kind -> commands, run through the configured shell.
     pub hooks: BTreeMap<String, Vec<String>>,
     /// Emit an OSC terminal record when stdout is a TTY.
     pub terminal: bool,
@@ -211,7 +204,6 @@ pub struct Config {
     pub terminal_kind: String,
     /// Minimum seconds between two notifications of the same kind.
     pub rate_limit_secs: u64,
-    /// An optional message prefix for the terminal record.
     pub title: String,
 }
 
@@ -237,9 +229,8 @@ pub fn osc777(message: &str) -> String {
     format!("\u{1b}]777;notify;{message}\u{7}")
 }
 
-/// The terminal record for this config, or `None` when disabled. Control bytes
-/// in the message are folded so a hook-supplied string cannot inject a second
-/// escape sequence.
+/// The terminal record for this config, or `None` when disabled. Control bytes in the message
+/// are folded so a hook-supplied string cannot inject a second escape sequence.
 pub fn terminal_record(config: &Config, message: &str) -> Option<String> {
     if !config.terminal {
         return None;
@@ -303,7 +294,6 @@ pub fn claim(dir: &std::path::Path, kind: &str, limit: Duration) -> bool {
     allowed
 }
 
-/// Reset the rate-limit clock (tests).
 pub fn reset_rate_limit() {
     let mut map = last().lock().unwrap_or_else(|e| e.into_inner());
     map.clear();
@@ -389,11 +379,7 @@ pub fn fire(
     })
 }
 
-/// Give outstanding hooks a short grace period before a one-shot process
-/// exits. Without this a hook spawned on the session's runtime would be
-/// dropped when the runtime shuts down, and `turn_done` would never fire in a
-/// `kelir run` (M11). The 30 s hook timeout still bounds a slow hook: this is
-/// only the wait at exit, never a block on the turn itself.
+/// Give outstanding hooks a short grace period before a one-shot process exits.
 pub async fn wait_outstanding(limit: Duration) {
     let handles: Vec<_> = std::mem::take(&mut *pending().lock().unwrap_or_else(|e| e.into_inner()));
     if handles.is_empty() {

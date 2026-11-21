@@ -1,26 +1,6 @@
 //! Single-flight: one lock per job (`jobs/<name>/lock`).
-//!
 //! The design is `scripts/gate-lock.sh`'s, in Rust, with the lessons of
 //! `docs/reviews/buildinfra-review.md` built in:
-//!
-//! * **Atomic create-and-own.** The lock is published with its record already
-//!   inside ([`crate::atomic::publish_new`]), so a lock that exists always names
-//!   its owner and two runs can never both publish (B2: `mkdir` then write left
-//!   an ownerless gap that a waiter stole).
-//! * **Identity is pid + process start time.** A recycled pid has another start
-//!   time ([`crate::child::process_alive`]), so a stale lock is not mistaken for
-//!   a live one nor a live one for a stale one.
-//! * **No stealing a fresh lock.** A lock whose holder looks gone is only taken
-//!   over when it is not young, and only after the same verdict held on two
-//!   looks a moment apart.
-//! * **The takeover is checked.** The stale lock is moved aside atomically and
-//!   the record read from the moved file must be the one that was judged; if it
-//!   is not, it is handed back untouched (S4a).
-//! * **Release only by the holder.** [`Guard::release`] removes the file only
-//!   if it still carries this acquisition's token (S4b).
-//!
-//! Nothing here is a daemon: the lock is a file, and a crashed holder frees it
-//! because its pid is gone.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,10 +16,8 @@ pub const FRESH: Duration = Duration::from_secs(1);
 pub const GARBAGE_AFTER: Duration = Duration::from_secs(30);
 /// The gap between the two looks that must agree before a takeover.
 const SECOND_LOOK: Duration = Duration::from_millis(150);
-/// How often a waiter looks again.
 const POLL: Duration = Duration::from_millis(200);
 
-/// What the lock file holds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
     /// Unique per acquisition: what "release only by the holder" compares.
@@ -52,7 +30,6 @@ pub struct Record {
     pub started: String,
 }
 
-/// What a look at an existing lock concluded.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
     /// The recorded process is running.
@@ -63,9 +40,8 @@ pub enum Verdict {
     Stale(String),
 }
 
-/// Judge a lock. Pure: the caller supplies what it read and whether the
-/// recorded process is alive, so the whole state machine is unit-tested
-/// without a process.
+/// Judge a lock. Pure: the caller supplies what it read and whether the recorded process is
+/// alive, so the whole state machine is unit-tested without a process.
 pub fn judge(record: Option<&Record>, age: Duration, alive: bool) -> Verdict {
     match record {
         Some(_) if alive => Verdict::Alive,
@@ -96,8 +72,6 @@ pub struct Holder {
     pub cmd: String,
     pub started: String,
     /// Why the lock could not be taken when there is no readable record.
-    /// A young, unreadable lock is respected (pid-reuse safety), but the skip
-    /// still needs to say what was seen rather than an empty holder.
     pub reason: String,
 }
 
@@ -271,9 +245,8 @@ fn holder_of(record: Option<Record>) -> Holder {
     }
 }
 
-/// Move the stale lock aside and make sure it was the one judged. `Ok(true)`:
-/// it was, it is gone, the caller may publish. `Ok(false)`: it was somebody
-/// else's newer lock and has been handed back.
+/// Move the stale lock aside and make sure it was the one judged. `Ok(true)`: it was, it is
+/// gone, the caller may publish.
 fn take_over(path: &Path, judged: Option<&str>, my_token: &str) -> io::Result<bool> {
     let tomb = path.with_extension(format!("stale.{my_token}"));
     if std::fs::rename(path, &tomb).is_err() {
@@ -376,7 +349,7 @@ mod tests {
             holder.reason.contains("unreadable"),
             "a skip must explain the empty holder: {holder:?}"
         );
-        // A readable holder keeps its identity and needs no reason (S2).
+        // A readable holder keeps its identity and needs no reason .
         let named = holder_of(Some(record(42)));
         assert_eq!(named.pid, Some(42));
         assert!(named.reason.is_empty());

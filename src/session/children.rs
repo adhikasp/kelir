@@ -1,18 +1,7 @@
-//! The session side of children (M7): the verbs `kelir run --child`,
-//! `kelir brief` and `kelir kill` send, the root's registry operations, and the
-//! task that starts a child host, waits for it and settles it.
-//!
+//! The session side of children: the verbs `kelir run --child`, `kelir brief` and `kelir
+//! kill` send, the root's registry operations, and the task that starts a child host, waits
+//! for it and settles it.
 //! One verb (`child`) with an `op`:
-//!
-//! | op | from | does |
-//! |---|---|---|
-//! | `run`, `brief`, `kill` | a tool child or a human (this session's token) | the request |
-//! | `admit`, `up`, `settle`, `kill` | a descendant session (the root's token **and** its link) | the registry |
-//! | `admit-local`, `up-local`, `settle-local`, `note-started`, `note-settled` | this session's own tasks (a private key) | the same, without a socket |
-//!
-//! The root is the only writer of the registry and of its own log. A parent
-//! that is not the root also records its own children in its own log, because
-//! that is where it wakes from and resumes.
 
 use std::collections::HashMap;
 
@@ -360,9 +349,8 @@ impl Session {
         }
     }
 
-    /// An operation a descendant sent over this (root) session's socket: the
-    /// token got it here, and the link says which child it is and so what it
-    /// may touch.
+    /// An operation a descendant sent over this (root) session's socket: the token got it here,
+    /// and the link says which child it is and so what it may touch.
     fn child_remote(&mut self, op: &str, args: &Value) -> Response {
         if !self.kids.is_root() {
             return Response::error("child: only the root session keeps the registry");
@@ -525,8 +513,6 @@ impl Session {
         }
     }
 
-    /// The root's own children wake the root; a deeper descendant's settlement
-    /// is the registry's business alone.
     fn queue_child_note(
         &mut self,
         entry: &Entry,
@@ -554,9 +540,8 @@ impl Session {
         });
     }
 
-    /// Apply a settlement at a boundary: the `child_settled` event (unless the
-    /// registry already wrote it) and, for a background child, the message that
-    /// wakes the model. Returns whether a message was written.
+    /// Apply a settlement at a boundary: the `child_settled` event (unless the registry already wrote it)
+    /// and, for a background child, the message that wakes the model.
     pub(super) fn note_child(&mut self, note: &ChildNote) -> Result<bool, String> {
         let settled = self.events.iter().any(|event| {
             matches!(&event.body, EventBody::ChildSettled { child_id, .. } if child_id == &note.child_id)
@@ -584,16 +569,18 @@ impl Session {
             delivery: "next".into(),
             attachments: Vec::new(),
         })?;
-        self.emit(UiEvent::Info(format!("» {}", one_line(&text))));
+        self.emit(UiEvent::Info(format!(
+            "» {}",
+            crate::util::one_line_visible(&text, 200)
+        )));
         self.sync();
         Ok(true)
     }
 
     // -------------------------------------------------------------- kill
 
-    /// `kelir kill`: stop descendants of the asker. In the root it is decided
-    /// here; elsewhere it is forwarded with the link (the root decides what is
-    /// below whom).
+    /// `kelir kill`: stop descendants of the asker. In the root it is decided here; elsewhere it
+    /// is forwarded with the link (the root decides what is below whom).
     fn child_kill(&mut self, args: &Value, reply: oneshot::Sender<Response>) {
         let target = args
             .get("target")
@@ -795,8 +782,6 @@ async fn run_child(plan: Plan, reply: oneshot::Sender<Response>) {
     };
 
     // 1. A slot, from the root's registry.
-    // The root's line is at most 64 KB: its registry keeps a prefix of a long
-    // task (this session's own log keeps all of it).
     let admit_args = json!({
         "kind": plan.kind,
         "background": plan.background,
@@ -1118,9 +1103,8 @@ impl Session {
 }
 
 impl Session {
-    /// A resumed root cannot reach what an earlier process started (those
-    /// children leave with their parent), so the log's unsettled children are
-    /// settled `lost` and the registry starts empty.
+    /// A resumed root cannot reach what an earlier process started (those children leave with their
+    /// parent), so the log's unsettled children are settled `lost` and the registry starts empty.
     pub(super) fn settle_lost_children(&mut self) {
         if !self.kids.is_root() {
             return;

@@ -1,29 +1,8 @@
-//! Gates (M8): the only way a veto or a nudge enters the core.
-//!
-//! A gate is an executable the session runs at one of six named events. It
-//! gets the event as JSON on stdin and may answer `allow`, `deny` or `rewrite`
-//! as JSON on stdout. Opinions ("verify before you claim", "check the note
-//! you edited") live in gates, never in the core.
-//!
-//! **Fail open.** A gate that cannot start, crashes (non-zero exit), times out
-//! (30 s), prints garbage or prints more than [`OUTPUT_MAX`] bytes is logged
-//! (`gate` event with `error`) and treated as `allow`. A broken gate must
-//! never wedge a session.
-//!
-//! **Trust.** A gate is a child of the session, like a `bash` call, so it gets
-//! the *same* secret-free environment an MCP server does (STEER-7): an
-//! allow-list of ordinary variables ([`crate::mcp::rpc::inherited`] plus
-//! `SSH_AUTH_SOCK`), then `KELIR_SESSION_DIR`, `KELIR_GATE_EVENT` and
-//! `KELIR_GATE_NAME`. It never receives `KELIR_TOKEN`, `KELIR_SOCK`, a
-//! provider key or a user's `key_env` variable. A gate's own `env` table in
-//! `config.toml` adds to that, explicitly.
-//!
-//! **Process handling.** Unix: the gate leads its own process group and the
-//! group is killed when the gate ends (so `cmd &` leaves nothing). Windows: a
-//! named Job Object with kill-on-close, created suspended and resumed once it
-//! is inside the job; `CREATE_NO_WINDOW` when the session has no console. The
-//! command string goes to the configured shell through `shellcmd` (a file on
-//! Windows), so `.cmd`/`.ps1` gates work with a `cmd.exe`/PowerShell shell.
+//! Gates: the only way a veto or a nudge enters the core.
+//! A gate is an executable the session runs at one of six named events.
+//! It gets the event as JSON on stdin and may answer `allow`, `deny` or `rewrite` as JSON on
+//! stdout.
+//! Opinions ("verify before you claim", "check the note you edited") live in gates, never in the
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -45,15 +24,10 @@ static JOBS: AtomicU64 = AtomicU64::new(0);
 /// Gate runs started by this process (part of each run's `KELIR_GATE_RUN` token).
 static RUNS: AtomicU64 = AtomicU64::new(0);
 
-/// At most this many gate processes are alive in one process at any moment. A
-/// gate that is slow, misbehaves or re-enters kelir cannot multiply: the run
-/// past the cap is skipped (fail open, logged) instead of started.
+/// At most this many gate processes are alive in one process at any moment.
 pub const MAX_LIVE: usize = 8;
 
-/// A child session (a descendant of the root) may have at most this many gate
-/// processes alive. The cap is per process, so the root's total is bounded by
-/// [`root_bound`]: the root's own [`MAX_LIVE`] plus this for every child that
-/// may be alive at once (`max_live`, 16 by default) = 8 + 16 * 2 = 40.
+/// A child session (a descendant of the root) may have at most this many gate processes alive.
 pub const MAX_LIVE_CHILD: usize = 2;
 
 /// The most gate processes one root and all its live descendants can have alive.
@@ -71,7 +45,6 @@ pub fn limit_for_child() {
 
 static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Gate processes alive right now (the tests assert it is back to zero).
 pub fn live() -> usize {
     LIVE.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -104,9 +77,7 @@ impl Drop for Slot {
     }
 }
 
-/// The env var that marks every process of one gate run. A gate that detaches
-/// (`setsid`, a double fork) leaves the process group but keeps its environment,
-/// so the run can still find and kill it by this token.
+/// The env var that marks every process of one gate run.
 pub const RUN_ENV: &str = "KELIR_GATE_RUN";
 
 /// A token no other run shares: this process, a counter and the clock.
@@ -120,16 +91,13 @@ fn run_token() -> String {
 }
 
 /// Unix: after a gate run, nothing of it is left, even what left its process
-/// group, and a killed session cannot orphan it (F2, F3 of the M8 review).
+/// group, and a killed session cannot orphan it.
 #[cfg(unix)]
 pub mod reap {
     use super::RUN_ENV;
 
-    /// Kill the gate's descendants (by parent links) and every process that
-    /// carries the run's token in its environment, until none is left. The
-    /// token scan reads `/proc` on Linux and one `ps axww -E` on macOS; on
-    /// other Unix systems the caller only signals the process group. No
-    /// process outside the tree (and never this one) is signalled.
+    /// Kill the gate's descendants (by parent links) and every process that carries the run's token in its
+    /// environment, until none is left.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn kill_run(root: u32, token: &str) {
         let me = std::process::id();
@@ -151,11 +119,8 @@ pub mod reap {
                     victims.insert(pid);
                 }
             }
-            // A descendant can be reparented to init and become invisible to
-            // the parent-link walk before `ps` sees it with the run token.
-            // Tolerate a couple of empty passes for that lag, then stop: a
-            // gate run under a thousand-call stream must not pay the whole
-            // window every time.
+            // A descendant can be reparented to init and become invisible to the parent-link walk before `ps` sees
+            // it with the run token. Tolerate a couple of empty passes for macOS `ps` lag, then stop.
             if victims.is_empty() {
                 quiet += 1;
                 if quiet >= 3 {
@@ -223,10 +188,7 @@ pub mod reap {
             .collect()
     }
 
-    /// macOS: one `ps axww -E` gives both pids and their environments. Match
-    /// the one exact `KELIR_GATE_RUN=<token>` entry and never print or log the
-    /// output: the token is a secret for this run only. A whole-entry match
-    /// avoids a false hit on a different token with the same prefix.
+    /// macOS: one `ps axww -E` gives both pids and their environments.
     #[cfg(target_os = "macos")]
     fn marked_pids(needle: &str) -> std::collections::BTreeSet<u32> {
         let Ok(output) = std::process::Command::new("ps")
@@ -283,10 +245,7 @@ pub mod reap {
     }
 
     impl Reaper {
-        /// `pid` is the gate shell (also its process group). The guard is a
-        /// hidden `kelir gate-guard` that polls this process and, when it is
-        /// gone, kills the gate's tree: PR_SET_PDEATHSIG would reach only the
-        /// shell, not its children.
+        /// `pid` is the gate shell (also its process group).
         pub fn start(pid: u32, token: &str, ttl: std::time::Duration) -> Self {
             use std::os::unix::process::CommandExt as _;
             let guard = crate::util::self_binary().ok().and_then(|exe| {
@@ -387,7 +346,6 @@ pub fn timeout() -> Duration {
         .unwrap_or(TIMEOUT)
 }
 
-/// The six events a gate can be bound to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Event {
     SessionStart,
@@ -438,16 +396,13 @@ impl Event {
     }
 }
 
-/// One declared gate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GateDef {
     pub name: String,
     pub event: Event,
-    /// What the shell runs.
     pub command: String,
-    /// `before_tool`/`after_tool` only: the tool names this gate sees (empty
-    /// is every tool). `mcp:<server>` covers every tool of a server and a
-    /// trailing `*` is a prefix match.
+    /// `before_tool`/`after_tool` only: the tool names this gate sees (empty is every tool).
+    /// `mcp:<server>` covers every tool of a server and a trailing `*` is a prefix match.
     pub tools: Vec<String>,
     /// Extra environment, from the gate's own `env` table.
     pub env: BTreeMap<String, String>,
@@ -480,14 +435,8 @@ fn tool_matches(pattern: &str, tool: &str) -> bool {
 
 // ------------------------------------------------------------------- config
 
-/// Read the `[gates]` table: each key an event name, each value a command
-/// string, a table, or a list of those.
-///
-/// ```toml
-/// [gates]
-/// turn_end = "python gates/verify.py"
-/// before_tool = [{ name = "no-rm", command = "sh gates/no-rm.sh", tools = ["bash"] }]
-/// ```
+/// Read the `[gates]` table: each key an event name, each value a command string, a table, or
+/// a list of those.
 pub fn from_toml(value: &toml::Value) -> Result<Vec<GateDef>, String> {
     let table = value
         .as_table()
@@ -678,11 +627,8 @@ pub fn skill_binding(metadata: &str) -> Option<String> {
     None
 }
 
-/// Gates declared by the skills in `found`: a skill whose metadata says
-/// `kelir-gate: <event>[=<script>][; <event>=<script>…]` binds a file under its
-/// own `scripts/` directory. Without `=<script>` the file is
-/// `scripts/<event>.*`, then `scripts/gate.*`, then the only file there.
-/// Problems come back as notes, never as a refusal to start.
+/// Gates declared by the skills in `found`: a skill whose metadata says `kelir-gate:
+/// <event>[=<script>][; <event>=<script>…]` binds a file under its own `scripts/` directory.
 pub fn from_skills(found: &[crate::sources::Found], notes: &mut Vec<String>) -> Vec<GateDef> {
     let mut defs = Vec::new();
     for source in found {
@@ -782,17 +728,14 @@ fn resolve_script(dir: &Path, event: Event, named: Option<&str>) -> Result<PathB
     }
 }
 
-/// A gate that came from the project's own files (its `.kelir/config.toml`, a
-/// skill under `.kelir/skills` or `.claude/skills`): code the repository's author
-/// chose, not the person running kelir.
+/// A gate that came from the project's own files (its `.kelir/config.toml`, a skill under
+/// `.kelir/skills` or `.claude/skills`): code the repository's author chose, not the person running
 pub fn is_project_gate(def: &GateDef) -> bool {
     def.origin.starts_with("project ")
 }
 
-/// Whether the project at `cwd` may run its own gates (M8 fix F6). kelir has no
-/// prompt, so trust is declared: `trusted_projects` in the machine config names a
-/// directory at or above `cwd`, or `KELIR_TRUST_PROJECT` is set for this run. The
-/// project's own config cannot declare itself trusted.
+/// Whether the project at `cwd` may run its own gates. kelir has no prompt, so trust is declared:
+/// `trusted_projects` in the machine config names a directory at or above `cwd`, or
 pub fn project_trusted(cwd: &Path, trusted: &[PathBuf]) -> bool {
     if crate::envs::var("KELIR_TRUST_PROJECT").is_some_and(|v| !matches!(v.trim(), "" | "0")) {
         return true;
@@ -821,7 +764,6 @@ pub fn apply_trust(defs: Vec<GateDef>, trusted: bool, notes: &mut Vec<String>) -
         .collect()
 }
 
-/// The shell command that runs a script file, chosen by extension.
 pub fn script_command(path: &Path) -> String {
     let shown = crate::util::path_string(path).replace('\\', "/");
     let quoted = format!("\"{shown}\"");
@@ -839,10 +781,7 @@ pub fn script_command(path: &Path) -> String {
     }
 }
 
-/// Adapt a `cmd /C …` command line to the shell that will run it. Under a POSIX
-/// shell on Windows (Git Bash, MSYS) `/C` is taken for a path and rewritten to
-/// `C:/`, so cmd starts its banner instead of the script; `//C` survives the
-/// conversion and means `/C` to cmd. Under cmd or PowerShell nothing changes.
+/// Adapt a `cmd /C …` command line to the shell that will run it.
 pub fn adapt_for_shell(command: &str, shell_program: &str) -> String {
     let stem = Path::new(shell_program)
         .file_stem()
@@ -870,7 +809,6 @@ pub fn python() -> &'static str {
 
 // ---------------------------------------------------------------- decisions
 
-/// What a gate said.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Parsed {
     Allow { reason: String },
@@ -878,9 +816,8 @@ pub enum Parsed {
     Rewrite { reason: String, input: Value },
 }
 
-/// Parse a gate's stdout. Empty is `allow` (a gate that only has side effects
-/// prints nothing); anything else must be one JSON object with a known
-/// `decision`. Everything wrong is an `Err` the caller logs and fails open on.
+/// Parse a gate's stdout. Empty is `allow` (a gate that only has side effects prints
+/// nothing); anything else must be one JSON object with a known `decision`.
 pub fn parse_decision(stdout: &str) -> Result<Parsed, String> {
     let text = stdout.trim();
     if text.is_empty() {
@@ -941,7 +878,6 @@ pub struct Run {
     pub error: Option<String>,
 }
 
-/// What the chain of gates at one event concluded.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
     Allow,
@@ -949,9 +885,8 @@ pub enum Verdict {
         gate: String,
         reason: String,
     },
-    /// The event's value after every rewrite: `{"text"}` for a prompt or a
-    /// final answer, the tool input for `before_tool`, `{"result"}` for
-    /// `after_tool`.
+    /// The event's value after every rewrite: `{"text"}` for a prompt or a final answer, the tool
+    /// input for `before_tool`, `{"result"}` for `after_tool`.
     Rewrite(Value),
 }
 
@@ -1080,10 +1015,8 @@ impl Runner {
             .any(|def| def.event == event && def.matches(tool))
     }
 
-    /// Run every gate bound to `event` (for `tool`), in declaration order. A
-    /// rewrite is seen by the gates after it; the first `deny` ends the chain
-    /// (where `deny` means something). `payload` is an object with the event's
-    /// own fields; the session fields are added here.
+    /// Run every gate bound to `event` (for `tool`), in declaration order. A rewrite is seen by
+    /// the gates after it; the first `deny` ends the chain (where `deny` means something).
     pub async fn run_event(
         &self,
         event: Event,
@@ -1329,7 +1262,6 @@ impl Runner {
     }
 }
 
-/// Whether a variable of the session's own environment reaches a gate.
 pub fn allowed_env(name: &str) -> bool {
     crate::mcp::rpc::inherited(name) || name.eq_ignore_ascii_case("SSH_AUTH_SOCK")
 }
@@ -2031,9 +1963,8 @@ session_end = { command = "git push" }
     async fn a_gate_that_spawns_itself_is_bounded_and_leaves_nothing() {
         let _serial = Quiet(SERIAL.lock().await);
         let temp = tempfile::tempdir().unwrap();
-        // Each level starts two more, three levels deep at most (the script
-        // counts its own depth), and then sleeps: 15 processes if nothing
-        // stopped it. The runner starts exactly one; its tree dies with it.
+        // Each level starts two more, three levels deep at most (the script counts its own depth), and then
+        // sleeps: 15 processes if nothing stopped it.
         let script = answers(
             temp.path(),
             "selfish.sh",
@@ -2051,13 +1982,8 @@ sleep 1
             .await;
         assert_eq!(chain.runs.len(), 1);
         assert_eq!(live(), 0);
-        // The script's own sleeps determine when a survivor would write
-        // `flag.txt`: 1 s in the gate and 3 s in the detached child. Check
-        // after both would have elapsed, measured from the end of the gate:
-        // a fixed wait could look before a delayed descendant got
-        // scheduled on a loaded CI runner (the macOS failure). 12 s leaves
-        // ample room for a 3 s child sleep even there; this does not weaken
-        // the no-leak check on any platform.
+        // The script's own sleeps determine when a survivor would write `flag.txt`: 1 s in the gate and 3 s in
+        // the detached child.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2068,9 +1994,9 @@ sleep 1
         );
     }
 
-    // ------------------------------------------------ M8 fix: F1, F6, F2/F3
+    // ------------------------------------------------ process sweep
 
-    /// F1: under a POSIX shell on Windows the `/C` of `cmd /C` must survive MSYS.
+    /// under a POSIX shell on Windows the `/C` of `cmd /C` must survive MSYS.
     #[test]
     fn a_cmd_line_is_adapted_to_a_posix_shell_on_windows_only() {
         let line = script_command(Path::new("C:/g/turn_end.cmd"));
@@ -2136,14 +2062,13 @@ sleep 1
             " 45 sh -c KELIR_GATE_RUN=token123 sleep\n",
         );
         let found = reap::parse_marked_pids(ps, "KELIR_GATE_RUN=token123");
-        // Every whole field equal to the token counts, whether the `ps e`
-        // output carries it as a command word or an environment entry. The
-        // longer token (line 43) and an unknown one must never match.
+        // Every whole field equal to the token counts, whether the `ps e` output carries it as a command word
+        // or an environment entry.
         assert_eq!(found, [42, 44, 45].into_iter().collect());
         assert!(reap::parse_marked_pids(ps, "KELIR_GATE_RUN=zzz").is_empty());
     }
 
-    /// F2/F3 (Linux): the sweep finds a process that left the group by its token.
+    /// Linux: the sweep finds a process that left the group by its token.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_sweep_kills_a_setsid_process_that_carries_the_token() {

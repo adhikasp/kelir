@@ -1,23 +1,8 @@
 //! `bash`: run a command in the configured shell.
-//!
-//! Every call runs under `kelir bg-shim` (this same binary, M4). The shim is
-//! the call's process owner: it spawns the shell, hands it the output file
-//! directly, and writes `bg/<dir>.status` (running, then exited). This module
-//! only tails that file for the inline result and waits for the shim.
-//!
-//! Two things fall out of owning the tree in the shim:
-//!
-//! * **A call past `promote_after` is promoted, not killed**: the session stops
-//!   waiting, marks the job promoted and lets go of the process group, and the
-//!   shim keeps running (writing the same file) when the session exits. Work in
-//!   flight is never destroyed by a clock.
-//! * **A call's whole tree dies with it**: on Unix the shim leads the process
-//!   group, on Windows the command is in the call's Job Object, and a session
-//!   that dies without promoting takes the tree down itself (the shim watches
-//!   its owner).
-//!
-//! Memory stays bounded: the file gets every byte, while the [`Capture`] keeps
-//! only the inline window and a 1 KB tail ring.
+//! Every call runs under `kelir bg-shim` (this same binary,).
+//! The shim is the call's process owner: it spawns the shell, hands it the output file directly,
+//! and writes `bg/<dir>.status` (running, then exited).
+//! This module only tails that file for the inline result and waits for the shim.
 
 use std::path::{Path, PathBuf};
 
@@ -42,12 +27,8 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
     }
 
     let bg_dir = ctx.session_dir.join("bg");
-    // The command goes to a file *here*, before the shim exists (on Windows
-    // always, on Unix when it is long): the file is what the shell runs
-    // (`cmd.sh`), it keeps a 40 KB command off the shim's own command line,
-    // where Windows refuses to start it at all (`os error 206`), and it keeps
-    // backslashes off msys' argv rewriting. A POSIX shell's argv then drops the
-    // `-c` (`bash cmd.sh`); `cmd.exe` keeps its `/C` (`cmd.exe /C cmd.bat`).
+    // The command goes to a file *here*, before the shim exists (on Windows always, on Unix when it is
+    // long): the file is what the shell runs (`cmd.sh`), it keeps a 40 KB command off the shim's own
     let shell_args: Vec<String> = ctx.shell.iter().skip(1).cloned().collect();
     let cmd_file = match shellcmd::input(command, &shell_args, &call_dir, "") {
         Ok(shellcmd::ShellInput::Argument(_)) => None,
@@ -67,15 +48,13 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
         job: Some(bg::job_name(&ctx.session_id, dir)),
         sock: Some(ctx.sock.clone()),
         token: Some(ctx.token.clone()).filter(|token| !token.is_empty()),
-        // The key the session minted for this call: the shim signs its status
-        // file with it, and the session ignores a status that is not. It goes
-        // down a pipe, never to an argv, the environment or a file.
+        // The key the session minted for this call: the shim signs its status file with it, and the session
+        // ignores a status that is not.
         key: ctx.trust.as_ref().and_then(|trust| trust.key(dir)),
         capability: None,
         env: None,
-        // The call runs where the session (or `--cwd`, or a resumed session's
-        // log) says, not in whatever directory the session process happens to
-        // have (M4 review F2).
+        // The call runs where the session (or `--cwd`, or a resumed session's log) says, not in
+        // whatever directory the session process happens to have.
         cwd: Some(ctx.cwd.clone()),
     };
     let mut process = match bg::shim_command(&launch) {
@@ -88,12 +67,11 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
     let group = {
         use crate::proc::win::Job;
         // Kill-on-close: a session that is killed outright still takes this
-        // call's tree with it, including a child the command left behind
-        // (M4 review F6). Promotion clears the flag before the session lets go.
+        // call's tree with it, including a child the command left behind. Promotion clears the flag before the session lets go.
         match Job::create_named(launch.job.as_deref().unwrap_or_default(), true) {
             Some(job) => group.with_job(job),
             // A call whose tree is not in a Job Object could not be stopped
-            // (M1 review N7): refuse it instead of running it unreachable.
+            // : refuse it instead of running it unreachable.
             None => {
                 return ToolOutcome::error(format!(
                     "cannot create a job object for the call's tree ({})",
@@ -142,10 +120,8 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
     let mut tail = Tail::new(&out_path);
     let started = Instant::now();
     let mut promotion_tried = false;
-    // The shim's own exit, when it got there first: on Unix an unpromoted call
-    // whose tree still holds a child (`cmd &`) leaves the shim behind as the
-    // tree's owner, so settlement is what the *status file* says, not the shim
-    // process (M4 review F6).
+    // The shim's own exit, when it got there first: on Unix an unpromoted call whose tree still holds a
+    // child (`cmd &`) leaves the shim behind as the tree's owner, so settlement is what the *status file*
     let mut shim_exit = None;
     loop {
         tail.drain_into(&mut capture).await;
@@ -199,19 +175,16 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
                     ),
                 };
             }
-            // It finished, or the shim never acknowledged: the session still
-            // owns the tree, so the call settles normally — and the marker goes,
-            // so a shim that looks later cannot promote a call the model has
-            // already been answered (M4 review N4).
+            // It finished, or the shim never acknowledged: the session still owns the tree, so the call settles
+            // normally — and the marker goes, so a shim that looks later cannot promote a call the model has
             let _ = std::fs::remove_file(bg::promote_path(&bg_dir, dir));
         }
         tokio::time::sleep(bg::POLL).await;
     }
     tail.drain_into(&mut capture).await;
 
-    // The command's own exit code and output are in the status file the shim
-    // wrote before it exited (or before it stayed behind as the tree's owner);
-    // the shim's own exit code is only a fallback.
+    // The command's own exit code and output are in the status file the shim wrote before it exited (or
+    // before it stayed behind as the tree's owner); the shim's own exit code is only a fallback.
     let status = bg::Status::read(&bg::status_path(&bg_dir, dir));
     let settled = status
         .as_ref()
@@ -223,10 +196,8 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
         return ToolOutcome::error(format!("the command did not run: {error}"));
     }
     if !settled && shim_exit.is_some() {
-        // The shim died (a `taskkill /F`, an OOM kill) before the command
-        // settled: nothing will ever write this call's result. Take what is
-        // left of the tree down rather than leave a working orphan behind, and
-        // say the outcome is unknown instead of hanging (M4 review F4).
+        // The shim died (a `taskkill /F`, an OOM kill) before the command settled: nothing will ever write
+        // this call's result.
         let out = crate::util::path_string(&out_path);
         let (bytes, lines) = (capture.bytes(), capture.lines());
         let mut result = "the call's shim exited before the command settled: no result was \
@@ -281,10 +252,8 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
     }
 }
 
-/// Wait for the shim to acknowledge the promotion in its status file, keeping
-/// the inline capture up to date meanwhile. Bounded, so a wedged shim cannot
-/// hold the turn; `false` means the shim finished (or never answered), and the
-/// call settles the ordinary way.
+/// Wait for the shim to acknowledge the promotion in its status file, keeping the inline capture up to
+/// date meanwhile.
 async fn wait_for_promotion(
     bg_dir: &Path,
     id: &str,
@@ -313,7 +282,7 @@ async fn wait_for_promotion(
         }
         if Instant::now() >= deadline {
             // One last look, so a shim that acknowledged at the edge of the
-            // window is honoured instead of being demoted (M4 review N4).
+            // window is honoured instead of being demoted.
             return bg::Status::read(&bg::status_path(bg_dir, id))
                 .map(|status| status.promoted)
                 .unwrap_or(false);
@@ -342,9 +311,8 @@ impl Drop for TreeGuard {
     }
 }
 
-/// Reads the output file as it grows. The command holds the file directly, so
-/// this only has to follow the offset — and a session that stops reading never
-/// blocks the command.
+/// Reads the output file as it grows. The command holds the file directly, so this only has
+/// to follow the offset — and a session that stops reading never blocks the command.
 struct Tail {
     path: PathBuf,
     file: Option<File>,

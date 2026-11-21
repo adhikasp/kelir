@@ -1,9 +1,8 @@
 //! Per-OS state and config directories.
-//!
-//! State: `%LOCALAPPDATA%\kelir` (Windows), `~/Library/Application Support/kelir`
-//! (macOS), `$XDG_STATE_HOME/kelir` or `~/.local/state/kelir` (Linux).
-//! Config: `%APPDATA%\kelir` (Windows), the same Application Support dir
-//! (macOS), `$XDG_CONFIG_HOME/kelir` or `~/.config/kelir` (Linux).
+//! State: `%LOCALAPPDATA%\kelir` (Windows), `~/Library/Application Support/kelir` (macOS),
+//! `$XDG_STATE_HOME/kelir` or `~/.local/state/kelir` (Linux).
+//! Config: `%APPDATA%\kelir` (Windows), the same Application Support dir (macOS),
+//! `$XDG_CONFIG_HOME/kelir` or `~/.config/kelir` (Linux).
 
 use std::path::{Path, PathBuf};
 
@@ -13,18 +12,10 @@ fn env_path(var: &str) -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
-/// The home directory. `KELIR_HOME` wins; otherwise `std::env::home_dir` asks
-/// the OS (`$HOME` on Unix, with a `getpwuid_r` fallback; `%USERPROFILE%` or
-/// `%HOMEDRIVE%%HOMEPATH%` on Windows).
-///
-/// The override stays first so a run never reads the machine's own
-/// `~/.claude/skills`: discovery must see the same inputs every time, and a
-/// person's home is not a test fixture.
 pub fn home() -> PathBuf {
     env_path("KELIR_HOME").unwrap_or_else(|| {
-        // `std::env::home_dir` is un-deprecated (1.87) and has a Unix fallback
-        // (1.90): it is the OS's answer, not a hand-rolled env lookup. The
-        // override stays first so tests never read the machine's own home.
+        // `std::env::home_dir` is un-deprecated (1.87) and has a Unix fallback (1.90): it is the OS's answer,
+        // not a hand-rolled env lookup.
         std::env::home_dir().unwrap_or_else(|| PathBuf::from("."))
     })
 }
@@ -84,10 +75,8 @@ pub fn session_dir(id: &str) -> PathBuf {
     sessions_dir().join(id)
 }
 
-/// Create a directory only the user can reach: mode 0700 on Unix, where a
-/// umask like `002` would otherwise make the session log and its socket
-/// group-readable. Windows inherits the profile's ACL, which already denies
-/// other users (M1 review N4).
+/// Create a directory only the user can reach: mode 0700 on Unix, where a umask like `002` would
+/// otherwise make the session log and its socket group-readable.
 pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -125,11 +114,6 @@ pub fn sessions_newest_first_in(base: &Path) -> Vec<String> {
 }
 
 /// Resolve `kelir ctl <session>`: an exact id, a unique prefix, or `latest`.
-///
-/// Returns the candidates in the order to try them: one for an exact id, the
-/// matches for a prefix, and the newest session alone for `latest` (a verb sent
-/// to `latest` must never land on an older session because the newest one is
-/// dead).
 pub fn session_candidates(spec: &str) -> Result<Vec<String>, String> {
     session_candidates_in(&sessions_dir(), spec)
 }

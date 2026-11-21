@@ -1,14 +1,8 @@
 //! The environment: every variable kelir reads or sets, in one table.
-//!
-//! `docs/reference/env.md` is generated from [`VARS`], so this module is the
-//! only place a variable is *declared*: a name that is not here cannot be
-//! documented, and [`var`]/[`var_os`] debug-assert that the name they are
-//! asked for is known. The one exception is [`named`]: a `key_env` in the
-//! config names *any* variable the person chose, so it cannot be a constant.
-//!
-//! Access goes through this module rather than `std::env` so that the drift
-//! test can prove it: no `env::var` call may live outside this file
-//! ([`tests::no_env_read_happens_outside_this_module`]).
+//! `docs/reference/env.md` is generated from [`VARS`], so this module is the only place a variable
+//! is *declared*: a name that is not here cannot be documented, and [`var`]/[`var_os`] debug-
+//! assert that the name they are asked for is known.
+//! The one exception is [`named`]: a `key_env` in the config names *any* variable the person
 
 use std::ffi::OsString;
 
@@ -38,7 +32,6 @@ impl Dir {
 pub struct Var {
     pub name: &'static str,
     pub dir: Dir,
-    /// What it does, in one sentence (the docs table's effect column).
     pub effect: &'static str,
 }
 
@@ -66,9 +59,8 @@ const fn hook(name: &'static str, effect: &'static str) -> Var {
     }
 }
 
-/// Every variable kelir knows, sorted by name within each direction by the
-/// docs renderer (the table is kept in reading order here: providers, paths,
-/// knobs, then the ones kelir exports).
+/// Every variable kelir knows, sorted by name within each direction by the docs renderer (the table is
+/// kept in reading order here: providers, paths, knobs, then the ones kelir exports).
 pub const VARS: &[Var] = &[
     // ---------------------------------------------------------- provider keys
     read(
@@ -282,9 +274,6 @@ pub fn with_dir(dir: Dir) -> impl Iterator<Item = &'static Var> {
 }
 
 /// Read a declared variable (UTF-8, `None` when unset or not UTF-8).
-///
-/// Debug builds assert the name is in [`VARS`]: a new knob that only exists in
-/// a call site would be invisible to `docs/reference/env.md`.
 pub fn var(name: &str) -> Option<String> {
     debug_assert!(
         declared(name).is_some(),
@@ -308,9 +297,8 @@ pub fn all() -> Vec<(String, String)> {
     std::env::vars().collect()
 }
 
-/// A variable someone else named: a provider's `key_env` from the config, which
-/// can be any name kelir did not choose. Never documented, because it is not
-/// kelir's to document.
+/// A variable someone else named: a provider's `key_env` from the config, which can be any
+/// name kelir did not choose. Never documented, because it is not kelir's to document.
 pub fn named(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }

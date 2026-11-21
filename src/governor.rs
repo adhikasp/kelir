@@ -1,14 +1,8 @@
-//! Client-side concurrency governor: at most N requests per provider across
-//! every local kelir process.
-//!
-//! Several local workers sharing one account hit the provider's own limit
-//! together (the 429 wave of 2026-11-19). The governor is opt-in
-//! (`[providers.<name>] max_concurrent_requests = N`) and advisory: a slot is
-//! an **OS file lock** on `<state root>/locks/<provider>-<slot>`, so a kelir that
-//! crashes (or is killed) leaks nothing — the kernel releases the lock when the
-//! process dies, which is exactly the property a pid file does not have.
-//!
-//! Nothing here reaches the network and nothing here spawns a process.
+//! Client-side concurrency governor: at most N requests per provider across every local kelir
+//! process.
+//! Several local workers sharing one account hit the provider's own limit together (the 429 wave
+//! of 2026-11-19).
+//! The governor is opt-in (`[providers.<name>] max_concurrent_requests = N`) and advisory: a slot
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -39,9 +33,7 @@ pub struct Governor {
 }
 
 impl Governor {
-    /// A governor for `provider` with `slots` slots. A provider name reaches a
-    /// file name, so it is reduced to a safe alphabet (a configured provider
-    /// name is a person's string; it must not be able to name a directory).
+    /// A governor for `provider` with `slots` slots.
     pub fn new(provider: &str, slots: u32) -> Self {
         Self {
             dir: paths::state_dir().join("locks"),
@@ -68,9 +60,7 @@ impl Governor {
         self.dir.join(format!("{}-{index}", self.provider))
     }
 
-    /// Take any free slot, or `None` when every slot is held (by this process
-    /// or another one). Non-blocking: the caller decides what waiting looks
-    /// like, because a kelir wait must stay interruptible by verbs.
+    /// Take any free slot, or `None` when every slot is held (by this process or another one).
     pub fn try_acquire(&self) -> Option<Slot> {
         for index in 0..self.slots {
             let path = self.path_for(index);

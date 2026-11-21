@@ -1,7 +1,6 @@
 //! Chat messages in the OpenAI Chat Completions shape.
-//!
-//! The fold produces these; the request builder serialises them unchanged, so
-//! a request's message prefix is byte-identical from one step to the next.
+//! The fold produces these; the request builder serialises them unchanged, so a request's
+//! message prefix is byte-identical from one step to the next.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,10 +37,7 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ApiToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    /// Image parts, when this message carries any. The OpenAI Chat Completions
-    /// shape puts them in `content` as a list, so the wire form is built in
-    /// [`ChatMessage::to_wire`]; `content` above stays the text, which is what
-    /// every other message and the whole existing code path use.
+    /// Image parts, when this message carries any.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImagePart>,
 }
@@ -95,10 +91,8 @@ impl ChatMessage {
         }
     }
 
-    /// The wire form: `content` stays a string unless the message carries
-    /// images, in which case it becomes the list of text and image parts that
-    /// OpenAI-compatible providers expect. A message with neither text nor
-    /// images keeps `content: null`.
+    /// The wire form: `content` stays a string unless the message carries images, in which case it becomes
+    /// the list of text and image parts that OpenAI-compatible providers expect.
     pub fn to_wire(&self) -> Value {
         let mut value = serde_json::to_value(self).unwrap_or(Value::Null);
         if self.images.is_empty() {

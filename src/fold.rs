@@ -1,9 +1,7 @@
 //! `fold(events.jsonl)`: the one code path that turns the log into context.
-//!
 //! Live and on resume the request is built from this, never from memory.
-//! Spilled payloads are read back here, so a request built from blobs is
-//! byte-identical to one built from inline values (the cache prefix cannot
-//! change because the log got large).
+//! Spilled payloads are read back here, so a request built from blobs is byte-identical to
+//! one built from inline values (the cache prefix cannot change because the log got large).
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -15,7 +13,6 @@ use crate::event::{EventBody, LogEvent};
 pub struct Folded {
     /// The frozen system text from `session_started`.
     pub system: String,
-    /// The conversation, system message excluded.
     pub messages: Vec<ChatMessage>,
 }
 
@@ -43,10 +40,6 @@ pub fn fold(events: &[LogEvent], session_dir: &Path) -> Result<Folded, String> {
     }
 
     // The compactions in this log, and which of them a later one supersedes.
-    // A compaction renders as "summary + pins" only while it stands: a later
-    // one that covers its range (or that reaches over the compaction event
-    // itself) has already summarised it, so the old summary and its pins are
-    // gone.
     struct Rule<'a> {
         seq: u64,
         through: u64,
@@ -87,10 +80,7 @@ pub fn fold(events: &[LogEvent], session_dir: &Path) -> Result<Folded, String> {
     ordered.sort_by_key(|event| event.seq);
     let mut rendered_pins: HashSet<u64> = HashSet::new();
 
-    // A compaction renders at `through_seq` — where its range ends — not where
-    // its event was written. That keeps the summary and the pins *before* the
-    // kept tail, so the request reads `[system, summary, pins, tail, …later]`
-    // and its last message is the newest event, never an old pin.
+    // A compaction renders at `through_seq` — where its range ends — not where its event was written.
     let mut next = 0usize;
     for event in ordered {
         while next < standing.len() && standing[next].through < event.seq {
@@ -160,10 +150,8 @@ fn render_compaction(
     Ok(())
 }
 
-/// The events a compaction of `through_seq` is summarised from: everything in
-/// the range, plus every `compacted` event whose own range is inside it. The
-/// latter carries the earlier summary, so a second compaction summarises the
-/// first one instead of losing it.
+/// The events a compaction of `through_seq` is summarised from: everything in the range, plus every
+/// `compacted` event whose own range is inside it.
 pub fn range_events(events: &[LogEvent], through_seq: u64) -> Vec<LogEvent> {
     events
         .iter()
@@ -198,10 +186,7 @@ fn render(folded: &mut Folded, event: &LogEvent, session_dir: &Path) -> Result<(
             path,
         } => {
             if kind == "attachment" {
-                // An image queued by `kelir view`: a user message holding one
-                // image part, at the tail. The log stores the relative path,
-                // never the bytes, so the data URL is built here, at request
-                // time, from the file the session still has.
+                // An image queued by `kelir view`: a user message holding one image part, at the tail.
                 let rel = path.clone().unwrap_or_else(|| name.clone());
                 let file = session_dir.join(&rel);
                 let bytes = std::fs::read(&file).map_err(|error| {
@@ -766,7 +751,7 @@ mod tests {
             .collect()
     }
 
-    /// B1: the summary and the pins render at `through_seq`, before the tail
+    /// the summary and the pins render at `through_seq`, before the tail
     /// that was kept verbatim, so the newest event is the last message.
     #[test]
     fn a_compaction_renders_before_the_tail_it_kept() {
@@ -803,9 +788,8 @@ mod tests {
         );
     }
 
-    /// B2: a later compaction whose range reaches over the earlier compaction's
-    /// event supersedes it even when its `through_seq` is below that event's
-    /// seq: one summary, every pin once.
+    /// A later compaction whose range reaches over the earlier compaction's event supersedes
+    /// it even when its `through_seq` is below that event's seq: one summary, every pin once.
     #[test]
     fn a_compaction_supersedes_one_whose_range_it_covers() {
         let events = vec![
@@ -818,9 +802,8 @@ mod tests {
             compacted_at(6, 4, "FIRST", vec![2, 3]),
             assistant_at(7, "three"),
             assistant_at(8, "four"),
-            // Second: through 7 — below the first event's seq (6)? No: 7 > 6,
-            // but the case that broke was through < the *tail* end, so cover it
-            // by keeping the tail after the second compaction.
+            // Second: through 7 — below the first event's seq (6)? No: 7 > 6, but the case that broke
+            // was through < the *tail* end, so cover it by keeping the tail after the second compaction.
             compacted_at(9, 7, "SECOND", vec![2, 3]),
             assistant_at(10, "five"),
         ];
@@ -840,9 +823,8 @@ mod tests {
         );
     }
 
-    /// The earlier compaction's event can sit *after* a later compaction's
-    /// `through_seq` (its kept tail is what pushed it there), and it is still
-    /// superseded.
+    /// The earlier compaction's event can sit *after* a later compaction's `through_seq` (its
+    /// kept tail is what pushed it there), and it is still superseded.
     #[test]
     fn a_compaction_supersedes_one_written_after_its_through_seq() {
         let events = vec![
@@ -867,9 +849,8 @@ mod tests {
         );
     }
 
-    /// The transcript of a second compaction includes the first summary: the
-    /// range is folded, and the earlier `compacted` event (written later) is
-    /// part of it.
+    /// The transcript of a second compaction includes the first summary: the range is folded, and
+    /// the earlier `compacted` event (written later) is part of it.
     #[test]
     fn a_range_includes_the_summary_of_the_compaction_it_covers() {
         let events = vec![
@@ -898,10 +879,8 @@ mod tests {
         );
     }
 
-    /// `bg_settled` is a record of what happened, not a message: the model
-    /// reads the `user` event that follows it (from `job`), so a job's
-    /// completion renders exactly once — the same way live and on resume, which
-    /// is what makes a resume's folded `bg_settled` visible at all.
+    /// `bg_settled` is a record of what happened, not a message: the model reads the `user` event that
+    /// follows it (from `job`), so a job's completion renders exactly once — the same way live and on
     #[test]
     fn a_settled_job_renders_as_the_message_that_follows_it() {
         let dir = temp_dir("bg");

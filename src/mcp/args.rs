@@ -1,10 +1,8 @@
-//! The `kelir mcp` command line: parsing the words, typing `k=v` values and
-//! checking the arguments against the tool's `inputSchema`.
-//!
-//! The words are parsed by hand, not by clap: after `kelir mcp <server>
-//! <tool>` the flags (`--json`, `--schema`, `--envelope`) belong to the call,
-//! and `--json` means "the arguments, as JSON" there but "machine-readable"
-//! after `kelir mcp ls`. A usage error is exit code 2.
+//! The `kelir mcp` command line: parsing the words, typing `k=v` values and checking the arguments
+//! against the tool's `inputSchema`.
+//! The words are parsed by hand, not by clap: after `kelir mcp <server> <tool>` the flags
+//! (`--json`, `--schema`, `--envelope`) belong to the call, and `--json` means "the arguments, as
+//! JSON" there but "machine-readable" after `kelir mcp ls`.
 
 use serde_json::{Map, Value};
 
@@ -171,12 +169,7 @@ fn declared_type(schema: &Value, key: &str) -> Vec<String> {
     out
 }
 
-/// Type one `k=v` value. The schema decides: a property that accepts a string
-/// and no other non-null scalar keeps the raw text; one that also accepts
-/// numbers/booleans/etc. reads the text as JSON when that JSON is of an
-/// accepted type, else keeps the text. Undeclared: JSON when it parses as JSON
-/// (an integer too big for 64 bits stays text, never a rounded float), else a
-/// string.
+/// Type one `k=v` value.
 pub fn type_value(raw: &str, declared: &[String]) -> Value {
     let accepts_string = declared.iter().any(|name| name == "string");
     let others: Vec<&String> = declared
@@ -262,9 +255,8 @@ fn shown(value: &Value) -> String {
     }
 }
 
-/// Check `value` against the supported subset of JSON Schema: `type`, `enum`,
-/// `required`, `properties`, `additionalProperties: false`, `items`,
-/// `minimum`/`maximum`. Every problem is reported, one per line, with its path.
+/// Check `value` against the supported subset of JSON Schema: `type`, `enum`, `required`, `properties`,
+/// `additionalProperties: false`, `items`, `minimum`/`maximum`.
 pub fn validate(schema: &Value, value: &Value) -> Result<(), String> {
     let mut problems = Vec::new();
     check(schema, value, "", &mut problems);

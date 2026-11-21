@@ -1,16 +1,8 @@
 //! The session side of `kelir mcp`: the broker.
-//!
-//! One [`Broker`] lives in the session process. It owns a connection per
-//! server, started lazily by the first call that needs it (channel servers are
-//! started when the session starts), keeps it for the session and restarts it
-//! the next time a call finds it dead. Dropping the broker kills every server's
-//! process tree.
-//!
-//! The broker does not write the event log: the session does, in the loop that
-//! owns the writer. A request that must be logged (`call`) is registered there
-//! (`mcp_started`), run here on a task, and handed back to the same loop as an
-//! internal `mcp-settle` verb carrying this broker's [`Broker::key`], so a
-//! socket client cannot forge a settlement.
+//! One [`Broker`] lives in the session process.
+//! It owns a connection per server, started lazily by the first call that needs it (channel
+//! servers are started when the session starts), keeps it for the session and restarts it the next
+//! time a call finds it dead.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -26,9 +18,7 @@ use super::rpc::{CallError, Client, Notification};
 use super::{CallOutput, run_call};
 use crate::ipc::{Incoming, Request, Response};
 
-/// The verb the CLI sends.
 pub const VERB: &str = "mcp";
-/// Internal verbs, sent by the broker's own tasks to the session loop.
 pub const VERB_SETTLE: &str = "mcp-settle";
 pub const VERB_NOTIFY: &str = "mcp-notify";
 /// The `from` of an internal request.
@@ -70,9 +60,8 @@ struct Inner {
 pub struct Broker(Arc<Inner>);
 
 impl Broker {
-    /// Read both `mcp.toml` layers for a session whose working directory is
-    /// `cwd`. A bad file is remembered, not fatal: the session still runs, and
-    /// `kelir mcp` says what is wrong.
+    /// Read both `mcp.toml` layers for a session whose working directory is `cwd`. A bad file is
+    /// remembered, not fatal: the session still runs, and `kelir mcp` says what is wrong.
     pub fn new(cwd: PathBuf, session_dir: PathBuf, session_id: String) -> Broker {
         let (servers, config_error) = match config::load(&cwd) {
             Ok(servers) => (servers, None),
@@ -193,9 +182,8 @@ impl Broker {
         }
     }
 
-    /// Give the broker a direct sink for raw MCP notifications (`kelir
-    /// channel`). A session's `attach` is unaffected; when both exist the
-    /// direct sink wins for inbound messages.
+    /// Give the broker a direct sink for raw MCP notifications (`kelir channel`). A session's
+    /// `attach` is unaffected; when both exist the direct sink wins for inbound messages.
     pub fn set_channel_sink(&self, sink: mpsc::UnboundedSender<Notification>) {
         if let Ok(mut slot) = self.0.channel_sink.lock() {
             *slot = Some(sink);
@@ -277,7 +265,7 @@ impl Broker {
             .and_then(|slot| slot.clone())
             .or_else(|| self.0.notify.lock().ok().and_then(|slot| slot.clone()));
         // A channel server learns that kelir is ready to receive its messages
-        // from the capabilities of `initialize` (M10). Never a permission relay.
+        // from the capabilities of `initialize`. Never a permission relay.
         let capabilities = if entry.config.channel {
             Some(crate::channel::capabilities(&entry.config))
         } else {

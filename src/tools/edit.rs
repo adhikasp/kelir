@@ -1,12 +1,8 @@
 //! `edit`: exact string replacement in one file.
-//!
-//! `old` must match exactly once unless `replace_all` is set. The literal text
-//! is tried first, so a file with mixed line endings is edited exactly as
-//! written. Only when the literal does not match is the pattern retried with
-//! the file's line endings (CRLF or LF); the inserted text then follows the
-//! matched region, and untouched regions keep their own endings.
-//! `old: ""` creates a missing file. The changed line numbers come back so the
-//! model (and a gate) can look at the right place.
+//! `old` must match exactly once unless `replace_all` is set.
+//! The literal text is tried first, so a file with mixed line endings is edited exactly as
+//! written.
+//! Only when the literal does not match is the pattern retried with the file's line endings (CRLF
 
 use std::path::{Path, PathBuf};
 
@@ -37,14 +33,6 @@ pub fn run(args: &Value, ctx: &Ctx, dir: &str) -> ToolOutcome {
     }
 }
 
-/// The edit itself; the caller adds the command file bookkeeping.
-///
-/// One hunk (`old`/`new`/`replace_all`) or several (`edits: [{old, new,
-/// replace_all?}, …]`). Several hunks are **atomic**: they apply in order
-/// against the evolving text, every one of them is checked before anything is
-/// written, and the file is written once. A hunk that does not match therefore
-/// leaves the file exactly as it was, which is what a multi-hunk patch tool has
-/// to do — a half-applied patch is the failure the model used `python -` for.
 fn edit(args: &Value, ctx: &Ctx) -> Result<String, String> {
     let raw_path = args
         .get("path")
@@ -85,7 +73,6 @@ fn edit(args: &Value, ctx: &Ctx) -> Result<String, String> {
     Ok(join_report(&display, &reported))
 }
 
-/// One replacement.
 struct Hunk {
     old: String,
     new: String,
@@ -188,9 +175,8 @@ fn create(path: &Path, display: &str, hunks: &[Hunk]) -> Result<String, String> 
     Ok(join_report(display, &reported))
 }
 
-/// Apply one hunk to `text`, returning the one result line for it. Every check
-/// happens before the caller writes anything, so a failure here leaves the file
-/// untouched on disk.
+/// Apply one hunk to `text`, returning the one result line for it. Every check happens before
+/// the caller writes anything, so a failure here leaves the file untouched on disk.
 fn apply(
     text: &mut String,
     hunk: &Hunk,
@@ -263,10 +249,7 @@ fn join_report(display: &str, reported: &[String]) -> String {
     }
 }
 
-/// The pattern to use: the literal text if it occurs, else the same text with
-/// the file's line endings. The replacement only gets converted when the
-/// fallback was needed, so an inserted region follows the region it replaces
-/// and nothing else is rewritten.
+/// The pattern to use: the literal text if it occurs, else the same text with the file's line endings.
 fn match_line_endings(content: &str, old: &str, new: &str) -> (String, String) {
     if !find_matches(content, old).is_empty() {
         return (old.to_string(), new.to_string());
@@ -305,7 +288,6 @@ fn resolve(cwd: &Path, path: &str) -> PathBuf {
     }
 }
 
-/// Non-overlapping occurrences, left to right.
 fn find_matches(haystack: &str, needle: &str) -> Vec<usize> {
     if needle.is_empty() {
         return Vec::new();

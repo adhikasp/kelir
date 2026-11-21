@@ -1,22 +1,8 @@
 //! Background jobs: the shim, the status files, and the `kelir bg` CLI.
-//!
-//! A job is one `kelir bg-shim` process (the same binary) that spawns the
-//! command, hands it the output file directly and writes `bg/<id>.status`
-//! whenever its state changes. The shim owns the command's process tree: on
-//! Unix both are in the shim's process group (`setsid` for a job), on Windows
-//! the command is assigned to a named Job Object the shim keeps open. That is
-//! what lets a job outlive the session — and what lets `cancel` take the whole
-//! tree down from another process.
-//!
-//! The status file is written **atomically** (`<id>.status.tmp` then a rename),
-//! so a reader never sees half a JSON object, and a torn file on disk (a crash
-//! from an older writer, a hand-edited file) is skipped by `ls`/the watcher
-//! instead of breaking them.
-//!
-//! Waking the agent is the session's business: it watches `bg/*.status`, and a
-//! job that settles while the session runs becomes a `bg_settled` event plus a
-//! `user` message from `job` at the next boundary ([`wake_text`]). A job that
-//! settles while nothing runs is folded in by the next `resume`.
+//! A job is one `kelir bg-shim` process (the same binary) that spawns the command, hands it the
+//! output file directly and writes `bg/<id>.status` whenever its state changes.
+//! The shim owns the command's process tree: on Unix both are in the shim's process group
+//! (`setsid` for a job), on Windows the command is assigned to a named Job Object the shim keeps
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -29,7 +15,6 @@ use crate::util::path_string;
 
 /// How often the shim looks at its command, its markers and its owner.
 pub const POLL: Duration = Duration::from_millis(25);
-/// How often the session looks for jobs that changed state.
 pub const WATCH: Duration = Duration::from_millis(250);
 /// How long a promotion waits for the shim to acknowledge the marker before the
 /// session lets go of the tree anyway.
@@ -41,17 +26,11 @@ pub const CANCEL_WAIT: Duration = Duration::from_secs(2);
 pub const STATE_RUNNING: &str = "running";
 pub const STATE_EXITED: &str = "exited";
 pub const STATE_CANCELLED: &str = "cancelled";
-/// The shim is gone and nothing will ever write this status again (`taskkill
-/// /F`, an OOM kill, a reboot). Readers report it instead of a job that runs for
-/// ever (M4 review F4); the command's own outcome is unknown.
+/// The shim is gone and nothing will ever write this status again (`taskkill /F`, an OOM kill, a
+/// reboot).
 pub const STATE_LOST: &str = "lost";
 
-/// How far a recorded start time may be from the process's own and still be the
-/// same process. Both are the OS's answer to the same question, so this only
-/// covers serialisation rounding between the shim's write and the reader's
-/// parse (a Linux start time is truncated to the second), never a pid that was
-/// recycled: a recycled process started at another time, and G1 of the round-2
-/// review is that two minutes of slack let it pass for the shim.
+/// How far a recorded start time may be from the process's own and still be the same process.
 pub const START_SLACK: Duration = Duration::from_secs(1);
 
 /// An explicit `kelir bg run` job.
@@ -73,15 +52,11 @@ pub struct Status {
     /// the process whose job object holds the tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shim: Option<u32>,
-    /// When the shim itself started, as the shim read it from the OS at launch
-    /// (`proc::start_time`). A reader compares this **exact** value before it
-    /// trusts a pid, so a pid recycled after the job started is never mistaken
-    /// for the shim (M4 review round 2, G1).
+    /// When the shim itself started, as the shim read it from the OS at launch (`proc::start_time`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shim_started: Option<String>,
     /// When the command started, read from the OS right after the spawn: the
     /// proof `cancel` needs to reach a lost job's tree by the command's pid
-    /// (M4 review round 2, G2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_started: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,21 +66,17 @@ pub struct Status {
     pub finished: Option<String>,
     #[serde(default)]
     pub cmd: String,
-    /// Where a long command was written instead of being passed as an
-    /// argument (`cmd.sh`/`cmd.bat` in the job's directory). `cmd` is then a
-    /// short reference, and this file holds the exact bytes that ran.
+    /// Where a long command was written instead of being passed as an argument (`cmd.sh`/`cmd.bat` in the
+    /// job's directory).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cmd_path: Option<String>,
-    /// The output file, absolute, forward slashes.
     #[serde(default)]
     pub out: String,
     /// `job` or `call`.
     #[serde(default)]
     pub kind: String,
-    /// A promoted call the model was told about.
     #[serde(default)]
     pub promoted: bool,
-    /// The provider call id of the bash call that started it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call: Option<String>,
     /// The Windows job object, so `cancel` can open it by name.
@@ -114,16 +85,12 @@ pub struct Status {
     /// Why the command could not be started, when it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Ed25519 signature (hex) over the rest of the record, made with the job's
-    /// private key (held by the session and that job's shim, never by a tool
-    /// child). A reader ignores a record whose signature does not verify under
-    /// the job's public key.
+    /// Ed25519 signature (hex) over the rest of the record, made with the job's private key (held by the
+    /// session and that job's shim, never by a tool child).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sig: Option<String>,
-    /// A counter that only goes up, bound into the signature together with the
-    /// job id: every signed write takes a higher one than any before it, so a
-    /// reader that has seen a record refuses an older one, and a final record
-    /// (exited, cancelled, lost) is terminal (STEER-7 review round 3).
+    /// A counter that only goes up, bound into the signature together with the job id: every signed write
+    /// takes a higher one than any before it, so a reader that has seen a record refuses an older one, and
     #[serde(default)]
     pub seq: u64,
 }
@@ -161,12 +128,10 @@ impl Status {
         serde_json::to_vec(&bare).unwrap_or_default()
     }
 
-    /// Sign the record in place.
     pub fn sign(&mut self, secret: &str) {
         self.sig = crate::trust::sign(secret, &self.sealed_bytes());
     }
 
-    /// Does the record carry a valid signature under the job's public key?
     pub fn verifies(&self, public: &str) -> bool {
         match &self.sig {
             Some(sig) if !public.is_empty() => {
@@ -176,12 +141,8 @@ impl Status {
         }
     }
 
-    /// Write the record signed with `key` (unsigned when there is none: a job
-    /// started by hand has no session to authenticate to).
-    ///
-    /// A signed write takes the next sequence number, and a final record is
-    /// also written beside the status file ([`final_path`]) so that putting an
-    /// older record back over the status file cannot un-settle the job.
+    /// Write the record signed with `key` (unsigned when there is none: a job started by hand has
+    /// no session to authenticate to).
     pub fn write_with(&self, path: &Path, key: Option<&str>) -> std::io::Result<()> {
         match key.filter(|key| !key.is_empty()) {
             Some(key) => {
@@ -203,19 +164,15 @@ impl Status {
         self.state != STATE_RUNNING
     }
 
-    /// The status as a reader should understand it: a `running` job whose shim
-    /// is gone — or whose shim cannot be proved to be the process holding its
-    /// pid — is [`STATE_LOST`], because nothing will ever write it again. The
-    /// file on disk is left alone — a reader never writes another process's
-    /// status (M4 review F4).
+    /// The status as a reader should understand it: a `running` job whose shim is gone — or whose shim
+    /// cannot be proved to be the process holding its pid — is [`STATE_LOST`], because nothing will ever
     pub fn observed(&self) -> Status {
         if self.state != STATE_RUNNING {
             return self.clone();
         }
         let error = match shim_identity(self) {
-            // Alive, and its own start time is the recorded one (or the
-            // platform cannot report start times at all: liveness is the best
-            // answer available there, and signalling is refused instead).
+            // Alive, and its own start time is the recorded one (or the platform cannot report start times at all:
+            // liveness is the best answer available there, and signalling is refused instead).
             ShimIdentity::Same | ShimIdentity::NoPlatform => return self.clone(),
             ShimIdentity::Different => "the job's shim is gone; its outcome is unknown",
             ShimIdentity::NoRecord => {
@@ -276,7 +233,6 @@ fn parse_ts(text: &str) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
 }
 
-/// Whether the process holding a pid is the process a status file recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShimIdentity {
     /// The pid is alive and its own start time is the recorded one.
@@ -290,18 +246,13 @@ pub enum ShimIdentity {
     NoPlatform,
 }
 
-/// Is the process holding `status.shim`'s pid really the shim that wrote the
-/// status? A status outlives its shim and a pid is reused within seconds, so
-/// the answer comes from comparing the start time the shim recorded for itself
-/// with the one the OS reports for that pid now — not from the job's `started`
-/// (four minutes of job lifetime can pass before a shim is lost).
+/// Is the process holding `status.shim`'s pid really the shim that wrote the status?
 pub fn shim_identity(status: &Status) -> ShimIdentity {
     identity(status.shim, status.shim_started.as_deref())
 }
 
-/// The same question for the command's own pid (`pid_started`): only `cancel`
-/// on Windows walks a lost job's tree by it, and the unit tests ask on every
-/// platform.
+/// The same question for the command's own pid (`pid_started`): only `cancel` on Windows
+/// walks a lost job's tree by it, and the unit tests ask on every platform.
 #[cfg(any(windows, test))]
 fn pid_identity(status: &Status) -> ShimIdentity {
     identity(status.pid, status.pid_started.as_deref())
@@ -313,7 +264,7 @@ fn identity(pid: Option<u32>, recorded: Option<&str>) -> ShimIdentity {
     };
     // Liveness first: a killed process keeps its creation time until the
     // kernel object is reaped, so a start time alone would call it alive.
-    if !process_alive(pid) {
+    if !crate::proc::alive(pid) {
         return ShimIdentity::Different;
     }
     // Alive, but its start time is not ours to read (macOS).
@@ -331,18 +282,8 @@ fn identity(pid: Option<u32>, recorded: Option<&str>) -> ShimIdentity {
     }
 }
 
-/// A start time as the status file writes it: RFC 3339, or `None` where the
-/// platform cannot say (macOS) — in which case nothing is ever signalled on the
-/// strength of a pid.
-fn start_time_text(pid: u32) -> Option<String> {
-    let at = crate::proc::start_time(pid)?;
-    time::OffsetDateTime::from(at)
-        .format(&time::format_description::well_known::Rfc3339)
-        .ok()
-}
-
-/// Is a call due to be promoted? `after` zero disables promotion; the caller
-/// passes the elapsed time, so the timer is testable without a clock.
+/// A start time as the status file writes it: RFC 3339, or `None` where the platform cannot say (macOS)
+/// — in which case nothing is ever signalled on the strength of a pid.
 pub fn promotion_due(after: Duration, elapsed: Duration) -> bool {
     after > Duration::ZERO && elapsed >= after
 }
@@ -364,9 +305,8 @@ pub fn root() -> PathBuf {
     crate::paths::state_dir().join("bg")
 }
 
-/// The next signed-record sequence number: strictly above `floor` and above
-/// every one this process handed out, and (the wall clock in nanoseconds) above
-/// whatever an earlier process of the same job used.
+/// The next signed-record sequence number: strictly above `floor` and above every one this process
+/// handed out, and (the wall clock in nanoseconds) above whatever an earlier process of the same job
 fn next_seq(floor: u64) -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static LAST: AtomicU64 = AtomicU64::new(0);
@@ -407,23 +347,12 @@ pub fn promote_path(dir: &Path, id: &str) -> PathBuf {
 /// [`CANCEL_WAIT`]; the rest is slack for a slow box, not for a stale file.
 pub const CANCEL_MARKER_TTL: Duration = Duration::from_secs(30);
 
-/// The marker a `cancel` writes before it kills anything (STEER-7). Between the
-/// kill and the final `cancelled` status (up to [`CANCEL_WAIT`]) the status file
-/// still says `running` and its shim is already dead, which readers would report
-/// as `lost` — the session's own watcher recorded exactly that, so a `cancel`
-/// shown in the log as "the job was lost". The marker tells every reader "a
-/// cancel is in flight; keep waiting", and only `cancel` writes or removes it.
+/// The marker a `cancel` writes before it kills anything.
 pub fn cancel_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.cancel"))
 }
 
 /// Is a `cancel` in flight for this job?
-///
-/// A marker only counts while it is young: a `cancel` that was itself killed
-/// between the kill and the status write leaves the file behind, and a marker
-/// that never expired would keep a dead job `running` for ever — the exact
-/// failure [`Status::observed`] exists to prevent. Past [`CANCEL_MARKER_TTL`]
-/// the marker is ignored and the job is judged by its shim, as before.
 pub fn cancelling(dir: &Path, id: &str) -> bool {
     let path = cancel_path(dir, id);
     let Ok(metadata) = std::fs::metadata(&path) else {
@@ -436,9 +365,8 @@ pub fn cancelling(dir: &Path, id: &str) -> bool {
     }
 }
 
-/// A status as a reader should understand it, given the `bg/` directory it was
-/// read from: [`Status::observed`], except that a job whose `cancel` marker is
-/// present is still `running` (it is about to be, not lost).
+/// A status as a reader should understand it, given the `bg/` directory it was read from:
+/// [`Status::observed`], except that a job whose `cancel` marker is present is still `running` (it is
 pub fn observed_in(dir: &Path, status: &Status) -> Status {
     if status.state == STATE_RUNNING && cancelling(dir, &status.id) {
         return status.clone();
@@ -464,10 +392,7 @@ pub fn job_name(session: &str, dir_name: &str) -> String {
     name
 }
 
-/// Every status file in `dir`, newest first, skipping temp files and anything
-/// that does not parse. A status whose shim is gone comes back as `lost`
-/// ([`Status::observed`]), so a listing never shows a job that runs for ever —
-/// unless a `cancel` is in flight, when it is still running ([`observed_in`]).
+/// Every status file in `dir`, newest first, skipping temp files and anything that does not parse.
 pub fn list(dir: &Path) -> Vec<Status> {
     let mut out: Vec<Status> = std::fs::read_dir(dir)
         .into_iter()
@@ -520,10 +445,7 @@ pub struct Launch<'a> {
     pub out: PathBuf,
     /// The command, run by `shell` (`shell[0]` plus its args, then the command).
     pub cmd: String,
-    /// A file holding the command, when it is too long to pass on a command
-    /// line. The shim reads it and does not take `cmd` (a 40 KB argument past
-    /// the Windows limit does not even reach the shim: `spawn` fails with
-    /// `os error 206`).
+    /// A file holding the command, when it is too long to pass on a command line.
     pub cmd_file: Option<PathBuf>,
     pub shell: Vec<String>,
     pub kind: &'a str,
@@ -536,32 +458,24 @@ pub struct Launch<'a> {
     /// The session socket, exported to the command as `KELIR_SOCK`.
     pub sock: Option<String>,
     /// The session's socket token, exported to the command as `KELIR_TOKEN`
-    /// (STEER-7): a job that reports itself over the socket must carry it.
+    /// : a job that reports itself over the socket must carry it.
     pub token: Option<String>,
-    /// This job's status key (and, for an explicit job, its capability). It
-    /// reaches the shim over an inherited pipe and nowhere else: not argv, not
-    /// the environment (a same-user child reads both), not a file. The shim
-    /// does not pass it on to the command it runs.
+    /// This job's status key (and, for an explicit job, its capability).
     pub key: Option<String>,
     /// This job's capability, the second line of the same pipe: the shim
     /// reports itself to the session with it. Never argv, never environment.
     pub capability: Option<String>,
-    /// The environment the shim and its command get, when the starter is the
-    /// session acting for a client: exactly the client's own (the session's
-    /// environment is not the client's and must not leak into its job).
+    /// The environment the shim and its command get, when the starter is the session acting for a client:
+    /// exactly the client's own (the session's environment is not the client's and must not leak into its
     pub env: Option<Vec<(String, String)>>,
-    /// The directory the command runs in. The shim is started there and the
-    /// command inherits it, so a `--cwd` session (and a resumed session's
-    /// recorded cwd) is the directory its commands see (M4 review F2).
     pub cwd: Option<PathBuf>,
 }
 
 /// The command that runs one shim. The caller may add platform grouping flags
 /// (`ProcessGroup::configure`) or detach it ([`detach`]).
 pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> {
-    // Resolve with a PATH fallback: `current_exe()` goes stale (deleted) when
-    // `cargo install --force` replaces the binary under a live session, which
-    // used to make every bash call fail ENOENT.
+    // Resolve with a PATH fallback: `current_exe` goes stale when the binary is replaced
+    // under a live session, and a self-spawn must still find a runnable path.
     let binary = crate::util::self_binary()?;
     let mut command = tokio::process::Command::new(binary);
     if let Some(env) = &launch.env {
@@ -605,23 +519,18 @@ pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> 
     if let Some(sock) = &launch.sock {
         command.arg("--sock").arg(sock);
     }
-    // The token goes through the environment, never the argv (STEER-7): a
-    // command line is world-readable on Linux (`/proc/<pid>/cmdline`) and a
-    // token in it would be a token anyone could read. The shim passes its own
-    // environment on to the command it starts, so nothing else is needed.
+    // The token goes through the environment, never the argv: a command line is world-readable on Linux
+    // (`/proc/<pid>/cmdline`) and a token in it would be a token anyone could read.
     if let Some(token) = &launch.token {
         command.env(crate::trust::TOKEN_ENV, token);
     }
-    // Where this session sits in the family of sessions (M7): a command that
+    // Where this session sits in the family of sessions: a command that
     // runs `kelir ls` or `kelir run --child` knows its root, parent and depth.
     for (name, value) in crate::child::lineage_env() {
         command.env(name, value);
     }
-    // The status key goes down a pipe: written here (a few dozen bytes, far
-    // below the pipe's buffer, so nothing blocks) and closed before the shim
-    // exists. An environment variable or an argv would be readable by any
-    // process of the same user (`/proc/<pid>/environ`, the PEB); the pipe's
-    // contents are not (steer7b review S-A).
+    // The status key goes down a pipe: written here (a few dozen bytes, far below the pipe's buffer, so
+    // nothing blocks) and closed before the shim exists.
     let mut stdin = std::process::Stdio::null();
     if let Some(key) = launch.key.as_deref().filter(|key| !key.is_empty()) {
         use std::io::Write as _;
@@ -655,11 +564,8 @@ pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> 
     Ok(command)
 }
 
-/// Detach a job's shim from this process, this process group and (on Windows)
-/// any enclosing Job Object, so it outlives the session that started it.
-///
-/// `cfg_select!` (1.95) keeps the three platform bodies in one item; each branch
-/// is still compiled only on its target.
+/// Detach a job's shim from this process, this process group and (on Windows) any enclosing
+/// Job Object, so it outlives the session that started it.
 pub fn detach(command: &mut tokio::process::Command) {
     cfg_select! {
         unix => {
@@ -689,17 +595,12 @@ pub fn detach(command: &mut tokio::process::Command) {
     }
 }
 
-/// What a `kelir bg run` inside a call asks its session to do on Windows: start
-/// the shim **outside** the call's Job Object. The job forbids breakaway — it
-/// has to, or the call's tree could not be cancelled (M4 review F1) — so a shim
-/// spawned from inside it would be trapped, and a job is supposed to outlive the
-/// session. The session is outside the job, so it spawns the shim itself.
+/// What a `kelir bg run` inside a call asks its session to do on Windows: start the shim **outside**
+/// the call's Job Object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnRequest {
     pub dir: String,
-    /// The job id, when the caller already has one (a re-spawn). A first spawn
-    /// leaves it out: the **session** mints the id, and the answer carries it
-    /// back (STEER-7 review B1: a child must not be able to pick a job id).
+    /// The job id, when the caller already has one (a re-spawn).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub out: String,
@@ -713,7 +614,7 @@ pub struct SpawnRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sock: Option<String>,
     /// The token the client holds; the session compares it with its own before
-    /// it starts anything (STEER-7).
+    /// it starts anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     /// The directory the client was in: a job started inside a call runs where
@@ -743,12 +644,6 @@ impl SpawnRequest {
         }
     }
 
-    /// The request as the session will honour it. Only `cmd`, `shell`, `cwd` and
-    /// `env` are the caller's: the kind, the socket the shim reports to, the
-    /// token, the Windows job name and the call are the session's own, so a
-    /// tool child cannot aim the shim's report at its own listener or ask for a
-    /// shim that skips hardening (STEER-7 review round 4, S1). `call` survives
-    /// only when `call_is_live` says the session is running that call.
     pub fn pinned(mut self, sock: &str, token: &str, call_is_live: impl Fn(&str) -> bool) -> Self {
         self.kind = KIND_JOB.to_string();
         self.sock = Some(sock.to_string()).filter(|sock| !sock.trim().is_empty());
@@ -765,10 +660,8 @@ impl SpawnRequest {
     }
 
     pub fn launch(&self, id: &str) -> Launch<'_> {
-        // A spawn request never carries a capability in: the session mints the
-        // job's capability itself and starts the shim with it
-        // ([`spawn_shim_for_client`]). The id is the session's own, not the
-        // caller's: an omitted one was minted when the spawn was answered.
+        // A spawn request never carries a capability in: the session mints the job's capability itself and
+        // starts the shim with it ([`spawn_shim_for_client`]).
         Launch {
             dir: PathBuf::from(&self.dir),
             id: id.to_string(),
@@ -820,9 +713,8 @@ pub async fn start_shim(launch: &Launch<'_>) -> Result<(), String> {
     #[cfg(windows)]
     {
         if let Err(denied) = spawn_shim(launch, true) {
-            // The one case that can refuse a detached child: an enclosing Job
-            // Object without breakaway, which is a call's job. Ask the session,
-            // which is outside it.
+            // The one case that can refuse a detached child: an enclosing Job Object without breakaway,
+            // which is a call's job. Ask the session, which is outside it.
             if let Some(sock) = launch.sock.clone().filter(|sock| !sock.trim().is_empty()) {
                 let args = serde_json::to_value(SpawnRequest::of(launch))
                     .map_err(|error| format!("cannot serialise the spawn request: {error}"))?;
@@ -833,9 +725,8 @@ pub async fn start_shim(launch: &Launch<'_>) -> Result<(), String> {
                     return Ok(());
                 }
             }
-            // No session to help (a bare shell inside some other job): the job
-            // runs inside whatever job the caller had, which is the best that
-            // can be done — and the caller's job is not a call's.
+            // No session to help (a bare shell inside some other job): the job runs inside whatever job
+            // the caller had, which is the best that can be done — and the caller's job is not a call's.
             spawn_shim(launch, false).map_err(|error| format!("{error} ({denied})"))?;
         }
         Ok(())
@@ -846,10 +737,6 @@ pub async fn start_shim(launch: &Launch<'_>) -> Result<(), String> {
     }
 }
 
-/// Start one shim. `escape` asks for a process outside every enclosing job
-/// (`setsid` on Unix, `CREATE_BREAKAWAY_FROM_JOB` on Windows); a Job Object that
-/// does not allow breakaway refuses it, which is exactly what a call's job does
-/// (M4 review F1) and what a harness's may do.
 fn spawn_shim(launch: &Launch<'_>, escape: bool) -> Result<(), String> {
     let mut command = shim_command(launch)?;
     #[cfg(unix)]
@@ -860,14 +747,8 @@ fn spawn_shim(launch: &Launch<'_>, escape: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
-        // `CREATE_NO_WINDOW`, not `DETACHED_PROCESS`: the shim is a console
-        // program, and a detached one leaves its console-subsystem child
-        // (`bash.exe`) to allocate a fresh console — a new `conhost.exe` per
-        // job, which under 40 concurrent starts took seconds instead of a tenth
-        // of one (M4 review round 2, G3). With `CREATE_NO_WINDOW` the shim gets
-        // a console with no window and the child inherits it; the shim is still
-        // outside the session's console and, with the breakaway flag, outside
-        // its Job Object, so it outlives the session exactly as before.
+        // `CREATE_NO_WINDOW`, not `DETACHED_PROCESS`: the shim is a console program, and a detached one leaves
+        // its console-subsystem child (`bash.exe`) to allocate a fresh console — a new `conhost.exe` per job,
         let flags = crate::proc::win::CREATE_NO_WINDOW | crate::proc::win::CREATE_NEW_PROCESS_GROUP;
         command.as_std_mut().creation_flags(if escape {
             flags | crate::proc::win::CREATE_BREAKAWAY_FROM_JOB
@@ -885,25 +766,14 @@ fn spawn_shim(launch: &Launch<'_>, escape: bool) -> Result<(), String> {
         .map_err(|error| format!("cannot start the shim: {error}"))
 }
 
-/// How the session answers a spawn: the id it minted, and nothing else. The
-/// job's capability and signing key go from the session to the shim it starts
-/// (over the shim's stdin pipe) and to nobody else: no verb returns either, so
-/// no tool child, which holds the session token, can ever obtain one (STEER-7
-/// review round 3, B1/B2).
+/// How the session answers a spawn: the id it minted, and nothing else.
 #[derive(Debug, Clone, Serialize)]
 pub struct Spawned {
     pub id: String,
 }
 
-/// The session's half of [`SpawnRequest`]: start the shim for a client and
-/// answer at once (`kelir bg run` waits for the status file; the session must
-/// not block on a job).
-///
-/// The session mints the id, the capability and the key, always: a request
-/// that names an id is refused by `trust::check_spawn`, so there is no way to
-/// ask for an existing job's secrets. Where the job lives (`bg/`, its output
-/// file) is the session's, never the request's. The secrets reach the shim over
-/// an inherited pipe, never an argv or the environment.
+/// The session's half of [`SpawnRequest`]: start the shim for a client and answer at once
+/// (`kelir bg run` waits for the status file; the session must not block on a job).
 pub fn spawn_shim_for_client(
     trust: &crate::trust::Trust,
     spawn: &SpawnRequest,
@@ -929,10 +799,8 @@ pub fn spawn_shim_for_client(
     launch.job = Some(job_name("job", &id));
     launch.key = trust.key(&id);
     launch.capability = Some(capability);
-    // The session can itself be inside a job that forbids breakaway (a test
-    // harness, a scheduler) while the client is in a call's job. Escape it if
-    // the OS allows; otherwise spawn into the session's own job, which is still
-    // outside the *call's* job — which is what this route is for.
+    // The session can itself be inside a job that forbids breakaway (a test harness, a scheduler) while
+    // the client is in a call's job.
     let spawned = match spawn_shim(&launch, true) {
         Ok(()) => Ok(()),
         Err(_) => spawn_shim(&launch, false).map_err(|error| format!("bg-spawn: {error}")),
@@ -1038,11 +906,8 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
         Secrets::default()
     };
     let key = secrets.key.as_deref();
-    // A job's shim holds the signing key for as long as the job lives: close
-    // the process to its own user's ordinary memory reads (Windows; on Unix
-    // `/proc/<pid>/mem` is closed to a non-ptrace-capable sibling by the
-    // kernel's ptrace rules where Yama is on, and by dumpable below).
-    // Every shim that holds a key, whatever `--kind` it was started with.
+    // A job's shim holds the signing key for as long as the job lives: close the process to its own user's
+    // ordinary memory reads (Windows; on Unix `/proc/<pid>/mem` is closed to a non- ptrace-capable sibling
     if key.is_some()
         && let Err(error) = harden_process()
     {
@@ -1068,16 +933,12 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     let mut status = Status::new(&args.id, &args.kind, &args.cmd, &args.out);
     status.call = args.call.clone();
     status.job = args.job.clone();
-    // The shim reads *its own* start time from the OS, in this process: a
-    // reader in another process compares that exact value with what the OS says
-    // about the pid before it signals anything, which is what makes a recycled
-    // pid impossible to mistake for the shim (M4 review round 2, G1).
-    status.shim_started = start_time_text(std::process::id());
+    // The shim reads *its own* start time from the OS, in this process: a reader in another process
+    // compares that exact value with what the OS says about the pid before it signals anything, which is
+    status.shim_started = crate::proc::start_time_text(std::process::id());
 
-    // The Job Object: for a call the session created it and the shim only
-    // opens it (so the tree is in the call's job before the command runs);
-    // for a `kelir bg run` job the shim creates it. Either way the shim keeps
-    // its own handle, which is what lets a promoted job survive the session.
+    // The Job Object: for a call the session created it and the shim only opens it (so the tree is in the
+    // call's job before the command runs); for a `kelir bg run` job the shim creates it.
     #[cfg(windows)]
     let job = {
         let Some(name) = args.job.clone() else {
@@ -1132,17 +993,15 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     let argv: Vec<String> = std::iter::once(args.shell.clone())
         .chain(args.shell_args.iter().cloned())
         .collect();
-    // A long command is written to a file and handed to the shell by name: a
-    // command line past ~8 KB is silently cut on Windows (`shellcmd`), and the
-    // cut looks like success. `cmd` is what the shell actually runs.
+    // A long command is written to a file and handed to the shell by name: a command line past ~8 KB is
+    // silently cut on Windows (`shellcmd`), and the cut looks like success.
     let script_dir = args
         .out
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| dir.clone());
-    // A caller that already wrote the script (the bash call, which had to keep
-    // the shim's own argv short) decided it; otherwise the shim decides from
-    // the command and the shell.
+    // A caller that already wrote the script (the bash call, which had to keep the shim's own
+    // argv short) decided it; otherwise the shim decides from the command and the shell.
     let shell_input = match &script {
         Some(path) => match crate::shellcmd::script_input(path, &args.shell_args) {
             Ok(input) => input,
@@ -1165,18 +1024,12 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
             command.args(&argv[1..]).arg(cmd);
         }
         crate::shellcmd::ShellInput::Script { path, keep_switch } => {
-            // The switch is kept for a shell that needs one even with a file
-            // (`cmd.exe /C <script>`, `pwsh -File <script>`): dropping `/C`
-            // starts an interactive cmd.exe, which runs nothing and exits 0
-            // (STEER-6 review B1). A POSIX shell reads the file from its own
-            // argv, so its `-c` goes.
+            // The switch is kept for a shell that needs one even with a file (`cmd.exe /C <script>`, `pwsh -File
+            // <script>`): dropping `/C` starts an interactive cmd.exe, which runs nothing and exits 0.
             let rest = crate::shellcmd::script_args(&args.shell_args, keep_switch.as_deref(), path);
             command.args(&rest);
-            // A reader of the status file (and the model, in a `bg` report)
-            // gets a reference, never a 40 KB command; `cmd.sh` has the bytes.
-            // Set here and written after the spawn like every other field: an
-            // early write would be the status `bg run` reads first, and it has
-            // no pid yet (a test caught that as "the shim never started").
+            // A reader of the status file (and the model, in a `bg` report) gets a reference, never a 40 KB
+            // command; `cmd.sh` has the bytes.
             status.cmd = crate::util::truncate_chars(args.cmd.trim(), 300);
             status.cmd_path = Some(path_string(path));
         }
@@ -1205,12 +1058,8 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     if let Some(sock) = &args.sock {
         command.env("KELIR_SOCK", sock);
     }
-    // `KELIR_TOKEN` is not copied here: the shim was started with it in its
-    // own environment and the command inherits that environment, so the token
-    // is never in an argv and never written to a status file (STEER-7).
-    // The command inherits the shim's process group on Unix, so the whole tree
-    // dies with one `killpg`; on Windows it is created suspended and assigned
-    // to the job before it can run any of the user's code (M0 review N2).
+    // `KELIR_TOKEN` is not copied here: the shim was started with it in its own environment and the
+    // command inherits that environment, so the token is never in an argv and never written to a status
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
@@ -1250,11 +1099,8 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
             );
             return 1;
         }
-        // A `kelir bg run` job outlives everything by definition: let the
-        // command hold the job handle too, so the job's name survives the shim
-        // and `cancel` can still open it after the shim is killed (M4 review
-        // round 2, G2). A call gets the same handle at promotion, never before:
-        // until then its job must stay kill-on-close (M4 review F6).
+        // A `kelir bg run` job outlives everything by definition: let the command hold the job handle too, so
+        // the job's name survives the shim and `cancel` can still open it after the shim is killed,
         if args.kind == KIND_JOB
             && let Err(error) = job.lend_to(pid)
         {
@@ -1262,11 +1108,9 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
         }
     }
     status.pid = Some(pid);
-    // The command's own start time, read here once: `cancel` uses it to prove
-    // that the pid it walks a lost job's tree from is the command, not its
-    // recycled pid (M4 review round 2, G2). It is read while the command is
-    // still suspended on Windows, which the kernel answers like any other.
-    status.pid_started = start_time_text(pid);
+    // The command's own start time, read here once: `cancel` uses it to prove that the pid it walks a lost
+    // job's tree from is the command, not its recycled pid.
+    status.pid_started = crate::proc::start_time_text(pid);
     if let Err(error) = status.write_with(&status_path(&dir, &args.id), key) {
         eprintln!("kelir bg-shim: cannot write the status file: {error}");
     }
@@ -1282,9 +1126,8 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
         .await;
     }
 
-    // The owner watch: a session that dies without promoting this call must
-    // not leave the tree behind. Promotion sets the marker and the shim keeps
-    // running on its own.
+    // The owner watch: a session that dies without promoting this call must not leave the tree
+    // behind. Promotion sets the marker and the shim keeps running on its own.
     let owner = Owner::new(args.owner);
     let mut promoted = false;
     let status_file = status_path(&dir, &args.id);
@@ -1298,13 +1141,7 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
                 eprintln!("kelir bg-shim: cannot write the status file: {error}");
             }
             if !promoted {
-                // The command is gone, but it may have left a child behind
-                // (`cmd &`). On Unix the shim *is* the tree's group leader, so
-                // staying until the group is empty is what lets the session's
-                // death — even a `SIGKILL` — take those children with it (M4
-                // review F6). A promoted job belongs to nobody and is left
-                // alone; on Windows the job object's kill-on-close does the
-                // same work with no process to keep.
+                // The command is gone, but it may have left a child behind (`cmd &`).
                 linger(&owner);
             }
             return 0;
@@ -1317,10 +1154,8 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
             if let Err(error) = status.write_with(&status_file, key) {
                 eprintln!("kelir bg-shim: cannot write the status file: {error}");
             }
-            // The tree is ours now. Let the command hold the job handle so the
-            // job's name outlives this shim: a lost job is only reachable by
-            // name, and the name dies with its last handle (M4 review round 2,
-            // G2).
+            // The tree is ours now. Let the command hold the job handle so the job's name outlives this
+            // shim: a lost job is only reachable by name, and the name dies with its last handle.
             #[cfg(windows)]
             if let Some(job) = &job
                 && let Err(error) = job.lend_to(pid)
@@ -1331,9 +1166,8 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
             let _ = pid;
         }
         if !promoted && owner.gone() {
-            // The session that owns this call is gone and never promoted it:
-            // take the tree down, as the session would have. The status goes
-            // first, because on Unix the kill includes this process.
+            // The session that owns this call is gone and never promoted it: take the tree down, as the
+            // session would have. The status goes first, because on Unix the kill includes this process.
             status.state = STATE_CANCELLED.into();
             status.finished = Some(crate::event::now_ts());
             status.error = Some("the session exited".into());
@@ -1345,9 +1179,8 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     }
 }
 
-/// Make this process's memory unreadable to other processes of the same user,
-/// as far as the platform allows. Best effort: a failure is a note on stderr,
-/// not a reason to not run the job.
+/// Make this process's memory unreadable to other processes of the same user, as far as the platform
+/// allows.
 pub fn harden_process() -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -1370,10 +1203,7 @@ pub fn harden_process() -> Result<(), String> {
     }
 }
 
-/// What the starter wrote down the shim's stdin pipe: the signing key and the
-/// capability, one per line. Held only in this process; overwritten when the
-/// shim ends. (A process of the same user that can read this process's memory
-/// can read them while the shim lives: see SPEC, "what the boundary is".)
+/// What the starter wrote down the shim's stdin pipe: the signing key and the capability, one per line.
 #[derive(Default)]
 struct Secrets {
     key: Option<String>,
@@ -1411,16 +1241,8 @@ fn read_secrets() -> Secrets {
     Secrets { key, capability }
 }
 
-/// The command has exited; stay as the tree's owner while the tree still has a
-/// process in it, so the owner's death can take those leftovers down with one
-/// `killpg`. Exits immediately when nothing is left (the common case), and on
-/// platforms where the group cannot be counted it does not linger at all.
-///
-/// The owner check is a `getppid()` (one cheap syscall, kept at [`POLL`]); the
-/// group count is a walk of `/proc` (one `stat` read per process) and is what
-/// used to cost a quarter of a core per lingering shim, so it backs off from
-/// 25 ms to [`LINGER_MAX`] while the group stays non-empty (M4 review round 2,
-/// G4). A session killed at any moment is still noticed within [`POLL`].
+/// The command has exited; stay as the tree's owner while the tree still has a process in it, so the
+/// owner's death can take those leftovers down with one `killpg`.
 #[cfg(target_os = "linux")]
 fn linger(owner: &Owner) {
     // A `kelir bg run` job has no owner to watch: nothing to protect it from,
@@ -1454,16 +1276,12 @@ fn linger(owner: &Owner) {
     }
 }
 
-/// The longest a lingering shim waits between looks at its process group.
 #[cfg(target_os = "linux")]
 pub const LINGER_MAX: Duration = Duration::from_secs(1);
 
 #[cfg(not(target_os = "linux"))]
 fn linger(_owner: &Owner) {}
 
-/// The session a shim answers to. Unix asks the kernel who its parent is (an
-/// orphan is reparented the instant the session dies); Windows waits on the
-/// session's process handle, so there is no polling lag at all.
 struct Owner {
     pid: Option<u32>,
     #[cfg(windows)]
@@ -1524,9 +1342,8 @@ fn kill_tree(pid: u32, job: &Option<String>) {
     cfg_select! {
         unix => {
             let _ = job;
-            // The shim leads the group; the command inherited it, so this is the
-            // whole tree — including the shim itself. Never signal group 0: that
-            // would include the agents running the tests.
+            // The shim leads the group; the command inherited it, so this is the whole tree — including
+            // the shim itself. Never signal group 0: that would include the agents running the tests.
             if pid == 0 {
                 return;
             }
@@ -1579,11 +1396,8 @@ async fn run(args: BgRunArgs) -> u8 {
         }
     };
     let dir = root();
-    // With a session, the session starts the shim and mints everything the
-    // job is trusted with (id, capability, signing key): none of it is ever
-    // returned to this process, which is a tool child (STEER-7 review round 3).
-    // Without one (a bare shell) the job is a local record and this process
-    // starts the shim itself.
+    // With a session, the session starts the shim and mints everything the job is trusted with (id,
+    // capability, signing key): none of it is ever returned to this process, which is a tool child.
     let id = if let Some(sock) = session_socket() {
         let spawn = SpawnRequest {
             dir: path_string(&dir),
@@ -1681,9 +1495,8 @@ async fn run(args: BgRunArgs) -> u8 {
     }
 }
 
-/// Ask the session to start this job's shim. The answer is the job's id and
-/// nothing else: the session keeps the capability and the signing key and gives
-/// them to the shim it starts.
+/// Ask the session to start this job's shim. The answer is the job's id and nothing else: the
+/// session keeps the capability and the signing key and gives them to the shim it starts.
 async fn spawned_by_session(sock: &str, spawn: &SpawnRequest) -> Result<String, String> {
     let args = serde_json::to_value(spawn)
         .map_err(|error| format!("cannot serialise the spawn request: {error}"))?;
@@ -1710,19 +1523,15 @@ fn session_socket() -> Option<String> {
         .filter(|sock| !sock.is_empty())
 }
 
-/// Tell the session about a job over its socket, so it records `bg_started`
-/// straight away instead of noticing the file on its next poll. Best effort:
-/// a session that is gone, busy or not there is what the poller and `resume`
-/// are for.
+/// Tell the session about a job over its socket, so it records `bg_started` straight away instead of
+/// noticing the file on its next poll.
 async fn notify(status: &Status, sock: &str, capability: Option<&str>) {
     let args = match serde_json::to_value(status) {
         Ok(args) => args,
         Err(_) => return,
     };
-    // `request_value` adds `KELIR_TOKEN` when the request has none (STEER-7):
-    // a report without it is refused by the session's socket. The capability is
-    // this job's own — the one the session minted for it a moment ago — and is
-    // the half that proves the report is this job's shim's and nobody else's.
+    // `request_value` adds `KELIR_TOKEN` when the request has none: a report without it is refused by the
+    // session's socket.
     let capability = capability.map(str::to_string);
     let request = crate::ipc::Request::new("bg", args, "job").with_capability(capability);
     let _ = crate::ipc::request_value(sock.trim(), &request).await;
@@ -1741,15 +1550,7 @@ async fn await_first(dir: &Path, id: &str, timeout: Duration) -> Option<Status> 
     }
 }
 
-/// The command line the shell is given, from the words on `kelir bg run`'s own
-/// command line (M4 review F3).
-///
-/// One word is a command line as written: it may hold shell syntax
-/// (`kelir bg run 'sleep 5 && echo done'`). Several words are **literal
-/// arguments**, each quoted, so the boundaries the caller wrote survive:
-/// `kelir bg run printf "[%s]" "a b" c` runs `printf '[%s]' 'a b' c` and prints
-/// `[a b][c]`, not `[a][b][c]`. Shell syntax belongs in one quoted word, which
-/// is how every other tool that takes a command line works.
+/// The command line the shell is given, from the words on `kelir bg run`'s own command line.
 pub fn command_line(words: &[String]) -> String {
     if words.len() == 1 {
         return words[0].clone();
@@ -1832,9 +1633,7 @@ fn out(args: BgOutArgs) -> u8 {
     }
 }
 
-/// `--follow`: print the file as it grows, and stop once the job settled and
-/// nothing new arrived. Only the bytes past the offset are read, so following a
-/// job that writes a lot costs the same as following a quiet one (M4 review N1).
+/// `--follow`: print the file as it grows, and stop once the job settled and nothing new arrived.
 fn follow(path: &Path, status_file: &Path, dir: &Path) -> u8 {
     use std::io::{Read as _, Seek as _, Write as _};
     let mut offset = 0u64;
@@ -1923,7 +1722,7 @@ async fn wait(args: BgWaitArgs) -> u8 {
         tokio::time::sleep(Duration::from_millis(50)).await;
         status = match Status::read(&status_path(&dir, &args.id)) {
             // A shim that died while we waited is not a job that runs for ever
-            // (M4 review F4) — unless a `cancel` is in flight for it.
+            // — unless a `cancel` is in flight for it.
             Some(status) => observed_in(&dir, &status),
             None => {
                 eprintln!("kelir: bg wait: the status file of {} vanished", args.id);
@@ -1933,16 +1732,7 @@ async fn wait(args: BgWaitArgs) -> u8 {
     }
 }
 
-/// `cancel`: take the job's whole tree down and record it. The shim is the only
-/// writer of a status file while it lives; it is confirmed gone (or already
-/// finished) before `cancelled` is written, so the two can never interleave.
-///
-/// Nothing is signalled on the strength of a status file alone: the pid is
-/// checked against the start time the *shim recorded for itself*, so a status
-/// that outlived its shim (a reboot, `taskkill /F`) cannot make kelir kill
-/// whatever inherited the pid (M4 review F5, and G1 of the round-2 review: the
-/// old check compared against the job's `started`, with two minutes of slack).
-/// A job whose shim is gone is `lost`, and [`stop_lost`] still reaches its tree.
+/// `cancel`: take the job's whole tree down and record it.
 pub async fn cancel(id: &str) -> u8 {
     let Some((dir, _status)) = find(id) else {
         eprintln!("kelir: no background job `{id}`");
@@ -1953,7 +1743,7 @@ pub async fn cancel(id: &str) -> u8 {
 }
 
 /// Where `cancel`'s sentences go: a human's terminal (`kelir bg cancel`), or the
-/// session's reply (`cancel` as a verb, STEER-7).
+/// session's reply (`cancel` as a verb,).
 trait CancelOut {
     fn line(&mut self, text: String);
     fn fail(&mut self, text: String);
@@ -1988,9 +1778,7 @@ async fn cancel_at(dir: &Path, id: &str, key: Option<&str>, out: &mut dyn Cancel
         ));
         return 0;
     }
-    // Only a pid that is provably the shim is signalled. `observed` has already
-    // turned every other answer into `lost`; this is the platform that cannot
-    // prove anything, and it is refused rather than guessed (G1).
+    // Only a pid that is provably the shim is signalled.
     if shim_identity(&status) != ShimIdentity::Same {
         out.fail(format!(
             "{}: this platform cannot report process start times, so pid {} cannot be proved to \
@@ -2000,11 +1788,8 @@ async fn cancel_at(dir: &Path, id: &str, key: Option<&str>, out: &mut dyn Cancel
         ));
         return 1;
     }
-    // From here until the `cancelled` status is written the status file still
-    // says `running` with a dead shim; any reader in that window would call the
-    // job `lost` (the session's watcher did, and the log said so — STEER-7).
-    // The marker says "a cancel is in flight", and the guard removes it on
-    // every way out, including the ones that change nothing.
+    // From here until the `cancelled` status is written the status file still says `running` with a dead
+    // shim; any reader in that window would call the job `lost` (the session's watcher did, and the log
     let _marker = CancelMarker::write(dir, &status.id);
     kill_tree(status.shim.or(status.pid).unwrap_or(0), &status.job);
     #[cfg(windows)]
@@ -2013,7 +1798,7 @@ async fn cancel_at(dir: &Path, id: &str, key: Option<&str>, out: &mut dyn Cancel
     }
     let deadline = std::time::Instant::now() + CANCEL_WAIT;
     while let Some(shim) = status.shim {
-        if !process_alive(shim) || std::time::Instant::now() >= deadline {
+        if !crate::proc::alive(shim) || std::time::Instant::now() >= deadline {
             break;
         }
         tokio::time::sleep(POLL).await;
@@ -2061,10 +1846,8 @@ impl Drop for CancelMarker {
     }
 }
 
-/// The session's `cancel` verb: the same kill, in *this session's* `bg/`, with
-/// the answer as a sentence (the client's `kelir ctl` prints it). Never a
-/// search across sessions: the caller has already proved the job is this
-/// session's own (STEER-7), so only its own `bg/` is looked at.
+/// The session's `cancel` verb: the same kill, in *this session's* `bg/`, with the answer as a sentence
+/// (the client's `kelir ctl` prints it).
 pub async fn cancel_in(dir: &Path, id: &str, key: Option<&str>) -> Result<String, String> {
     if !crate::trust::valid_job_id(id) {
         return Err(format!("`{id}` is not a job id"));
@@ -2108,12 +1891,8 @@ impl CancelOut for Sink {
     }
 }
 
-/// A job whose shim is gone is `lost`: its status file will never be written
-/// again, but its tree may still be running (the shim was killed with the job
-/// mid-flight). `cancel` reaches it by what the status *proves*: the shim's
-/// process group on Unix, the job object's name or a walk from the command's
-/// own pid on Windows. When nothing can be proved it says exactly what it could
-/// not do, and signals nothing (M4 review round 2, G2).
+/// A job whose shim is gone is `lost`: its status file will never be written again, but its tree may
+/// still be running (the shim was killed with the job mid-flight).
 #[cfg(unix)]
 fn stop_lost(status: &Status, out: &mut dyn CancelOut) -> u8 {
     let Some(shim) = status.shim.filter(|pid| *pid != 0) else {
@@ -2125,7 +1904,7 @@ fn stop_lost(status: &Status, out: &mut dyn CancelOut) -> u8 {
     };
     // A live process with the shim's pid that is not the shim is a recycled
     // pid: its group is somebody else's.
-    if process_alive(shim) && shim_identity(status) != ShimIdentity::Same {
+    if crate::proc::alive(shim) && shim_identity(status) != ShimIdentity::Same {
         out.fail(format!(
             "{} is lost and pid {shim} now belongs to another process; nothing was signalled",
             status.id
@@ -2134,9 +1913,8 @@ fn stop_lost(status: &Status, out: &mut dyn CancelOut) -> u8 {
     }
     match crate::proc::group_members(shim) {
         Some(members) if !members.is_empty() => {
-            // The group is led by the dead shim's pid; a pid number cannot be
-            // reused while a group with that number still has a member, so this
-            // group is the job's tree and nothing else's.
+            // The group is led by the dead shim's pid; a pid number cannot be reused while a group with
+            // that number still has a member, so this group is the job's tree and nothing else's.
             kill_tree(shim, &status.job);
             out.line(format!(
                 "{} lost (its shim is gone; stopped the {} process(es) still in its group)",
@@ -2175,9 +1953,8 @@ fn stop_lost(status: &Status, out: &mut dyn CancelOut) -> u8 {
         ));
         return 0;
     }
-    // Then the command's own pid, proved by the start time the shim recorded:
-    // the job object's name died with its last handle, but the tree is still
-    // there and its parent links say which processes it holds.
+    // Then the command's own pid, proved by the start time the shim recorded: the job object's name died
+    // with its last handle, but the tree is still there and its parent links say which processes it holds.
     match pid_identity(status) {
         ShimIdentity::Same => {
             let pid = status.pid.unwrap_or(0);
@@ -2223,30 +2000,6 @@ fn stop_lost(status: &Status, out: &mut dyn CancelOut) -> u8 {
         status.id
     ));
     1
-}
-
-#[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
-    // `kill(0, …)` signals the caller's own process group, so pid 0 is not a
-    // process here: no status names the shim as 0, and asking must not answer
-    // "alive" for "my own group".
-    if pid == 0 {
-        return false;
-    }
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-}
-
-#[cfg(windows)]
-fn process_alive(pid: u32) -> bool {
-    match crate::proc::win::OwnerWatch::open(pid) {
-        Some(watch) => !watch.gone(),
-        None => false,
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn process_alive(_pid: u32) -> bool {
-    false
 }
 
 /// The `bg_started`/`bg_settled` payloads for the log, from a status file.
@@ -2486,8 +2239,6 @@ mod tests {
         assert!(marker.exists());
     }
 
-    /// One word is a command line as written; several are literal arguments
-    /// whose boundaries survive (M4 review F3).
     #[test]
     fn bg_run_keeps_the_boundaries_the_caller_wrote() {
         let line =
@@ -2506,11 +2257,8 @@ mod tests {
         assert_eq!(line(&["nc", "-l", "8080"]), "nc -l 8080");
     }
 
-    /// A `cancel` in flight is not a lost job (STEER-7): between the kill and
-    /// the `cancelled` status the shim is dead and the file still says
-    /// `running`, so every reader has to be told what is happening. The
-    /// session's own watcher recorded `lost` for a job a test had just
-    /// cancelled, which is how this was found.
+    /// A `cancel` in flight is not a lost job: between the kill and the `cancelled` status the shim is dead
+    /// and the file still says `running`, so every reader has to be told what is happening.
     #[test]
     fn a_cancel_in_flight_is_not_a_lost_job() {
         let dir = temp_dir("cancelling");
@@ -2559,7 +2307,7 @@ mod tests {
     }
 
     /// A job whose shim is gone is never reported as running for ever: the
-    /// status file is left alone and the reader says `lost` (M4 review F4).
+    /// status file is left alone and the reader says `lost`.
     #[test]
     fn a_running_status_with_no_shim_is_lost() {
         let mut status = sample();
@@ -2576,16 +2324,15 @@ mod tests {
         assert_eq!(status.observed().state, STATE_EXITED);
     }
 
-    /// The identity check itself: a status is only the shim's when it records
-    /// the shim's **own** start time. A pid whose process started at another
-    /// time is somebody else, however close the job's `started` is.
+    /// The identity check itself: a status is only the shim's when it records the shim's **own** start
+    /// time.
     #[test]
     fn a_status_is_matched_with_its_own_process_not_just_its_pid() {
         let me = std::process::id();
-        let mine = start_time_text(me);
+        let mine = crate::proc::start_time_text(me);
         // Where the platform cannot report a start time (macOS) identity falls
         // back to liveness: `NoPlatform`, never `Same`.
-        let recorded = if start_time_text(me).is_some() {
+        let recorded = if crate::proc::start_time_text(me).is_some() {
             ShimIdentity::Same
         } else {
             ShimIdentity::NoPlatform
@@ -2598,9 +2345,6 @@ mod tests {
         assert_eq!(status.observed().state, STATE_RUNNING);
 
         // The process is ours, but the status does not say when it started.
-        // On macOS `identity` returns `NoPlatform` before it ever looks at the
-        // record: without a platform start time it cannot compare one. Where
-        // start times exist, the missing record must still say `NoRecord`.
         status.shim_started = None;
         assert_eq!(
             shim_identity(&status),
@@ -2627,8 +2371,7 @@ mod tests {
             status.started = crate::event::now_ts();
             assert_eq!(shim_identity(&status), ShimIdentity::Different);
             assert_eq!(status.observed().state, STATE_LOST);
-            // Five minutes of job lifetime used to be inside the tolerance:
-            // the answer must not depend on `started` at all.
+            // Identity never depends on `started` once the shim is gone.
             status.started = (time::OffsetDateTime::now_utc() - time::Duration::seconds(45))
                 .format(&time::format_description::well_known::Rfc3339)
                 .unwrap();
@@ -2643,13 +2386,13 @@ mod tests {
     }
 
     /// The command's own record is what `cancel` proves a lost job's tree by:
-    /// without it, nothing is signalled (M4 review round 2, G1/G2).
+    /// without it, nothing is signalled.
     #[test]
     fn a_command_pid_is_only_trusted_with_its_own_start_time() {
         let me = std::process::id();
         let mut status = sample();
         status.pid = Some(me);
-        status.pid_started = start_time_text(me);
+        status.pid_started = crate::proc::start_time_text(me);
         // macOS cannot report a process start time, so a live pid is only
         // `NoPlatform` there; Windows and Linux still have to prove `Same`.
         let recorded = if crate::proc::start_time(me).is_some() {
@@ -2669,9 +2412,8 @@ mod tests {
                 ShimIdentity::NoPlatform
             }
         );
-        // Without a record there is nothing to compare on platforms that can
-        // report start times; on macOS `NoPlatform` is decided first, even
-        // with no record. A pid of 0 is always `NoRecord`, on every OS.
+        // Without a record there is nothing to compare on platforms that can report start times; on macOS
+        // `NoPlatform` is decided first, even with no record.
         status.pid_started = None;
         assert_eq!(
             pid_identity(&status),

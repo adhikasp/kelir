@@ -1,19 +1,12 @@
 //! Continuing a session from its log.
-//!
-//! `resume` never replays a tool call. A call the log shows as requested (an
-//! assistant message's `tool_calls`) or started (`tool_started`) but never
-//! settled gets one synthetic `tool_settled` whose result tells the model the
-//! outcome is unknown, so it can check rather than repeat a `rm -rf`.
-//!
-//! The same code answers two questions before the log is touched: was a turn in
-//! flight when the process died, and what damage does the log carry (a torn
-//! last line from a crash mid-write)?
+//! `resume` never replays a tool call.
+//! A call the log shows as requested (an assistant message's `tool_calls`) or started
+//! (`tool_started`) but never settled gets one synthetic `tool_settled` whose result tells the
+//! model the outcome is unknown, so it can check rather than repeat a `rm -rf`.
 
 use crate::event::{EventBody, LogEvent, LogRead};
 
 /// What the model is told about a call that was started but never settled.
-///
-/// The second sentence is the point: a naive replay re-runs the command.
 pub const UNKNOWN_RESULT: &str = "unknown outcome: kelir was interrupted while this call was \
 running; it may or may not have completed. Check before retrying.";
 
@@ -27,9 +20,6 @@ pub struct UnsettledCall {
 }
 
 /// The calls left without a result, in the order the model asked for them.
-///
-/// Ids are paired by occurrence, not by value: some providers send `call_0`
-/// again every step, and a settled `call_0` must not hide a later one.
 pub fn unsettled(events: &[LogEvent]) -> Vec<UnsettledCall> {
     let mut open: Vec<UnsettledCall> = Vec::new();
     for event in events {
@@ -90,16 +80,6 @@ pub fn turn_in_flight(events: &[LogEvent]) -> bool {
         })
 }
 
-/// Does a resume have a turn to continue?
-///
-/// Either a turn was running when the log stopped (no `turn_ended` after its
-/// last step), the last turn ended `stopped`, `paused` or `error` (SPEC's
-/// `resume` continues a stopped or crashed session, and a provider outage is
-/// the commonest reason to try again — M3 review S1; a turn an explicit
-/// `max_steps` cap paused is continued the same way), or the process never
-/// closed the log with `session_ended` — a kill between two turns is still an
-/// interrupted session. A log whose last turn ended `done` and was closed
-/// continues only when the caller passes a new task.
 pub fn interrupted(events: &[LogEvent]) -> bool {
     if turn_in_flight(events) {
         return true;
@@ -150,9 +130,8 @@ pub fn turns_done(events: &[LogEvent]) -> u32 {
         .count() as u32
 }
 
-/// One message per piece of log damage, for the `error` events a resume writes.
-/// A torn last line and a line that never parsed are skipped, never dropped
-/// silently.
+/// One message per piece of log damage, for the `error` events a resume writes. A torn last
+/// line and a line that never parsed are skipped, never dropped silently.
 pub fn log_damage(read: &LogRead) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(torn) = &read.torn_last {
@@ -399,10 +378,7 @@ mod tests {
                 reason: "end".into(),
             },
         ));
-        assert!(
-            interrupted(&stopped),
-            "SPEC: resume continues a stopped session (M3 review S1)"
-        );
+        assert!(interrupted(&stopped), "resume continues a stopped session");
         let mut failed = ended_with("error");
         failed.push(LogEvent::new(
             4,
@@ -424,7 +400,7 @@ mod tests {
         assert!(!interrupted(&done), "a finished session waits for a task");
         assert_eq!(last_turn_outcome(&done).as_deref(), Some("done"));
         assert_eq!(last_turn_outcome(&[]), None);
-        // STEER-4: an explicit cap pauses a turn; a resume continues it like a
+        // : an explicit cap pauses a turn; a resume continues it like a
         // stopped one.
         let mut paused = ended_with("paused");
         paused.push(LogEvent::new(

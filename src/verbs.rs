@@ -1,10 +1,8 @@
 //! Verbs: what a human, a script or a gate can do to a running session.
-//!
 //! A verb arrives as `{"verb": "say", "args": {…}}` (the socket, `kelir ctl`).
-//! The session logs it as a `verb` event and then applies it at **one named
-//! boundary**, never in the middle of a tool call. [`Scheduler`] is the pure
-//! state machine that answers "which verbs are due now?"; the loop only has to
-//! run them.
+//! The session logs it as a `verb` event and then applies it at **one named boundary**, never in
+//! the middle of a tool call.
+//! [`Scheduler`] is the pure state machine that answers "which verbs are due now?"; the loop only
 
 use serde_json::{Value, json};
 
@@ -36,7 +34,6 @@ impl Boundary {
     }
 }
 
-/// A validated verb.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verb {
     Say {
@@ -73,41 +70,29 @@ pub enum Verb {
         /// The text, inline: what a test or a script sends.
         text: Option<String>,
     },
-    /// `view <path>`: queue an image for the model's next message. It lands as
-    /// a `source` event (kind `attachment`) at the tail, never as an edit to an
-    /// earlier message, so the cached prefix stays byte-identical.
+    /// `view <path>`: queue an image for the model's next message.
     View {
         /// The image as named (a path, resolved against the session dir and
         /// then the cwd).
         path: String,
     },
-    /// A job reported itself or changed state: `kelir bg run` sends this over
-    /// the session socket, and the session's own watcher sends the same thing
-    /// for a job that settled. It is bookkeeping, so it applies at the first
-    /// boundary it can get (and immediately when the session is idle); the wake
-    /// message it records is the one that starts a turn.
+    /// A job reported itself or changed state: `kelir bg run` sends this over the session socket, and the
+    /// session's own watcher sends the same thing for a job that settled.
     Bg(Box<crate::bg::Status>),
-    /// `cancel <id>`: kill one of this session's background jobs and record it
-    /// `cancelled` (STEER-7). A job id the session did not start is refused
-    /// before it gets here.
+    /// `cancel <id>`: kill one of this session's background jobs and record it `cancelled`. A job
+    /// id the session did not start is refused before it gets here.
     Cancel {
         id: String,
     },
-    /// `brief <question>`: a side question as a child on a by-value snapshot of
-    /// the session (M7). The session answers it where it arrives (the answer is
-    /// the child's, so it waits), and the history is untouched.
+    /// `brief <question>`: a side question as a child on a by-value snapshot of the session.
     Brief {
         question: String,
     },
-    /// A child of this session settled (or the root reaped it): the session's
-    /// own bookkeeping, raised by the task that waited for it. It applies at the
-    /// first boundary; the wake-up message for a background child is what it
-    /// writes.
+    /// A child of this session settled (or the root reaped it): the session's own bookkeeping, raised by
+    /// the task that waited for it.
     Child(Box<crate::child::ChildNote>),
     End,
-    /// `status`: read-only. The session answers it where it is read (it never
-    /// queues, never logs and never waits for a boundary), so this variant only
-    /// exists to name the verb and its scope.
+    /// `status`: read-only.
     Status,
 }
 
@@ -133,15 +118,11 @@ impl Verb {
         }
     }
 
-    /// Is this verb an *action* rather than a message? An action does its work
-    /// and starts nothing: a `cancel` kills a job and must still be applied when
-    /// no boundary will ever come (an idle session), and it must never be
-    /// dropped where messages are taken out of the queue (STEER-7).
+    /// Is this verb an *action* rather than a message?
     pub fn is_action(&self) -> bool {
         matches!(self, Verb::Cancel { .. })
     }
 
-    /// Does it apply at this boundary?
     pub fn applies_at(&self, boundary: Boundary) -> bool {
         match self {
             // `say`, `stop`, `cancel` and a job's own report take the first
@@ -154,9 +135,8 @@ impl Verb {
             | Verb::Child(..)
             | Verb::Status
             | Verb::Cancel { .. } => true,
-            // An attachment applies at the next boundary, like a `say` that
-            // opens a turn: it is a message, and it must not land in a tool
-            // batch.
+            // An attachment applies at the next boundary, like a `say` that opens a turn: it is a
+            // message, and it must not land in a tool batch.
             Verb::View { .. } => boundary == Boundary::BeforeStep,
             Verb::Later { .. } => boundary == Boundary::TurnEnd,
             Verb::Model { .. }
@@ -167,7 +147,6 @@ impl Verb {
     }
 }
 
-/// A verb waiting for its boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pending {
     /// The `verb` event's seq: the log order, and the order they apply in.
@@ -218,10 +197,6 @@ impl Scheduler {
     }
 
     /// Take the pending verbs `keep` selects, leaving the rest in order.
-    ///
-    /// A `cancel` is an action, not a message: it must not start a turn and it
-    /// must not be dropped where verbs leave the queue without a boundary
-    /// (STEER-7).
     pub fn take_where(&mut self, mut keep: impl FnMut(&Verb) -> bool) -> Vec<Pending> {
         let mut taken = Vec::new();
         let mut rest = Vec::with_capacity(self.pending.len());
@@ -340,9 +315,8 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
         "compact" => Ok(Verb::Compact {
             focus: string_arg(args, "focus").filter(|focus| !focus.trim().is_empty()),
         }),
-        // A job's status file, as sent by `kelir bg run` or the session's own
-        // watcher. The parser is strict: a malformed report is refused and
-        // nothing is recorded.
+        // A job's status file, as sent by `kelir bg run` or the session's own watcher. The parser is
+        // strict: a malformed report is refused and nothing is recorded.
         "bg" => {
             let status: crate::bg::Status = serde_json::from_value(args.clone())
                 .map_err(|error| format!("bg: not a job status: {error}"))?;
@@ -351,9 +325,8 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
             }
             Ok(Verb::Bg(Box::new(status)))
         }
-        // `cancel <id>`: kill one of this session's jobs. Whether the id is
-        // this session's own is checked before parsing (`trust::check_job`), so
-        // a refusal is recorded with its reason.
+        // `cancel <id>`: kill one of this session's jobs. Whether the id is this session's own is
+        // checked before parsing (`trust::check_job`), so a refusal is recorded with its reason.
         "cancel" => Ok(Verb::Cancel {
             id: cancel_id(args)?,
         }),
@@ -363,12 +336,7 @@ pub fn parse(name: &str, args: &Value) -> Result<Verb, String> {
     }
 }
 
-/// The part of a request's `args` that may be written to the log. A whitelist
-/// per verb, never "whatever came in": a request is written by a process that
-/// holds the session token, and an unknown field (or an `env`, a `token`, a
-/// `key`) must not reach `events.jsonl`, which is quoted, resumed and shared
-/// (STEER-7 review round 4, B1). `bg-spawn` is logged as a count and two
-/// directories ([`spawn_log_args`]); an unknown verb logs no arguments.
+/// The part of a request's `args` that may be written to the log.
 pub fn loggable_args(name: &str, args: &Value) -> Value {
     let keep: &[&str] = match name {
         "say" => &["text", "now"],
@@ -411,8 +379,6 @@ pub fn loggable_args(name: &str, args: &Value) -> Value {
 }
 
 /// What a `bg-spawn` leaves in the log: the verb's shape, never its content.
-/// No `env`, no `token`, no `cmd` (a command line can carry a secret), only
-/// where the job would live, where it would run and how many variables came.
 pub fn spawn_log_args(args: &Value) -> Value {
     let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("");
     json!({
@@ -449,9 +415,6 @@ pub struct CliFlags {
 }
 
 /// Build a request's `args` from the `kelir ctl` command line.
-///
-/// A single positional that parses as a JSON object is the args verbatim; the
-/// flags are then merged over it. Otherwise the positional words are text.
 pub fn cli_args(verb: &str, words: &[String], flags: &CliFlags) -> Result<Value, String> {
     let mut args = match json_object(words) {
         Some(object) => object,
@@ -468,7 +431,7 @@ pub fn cli_args(verb: &str, words: &[String], flags: &CliFlags) -> Result<Value,
                     args
                 }
                 "model" if !text.trim().is_empty() => json!({"model": text}),
-                // `kelir ctl <session> cancel <id>` (STEER-7): the id is the
+                // `kelir ctl <session> cancel <id>`: the id is the
                 // one positional word.
                 "cancel" if !text.trim().is_empty() => json!({"id": text}),
                 "compact" if !text.trim().is_empty() => json!({"focus": text}),
@@ -695,9 +658,8 @@ mod tests {
         assert!(parse("tools", &json!({"disable": "mcp:a b"})).is_err());
     }
 
-    /// The job report is a verb so that it arrives through the same channel as
-    /// everything else (the socket, or the session's own watcher) and is logged
-    /// like everything else.
+    /// The job report is a verb so that it arrives through the same channel as everything else
+    /// (the socket, or the session's own watcher) and is logged like everything else.
     #[test]
     fn a_job_status_is_a_verb_that_applies_at_the_first_boundary() {
         let status = crate::bg::Status {

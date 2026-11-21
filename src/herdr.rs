@@ -1,28 +1,7 @@
 //! Herdr's agent status: one OSC 7501 record per status change.
-//!
-//! Herdr (the desktop app whose terminals run in `herdr-core`) shows a pane's
-//! agent state from what the program writes to its terminal. The record this
-//! Herdr accepts is exactly
-//!
-//! ```text
-//! ESC ] 7 5 0 1 ; s t a t e = <word> ESC \
-//! ```
-//!
-//! and nothing else: any extra `;key=value` pair (`app`, `id`, `msg`, `title`,
-//! …), a trailing `;`, or another separator makes the whole record invalid and
-//! the pane's `status` stays `null`. That was measured, not assumed: see
-//! `scripts/live/m2_osc_probe.py`, and `hc get <pane>` on `hc 0.1.21` with the
-//! live drive in `scripts/live/m2_status_check.sh`. M2's first writer carried
-//! `app=kelir`, `id=<session>` and a base64 `msg`; this Herdr ignored every
-//! one of those, so kelir's panes never showed a status at all (the M2 review's
-//! B1). DEVIATIONS records what is lost with them.
-//!
-//! States: `idle`, `working`, `done`, `error`, and `blocked` for a turn paused
-//! on an explicit step cap — that is a turn waiting for a human to say
-//! `continue`, the one case where kelir does wait on one. A `paused` word would
-//! be clearer, but this Herdr does not know it: it accepts `blocked` and
-//! silently drops any other word (`scripts/live/m2_osc_probe.py`, measured
-//! 2026-11-19, status stayed `null` for `state=paused`, `state=waiting`).
+//! Herdr (the desktop app whose terminals run in `herdr-core`) shows a pane's agent state
+//! from what the program writes to its terminal.
+//! The record this Herdr accepts is exactly
 
 use std::io::{IsTerminal as _, Write};
 
@@ -54,10 +33,6 @@ impl State {
     }
 }
 
-/// One status record, as the bytes written to the terminal.
-///
-/// This is the only record kelir sends. Do not add a key: Herdr 0.1.21 drops
-/// the whole record when it sees one.
 pub fn record(state: State) -> String {
     let mut out = String::from(OSC_7501);
     out.push_str("state=");
@@ -66,13 +41,11 @@ pub fn record(state: State) -> String {
     out
 }
 
-/// One terminal-title record (OSC 0), so a Herdr pane/tab names the session
-/// the way the facts row does. The tab-titles mod reads the pane's own title;
-/// this is the one source for both. ST-terminated, like the status record.
+/// One terminal-title record (OSC 0), so a Herdr pane/tab names the session the way the facts
+/// row does. The tab-titles mod reads the pane's own title; this is the one source for both.
 pub fn title_record(title: &str) -> String {
-    // A title is derived from the first prompt and bounded to 60 chars; strip
-    // control characters defensively so a crafted prompt cannot inject a new
-    // OSC sequence into the terminal.
+    // A title is derived from the first prompt and bounded to 60 chars; strip control characters
+    // defensively so a crafted prompt cannot inject a new OSC sequence into the terminal.
     let clean: String = title.chars().filter(|c| !c.is_control()).take(80).collect();
     format!("\x1b]0;{clean}{ST}")
 }
@@ -84,9 +57,8 @@ pub fn state_for(outcome: State, telegram: bool) -> State {
     }
 }
 
-/// Whether a status writer should be opened at all: never for `--json` (NDJSON
-/// on stdout must stay parseable), otherwise when the session owns a terminal
-/// or the caller asked for it with `KELIR_HERDR=1`.
+/// Whether a status writer should be opened at all: never for `--json` (NDJSON on stdout must stay
+/// parseable), otherwise when the session owns a terminal or the caller asked for it with
 pub fn wanted(herdr_env: Option<&str>, stdout_tty: bool, json: bool) -> bool {
     if json {
         return false;
@@ -103,11 +75,6 @@ pub fn is_telegram(term_program: Option<&str>) -> bool {
     matches!(term_program, Some(program) if program.trim() == "herdr-telegram")
 }
 
-/// The status writer of one session process.
-///
-/// The TUI does not write through this: its records go through the TUI task,
-/// so nothing shares stdout with the painter (M2 review F2). `kelir run` and
-/// `run --keep` use it.
 pub struct Herdr {
     telegram: bool,
     out: Box<dyn Write + Send>,
@@ -128,7 +95,6 @@ impl Herdr {
         })
     }
 
-    /// A writer over any sink, for tests.
     pub fn with_writer(telegram: bool, out: impl Write + Send + 'static) -> Self {
         Self {
             telegram,
@@ -180,9 +146,8 @@ mod tests {
 
     #[test]
     fn every_state_is_exactly_esc_7501_state_word_st() {
-        // The exact bytes Herdr 0.1.21 accepts: no app word, no id, no msg, no
-        // trailing separator. `state=working;app=kelir` is a *different*
-        // record, and Herdr drops it (that was B1).
+        // The exact bytes Herdr 0.1.21 accepts: no app word, no id, no msg, no trailing separator.
+        // `state=working;app=kelir` is a *different* record, and Herdr drops it.
         for (state, word) in [
             (State::Working, "working"),
             (State::Done, "done"),
@@ -217,9 +182,8 @@ mod tests {
         }
     }
 
-    /// `blocked` is the pause word: this Herdr accepts it and drops `paused`,
-    /// so a paused turn's pane is visibly waiting instead of looking like one
-    /// that never started (review N2).
+    /// `blocked` is the pause word: this Herdr accepts it and drops `paused`, so a paused turn's
+    /// pane is visibly waiting instead of looking like one that never started.
     #[test]
     fn a_paused_turn_reports_blocked_because_herdr_drops_paused() {
         let sink = Sink::default();

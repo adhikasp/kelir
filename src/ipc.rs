@@ -1,24 +1,7 @@
-//! The session socket: newline-delimited JSON over a Unix socket (a named pipe
-//! on Windows), served by the session process.
-//!
-//! Request: `{"verb": "say", "args": {"text": "hi"}, "from": "ctl",
-//! "token": "…"}`.
+//! The session socket: newline-delimited JSON over a Unix socket (a named pipe on Windows),
+//! served by the session process.
+//! Request: `{"verb": "say", "args": {"text": "hi"}, "from": "ctl", "token": "…"}`.
 //! Answer: one line, `{"ok": true, …}` or `{"ok": false, "error": "…"}`.
-//!
-//! Reaching the socket is not authorisation (STEER-7): every request carries the
-//! session's per-session token, and the listener answers and drops a request
-//! that does not before the session sees it. See [`crate::trust`].
-//!
-//! The path is `<session dir>/sock` on Unix and `\\.\pipe\kelir-<session id>`
-//! on Windows; both open with the same code, so `kelir ctl` never needs to know
-//! which platform the session runs on. The address is also exported to every
-//! bash child as `KELIR_SOCK`.
-//!
-//! A Unix socket path has to fit in `sun_path` (~108 bytes) and only the
-//! listener may clean up a stale file, so the address is resolved once here and
-//! both sides read the same answer: when `<session dir>/sock` is too long the
-//! session binds a short path in `$XDG_RUNTIME_DIR` (or the temp dir) and
-//! records it in `<session dir>/sock.path`.
 
 use std::path::Path;
 #[cfg(unix)]
@@ -40,7 +23,6 @@ use tokio::sync::{mpsc, oneshot};
 
 /// The socket's file name on Unix; on Windows the pipe name carries the id.
 pub const SOCKET_FILE: &str = "sock";
-/// The lock file that says "this session's log has a writer".
 pub const LOCK_FILE: &str = "session.lock";
 /// A Unix socket path must fit in `sun_path` (108 bytes on Linux, 104 on the
 /// BSDs and macOS); this leaves the last byte for the terminator.
@@ -57,17 +39,10 @@ pub const SOCKET_POINTER_FILE: &str = "sock.path";
 const PIPE_PREFIX: &str = "kelir-";
 /// How long a client waits for a connection or an answer.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
-/// The longest request line the listener will read. A verb's arguments are a job
-/// status or a sentence; 64 KB is far past anything `kelir ctl` sends and far
-/// short of what a hostile peer would like this process to hold (STEER-7 review
-/// N3).
 pub const MAX_LINE: usize = 64 * 1024;
-/// How long a connection may sit without sending its request. A client that
-/// connects and says nothing is not a client of this session; it is refused
-/// rather than held open for as long as it likes (STEER-7 review N3).
+/// How long a connection may sit without sending its request.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// One request line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub verb: String,
@@ -76,15 +51,11 @@ pub struct Request {
     /// Who sent it: `ctl`, `tui`, `gate`…
     #[serde(default = "default_from")]
     pub from: String,
-    /// The session's token ([`crate::trust::TOKEN_ENV`]). A request that crosses
-    /// the socket without it is refused and dropped at the listener; the TUI and
-    /// the session's own watcher run inside the session and set it from memory.
+    /// The session's token ([`crate::trust::TOKEN_ENV`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// The **job capability** the sender holds (returned by `bg-claim` to the
-    /// process that started the job): a per-job secret. A `bg` report must carry it, and
-    /// the session's token is not a substitute — every tool child has the token
-    /// (STEER-7 review B1). Never logged.
+    /// The **job capability** the sender holds (returned by `bg-claim` to the process that started the
+    /// job): a per-job secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability: Option<String>,
 }
@@ -171,15 +142,11 @@ impl Response {
 pub struct Incoming {
     pub request: Request,
     pub reply: oneshot::Sender<Response>,
-    /// Set when the session itself raised this wake-up (its own `bg/` watcher),
-    /// which is not a request at all: there is no `Request` to answer, so the
-    /// action is carried here and the loop takes it directly. `None` for
-    /// everything that arrived on the socket or from the TUI (STEER-7: the
-    /// watcher no longer impersonates a `job` on the wire).
+    /// Set when the session itself raised this wake-up (its own `bg/` watcher), which is not a request at
+    /// all: there is no `Request` to answer, so the action is carried here and the loop takes it directly.
     pub action: Option<Action>,
 }
 
-/// Work the session owes itself.
 #[derive(Debug)]
 pub enum Action {
     /// A status file in this session's `bg/` started or settled.
@@ -195,11 +162,8 @@ fn fits(path: &Path) -> bool {
     path.as_os_str().as_bytes().len() <= MAX_SOCKET_PATH
 }
 
-/// A short place for a socket whose session dir path does not fit:
-/// `$XDG_RUNTIME_DIR` (per-user, 0700) when it exists, else the temp dir. Only
-/// the session id goes in the file name, so the result stays short whatever
-/// the state dir looks like. The socket is chmod 0600 either way, and a shared
-/// temp dir is only used when there is no runtime dir.
+/// A short place for a socket whose session dir path does not fit: `$XDG_RUNTIME_DIR` (per- user, 0700)
+/// when it exists, else the temp dir.
 #[cfg(unix)]
 fn fallback_path(id: &str) -> PathBuf {
     let base = crate::envs::var_os("XDG_RUNTIME_DIR")
@@ -209,13 +173,6 @@ fn fallback_path(id: &str) -> PathBuf {
     base.join(format!("kelir-{id}.sock"))
 }
 
-/// The path a session's socket lives at.
-///
-/// `<session dir>/sock` is the address in every normal case. `sun_path` is
-/// only ~108 bytes though, and a state dir can be deeper than that (a deep
-/// home, or `KELIR_STATE_DIR` pointing somewhere long), so a session that
-/// cannot use the canonical path binds a short one and records it in
-/// `<session dir>/sock.path`; the record wins over any guess a client makes.
 #[cfg(unix)]
 fn socket_path(dir: &Path, id: &str) -> PathBuf {
     if let Ok(recorded) = std::fs::read_to_string(dir.join(SOCKET_POINTER_FILE)) {
@@ -290,25 +247,12 @@ fn name(dir: &Path, id: &str) -> Result<Name<'static>, String> {
     }
 }
 
-/// Exclusive ownership of one session's log, held for the life of the process.
-///
-/// On Unix `bind` unlinks a stale socket file before it listens, so two
-/// `resume`s started at the same moment can both pass the "already running"
-/// connect check and both bind: the check is connect-then-bind, not one atomic
-/// step (M3 review N3). An exclusive `File::try_lock` on
-/// `<session dir>/session.lock` is that step; the loser exits before it writes a
-/// byte. On Windows the named pipe's first-instance rule already makes `bind`
-/// the atomic test, so the guard carries no file there.
 pub struct SessionLock {
     #[cfg(unix)]
     _file: std::fs::File,
 }
 
 /// Take the session's write lock, or say who else has it.
-///
-/// `File::try_lock` (1.89) is the same operation on Unix and Windows; only the
-/// Unix side keeps the file, because that is the platform where the lock is
-/// what makes exclusivity atomic.
 pub fn lock(dir: &Path) -> Result<SessionLock, String> {
     #[cfg(unix)]
     {
@@ -342,18 +286,15 @@ pub fn lock(dir: &Path) -> Result<SessionLock, String> {
 pub fn bind(dir: &Path, id: &str) -> Result<LocalListener, String> {
     #[cfg(unix)]
     let path = socket_path(dir, id);
-    // Only the listener cleans up: a stale file from a session that died without
-    // cleaning up would make bind fail, and it cannot be a live listener, since
-    // the session dir is new. A *client* must never unlink the path — doing that
-    // is what made every round trip fail on Linux.
+    // Only the listener cleans up: a stale file from a session that died without cleaning up would make
+    // bind fail, and it cannot be a live listener, since the session dir is new.
     #[cfg(unix)]
     let _ = std::fs::remove_file(&path);
     let address = name(dir, id)?;
     #[cfg(windows)]
     let options = {
-        // An explicit descriptor, not the platform default: a protected DACL
-        // with one ACE for this process's user (STEER-7). `create_tokio` copies
-        // it into the pipe, so the descriptor is released here.
+        // An explicit descriptor, not the platform default: a protected DACL with one ACE for this process's
+        // user.
         use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
         let descriptor = crate::perm::pipe_descriptor()
             .map_err(|error| format!("cannot build the session pipe's DACL: {error}"))?;
@@ -369,10 +310,8 @@ pub fn bind(dir: &Path, id: &str) -> Result<LocalListener, String> {
             value(dir, id)
         )
     })?;
-    // `say` is a prompt-injection channel into a fully autonomous agent, so the
-    // socket is the user's alone: 0600 on Unix, an owner-only pipe DACL on
-    // Windows. Both are *re-checked* after the fact — a umask, a stale file or a
-    // platform default that leaked in must fail the start, not warn (STEER-7).
+    // `say` is a prompt-injection channel into a fully autonomous agent, so the socket is the user's
+    // alone: 0600 on Unix, an owner-only pipe DACL on Windows.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -385,13 +324,8 @@ pub fn bind(dir: &Path, id: &str) -> Result<LocalListener, String> {
     Ok(listener)
 }
 
-/// Accept connections forever. Every connection gets its own task; answers go
-/// back on each request's own channel, so two clients never block each other.
-///
-/// The token check is here, at the boundary: a request without this session's
-/// token is answered and its connection closed before it reaches `tx`, so an
-/// unauthenticated caller cannot make the session do anything — or write a
-/// `verb` event (STEER-7).
+/// Accept connections forever. Every connection gets its own task; answers go back on each
+/// request's own channel, so two clients never block each other.
 pub fn serve(
     listener: LocalListener,
     trust: Arc<crate::trust::Trust>,
@@ -405,9 +339,8 @@ pub fn serve(
                     let trust = trust.clone();
                     tokio::spawn(async move { connection(stream, trust, tx).await });
                 }
-                // The listener only fails for good reasons (the pipe name was
-                // taken, the runtime is going away); retry so one bad accept
-                // cannot stop the session from being reachable.
+                // The listener only fails for good reasons (the pipe name was taken, the runtime is going
+                // away); retry so one bad accept cannot stop the session from being reachable.
                 Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
             }
         }
@@ -426,9 +359,8 @@ async fn connection(
         line.clear();
         match read_bounded(&mut lines, &mut line, IDLE_TIMEOUT).await {
             Read::Line => {}
-            // The peer is gone, said nothing in time, or sent a line nobody
-            // would send: answer that once (when there is someone to answer)
-            // and close (STEER-7 review N3).
+            // The peer is gone, said nothing in time, or sent a line nobody would send: answer that once
+            // (when there is someone to answer) and close.
             Read::Closed => return,
             Read::Refused(message) => {
                 let mut out = Response::error(message).line();
@@ -459,10 +391,8 @@ async fn connection(
                         let _ = reply_line(&mut write, &out).await;
                         return;
                     }
-                    // A verb that takes long (a foreground child) is answered
-                    // when it is done; if the client goes away first, dropping
-                    // the receiver tells the session nobody is waiting (the
-                    // call that started the child was stopped).
+                    // A verb that takes long (a foreground child) is answered when it is done; if the client goes away
+                    // first, dropping the receiver tells the session nobody is waiting (the call that started the child
                     let mut answer = answer;
                     let given = tokio::select! {
                         result = &mut answer => Some(result),
@@ -506,11 +436,7 @@ where
     }
 }
 
-/// Write one answer line, bounded in time. An answer nobody reads is an answer
-/// the peer is not waiting for (a hostile client can fill its own receive
-/// buffer and then not read, which would park this connection's task for as
-/// long as it likes); a write that does not finish in [`IO_TIMEOUT`] closes the
-/// connection instead (STEER-7 review N3). Whether the line went out.
+/// Write one answer line, bounded in time.
 async fn reply_line<W>(write: &mut W, out: &str) -> bool
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -524,7 +450,6 @@ where
     matches!(sent, Ok(Ok(())))
 }
 
-/// What one bounded read of a request line produced.
 enum Read {
     /// A whole line is in the buffer.
     Line,
@@ -535,11 +460,8 @@ enum Read {
     Refused(String),
 }
 
-/// Read one request line, bounded in **length** and in **time**: at most
-/// [`MAX_LINE`] bytes are pulled in (so a megabyte with no newline is never
-/// held) and at most `idle` passes before the peer is told to go away. Both
-/// are what makes the listener unattractive to a hostile peer that never
-/// authenticates (STEER-7 review N3).
+/// Read one request line, bounded in **length** and in **time**: at most [`MAX_LINE`] bytes are pulled
+/// in (so a megabyte with no newline is never held) and at most `idle` passes before the peer is told
 async fn read_bounded<R>(lines: &mut BufReader<R>, line: &mut String, idle: Duration) -> Read
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -591,9 +513,8 @@ pub async fn request(dir: &Path, id: &str, request: &Request) -> Result<Response
     connect_and_send(dir, id, request).await
 }
 
-/// The same round trip, with the session's token read from its own directory
-/// (`kelir ctl` from a human's terminal: it knows which session it sent to, so
-/// it reads that session's `<session dir>/token` instead of the environment).
+/// The same round trip, with the session's token read from its own directory (`kelir ctl` from a
+/// human's terminal: it knows which session it sent to, so it reads that session's `<session
 pub async fn request_with_token_file(
     dir: &Path,
     id: &str,
@@ -629,11 +550,8 @@ async fn connect_and_send(dir: &Path, id: &str, request: &Request) -> Result<Res
     round_trip(stream, request, IO_TIMEOUT).await
 }
 
-/// The same round trip to an address taken from `KELIR_SOCK`, so a process that
-/// only inherited the variable (a bash child, the `kelir bg` CLI) can talk to
-/// its session without knowing the session dir or id. The session's token comes
-/// from `KELIR_TOKEN`, which the session exports to the same children; a
-/// request that already carries one is left alone.
+/// The same round trip to an address taken from `KELIR_SOCK`, so a process that only inherited the
+/// variable (a bash child, the `kelir bg` CLI) can talk to its session without knowing the session dir
 pub async fn request_value(address: &str, request: &Request) -> Result<Response, String> {
     let sent = match &request.token {
         Some(_) => request.clone(),
@@ -840,18 +758,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
-    /// The regression behind the first Linux round: `connect` used to unlink
-    /// the socket path on its way in, so every client deleted the listener and
-    /// got `No such file or directory (os error 2)`.
+    /// A client leaves the listener's path alone; only the listener unlinks it.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_client_leaves_the_listener_path_alone() {
         let dir = temp_dir("client-unlink");
         let id = "ses_ipc_client";
-        // `bind` resolves this to `<dir>/sock`, whose path must fit in BSD's
-        // 104-byte `sun_path`. macOS temp dirs from CI are longer than Linux's,
-        // so use a short directory here; the production fallback (a short path
-        // recorded in `sock.path`) is covered by the next test.
+        // `bind` resolves this to `<dir>/sock`, whose path must fit in BSD's 104-byte `sun_path`. macOS temp
+        // dirs from CI are longer than Linux's, so use a short directory here; the production fallback (a
         let dir = if fits(&dir.join(SOCKET_FILE)) {
             dir
         } else {
@@ -893,13 +807,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 
-    /// N3: only one process can hold a session's log, and releasing the guard
-    /// releases the lock. Repeated, because a one-shot pass proves nothing.
-    ///
-    /// The contender is a separate process: on BSD/macOS `flock` locks are on
-    /// the *file*, so a second descriptor opened in this process shares the
-    /// lock and closing any descriptor drops it for everyone. A second `kelir`
-    /// process is the real contract, and it behaves the same on Linux.
+    /// only one process can hold a session's log, and releasing the guard releases the lock.
+    /// Repeated, because a one-shot pass proves nothing.
     #[cfg(unix)]
     #[test]
     fn only_one_holder_can_lock_a_session() {
@@ -1007,9 +916,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `KELIR_SOCK` alone must be enough to reach the session: `kelir bg` has
-    /// nothing else to go on inside a bash call. The token comes with it
-    /// (`KELIR_TOKEN`), which is what makes the report acceptable (STEER-7).
+    /// `KELIR_SOCK` alone must be enough to reach the session: `kelir bg` has nothing else to go on inside
+    /// a bash call.
     #[tokio::test]
     async fn the_exported_socket_value_reaches_the_session() {
         let id = "ses_ipc_value";
@@ -1038,10 +946,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
-    /// A peer is read for at most `MAX_LINE` bytes and `IDLE_TIMEOUT`: an
-    /// unterminated megabyte is refused at the cap instead of being held, and a
-    /// connection that says nothing is closed rather than kept (STEER-7 review
-    /// N3).
+    /// A peer is read for at most `MAX_LINE` bytes and `IDLE_TIMEOUT`: an unterminated megabyte is refused
+    /// at the cap instead of being held, and a connection that says nothing is closed rather than kept (
     #[tokio::test]
     async fn a_request_line_is_bounded_in_length_and_in_time() {
         use tokio::io::AsyncWriteExt as _;
@@ -1097,9 +1003,8 @@ mod tests {
         ));
     }
 
-    /// The socket half of STEER-7: a request with no token, or another
-    /// session's, is answered and refused at the listener — the session never
-    /// sees it, so it cannot act on it or log it.
+    /// The socket half of: a request with no token, or another session's, is answered and refused
+    /// at the listener — the session never sees it, so it cannot act on it or log it.
     #[tokio::test]
     async fn an_unauthenticated_request_never_reaches_the_session() {
         let id = "ses_ipc_token";

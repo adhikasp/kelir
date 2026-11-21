@@ -1,22 +1,8 @@
-//! `kelir observe <session>`: what the model will see on its next request (M5-B).
-//!
-//! Read-only and offline: it reads the session's `events.jsonl` (a live session
-//! writes it as it goes, so the answer is current to the last event), folds it
-//! with the same [`crate::fold::fold`] the loop uses, and builds the request
-//! with the same [`crate::provider::build_request`] and the same two capability
-//! decisions (`parallel_tool_calls`, `reasoning_effort`) the loop applies. That
-//! shared path is the point: `--raw` prints the body that would be sent, and the
-//! test that matters compares it byte for byte with the body a mock server
-//! received for the next request.
-//!
-//! Known limits, stated rather than hidden: a field the provider refused with a
-//! 400 earlier in the *live* process (`refused_fields`) is process memory, not
-//! log, so an observe of a session that dropped one still shows it; and a
-//! `model` swap is read from the last `step_started`, so a swap not yet applied
-//! is not shown. It also builds the request with the config and the on-disk
-//! models cache as they are *now* (`cache_ttl`, the provider table, vision
-//! support), not the running session's: edit the config after a session starts
-//! and `--raw` can differ from that session's next wire body (m5bfix N3). No key is ever read for this: the body does not carry one.
+//! `kelir observe <session>`: what the model will see on its next request.
+//! Read-only and offline: it reads the session's `events.jsonl` (a live session writes it as it
+//! goes, so the answer is current to the last event), folds it with the same [`crate::fold::fold`]
+//! the loop uses, and builds the request with the same [`crate::provider::build_request`] and the
+//! same two capability decisions (`parallel_tool_calls`, `reasoning_effort`) the loop applies.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -44,7 +30,7 @@ pub struct Observed {
     pub steps: u32,
     pub cache: CacheStats,
     /// The effective gate configuration (declarations only, no environment
-    /// values) and every gate run the log holds (M8).
+    /// values) and every gate run the log holds.
     pub gates: Vec<Value>,
     pub fired: Vec<Value>,
 }
@@ -257,7 +243,6 @@ fn cache_stats(events: &[LogEvent]) -> CacheStats {
     stats
 }
 
-/// The exact JSON body, as the loop serialises it.
 pub fn raw(observed: &Observed) -> String {
     serde_json::to_string(&observed.body).unwrap_or_default()
 }

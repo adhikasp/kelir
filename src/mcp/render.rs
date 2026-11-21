@@ -1,17 +1,13 @@
-//! A `tools/call` result as the CLI prints it, and the exit code it maps to.
-//!
-//! stdout is `structuredContent` as JSON when the tool sent it, else the text
-//! blocks joined by newlines. Images, audio and binary resources are decoded to
-//! files in `blob_dir` and their paths are printed (on stdout after the text,
-//! or on stderr when stdout is JSON that a pipe will parse). A tool that
-//! answered `isError` prints its text on stderr and exits 1, so `| jq` never
-//! reads an error message as data.
+//! A `tools/call` result as the CLI prints it, and the exit code it maps to. stdout is
+//! `structuredContent` as JSON when the tool sent it, else the text blocks joined by newlines.
+//! Images, audio and binary resources are decoded to files in `blob_dir` and their paths are
+//! printed (on stdout after the text, or on stderr when stdout is JSON that a pipe will parse).
+//! A tool that answered `isError` prints its text on stderr and exits 1, so `| jq` never reads an
 
 use std::path::Path;
 
 use serde_json::Value;
 
-/// Exit codes (docs/SPEC.md, *MCP as a CLI*).
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_TOOL_ERROR: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
@@ -23,7 +19,6 @@ pub struct Rendered {
     pub stdout: String,
     pub stderr: String,
     pub is_error: bool,
-    /// Files written for image/audio/binary content.
     pub saved: Vec<String>,
 }
 

@@ -1,45 +1,8 @@
 //! Ctrl-C (and SIGTERM) as the session's own `stop`, while a wait is running.
-//!
-//! A signal must not kill a session mid-wait while the log says nothing
-//! (STEER-5 review B2). [`interrupted`] resolves when an interrupt arrives;
-//! `session::wait_for` selects on it, so a Ctrl-C during a retry or slot wait
-//! ends the turn the way the `stop` verb does — `turn_ended` outcome `stopped`,
-//! one-shot exit 0 — and a `--keep` session stays up for the next message
-//! (`kelir resume` picks a killed one up, which is the other half of the
-//! story).
-//!
-//! **One listener per process, installed once.** Tokio never restores a signal's
-//! default disposition after a `Signal` has existed ("for the duration of the
-//! entire process", its own docs), so a design that registered the handler only
-//! for the length of a wait would leave Ctrl-C captured — and silently ignored —
-//! for the rest of the session. [`install`] therefore installs the handler once,
-//! at session start, and every wait subscribes to the same broadcast.
-//!
-//! **The flag is level-triggered, not edge-triggered.** The first design handed
-//! every wait a `watch` channel and compared its subscription baseline with the
-//! current value, which loses an interrupt that lands while no wait is polling:
-//! `watch::Sender::send` *drops the value* when there are no receivers at that
-//! instant, and a wait that subscribes afterwards takes the already-bumped value
-//! as its baseline. A wait entered after the signal was consumed by an earlier
-//! wait therefore never saw it, and the Linux gate caught exactly that (about
-//! two runs in six: `an_interrupt_during_a_wait_ends_the_turn_stopped` never
-//! ended its turn). [`requested`] is now a plain atomic the handler sets and
-//! [`interrupted`] checks **on entry** and **while waiting** (a `Notify` only
-//! wakes a poll that is already parked, so the entry check is the half that
-//! makes it level-triggered). [`take`] clears it when a wait acts on it; a wait
-//! that is not running leaves it set, which is what "the interrupt is pending
-//! for the next wait" means.
-//!
-//! **The escape hatch is still there.** A single interrupt is the session's
-//! `stop`; a second one within [`DOUBLE`] ends the process (`exit 130`), the
-//! same rule the TUI applies to two Ctrl-Cs. That keeps a person's way out of a
-//! wedged kelir without a second mechanism.
-//!
-//! Unix watches SIGINT and SIGTERM (a `kill` reads the same way); Windows
-//! watches Ctrl-C and Ctrl-Break, so a supervisor's `CTRL_BREAK_EVENT` is
-//! honoured too. Note that a Windows console control event addresses a whole
-//! console, not one process: `GenerateConsoleCtrlEvent` from a test would also
-//! hit the test runner, which is why nothing in the suite sends one.
+//! A signal must not kill a session mid-wait while the log says nothing.
+//! [`interrupted`] resolves when an interrupt arrives; `session::wait_for` selects on it, so a
+//! Ctrl-C during a retry or slot wait ends the turn the way the `stop` verb does — `turn_ended`
+//! outcome `stopped`, one-shot exit 0 — and a `--keep` session stays up for the next message
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -47,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
-/// A second interrupt inside this window ends the process.
 pub const DOUBLE: Duration = Duration::from_secs(2);
 
 /// The process-wide listener, set inside [`install`].
@@ -64,7 +26,6 @@ struct Listener {
     requested: AtomicBool,
     /// How many interrupts have arrived, ever. Only for tests and diagnostics.
     count: AtomicU64,
-    /// Wakes the waits that are parked right now.
     wake: Notify,
 }
 
@@ -74,14 +35,10 @@ impl Listener {
     }
 }
 
-/// Start watching for interrupts, once per process. Safe to call from every
-/// session (a child session in the same process is not a thing, but a test
-/// binary runs many sessions) and idempotent.
+/// Start watching for interrupts, once per process.
 pub fn install() {
-    // `call_once`, not a `get`-then-`set`: two sessions starting together (a
-    // test binary does) must not leak two listeners and spawn two tasks, and
-    // the one that matters — "the streams exist before this returns" — has to
-    // hold for the losing caller too.
+    // `call_once`, not a `get`-then-`set`: two sessions starting together (a test binary does) must not
+    // leak two listeners and spawn two tasks, and the one that matters — "the streams exist before this
     INSTALL.call_once(|| {
         let listener: &'static Listener = Box::leak(Box::new(Listener {
             requested: AtomicBool::new(false),
@@ -89,12 +46,8 @@ pub fn install() {
             wake: Notify::new(),
         }));
         let _ = ARMED.set(listener);
-        // The OS-level handler is installed by creating the streams, not by
-        // polling them: do that here, on the caller's task, so the protection
-        // exists before `install` returns. A signal that arrives between this
-        // call and the listener task's first poll would otherwise still have
-        // the default disposition — the process dies — which is the narrow end
-        // of the same race.
+        // The OS-level handler is installed by creating the streams, not by polling them: do that here, on the
+        // caller's task, so the protection exists before `install` returns.
         let mut streams = Streams::new();
         tokio::spawn(async move {
             let mut last: Option<Instant> = None;
@@ -117,13 +70,7 @@ pub fn install() {
     });
 }
 
-/// Record one interrupt: bump the count, set the level, wake the waiters. The
-/// handler calls this, and so do the unit tests — the whole point of the level
-/// is that this part is testable without a signal.
-///
-/// The order matters. The level goes up **before** the wakeup, so a wait that
-/// checks the level and then parks can see either `true` (a wait arriving
-/// later) or the notification (a wait already parked), never neither.
+/// Record one interrupt: bump the count, set the level, wake the waiters.
 fn post(listener: &'static Listener) {
     listener.count.fetch_add(1, Ordering::SeqCst);
     listener.requested.store(true, Ordering::SeqCst);
@@ -139,14 +86,8 @@ fn post_for_tests() {
     }
 }
 
-/// Resolves when an interrupt is pending — **immediately** if one arrived
-/// before this call, which is the whole point: the handler runs on its own
-/// task, so the signal can land between the `error` event and the first poll of
-/// the wait that follows it, and an edge-triggered wakeup lost exactly that
-/// (STEER-5 fixes round 2).
-///
-/// It never clears the flag; [`take`] does, so a wait that is cancelled for
-/// another reason leaves the interrupt pending for the next one.
+/// Resolves when an interrupt is pending — **immediately** if one arrived before this call, which is
+/// the whole point: the handler runs on its own task, so the signal can land between the `error` event
 pub async fn interrupted() {
     let Some(listener) = ARMED.get() else {
         return std::future::pending().await;
@@ -154,11 +95,8 @@ pub async fn interrupted() {
     loop {
         let notified = listener.wake.notified();
         tokio::pin!(notified);
-        // Register before the check: a `Notified` future joins the waiter list
-        // when it is enabled (or polled), not when it is created, and
-        // `notify_waiters` stores no permit. Enabling first means an interrupt
-        // that lands between the check and the await still completes the await
-        // rather than parking for ever.
+        // Register before the check: a `Notified` future joins the waiter list when it is enabled (or polled),
+        // not when it is created, and `notify_waiters` stores no permit.
         notified.as_mut().enable();
         if listener.pending() {
             return;
@@ -279,22 +217,8 @@ impl WindowsSignal for tokio::signal::windows::CtrlBreak {
 
 #[cfg(test)]
 mod tests {
-    // Never *send* this process an interrupt from these tests: a console
-    // control event on Windows reaches every process on the console (the runner
-    // included), and a Unix `SIGINT` would end the suite. What they prove is
-    // the *state machine* — the level, the wakeup and the clearing — driven
-    // through the same `post` the handler calls. The signal-to-handler half is
-    // driven end to end on Unix by a real `SIGINT` to a real session:
-    // `tests/e2e_steer5.rs::an_interrupt_during_a_wait_ends_the_turn_stopped`
-    // and `::an_interrupt_before_the_wait_begins_is_not_lost`.
-    //
-    // The tests in this module share the process-wide listener, so they take a
-    // lock: `cargo test` runs them concurrently on several threads otherwise,
-    // and one test's `take` would clear another's level. They are
-    // `current_thread` for exactly that reason — a `std` mutex may not be held
-    // across an await on a runtime that could move the task to another worker
-    // thread, and a single-threaded runtime is also what makes "the notifier
-    // task ran" deterministic.
+    // Never *send* this process an interrupt from these tests: a console control event on Windows reaches
+    // every process on the console (the runner included), and a Unix `SIGINT` would end the suite.
 
     use super::{interrupted, post_for_tests};
     use std::time::Duration;
@@ -337,11 +261,7 @@ mod tests {
         assert!(again.await.is_err(), "a dropped wait poisoned the listener");
     }
 
-    /// An interrupt raised while **nothing is waiting** is still there for the
-    /// next wait. This is the bug the Linux gate caught (STEER-5 fixes round
-    /// 2): the old edge-triggered channel dropped it, because
-    /// `watch::Sender::send` discards its value when there are no receivers and
-    /// the wait took the already-bumped value as its baseline.
+    /// An interrupt raised while **nothing is waiting** is still there for the next wait.
     #[tokio::test(flavor = "current_thread")]
     async fn an_interrupt_with_no_waiter_parked_is_not_lost() {
         let _serial = serial().await;
@@ -377,10 +297,7 @@ mod tests {
         assert!(super::take());
     }
 
-    /// The stress the brief asks for: 200 rounds of "signal, then wait", the
-    /// order that used to lose it, with the interruption delivered before the
-    /// wait even exists. Cheap here (no process, no network); the same window
-    /// end to end is `an_interrupt_before_the_wait_begins_is_not_lost`.
+    /// Signals delivered before their wait are still seen, 200 rounds in a row.
     #[tokio::test(flavor = "current_thread")]
     async fn two_hundred_signals_before_their_wait_are_all_seen() {
         let _serial = serial().await;
@@ -389,9 +306,8 @@ mod tests {
         let mut lost = 0;
         for round in 0..200 {
             post_for_tests();
-            // Yield so the notifier task and this one interleave as they do
-            // under a real runner: half the rounds are polled immediately, half
-            // after a suspension.
+            // Yield so the notifier task and this one interleave as they do under a real runner: half
+            // the rounds are polled immediately, half after a suspension.
             if round % 2 == 0 {
                 tokio::task::yield_now().await;
             }

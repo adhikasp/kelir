@@ -1,18 +1,8 @@
-//! Channel mode (M10): chat bridges through MCP, a durable spool, fallback replies.
-//!
-//! A *channel server* is an MCP server with `channel = true`. It sends inbound
-//! chat messages as `notifications/claude/channel`; kelir answers on the same
-//! server with a configurable reply tool and tells it when a turn ends. This
-//! module is the generic mechanism — a concrete bridge (Telegram or anything
-//! else) is configuration and credentials outside this repo.
-//!
-//! `kelir channel` runs headless: one named session per conversation (M9 names,
-//! `chan-<server>-<conversation>`), single-flight per conversation, a bounded
-//! number of active turns, and rate limits. Every inbound message is written
-//! to a fsync'd, append-only spool *before* anything else happens to it, then
-//! claimed, then done; a crash replays unfinished messages, deduped by message
-//! id. Reply sending is idempotent by message id, so a replay never produces a
-//! second reply.
+//! Channel mode: chat bridges through MCP, a durable spool, fallback replies.
+//! A *channel server* is an MCP server with `channel = true`.
+//! It sends inbound chat messages as `notifications/claude/channel`; kelir answers on the same
+//! server with a configurable reply tool and tells it when a turn ends.
+//! This module is the generic mechanism — a concrete bridge (Telegram or anything else) is
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::Write;
@@ -30,9 +20,7 @@ use crate::mcp::rpc::Notification;
 
 /// Default reply tool on the channel server.
 pub const DEFAULT_REPLY_TOOL: &str = "reply";
-/// The capability kelir declares to a bridge so it starts sending. A bridge
-/// that needs a different one says so in `mcp.toml`; kelir NEVER declares a
-/// permission-relay capability (it has no approvals).
+/// The capability kelir declares to a bridge so it starts sending.
 pub const DEFAULT_CAPABILITY: &str = "claude/channel";
 /// Capabilities kelir will not declare, whatever the config says: an approval
 /// relay is a promise kelir cannot keep.
@@ -41,7 +29,6 @@ pub const FORBIDDEN_CAPABILITIES: &[&str] = &[
     "claude/channel/permissions",
     "claude/channel/approval",
 ];
-/// The notification method a bridge sends.
 pub const INBOUND_METHOD: &str = "notifications/claude/channel";
 /// The notification kelir sends when a turn is over (bridge stops typing).
 pub const TURN_DONE_METHOD: &str = "notifications/claude/channel/turn_done";
@@ -49,13 +36,10 @@ pub const TURN_DONE_METHOD: &str = "notifications/claude/channel/turn_done";
 pub const STOP_COMMAND: &str = "/stop";
 /// The longest inbound text accepted (bytes). Larger is dropped and logged once.
 pub const MAX_TEXT: usize = 64 * 1024;
-/// The longest single spool line accepted on replay (bytes).
 pub const MAX_SPOOL_LINE: usize = 256 * 1024;
-/// How many bytes of a dropped notification's shape are logged.
 pub const MALFORMED_NOTE: &str = "channel: dropped a malformed or oversized notification";
 /// Default text of the one fallback reply on error/paused/timeout.
 pub const DEFAULT_FALLBACK: &str = "Sorry — I couldn't finish that. Please try again.";
-/// Fallback on timeout.
 pub const TIMEOUT_FALLBACK: &str = "Sorry — that request timed out. Please try again.";
 /// Fallback when a gate denies the prompt.
 pub const GATED_FALLBACK: &str = "That message was blocked by policy and was not run.";
@@ -81,18 +65,14 @@ pub struct Message {
     pub conversation: String,
     pub sender: String,
     pub text: String,
-    /// An optional message this one replies to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
-    /// Paths (inside the session) or data references, per M5-B / TUI v2.
+    /// Paths (inside the session) or data references, per / TUI v2.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Value>,
 }
 
 impl Message {
-    /// The M9 session name for this conversation. The server and conversation
-    /// ids are sanitised into the `[a-z0-9._-]` alphabet `names::validate`
-    /// requires, and length-bounded so the name stays within 64 characters.
     pub fn session_name(&self) -> String {
         let mut name = format!(
             "{}-{}-{}",
@@ -200,11 +180,6 @@ pub enum Drop {
 }
 
 /// Parse one `notifications/claude/channel` notification into a message.
-///
-/// Recognised payload shapes: the bridge's own (`message_id`, `conversation_id`,
-/// `sender`, `content`/`text`, `attachments`, `reply_to`) and the generic one
-/// (`id`, `conversation`, `sender`, `content`). Unknown fields are ignored;
-/// oversized text and ids that are not short, safe strings are refused.
 pub fn parse_notification(note: &Notification) -> Result<Message, Drop> {
     if note.method != INBOUND_METHOD {
         return Err(Drop::Other);
@@ -287,13 +262,6 @@ pub fn parse_notification(note: &Notification) -> Result<Message, Drop> {
 }
 
 /// The append-only spool. One file per server: `<state>/spool/<server>.jsonl`.
-///
-/// Every record has `seq` (monotonic within the file), `op` (`inbound`,
-/// `claimed` or `done`) and the message id. `inbound` carries the whole
-/// message; the other two are small. An append is a write plus `sync_all`, so a
-/// record is durable before the caller acknowledges anything. Replay folds the
-/// records: a message with no `done` is unfinished; dedupe is by message id,
-/// so a message seen twice is processed once.
 pub struct Spool {
     path: PathBuf,
     next_seq: u64,
@@ -315,9 +283,7 @@ struct Record {
 }
 
 impl Spool {
-    /// Open the server's spool, or create it. A torn tail is cut off (and kept
-    /// beside the file) before anything is appended, so a crash mid-write can
-    /// never leave a record that replay cannot parse.
+    /// Open the server's spool, or create it.
     pub fn open(state: &Path, server: &str) -> Result<Spool, String> {
         if !crate::mcp::config::valid_name(server) {
             return Err(format!("invalid channel server name `{server}`"));
@@ -415,7 +381,6 @@ impl Spool {
         Ok(true)
     }
 
-    /// Mark a message claimed (a turn started for it). Idempotent by id.
     pub fn claim(&mut self, id: &str) -> Result<(), String> {
         if !self.seen.contains(id) || self.done.contains(id) {
             return Ok(());
@@ -449,7 +414,6 @@ impl Spool {
         Ok(())
     }
 
-    /// Unfinished messages to replay at start, oldest first.
     pub fn replay(&self) -> &[Message] {
         &self.pending
     }
@@ -466,10 +430,8 @@ impl Spool {
         self.bytes
     }
 
-    /// Compact the file when it grows past `limit`: keep every unfinished
-    /// message's `inbound` record and one `done` record per finished id, drop
-    /// the rest. A crash during the rename leaves either the old file or the
-    /// complete new one; nothing is lost either way.
+    /// Compact the file when it grows past `limit`: keep every unfinished message's `inbound` record and
+    /// one `done` record per finished id, drop the rest.
     pub fn compact(&mut self, limit: u64, now: &str) -> Result<bool, String> {
         if self.bytes <= limit {
             return Ok(false);
@@ -556,9 +518,8 @@ pub fn capabilities(config: &crate::mcp::config::ServerConfig) -> Value {
     Value::Object(map)
 }
 
-/// Channel mode settings from `config.toml`. The keys are flat
-/// (`channel_max_active` etc.) so the generated config table reads them at the
-/// top level; this is the resolved form.
+/// Channel mode settings from `config.toml`. The keys are flat (`channel_max_active` etc.) so
+/// the generated config table reads them at the top level; this is the resolved form.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub max_active: usize,
@@ -568,9 +529,8 @@ pub struct Config {
     pub spool_limit: u64,
 }
 
-/// A status snapshot for `kelir channel`'s stdout/`ctl status`: conversation
-/// count, queue depth, active turns, spool backlog per server and the counts
-/// of replies and fallback replies.
+/// A status snapshot for `kelir channel`'s stdout/`ctl status`: conversation count, queue depth, active
+/// turns, spool backlog per server and the counts of replies and fallback replies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Status {
     pub conversations: usize,
@@ -601,9 +561,7 @@ pub enum Outcome {
     Gated(String),
 }
 
-/// Read a session's newest `turn_ended` and the final assistant text. A gate
-/// that dropped a prompt leaves a `gate` event with decision `deny` and no
-/// turn; that is distinct from a turn that failed.
+/// Read a session's newest `turn_ended` and the final assistant text.
 pub fn outcome(events: &[crate::event::LogEvent]) -> Outcome {
     if let Some(turn) = events
         .iter()
@@ -621,9 +579,7 @@ pub fn outcome(events: &[crate::event::LogEvent]) -> Outcome {
             other => Outcome::Failed(format!("turn {other}: {text}")),
         };
     }
-    // No `turn_ended`: a gate deny counts only when no `user` event follows
-    // it. A deny logged before the newest user event belongs to an earlier
-    // turn of this resumed session and must not colour this one.
+    // No `turn_ended`: a gate deny counts only when no `user` event follows it.
     for event in events.iter().rev() {
         match &event.body {
             crate::event::EventBody::User { .. } => break,
@@ -677,10 +633,8 @@ fn decode_base64(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Save attachments named by a message into its session directory, returning
-/// the pointers to put in the envelope. A `data` reference is written to a
-/// file; a `path` is copied when it exists. Oversized or unknown attachments
-/// are noted but never crash the turn.
+/// Save attachments named by a message into its session directory, returning the pointers to put in the
+/// envelope.
 pub fn save_attachments(message: &Message, session_dir: &Path) -> Vec<String> {
     let mut pointers = Vec::new();
     for (index, item) in message.attachments.iter().enumerate() {
@@ -728,9 +682,6 @@ pub fn save_attachments(message: &Message, session_dir: &Path) -> Vec<String> {
     pointers
 }
 
-/// Send one reply to a conversation on the channel server. `message_id` is
-/// included in the arguments so a server that supports idempotency can dedupe;
-/// the spool records the send so a replay never calls this twice.
 pub async fn reply(
     broker: &Broker,
     server: &str,
@@ -793,18 +744,15 @@ fn reply_tool(broker: &Broker, server: &str) -> String {
         .to_string()
 }
 
-/// Start a turn in the conversation's named session. A fresh session takes the
-/// envelope as its task; a resumed one takes it as a new message. The task is
-/// `from: channel` so M8 `prompt_submit` gates run on it and the model sees the
-/// untrusted-data envelope (never a session verb).
+/// Start a turn in the conversation's named session. A fresh session takes the envelope as
+/// its task; a resumed one takes it as a new message.
 async fn start_turn(
     common: &crate::cli::CommonArgs,
     message: Message,
 ) -> Result<Option<Active>, String> {
     let name = message.session_name();
-    // A channel conversation is a named session (M9), but its task is a
-    // remote user message, not a job's: `from: channel` on the user event and
-    // `prompt_submit` gates on the envelope (STEER-7).
+    // A channel conversation is a named session, but its task is a remote user message, not a
+    // job's: `from: channel` on the user event and `prompt_submit` gates on the envelope.
     let target = crate::names::resolve_for_run(&name)?;
     let (session, resume) = match target {
         crate::names::Target::Resume(id) => (id, true),
@@ -812,7 +760,7 @@ async fn start_turn(
     };
     let dir = crate::paths::session_dir(&session);
     // `/stop` from chat maps to the `stop` verb (never a prompt): only the
-    // session's own token, read from its dir, authorises it (STEER-7).
+    // session's own token, read from its dir, authorises it.
     if let Some(reason) = stop_command(&message.text) {
         let args = crate::verbs::cli_args(
             "stop",
@@ -859,9 +807,8 @@ async fn start_turn(
             resume: None,
             child: false,
             background: false,
-            // No `name`: that installs the process-wide plan, which only one
-            // run per process may do. The name is already bound above and the
-            // id travels in the turn's own task-local slot.
+            // No `name`: that installs the process-wide plan, which only one run per process may do. The
+            // name is already bound above and the id travels in the turn's own task-local slot.
             name: None,
         };
         crate::jobs::with_next_id(started, crate::session::run(task)).await
@@ -872,7 +819,6 @@ async fn start_turn(
     Ok(Some(Active { session, start_seq }))
 }
 
-/// Read the events appended by the turn that just ended.
 fn turn_events(active: &Active) -> Vec<crate::event::LogEvent> {
     let path = crate::paths::session_dir(&active.session).join("events.jsonl");
     let read = crate::event::read_events(&path).unwrap_or_default();
@@ -882,9 +828,8 @@ fn turn_events(active: &Active) -> Vec<crate::event::LogEvent> {
         .collect()
 }
 
-/// Rate limiter: a fixed window per conversation and one globally. Bursts of a
-/// thousand messages stay bounded; excess messages are queued, not answered in
-/// parallel.
+/// Rate limiter: a fixed window per conversation and one globally. Bursts of a thousand
+/// messages stay bounded; excess messages are queued, not answered in parallel.
 #[derive(Debug)]
 pub struct RateLimits {
     per_conversation: u32,
@@ -946,9 +891,8 @@ pub struct Conversation {
     pub unsettled: VecDeque<String>,
 }
 
-/// The bounded set of conversations. `max_active` turns may run at once; the
-/// rest stay queued. `note_finished` frees a slot and returns the next
-/// conversation with work, if any.
+/// The bounded set of conversations. `max_active` turns may run at once; the rest stay
+/// queued.
 #[derive(Debug, Default)]
 pub struct Dispatcher {
     pub conversations: BTreeMap<String, Conversation>,
@@ -1080,9 +1024,6 @@ impl Shared {
     }
 }
 
-/// The text of the one fallback reply. A configured text wins for every case;
-/// the default text is refined so a policy block, a pause and a timeout read
-/// differently from a provider failure.
 fn fallback_text(cfg: &Config, outcome: &Outcome) -> String {
     if cfg.fallback != DEFAULT_FALLBACK {
         return cfg.fallback.clone();
@@ -1098,10 +1039,8 @@ fn fallback_text(cfg: &Config, outcome: &Outcome) -> String {
     }
 }
 
-/// One inbound message: `claimed`, a turn, one reply, then `done` (always,
-/// including a handled `/stop`). A crash between the reply and `done` replays
-/// the message, and the reply tool is idempotent by message id. The dispatcher
-/// slot is freed here whatever happens.
+/// One inbound message: `claimed`, a turn, one reply, then `done` (always, including a handled
+/// `/stop`).
 async fn process(message: Message, shared: Rc<Shared>) {
     let conversation = message.conversation.clone();
     process_turn(message, &shared).await;
@@ -1162,9 +1101,7 @@ async fn process_turn(message: Message, shared: &Shared) {
 
 /// `kelir channel`: run all configured channel servers until interrupted.
 pub async fn run(args: crate::cli::ChannelArgs) -> u8 {
-    // Turns run concurrently on one thread (their futures are not `Send`), hence
-    // a `LocalSet`. Whole sessions are polled inline there, so that thread gets
-    // a big stack of its own instead of the process's main thread.
+    // Turns run concurrently on one thread (their futures are not `Send`), hence a `LocalSet`.
     let (tx, rx) = tokio::sync::oneshot::channel();
     let spawned = std::thread::Builder::new()
         .name("kelir-channel".into())
@@ -1325,7 +1262,7 @@ async fn drive(args: crate::cli::ChannelArgs) -> u8 {
                     Err(Drop::Other) => continue,
                     Err(reason) => {
                         // Once per dropped shape, never the payload: a bridge
-                        // can send text containing secrets (STEER-7).
+                        // can send text containing secrets.
                         if logged_drops.insert(format!("{reason:?}")) {
                             eprintln!("kelir channel: {MALFORMED_NOTE} ({reason:?})");
                         }

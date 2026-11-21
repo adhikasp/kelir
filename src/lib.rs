@@ -1,8 +1,5 @@
-// Cargo's `[lints.clippy]` allow-list is overwritten by the `pedantic`/
-// `nursery` group flags on this nightly (lint-groups-priority). These source
-// attributes are the authoritative allow-list for the crate (#23). Each entry
-// is a deliberate non-goal, not a silence: broad public API, long-form CLI
-// docs, and checked casts at protocol boundaries.
+// Cargo's `[lints.clippy]` allow-list is overwritten by the `pedantic`/ `nursery` group flags on this
+// nightly (lint-groups-priority).
 #![allow(
     clippy::assert_is_empty,
     clippy::assertions_on_constants,
@@ -86,10 +83,8 @@
     clippy::wildcard_imports
 )]
 //! kelir — a small, steerable coding-agent harness.
-//!
-//! One session is one OS process plus one append-only event log; every
-//! request is rebuilt from `fold(events.jsonl)` so the loop is the same live
-//! and on resume.
+//! One session is one OS process plus one append-only event log; every request is rebuilt
+//! from `fold(events.jsonl)` so the loop is the same live and on resume.
 
 pub mod activity;
 pub mod atomic;

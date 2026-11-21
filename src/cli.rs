@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn bare_kelir_takes_the_tui_flags() {
         // `kelir --model x` is the default session with a model, not a usage
-        // error (M2 review N2).
+        // error.
         let cli = Cli::parse_from(["kelir", "--model", "m", "--provider", "p"]);
         assert!(cli.command.is_none(), "no subcommand is the TUI");
         assert_eq!(cli.tui.common.model.as_deref(), Some("m"));

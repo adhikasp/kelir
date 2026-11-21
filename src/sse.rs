@@ -1,8 +1,7 @@
 //! Incremental Server-Sent Events parser.
-//!
-//! Bytes arrive in arbitrary pieces, so the parser buffers until a full event
-//! block is present. Both `\n\n` and `\r\n\r\n` framing are accepted, `data:`
-//! lines are joined with `\n`, and comment/keepalive blocks are skipped.
+//! Bytes arrive in arbitrary pieces, so the parser buffers until a full event block is present.
+//! Both `\n\n` and `\r\n\r\n` framing are accepted, `data:` lines are joined with `\n`, and
+//! comment/keepalive blocks are skipped.
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SseEvent {
@@ -24,7 +23,6 @@ impl SseParser {
         self.buf.extend_from_slice(chunk);
     }
 
-    /// Whether unconsumed bytes are buffered (a block still waiting).
     pub fn has_pending(&self) -> bool {
         !self.buf.is_empty()
     }

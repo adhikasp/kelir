@@ -1,7 +1,6 @@
 //! `config.toml`: machine config, then the project's `.kelir/config.toml`.
-//!
-//! CLI flags override the file; the environment supplies the keys and can
-//! point the provider at a stand-in base URL (`KELIR_BASE_URL`).
+//! CLI flags override the file; the environment supplies the keys and can point the
+//! provider at a stand-in base URL (`KELIR_BASE_URL`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,9 +10,6 @@ use serde::Deserialize;
 use crate::paths;
 
 /// The base prompt, embedded at build time (`src/prompt.md`, at most 1 KB).
-///
-/// It names the skills directories and carries no listing: skills are pull, so
-/// the model reads a `SKILL.md` with `bash` when the task calls for one.
 pub const DEFAULT_PROMPT: &str = include_str!("prompt.md");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,17 +48,12 @@ pub struct ProviderConfig {
     pub key_expires_at_ms: Option<u64>,
     pub extra_headers: BTreeMap<String, String>,
     pub reasoning_field: Option<String>,
-    /// How much hidden reasoning the model should spend on this session's
-    /// requests (`low`, `medium`, `high`), sent as `reasoning_effort`. `None`
-    /// sends no field at all, which is the provider's own default.
+    /// How much hidden reasoning the model should spend on this session's requests (`low`, `medium`,
+    /// `high`), sent as `reasoning_effort`.
     pub reasoning_effort: Option<String>,
-    /// Whether [`ProviderConfig::reasoning_effort`] came from the config file
-    /// rather than from kelir's own default (`medium`). An explicit choice is
-    /// what lets the field reach a model the provider's list says nothing
-    /// about; the default only goes where the list says it is supported
-    /// (STEER-6 review S3).
+    /// Whether [`ProviderConfig::reasoning_effort`] came from the config file rather than from kelir's own
+    /// default (`medium`).
     pub reasoning_effort_explicit: bool,
-    /// Header carrying the session id for providers that require one.
     pub session_header: Option<String>,
     /// Client-side concurrency governor: at most this many requests in flight
     /// per provider across every local kelir process (`0`/unset = off).
@@ -76,26 +67,21 @@ pub struct Config {
     /// argv prefix; the command is appended (so `bash -c` or `pwsh -Command`).
     pub shell: Vec<String>,
     pub spill_limit: usize,
-    /// The cap on one turn's steps: `None` means unlimited, which is the
-    /// default. An explicit positive `max_steps` (or `--max-steps`) caps a
-    /// turn, and reaching it *pauses* the turn rather than failing it.
+    /// The cap on one turn's steps: `None` means unlimited, which is the default.
     pub max_steps: Option<u32>,
     pub cache_ttl: Option<String>,
     pub system_prompt: String,
-    /// The file `system_prompt` was read from (`prompt` or `prompt.md`), when
-    /// it came from one: `sources[]` records it, so a log reader can tell a
-    /// file's base prompt from the embedded default (F2).
+    /// The file `system_prompt` was read from (`prompt` or `prompt.md`), when it came from one: `sources[]`
+    /// records it, so a log reader can tell a file's base prompt from the embedded default .
     pub prompt_path: Option<PathBuf>,
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Context window override for every model (`window`), when set.
     pub window: Option<u64>,
     /// Per-model window overrides (`[model_windows]`).
     pub model_windows: BTreeMap<String, u64>,
-    /// Fraction of the window at which compaction triggers automatically.
     pub auto_compact_at: f64,
-    /// An absolute soft target in tokens: compaction triggers at
-    /// `min(window * auto_compact_at, compact_at_tokens)`, so a huge window does
-    /// not carry a 400K-token context. `0` disables the cap.
+    /// An absolute soft target in tokens: compaction triggers at `min(window * auto_compact_at,
+    /// compact_at_tokens)`, so a huge window does not carry a 400K-token context.
     pub compact_at_tokens: u64,
     /// The summary prompt (`compact_prompt`/`compact.md`, else embedded).
     pub compact_prompt: String,
@@ -110,38 +96,35 @@ pub struct Config {
     /// The pushed hint's scorer (`[hint]`); `None` is the hint off, which is
     /// the default.
     pub hint: Option<HintConfig>,
-    /// A bash call still running after this long is promoted to a background
-    /// job instead of being killed (`config.toml` `promote_after`, seconds;
-    /// `KELIR_PROMOTE_AFTER` overrides it; zero disables promotion).
+    /// A bash call still running after this long is promoted to a background job instead of being killed
+    /// (`config.toml` `promote_after`, seconds; `KELIR_PROMOTE_AFTER` overrides it; zero disables
     pub promote_after: std::time::Duration,
     /// What to retry and how long to wait (`retry_base_ms`, `retry_cap_ms`,
     /// `retry_max_wait`).
     pub retry: crate::retry::Policy,
-    /// Warn (log and screen, never the model) when the last prompt is larger
-    /// than this many tokens (`warn_prompt_tokens`, default 150000; `None` =
-    /// off).
+    /// Warn (log and screen, never the model) when the last prompt is larger than this many
+    /// tokens (`warn_prompt_tokens`, default 150000; `None` = off).
     pub warn_prompt_tokens: Option<u64>,
     /// Warn once when the session's cost passes this many dollars (`warn_cost`,
     /// default unset).
     pub warn_cost: Option<f64>,
     /// The child caps (`max_child_depth`, `max_children`, `max_live_descendants`):
-    /// enforced by the root session's registry (M7).
+    /// enforced by the root session's registry.
     pub children: crate::child::Caps,
     /// `[prices."<model>"]`: per-million-token prices that override and extend
     /// the built-in table.
     pub prices: BTreeMap<String, crate::spend::Price>,
-    /// Gates declared under `[gates]` (M8); skills add theirs at session start.
+    /// Gates declared under `[gates]`; skills add theirs at session start.
     pub gates: Vec<crate::gates::GateDef>,
-    /// Gates declared by the *project's* `.kelir/config.toml` (M8 fix F6). They run
-    /// only when the project is trusted: `trusted_projects` (machine layer) names
-    /// it, or `KELIR_TRUST_PROJECT` is set.
+    /// Gates declared by the *project's* `.kelir/config.toml`. They run only when the project is
+    /// trusted: `trusted_projects` (machine layer) names it, or `KELIR_TRUST_PROJECT` is set.
     pub project_gates: Vec<crate::gates::GateDef>,
     /// `trusted_projects`: directories whose project-layer gates may run.
     pub trusted_projects: Vec<PathBuf>,
-    /// Channel mode (M10): the conversation concurrency, rate limits, fallback
+    /// Channel mode: the conversation concurrency, rate limits, fallback
     /// text and spool bound. Every field has a safe default.
     pub channel: crate::channel::Config,
-    /// Notification hooks and terminal records (M11). Nothing is enabled by
+    /// Notification hooks and terminal records. Nothing is enabled by
     /// default.
     pub notify: crate::notify::Config,
 }
@@ -183,9 +166,7 @@ struct RawConfig {
     cache_ttl: Option<String>,
     prompt: Option<String>,
     providers: BTreeMap<String, RawProvider>,
-    /// A key written into the config file itself. Rejected with a warning that
-    /// names the two supported sources: a literal goes stale, shadows a live
-    /// one and puts a secret in more places than it needs to be (STEER-2).
+    /// A key written into the config file itself.
     key: Option<String>,
     window: Option<u64>,
     model_windows: BTreeMap<String, u64>,
@@ -217,7 +198,7 @@ struct RawConfig {
     /// Directories whose project-layer gates may run (machine layer only).
     #[serde(default)]
     trusted_projects: Vec<PathBuf>,
-    /// Channel mode (M10): how many conversations may answer at once.
+    /// Channel mode: how many conversations may answer at once.
     channel_max_active: Option<usize>,
     /// Channel mode: messages per conversation per minute.
     channel_per_conversation_rpm: Option<u32>,
@@ -276,23 +257,18 @@ struct RawProvider {
 pub const PROVIDER_OPENROUTER: &str = "openrouter";
 pub const PROVIDER_GO: &str = "opencode-go";
 
-/// The providers kelir has, in the order messages name them.
 pub const PROVIDERS: [&str; 2] = [PROVIDER_OPENROUTER, PROVIDER_GO];
 
-/// The error `provider = "..."` and `--provider` give for anything else: it
-/// names both providers, because a maintainer's old config said `kelir` and the
-/// only useful answer is what the two real ones are.
+/// The error `provider = "..."` and `--provider` give for anything else: it names both providers,
+/// because a maintainer's old config said `kelir` and the only useful answer is what the two real ones
 pub fn unknown_provider(name: &str) -> ConfigError {
     ConfigError(format!(
         "unknown provider `{name}`: kelir has exactly two, `{PROVIDER_OPENROUTER}` and `{PROVIDER_GO}`"
     ))
 }
 
-/// The error a `[providers.<name>]` table with an unknown name gives (STEER-2
-/// fix 3): it says which table, in which file, that the name *is* the provider
-/// (`kind = …` is no longer used), and what to rename it to. `sources` is the
-/// config files that were merged, in the order they were read; a diagnostic
-/// tool (`kelir doctor`) must be able to point at the file, not just the name.
+/// The error a `[providers.<name>]` table with an unknown name gives ( fix 3): it says which table, in
+/// which file, that the name *is* the provider (`kind = …` is no longer used), and what to rename it
 pub fn unknown_provider_table(name: &str, sources: &[PathBuf]) -> ConfigError {
     let files = if sources.is_empty() {
         "the config file".to_string()
@@ -320,10 +296,7 @@ fn builtin_provider(name: &str) -> Option<RawProvider> {
         }),
         PROVIDER_GO => Some(RawProvider {
             base_url: Some("https://opencode.ai/inference/go/v1".into()),
-            // `KELIR_GO_API_KEY` is the *override*; the default source is
-            // opencode's own store (STEER-2). `key_env` is the variable kelir
-            // looks at first, and the default store is what happens when it is
-            // unset.
+            // `KELIR_GO_API_KEY` is the *override*; the default source is opencode's own store.
             key_env: Some(crate::credentials::GO_ENV.into()),
             session_header: Some("x-opencode-session".into()),
             ..RawProvider::default()
@@ -357,7 +330,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             if let Some(project) = find_project_config() {
                 let mut layer = read_toml(&project)?;
                 // The project layer cannot vouch for itself, and its gates are
-                // kept apart: they run only in a trusted project (F6).
+                // kept apart: they run only in a trusted project .
                 if let Some(table) = layer.as_table_mut() {
                     project_gates = table.remove("gates");
                     if table.remove("trusted_projects").is_some() {
@@ -379,10 +352,8 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     // `raw`.
     let retry = retry_policy(&raw)?;
 
-    // A literal key in the config file is refused with a warning (STEER-2):
-    // `key = "…"` goes stale, shadows a live store and puts a secret in a file
-    // that gets copied around. Naming the two supported sources is the whole
-    // message a person needs.
+    // A literal key in the config file is refused with a warning: `key = "…"` goes stale, shadows a live
+    // store and puts a secret in a file that gets copied around.
     if let Some(_literal) = raw.key.as_deref().filter(|key| !key.trim().is_empty()) {
         eprintln!(
             "kelir: warning: `key` in a config file is ignored: use the environment (\
@@ -398,9 +369,8 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         _ => default_shell(),
     };
 
-    // Exactly two providers, and only those two: a table for anything else is a
-    // usage error that names the pair (a maintainer's config called theirs
-    // `kelir`) and the file to edit (STEER-2 fix 3).
+    // Exactly two providers, and only those two: a table for anything else is a usage error that
+    // names the pair (a maintainer's config called theirs `kelir`) and the file to edit.
     if let Some(other) = raw
         .providers
         .keys()
@@ -436,9 +406,8 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             ProviderConfig {
                 kind,
                 base_url,
-                // The key itself is resolved at session start
-                // ([`crate::credentials`]): it may need a process read, and a
-                // config load must stay pure (a test, a `doctor`, an editor).
+                // The key itself is resolved at session start ([`crate::credentials`]): it may need a
+                // process read, and a config load must stay pure (a test, a `doctor`, an editor).
                 key_env: entry.key_env,
                 key_cmd: entry.key_cmd,
                 key: None,
@@ -455,7 +424,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     }
 
     // The base prompt and the file it came from (`None` for the embedded
-    // default), so `sources[]` records the real path (F2).
+    // default), so `sources[]` records the real path .
     let (system_prompt, prompt_path) = load_prompt(raw.prompt.as_deref())?;
     let compact_prompt = load_compact_prompt(raw.compact_prompt.as_deref())?;
     let auto_compact_at = raw.auto_compact_at.unwrap_or(crate::compact::AUTO_FRACTION);
@@ -566,9 +535,8 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     })
 }
 
-/// The `[notify]` table: event -> command list, plus terminal and rate limit.
-/// Nothing is enabled by default. A wrong event name is a config error (a
-/// person who wrote one meant a notification).
+/// The `[notify]` table: event -> command list, plus terminal and rate limit. Nothing is
+/// enabled by default.
 fn notify(raw: Option<&toml::Value>) -> Result<crate::notify::Config, ConfigError> {
     let Some(value) = raw else {
         return Ok(crate::notify::Config::default());
@@ -634,9 +602,7 @@ fn notify(raw: Option<&toml::Value>) -> Result<crate::notify::Config, ConfigErro
     Ok(cfg)
 }
 
-/// The pushed hint: off unless a `[hint]` table names a model. A wrong provider
-/// name or a zero timeout is a config error (a person who wrote them meant
-/// something); a missing model is simply "off".
+/// The pushed hint: off unless a `[hint]` table names a model.
 fn hint_config(
     raw: Option<&RawHint>,
     default_provider: &str,
@@ -691,9 +657,8 @@ fn warn_cost(raw: Option<f64>) -> Result<Option<f64>, ConfigError> {
     }
 }
 
-/// `[prices]`: `input` and `output` are required, `cached_input` defaults to
-/// `input` (no cache discount). A negative or missing price is a config error:
-/// a wrong price is worse than none.
+/// `[prices]`: `input` and `output` are required, `cached_input` defaults to `input` (no cache
+/// discount).
 fn prices(
     raw: &BTreeMap<String, RawPrice>,
 ) -> Result<BTreeMap<String, crate::spend::Price>, ConfigError> {
@@ -755,22 +720,13 @@ fn retry_policy(raw: &RawConfig) -> Result<crate::retry::Policy, ConfigError> {
 }
 
 /// The effort kelir asks for when the config says nothing: enough thinking to
-/// plan, not enough to re-derive the plan every step (STEER-6, F1).
+/// plan, not enough to re-derive the plan every step.
 pub const DEFAULT_REASONING_EFFORT: &str = "medium";
 
-/// The values `reasoning_effort` accepts. The providers document `low`,
-/// `medium` and `high`; a value outside that set is a typo, and a typo sent as
-/// a request field is a 400 at the first step, so it is refused here instead.
+/// The values `reasoning_effort` accepts.
 pub const REASONING_EFFORTS: [&str; 3] = ["low", "medium", "high"];
 
 /// Resolve one provider's `reasoning_effort`:
-///
-/// * unset (or empty) -> [`DEFAULT_REASONING_EFFORT`], the loop's own choice;
-/// * `none` -> `None`: send no field at all, i.e. the provider's default;
-/// * `low`/`medium`/`high` -> that, verbatim (lower-cased).
-///
-/// A value outside the set is refused at load: it would be a 400 on the first
-/// request, which is a worse way to find out.
 fn reasoning_effort(
     configured: Option<String>,
     provider: &str,
@@ -794,17 +750,14 @@ fn reasoning_effort(
     Ok((Some(value), true))
 }
 
-/// `max_steps`: unset or `0` means no cap at all (the default: a fully
-/// autonomous agent is not stopped by a counter), a positive value caps one
-/// turn. `0` is accepted as "unlimited" rather than refused, because a config
-/// that means "no limit" should not be able to break a session. A value that is
-/// not a positive whole number (`-1`, `"lots"`) is refused while parsing.
+/// `max_steps`: unset or `0` means no cap at all (the default: a fully autonomous agent is not stopped
+/// by a counter), a positive value caps one turn.
 fn step_cap(configured: Option<u32>) -> Option<u32> {
     configured.filter(|steps| *steps > 0)
 }
 
 /// Seconds between `config.toml` and `KELIR_PROMOTE_AFTER`. Zero disables
-/// promotion: a long call then runs to completion, as it did before M4.
+/// promotion: a long call then runs to completion, as it did before.
 fn promote_after(configured: Option<u64>) -> Result<std::time::Duration, ConfigError> {
     let seconds = match crate::envs::var_os("KELIR_PROMOTE_AFTER") {
         Some(value) => {
@@ -837,18 +790,15 @@ impl Config {
         Ok(provider)
     }
 
-    /// How much hidden reasoning to ask the current provider/model for: the
-    /// configured `reasoning_effort`, else [`crate::compact`]'s own default for
-    /// the loop (`medium`), else nothing.
+    /// How much hidden reasoning to ask the current provider/model for: the configured `reasoning_effort`,
+    /// else [`crate::compact`]'s own default for the loop (`medium`), else nothing.
     pub fn reasoning_effort(&self, provider: &str) -> Option<String> {
         self.providers
             .get(provider)
             .and_then(|entry| entry.reasoning_effort.clone())
     }
 
-    /// The window a configuration override names, if any: `[model_windows]`
-    /// for this model, else `window`. What the provider says is
-    /// [`crate::models::resolve`]; this is only the part a person set.
+    /// The window a configuration override names, if any: `[model_windows]` for this model, else `window`.
     pub fn override_window(&self, model: &str) -> Option<u64> {
         self.model_windows
             .get(model)
@@ -954,12 +904,7 @@ fn load_prompt(configured: Option<&str>) -> Result<(String, Option<PathBuf>), Co
             path.display()
         )));
     }
-    // Only the machine `prompt.md` here. The project's `.kelir/prompt.md` is
-    // *not* looked up from the process cwd: a session's cwd is `--cwd`, which
-    // the config does not know, and the render already reads
-    // `<cwd>/.kelir/prompt.md` first (M5-A fixes F2, second half). Reading it
-    // here would both miss `--cwd` and record a path the text did not come
-    // from.
+    // Only the machine `prompt.md` here.
     let machine = paths::config_dir().join("prompt.md");
     if machine.is_file()
         && let Ok(text) = std::fs::read_to_string(&machine)
@@ -1135,9 +1080,8 @@ extra_headers = { "x-extra" = "yes" }
 
     #[test]
     fn a_third_provider_name_is_refused_and_the_error_names_the_two() {
-        // A maintainer's config called its provider `kelir`; there are exactly
-        // two now, and the error has to say which (STEER-2), in which table and
-        // in which file, and how to migrate (STEER-2 fix 3).
+        // A maintainer's config called its provider `kelir`; there are exactly two now, and the
+        // error has to say which, in which table and in which file, and how to migrate.
         for text in [
             "[providers.local]\nkey_env = \"NOPE_KEY\"\n",
             "[providers.weird]\nkind = \"gemini\"\nbase_url = \"x\"\n",
@@ -1241,7 +1185,7 @@ extra = 3
     #[test]
     fn a_literal_key_in_the_config_is_ignored_not_used() {
         // Warned about (to stderr) and refused: a literal goes stale, shadows a
-        // live store and puts a secret in a file that gets copied (STEER-2).
+        // live store and puts a secret in a file that gets copied.
         let path = temp_config(
             "key = \"sk-literal-not-used\"\n[providers.openrouter]\nkey = \"sk-also-not-used\"\n",
         );
@@ -1348,9 +1292,8 @@ compact_keep = 0
         assert_eq!(cfg.reasoning_effort("openrouter").as_deref(), Some("high"));
     }
 
-    /// The default `medium` and an explicit choice are not the same fact: only
-    /// the explicit one may reach a model the provider's list says nothing
-    /// about (STEER-6 review S3).
+    /// The default `medium` and an explicit choice are not the same fact: only the explicit one
+    /// may reach a model the provider's list says nothing about.
     #[test]
     fn an_explicit_effort_is_told_apart_from_the_default() {
         let cfg = load(Some(&temp_config(""))).unwrap();
@@ -1431,9 +1374,8 @@ retry_max_attempts = 5
 ",
         );
         assert_eq!(load(Some(&path)).unwrap().retry.max_wait, None);
-        // A count cap of zero would mean "never retry", which `retry_max_wait
-        // = 0` cannot express; it is refused as an attempt cap and falls back
-        // to the budget.
+        // A count cap of zero would mean "never retry", which `retry_max_wait = 0` cannot express;
+        // it is refused as an attempt cap and falls back to the budget.
         let path = temp_config(
             "retry_max_attempts = 0
 ",
@@ -1521,7 +1463,7 @@ max_concurrent_requests = 0
         let cfg = load(Some(&path)).unwrap();
         assert_eq!(cfg.system_prompt, "EXPLICIT BASE");
         assert_eq!(cfg.prompt_path.as_deref(), Some(prompt.as_path()));
-        // The embedded default has no path, and no sentinel either (F2, F2b).
+        // The embedded default has no path, and no sentinel either.
         let path = temp_config("");
         let cfg = load(Some(&path)).unwrap();
         assert_eq!(cfg.system_prompt, DEFAULT_PROMPT);

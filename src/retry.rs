@@ -1,16 +1,8 @@
 //! What to retry, how long to wait, and when to give up.
-//!
-//! A fully autonomous agent has to ride out transient provider trouble: a `429`
-//! when several local workers share one account, a `5xx` from a busy gateway, a
-//! socket that dies mid-stream. This module is the whole policy as pure
-//! functions: the status classification, `Retry-After` and reset-header
-//! parsing, full-jitter exponential backoff (base 2 s, factor 2, cap 120 s) and
-//! the per-request waiting budget. The clock and the random source are
-//! arguments, so the schedule is testable without sleeping.
-//!
-//! What is deliberately *not* here: the wait itself. `session::stream` owns
-//! that, because a wait has to stay interruptible by verbs and has to be
-//! visible as an `error` event and a status line.
+//! A fully autonomous agent has to ride out transient provider trouble: a `429` when several local
+//! workers share one account, a `5xx` from a busy gateway, a socket that dies mid-stream.
+//! This module is the whole policy as pure functions: the status classification, `Retry- After`
+//! and reset-header parsing, full-jitter exponential backoff (base 2 s, factor 2, cap 120 s) and
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,17 +15,9 @@ pub const DEFAULT_WAIT_SECS: u64 = 30 * 60;
 /// A parsed provider hint is clamped to this, so an absurd `Retry-After` cannot
 /// overflow anything (the budget still decides whether the wait happens).
 pub const MAX_PARSED: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// The shortest wait a provider's own hint can shorten a retry to. A gateway
-/// that answers `429 Retry-After: 0` forever must not turn "backoff" into a
-/// hot loop; the floor is capped by the schedule's own first ceiling, so a
-/// person who configured a faster schedule gets that instead.
 pub const HINT_FLOOR: Duration = Duration::from_millis(250);
 
-/// How many provider requests one budget allows. The brief says "attempts are
-/// unlimited inside the budget"; this is the finite stand-in, because a
-/// provider that fails instantly would otherwise spin a zero-wait loop and the
-/// budget would never fill. The budget is the real limit: with the default
-/// schedule the waits grow to the 120 s cap long before the count is reached.
+/// How many provider requests one budget allows.
 pub const MAX_ATTEMPTS: u32 = 60;
 
 /// The backoff schedule (`retry_base_ms`, `retry_cap_ms`, `retry_max_wait`,
@@ -45,10 +29,6 @@ pub struct Policy {
     /// Total waiting allowed per request. `None` is `retry_max_wait = 0`: wait
     /// as long as the provider needs.
     pub max_wait: Option<Duration>,
-    /// A count cap inside the budget. Unset (the default) means the budget
-    /// alone decides; it exists because "unlimited inside the budget" is only
-    /// safe when every attempt costs a wait, and a person (`retry_max_attempts
-    /// = 5`) or a test may want the count to be the bound instead.
     pub max_attempts: Option<u32>,
 }
 
@@ -114,17 +94,10 @@ impl Rng for Xorshift {
 }
 
 /// How long to wait before attempt `attempt + 1`.
-///
-/// A provider hint (`Retry-After`, a reset header) wins when there is one: it
-/// is what the provider asked for. Otherwise full jitter — uniform in
-/// `[0, ceiling(attempt)]` — which is what keeps several workers from retrying
-/// in step.
 pub fn delay(policy: &Policy, attempt: u32, hint: Option<Duration>, rng: &mut dyn Rng) -> Duration {
     if let Some(hint) = hint {
-        // A hint is what the provider asked for, but never a zero wait: a
-        // gateway that answers `Retry-After: 0` (or a reset header already in
-        // the past) for ever would otherwise get a request per millisecond
-        // (STEER-5 review S2).
+        // A hint is what the provider asked for, but never a zero wait: a gateway that answers `Retry-After:
+        // 0` (or a reset header already in the past) for ever would otherwise get a request per millisecond
         let floor = policy.ceiling(0).min(HINT_FLOOR);
         return hint.max(floor).min(MAX_PARSED);
     }
@@ -135,7 +108,6 @@ pub fn delay(policy: &Policy, attempt: u32, hint: Option<Duration>, rng: &mut dy
     Duration::from_nanos(rng.next_u64() % (nanos + 1))
 }
 
-/// One request's waiting budget.
 #[derive(Debug, Clone)]
 pub struct Budget {
     total: Option<Duration>,
@@ -145,9 +117,8 @@ pub struct Budget {
 }
 
 impl Budget {
-    /// A budget of `total` waiting (`None` = unlimited), with `attempts` as an
-    /// optional count cap inside it (`None` = the [`MAX_ATTEMPTS`] safety cap
-    /// only).
+    /// A budget of `total` waiting (`None` = unlimited), with `attempts` as an optional count cap
+    /// inside it (`None` = the [`MAX_ATTEMPTS`] safety cap only).
     pub fn new(total: Option<Duration>, attempts: Option<u32>) -> Self {
         Self {
             total,
@@ -165,7 +136,6 @@ impl Budget {
         self.spent
     }
 
-    /// How many provider requests were made inside this budget.
     pub fn attempts(&self) -> u32 {
         self.attempts
     }
@@ -174,9 +144,8 @@ impl Budget {
         self.attempts = self.attempts.saturating_add(1);
     }
 
-    /// Is there room for one more wait of `wait`? A wait that does not fit is
-    /// not taken (the turn pauses instead): waiting 4 s of a 1 s budget is not
-    /// what the budget says.
+    /// Is there room for one more wait of `wait`? A wait that does not fit is not taken (the turn
+    /// pauses instead): waiting 4 s of a 1 s budget is not what the budget says.
     pub fn fits(&self, wait: Duration) -> bool {
         if self.attempts >= self.cap {
             return false;
@@ -193,9 +162,8 @@ impl Budget {
     }
 }
 
-/// The HTTP statuses worth another request: 429, 408 (request timeout) and
-/// every 5xx, which covers 529 ("overloaded"). 400/401/403/404 are answers,
-/// not outages: retrying them buys the same answer again.
+/// The HTTP statuses worth another request: 429, 408 (request timeout) and every 5xx, which covers 529
+/// ("overloaded"). 400/401/403/404 are answers, not outages: retrying them buys the same answer again.
 pub fn status_is_retryable(code: u16) -> bool {
     matches!(code, 408 | 429) || (500..=599).contains(&code)
 }
@@ -262,8 +230,6 @@ pub fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
 }
 
 /// One reset header (`x-ratelimit-reset*`, `anthropic-ratelimit-*-reset`, …).
-/// Providers write these in several ways: a delta ("1s", "6m0s", "120"), epoch
-/// seconds, epoch milliseconds, an HTTP-date or an RFC 3339 timestamp.
 pub fn parse_reset(value: &str, now: SystemTime) -> Option<Duration> {
     let value = value.trim();
     if value.is_empty() {
@@ -310,9 +276,8 @@ fn absolute(text: &str, now: SystemTime) -> Option<Duration> {
     )
 }
 
-/// Go-style durations ("1s", "6m0s", "120ms", "1h30m"): the shape the Anthropic
-/// and OpenAI reset headers use. A bare number is accepted as seconds here too
-/// (a reset header may write "120").
+/// Go-style durations ("1s", "6m0s", "120ms", "1h30m"): the shape the Anthropic and OpenAI reset
+/// headers use.
 pub fn parse_duration_spec(text: &str) -> Option<Duration> {
     let text = text.trim();
     if text.is_empty() {
@@ -354,18 +319,8 @@ pub fn parse_duration_spec(text: &str) -> Option<Duration> {
     any.then(|| Duration::from_secs_f64(total).min(MAX_PARSED))
 }
 
-/// The wait one response's headers ask for: `Retry-After` when it is there and
-/// not zero, otherwise the *shortest* reset header.
-///
-/// The shortest, not the longest: a provider that reports both a per-minute and
-/// a daily window writes both, and the one that fired is the tight one. Waiting
-/// the daily window out because it happens to be the larger number turns a
-/// minute's wait into hours (STEER-5 review N2).
-///
-/// Absolute hints (an HTTP-date, an epoch, an RFC 3339 timestamp) are measured
-/// against the response's own `Date` header when it has one: a skewed local
-/// clock would otherwise turn a 90 s hint into no wait at all (or into hours;
-/// review N1). Names are matched case-insensitively.
+/// The wait one response's headers ask for: `Retry-After` when it is there and not zero,
+/// otherwise the *shortest* reset header.
 pub fn header_hint<'a>(
     headers: impl Iterator<Item = (&'a str, &'a str)>,
     now: SystemTime,
@@ -392,9 +347,8 @@ pub fn header_hint<'a>(
             reset = Some(reset.map_or(wait, |current: Duration| current.min(wait)));
         }
     }
-    // A `Retry-After: 0` (or a date already past) says "retry now"; when the
-    // same response also names a real reset window, the window is the better
-    // answer.
+    // A `Retry-After: 0` (or a date already past) says "retry now"; when the same response also
+    // names a real reset window, the window is the better answer.
     match (retry_after, reset) {
         (Some(hint), Some(window)) if hint.is_zero() => Some(window),
         (Some(hint), _) => Some(hint),
@@ -414,7 +368,7 @@ fn is_reset_header(name: &str) -> bool {
 }
 
 /// HTTP-date (RFC 7231): IMF-fixdate `Sun, 06 Nov 1994 08:49:37 GMT`, and the
-/// obsolete asctime form `Sun Nov  6 08:49:37 1994`.
+/// obsolete asctime form `Sun Nov 6 08:49:37 1994`.
 fn http_date(text: &str) -> Option<SystemTime> {
     let text = text.trim();
     let parts: Vec<&str> = text.split_whitespace().collect();
@@ -428,7 +382,7 @@ fn http_date(text: &str) -> Option<SystemTime> {
         }
         (parts[1], parts[2], parts[3], parts[4])
     } else {
-        // asctime: "Sun Nov  6 08:49:37 1994"
+        // asctime: "Sun Nov 6 08:49:37 1994"
         if parts.len() < 5 {
             return None;
         }
@@ -660,10 +614,8 @@ mod tests {
 
     #[test]
     fn an_absolute_hint_is_measured_from_the_responses_own_date() {
-        // 22:13:20 is `now()`; the response says it was written at 22:13:50 and
-        // the provider wants the caller back at 22:15:20, so the wait is 90 s
-        // whatever this machine's clock believes (N1). A skewed clock would
-        // make it "none at all" (hammering) or hours (a pause).
+        // 22:13:20 is `now()`; the response says it was written at 22:13:50 and the provider wants the caller
+        // back at 22:15:20, so the wait is 90 s whatever this machine's clock believes.
         let headers = [
             ("Date", "Tue, 14 Nov 2023 22:13:50 GMT"),
             ("Retry-After", "Tue, 14 Nov 2023 22:15:20 GMT"),
@@ -698,7 +650,7 @@ mod tests {
             max_wait: None,
             max_attempts: None,
         };
-        // `Retry-After: 0` from a gateway that never stops saying it (S2).
+        // `Retry-After: 0` from a gateway that never stops saying it .
         assert_eq!(
             delay(&policy, 0, Some(Duration::ZERO), &mut Fixed(0)),
             HINT_FLOOR
@@ -742,7 +694,7 @@ mod tests {
         assert_eq!(
             header_hint(headers.into_iter(), now()),
             Some(Duration::from_secs(30)),
-            "the shortest window: the tight one is the one that fired (N2)"
+            "the shortest window: the tight one is the one that fired"
         );
         // A zero `Retry-After` beside a real window: the window is the answer.
         let zero_after = [("Retry-After", "0"), ("x-ratelimit-reset-requests", "2m")];

@@ -1,19 +1,6 @@
 //! One place for every style and glyph the TUI uses.
-//!
-//! Two rules from the design note (TUI-v2 §7) live here so no renderer can
-//! break them by accident:
-//!
-//! - **Only the 16 ANSI colours and the terminal default.** Never `White`,
-//!   `Black`, `Rgb` or `Indexed`: the user's theme decides what they look like,
-//!   and a light terminal stays readable.
-//! - **De-emphasis is [`Modifier::DIM`], never `Color::DarkGray`.** Bright black
-//!   is the *background* in Solarized-style themes, which is how the baseline's
-//!   idle status line became invisible there.
-//!
-//! `NO_COLOR` (any non-empty value) drops every foreground colour and keeps the
-//! attributes (`BOLD`, `DIM`, `UNDERLINE`, `REVERSED`); the glyphs stay, so the
-//! state is still legible. `KELIR_ASCII=1` or `TERM=dumb` swaps the Unicode
-//! glyphs for ASCII ones.
+//! Two rules from the design note (TUI-v2 §7) live here so no renderer can break them by
+//! accident:
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -65,7 +52,7 @@ impl Glyphs {
         if self.ascii { "#" } else { "⏹" }
     }
 
-    /// The editor's prompt, on every row (`› ` / `  `).
+    /// The editor's prompt, on every row (`› ` / ` `).
     pub fn prompt(&self) -> &'static str {
         if self.ascii { "> " } else { "› " }
     }
@@ -99,12 +86,10 @@ impl Glyphs {
         if self.ascii { '.' } else { '…' }
     }
 
-    /// A newline shown inside a one-line preview.
     pub fn newline_mark(&self) -> &'static str {
         if self.ascii { " | " } else { " ↵ " }
     }
 
-    /// The table border pieces.
     pub fn table(&self) -> Table {
         if self.ascii {
             Table {
@@ -138,7 +123,6 @@ impl Glyphs {
     }
 }
 
-/// The box-drawing characters of one table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Table {
     pub h: char,
@@ -285,7 +269,6 @@ impl Theme {
         self.fg(Color::Cyan)
     }
 
-    /// Rate limited, paused, waiting on a human.
     pub fn waiting(self) -> Style {
         self.fg(Color::Yellow)
     }

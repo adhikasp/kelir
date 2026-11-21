@@ -1833,3 +1833,15 @@ own line, and a clean call shows no `ok` word.
 - **No `ok` verdict.** A clean call's right-hand column shows only its output size (`29 B`);
   a failure (`✗ exit 101`) and a stop (`⏹ cancelled`) keep their words. The headless progress
   line (`→ bash … · ok · …`) is a separate path and is unchanged.
+
+## Comment history stripped (P1, 2026-11-21)
+
+One-liners for the guarantees whose incident narratives were removed from the source; the
+original commits and reviews remain in git history.
+
+- `cancel` is a first-class verb, applied at once and kept in the scheduler queue as an action, so it can kill a job in an idle `--keep` session (6b1a8be).
+- A 400 that refuses a body field is remembered for the session so the same field is not sent again and the same 400 is not paid twice (a33bbc7).
+- A file created and then written has a window in which a reader sees it empty; content is written to a temp file and linked into place, or a young unreadable file is treated as somebody's (docs/reviews/buildinfra-review.md B2).
+- A connection close on Unix must not unlink a socket another process still uses; the listener owns its path (9bff9d4).
+- A SIGKILL can still leave a grandchild running; a shim's whole tree is in one process group (Unix) or Job Object (Windows) and dies with it (1f16d55).
+- A job's liveness and its recorded start time are both checked: a recycled pid or a zombie is not the shim that wrote a status file (774038f).

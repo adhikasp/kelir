@@ -1,11 +1,8 @@
-//! Turning text into scrollback rows, and deciding what stays in the inline
-//! area.
-//!
-//! Two pure pieces: [`wrap`] breaks a string into terminal rows of a given
-//! width (wide characters count two columns, a break lands on a space when
-//! there is one), and [`Live`] tracks a streamed message so every row is
-//! committed to the scrollback exactly once — the rows that no longer fit in
-//! the live area go first, the rest when the message is finished.
+//! Turning text into scrollback rows, and deciding what stays in the inline area.
+//! Two pure pieces: [`wrap`] breaks a string into terminal rows of a given width (wide characters
+//! count two columns, a break lands on a space when there is one), and [`Live`] tracks a streamed
+//! message so every row is committed to the scrollback exactly once — the rows that no longer fit
+//! in the live area go first, the rest when the message is finished.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -24,9 +21,7 @@ pub fn display_width(line: &str) -> usize {
     line.chars().map(width_of).sum()
 }
 
-/// Break `text` into rows no wider than `width` columns. Newlines are row
-/// breaks; a break prefers the last space on the row; trailing spaces are
-/// dropped; a row that is too narrow for one character still gets it.
+/// Break `text` into rows no wider than `width` columns.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
@@ -48,9 +43,8 @@ fn wrap_line(line: &str, width: usize, out: &mut Vec<String>) {
     let mut index = 0usize;
     while index < chars.len() {
         let char_width = width_of(chars[index]);
-        // A space is only a break opportunity, never the reason to break: a row
-        // may hold exactly `width` columns and the space after it belongs to the
-        // break (it is dropped, not printed).
+        // A space is only a break opportunity, never the reason to break: a row may hold exactly
+        // `width` columns and the space after it belongs to the break (it is dropped, not printed).
         if column + char_width > width && index > start && chars[index] != ' ' {
             let end = match last_space {
                 Some(space) if space > start => space,
@@ -81,11 +75,6 @@ fn wrap_line(line: &str, width: usize, out: &mut Vec<String>) {
 }
 
 /// A streamed message and the row the scrollback has reached.
-///
-/// Wrapping is incremental: each character is fed through the same break rules
-/// as [`wrap`] exactly once, and rows that can no longer change are kept. Only
-/// a resize re-wraps the whole message. Re-wrapping the whole text on every
-/// frame was O(n²) in the length of one answer (M2 review N4).
 #[derive(Debug, Clone)]
 pub struct Live {
     /// The whole message, kept only so a resize can re-wrap it.
@@ -100,7 +89,6 @@ pub struct Live {
     open: Vec<char>,
     column: usize,
     last_space: Option<usize>,
-    /// Characters fed through the wrapper (a test asserts it is linear).
     #[cfg(test)]
     wrapped: usize,
 }
@@ -164,9 +152,8 @@ impl Live {
         if self.column + width > self.width && !self.open.is_empty() && c != ' ' {
             match self.last_space.filter(|space| *space > 0) {
                 Some(space) => {
-                    // Break at the last space: the head is a finished row, the
-                    // tail (after the space, and any spaces after it) carries
-                    // over and this character joins it.
+                    // Break at the last space: the head is a finished row, the tail (after the space, and any
+                    // spaces after it) carries over and this character joins it.
                     let head: String = self.open[..space].iter().collect();
                     self.settled.push(head.trim_end().to_string());
                     let mut tail: Vec<char> = self.open[space + 1..].to_vec();
@@ -206,7 +193,6 @@ impl Live {
         self.last_space = None;
     }
 
-    /// The open line as it would be displayed (trailing spaces trimmed).
     fn open_row(&self) -> String {
         self.open.iter().collect::<String>().trim_end().to_string()
     }
@@ -244,7 +230,6 @@ impl Live {
         out
     }
 
-    /// The rows still in the live area.
     pub fn view(&self) -> Vec<String> {
         if self.text.is_empty() {
             return Vec::new();
@@ -387,9 +372,8 @@ mod tests {
 
     #[test]
     fn a_one_megabyte_message_is_wrapped_once() {
-        // A single long answer in 1 KB deltas: the old `due()` re-wrapped the
-        // whole message every frame (O(n²)); this proves every character goes
-        // through the wrapper once.
+        // A single long answer in 1 KB deltas: the old `due()` re-wrapped the whole message every
+        // frame (O(n²)); this proves every character goes through the wrapper once.
         let mut text = String::with_capacity(1 << 20);
         let mut index = 0;
         while text.len() < (1 << 20) {

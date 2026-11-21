@@ -1,13 +1,8 @@
-//! `kelir job run|status|history`: one run of a job, from the lock to the
-//! notify hook.
-//!
-//! A run is: take the job's lock (or exit 75), settle the named session it
-//! resumes (or start one, or start a fresh one when `new_session_every` says
-//! so), write STATUS as `running`, drive the session loop with a plan the loop
-//! reads, then write STATUS for what happened, append the history line, run the
-//! notify hooks and release the lock. The same finalize runs when the deadline
-//! has to force the process out, so a hung provider cannot leave STATUS saying
-//! `running`.
+//! `kelir job run|status|history`: one run of a job, from the lock to the notify hook.
+//! A run is: take the job's lock (or exit 75), settle the named session it resumes (or start one,
+//! or start a fresh one when `new_session_every` says so), write STATUS as `running`, drive the
+//! session loop with a plan the loop reads, then write STATUS for what happened, append the
+//! history line, run the notify hooks and release the lock.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -27,7 +22,6 @@ pub const EXIT_USAGE: u8 = 2;
 pub const EXIT_SKIPPED: u8 = 75;
 pub const EXIT_TIMEOUT: u8 = 124;
 
-/// How long a notify hook may run.
 pub const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long after the deadline's `stop` the process is forced out.
 pub const FORCE_AFTER: Duration = Duration::from_secs(20);
@@ -297,10 +291,6 @@ pub async fn run(args: JobRunArgs) -> u8 {
         ),
     });
     // The effective step cap for this run: the CLI flag wins over jobs.toml.
-    // It goes to the session through `CommonArgs` (where `prepare` applies it
-    // to the config the loop reads) and into the Plan so a job that reaches its
-    // cap reports `paused` even on an answer at the last allowed step. `0`
-    // means no cap, so it is not a boundary and is not passed to the Plan.
     let step_cap = args.common.max_steps.or(def.max_steps).filter(|n| *n > 0);
     if !jobs::install(Plan {
         planned_id: planned,
@@ -519,9 +509,7 @@ pub async fn finalize(drive_code: Option<u8>, early_error: Option<String>) -> u8
         status.notify_errors = errors;
         let _ = jobs::write_status(&run.dir, &status);
     }
-    // The waiter on the job lock can resolve the name the instant that lock
-    // is released. Clear the session owner first: `holder()` keys it on this
-    // process's pid, which is still alive until `run()` returns (STEER-9).
+    // The waiter on the job lock can resolve the name the instant that lock is released.
     if !run.session_id.is_empty() {
         crate::names::release_owner(&crate::paths::session_dir(&run.session_id));
     }
@@ -702,9 +690,7 @@ pub fn history(args: JobHistoryArgs) -> u8 {
 
 // ------------------------------------------------------------ run --name
 
-/// `kelir run --name <name>`: settle which session the run uses and install the
-/// plan. `Some(id)` resumes that session (the task joins it as a `job`
-/// message); `None` starts the session the name was just bound to.
+/// `kelir run --name <name>`: settle which session the run uses and install the plan.
 pub fn plan_for_name(name: &str) -> Result<Option<String>, String> {
     let (resume, plan) = match names::resolve_for_run(name)? {
         Target::Resume(id) => (

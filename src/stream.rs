@@ -1,9 +1,8 @@
 //! Assemble a Chat Completions stream into one assistant turn.
-//!
-//! Deltas arrive as text, reasoning and tool-call fragments spread across
-//! chunks; tool calls are keyed by their `index` and concatenated. The final
-//! usage-only chunk (sent because `stream_options.include_usage` is on) is
-//! captured here, including the cache fields.
+//! Deltas arrive as text, reasoning and tool-call fragments spread across chunks; tool calls are
+//! keyed by their `index` and concatenated.
+//! The final usage-only chunk (sent because `stream_options.include_usage` is on) is captured
+//! here, including the cache fields.
 
 use serde_json::Value;
 
@@ -20,7 +19,6 @@ pub struct Usage {
     pub allowance: Option<Value>,
 }
 
-/// Text that arrived in the stream, for a UI that renders it live.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delta {
     Text(String),
@@ -70,8 +68,12 @@ impl Assembler {
             self.done = true;
             return Ok(());
         }
-        let value: Value = serde_json::from_str(data)
-            .map_err(|_| format!("invalid JSON in stream chunk: {}", truncate(data, 200)))?;
+        let value: Value = serde_json::from_str(data).map_err(|_| {
+            format!(
+                "invalid JSON in stream chunk: {}",
+                crate::util::truncate_chars(data, 200)
+            )
+        })?;
         self.feed_json(&value);
         Ok(())
     }
@@ -144,7 +146,6 @@ impl Assembler {
         }
     }
 
-    /// The assembled tool calls, in the order the model emitted them.
     pub fn tool_calls(&self) -> Vec<ToolCall> {
         let mut calls = self.calls.clone();
         calls.sort_by_key(|c| c.index);
@@ -233,10 +234,6 @@ pub(crate) fn parse_usage(usage: &Value) -> Usage {
         cost,
         allowance: usage.get("allowance").filter(|v| !v.is_null()).cloned(),
     }
-}
-
-fn truncate(text: &str, max: usize) -> String {
-    crate::util::truncate_chars(text, max)
 }
 
 #[cfg(test)]

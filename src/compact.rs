@@ -1,17 +1,8 @@
 //! Compaction: replace a prefix of the conversation with a summary.
-//!
-//! Three triggers, one mechanism: the model calls the `compact` tool, a human
-//! sends the `compact` verb (`/compact [focus]`, `kelir ctl … compact`), or the
-//! context passes the auto fraction of the model's window. Whatever the
-//! trigger, it applies at the next `before_step` boundary — never between a tool
-//! call and its result — and produces one `compacted` event.
-//!
-//! The summarising request is sealed: a system message (the `compact.md` prompt)
-//! and one user message (the transcript, plus the focus). No tools, so the model
-//! cannot answer a summary request by calling `bash`.
-//!
-//! `fold` then renders the range as the summary plus the pinned messages: the
-//! first user message (the task) and every message a human typed.
+//! Three triggers, one mechanism: the model calls the `compact` tool, a human sends the `compact`
+//! verb (`/compact [focus]`, `kelir ctl … compact`), or the context passes the auto fraction of
+//! the model's window.
+//! Whatever the trigger, it applies at the next `before_step` boundary — never between a tool call
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -41,18 +32,12 @@ pub const AUTO_FRACTION: f64 = 0.8;
 /// doing; `compact_keep` in the config overrides it.
 pub const DEFAULT_KEEP: usize = 4;
 
-/// Compaction is triggered once the context passes this many tokens, whatever
-/// the window is — unless the window-based trigger is smaller. A 1M-token window
-/// at 80 % is 800K tokens, and a real session passes 150K with 76 % of the
-/// context being old file reads (M5-A: 135 steps above 150K, 42.5M prompt
-/// tokens for a 300K-token job). The rate limit is charged on prompt volume, not
-/// on the price, so compacting early pays for itself.
+/// Compaction is triggered once the context passes this many tokens, whatever the window is — unless
+/// the window-based trigger is smaller.
 pub const DEFAULT_SOFT_TARGET: u64 = 150_000;
 
-/// The token count at which the auto trigger fires: the window-based threshold
-/// (`window * at`) capped by the absolute soft target. Whichever is smaller
-/// wins, so a small window keeps its fraction and a huge one still compacts at
-/// a sane size.
+/// The token count at which the auto trigger fires: the window-based threshold (`window * at`) capped
+/// by the absolute soft target.
 pub fn auto_threshold(window: u64, at: f64, soft_target: u64) -> u64 {
     let by_window = if window == 0 || !(0.0..=1.0).contains(&at) {
         0
@@ -67,18 +52,13 @@ pub fn auto_threshold(window: u64, at: f64, soft_target: u64) -> u64 {
     }
 }
 
-/// Passed the auto threshold? `at` is the fraction of the window (0.8 by
-/// default) and `soft_target` the absolute ceiling (0 when none); the comparison
-/// is `>=`, so the threshold exactly triggers. A threshold of 0 (no window and
-/// no target) never triggers.
 pub fn should_auto(window: u64, at: f64, soft_target: u64, tokens: u64) -> bool {
     let threshold = auto_threshold(window, at, soft_target);
     threshold > 0 && tokens >= threshold
 }
 
-/// A token estimate for a request: four bytes per token, rounded up, over the
-/// JSON the provider will receive. Good enough for a trigger and for the
-/// `tokens_before`/`tokens_after` numbers, which are labelled as estimates.
+/// A token estimate for a request: four bytes per token, rounded up, over the JSON the provider will
+/// receive.
 pub fn estimate_tokens(messages: &[ChatMessage]) -> u64 {
     let mut bytes = 0usize;
     for message in messages {
@@ -99,7 +79,6 @@ pub struct Plan {
     pub pinned_seqs: Vec<u64>,
 }
 
-/// Does this event render as a chat message?
 fn bears_a_message(event: &LogEvent) -> bool {
     matches!(
         event.body,
@@ -117,10 +96,6 @@ pub fn human_typed(from: &str) -> bool {
 }
 
 /// Work out the next compaction, or `None` when there is nothing to summarise.
-///
-/// The last `keep` messages stay verbatim. The cut never leaves the tail
-/// starting on a tool result: a provider rejects a `tool` message whose
-/// assistant call was summarised away, so the cut moves back to that call.
 pub fn plan(events: &[LogEvent], keep: usize) -> Option<Plan> {
     let bearing: Vec<&LogEvent> = events
         .iter()
@@ -141,9 +116,8 @@ pub fn plan(events: &[LogEvent], keep: usize) -> Option<Plan> {
     }
     let mut through_seq = bearing[cut - 1].seq;
 
-    // A compaction never reaches back before one that already stands: the new
-    // one has to cover it (its range and therefore its summary), or the fold
-    // would keep both summaries and pin the same messages twice (B2).
+    // A compaction never reaches back before one that already stands: the new one has to cover it (its
+    // range and therefore its summary), or the fold would keep both summaries and pin the same messages
     let floor = events
         .iter()
         .filter_map(|event| match &event.body {
@@ -156,9 +130,8 @@ pub fn plan(events: &[LogEvent], keep: usize) -> Option<Plan> {
     {
         through_seq = floor;
     }
-    // With the floor in force the tail can no longer be pulled back, so drop
-    // the orphan risk the other way: a tool result right after the cut moves
-    // into the range with it.
+    // With the floor in force the tail can no longer be pulled back, so drop the orphan risk the
+    // other way: a tool result right after the cut moves into the range with it.
     while let Some(next) = bearing.iter().find(|event| event.seq > through_seq) {
         if !matches!(next.body, EventBody::ToolSettled { .. }) {
             break;
@@ -187,13 +160,8 @@ pub fn plan(events: &[LogEvent], keep: usize) -> Option<Plan> {
     })
 }
 
-/// A `compact` call the log shows as queued but that was never applied: the
-/// process died between the tool's `compaction queued …` result and the
-/// boundary that would have summarised. A resume re-queues it (N2), so the
-/// model's request is not silently lost.
-///
-/// `None` means nothing is outstanding; `Some(focus)` is a queued compaction,
-/// with the focus the call carried when it had one.
+/// A `compact` call the log shows as queued but that was never applied: the process died between the
+/// tool's `compaction queued …` result and the boundary that would have summarised.
 pub fn queued_compaction(events: &[LogEvent], session_dir: &Path) -> Option<Option<String>> {
     let mut focus_by_call: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut pending: Option<Option<String>> = None;
@@ -239,7 +207,6 @@ pub fn queued_compaction(events: &[LogEvent], session_dir: &Path) -> Option<Opti
     pending
 }
 
-/// The conversation as text, for the summarising request.
 pub fn render_transcript(messages: &[ChatMessage]) -> String {
     let mut out = String::new();
     for message in messages {
@@ -494,9 +461,8 @@ mod tests {
 
     #[test]
     fn a_plan_never_reaches_back_before_a_compaction_that_stands() {
-        // A `compacted` event whose range ends at 4 is already in the log, but
-        // the raw count says the next cut is at 2. The new range must cover the
-        // old one, so its summary and pins are replaced, not repeated (B2).
+        // A `compacted` event whose range ends at 4 is already in the log, but the raw count says the next cut
+        // is at 2.
         let events = vec![
             started(),
             user(2, "the task", "cli"),

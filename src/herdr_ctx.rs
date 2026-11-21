@@ -1,24 +1,10 @@
-//! Herdr awareness: ONE frozen line in the system sources (M5).
-//!
-//! herdr-core sets `HC_TERMINAL_ID` in every pane it creates. When it is set,
-//! kelir asks `hc get <id> --json` once, at `session_started`, and renders the
-//! pane's address, space, tab and `where` label as one line of the frozen
-//! system prompt. The same probe also runs `hc ls --json` once to append a
-//! *start-of-session snapshot* of the concurrent activity around the pane:
-//! how many agents share the space (split by state), how many other spaces and
-//! machines exist. It is a snapshot for initial awareness, not a live feed —
-//! the `herdr` skill still answers live count questions with `hc ls`.
-//!
-//! It fails open. `hc` missing, erroring, slow (past [`TIMEOUT`]) or printing
-//! something that is not a JSON object omits the affected part and returns a
-//! *note* that the session records as an `error` event with location `source`;
-//! it never fails the session. A failed `hc ls` still leaves the pane line.
-//! Outside Herdr (no `HC_TERMINAL_ID`) there is no line and no note.
-//!
-//! The helper runs through [`crate::credentials::run_command`]: found on PATH
-//! the way a shell would (`hc.exe`, or a `.cmd` shim on Windows), no console
-//! window, its tree killed and reaped past the timeout, its output never
-//! echoed into a note.
+//! Herdr awareness: ONE frozen line in the system sources. herdr-core sets `HC_TERMINAL_ID` in
+//! every pane it creates.
+//! When it is set, kelir asks `hc get <id> --json` once, at `session_started`, and renders the
+//! pane's address, space, tab and `where` label as one line of the frozen system prompt.
+//! The same probe also runs `hc ls --json` once to append a *start-of-session snapshot* of
+//! the activity around the pane. It fails open: a slow or failed probe omits its part and
+//! records a note, never failing the session.
 
 use std::time::Duration;
 
@@ -88,7 +74,7 @@ pub fn probe_with(id: Option<&str>, run: &Runner<'_>) -> Probe {
                 line: None,
                 note: Some(format!(
                     "herdr: `hc get` failed ({}); no herdr line",
-                    one_line(&why, 160)
+                    crate::util::one_line_clean(&why, 160)
                 )),
             };
         }
@@ -107,7 +93,7 @@ pub fn probe_with(id: Option<&str>, run: &Runner<'_>) -> Probe {
             base,
             Some(format!(
                 "herdr: `hc ls` failed ({}); no activity counts",
-                one_line(&why, 160)
+                crate::util::one_line_clean(&why, 160)
             )),
         ),
     };
@@ -126,12 +112,6 @@ fn valid_id(id: &str) -> bool {
 }
 
 /// Render the line from `hc get --json`'s output.
-///
-/// `pane` is the `address` the JSON states, or the id we asked about; `space`,
-/// `tab` and `where` are the `labels` `herdr.space`, `herdr.tab` and `where`
-/// when present. A label that is absent, not a string or empty is left out of
-/// the line (a partial answer is still a pane address); an output that is not a
-/// JSON object is an error.
 pub fn line_from_json(asked: &str, output: &str) -> Result<String, String> {
     let value: Value = serde_json::from_str(output.trim())
         .map_err(|_| "`hc get` printed something that is not JSON".to_string())?;
@@ -167,15 +147,6 @@ pub fn line_from_json(asked: &str, output: &str) -> Result<String, String> {
 }
 
 /// Render the extra awareness fragment from `hc ls --json`'s output.
-///
-/// Returns `None` when there is nothing worth saying (no terminals at all), an
-/// error when the output is not the expected object, or a fragment to append to
-/// the pane line. Agents are terminals that report a `status` (a plain shell
-/// has none). Their state is that status string (`working`, `idle`, `done`,
-/// `blocked`). The current space comes from the base line's `space <id>` (or
-/// the `where "…"` prefix); other spaces are distinct `where` prefixes before
-/// the first `" / "`; machines are the connected entries of the `machines`
-/// array.
 pub fn awareness_from_json(base: &str, output: &str) -> Result<Option<String>, String> {
     let value: Value = serde_json::from_str(output.trim())
         .map_err(|_| "`hc ls` printed something that is not JSON".to_string())?;
@@ -290,20 +261,10 @@ fn space_prefix(where_label: &str) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// One line, no control characters, at most [`MAX_LABEL`] characters: a label
-/// is written by another process, and a newline in it would be a way to put
-/// instructions into the frozen system prompt.
+/// One line, no control characters, at most [`MAX_LABEL`] characters: a label is written by another
+/// process, and a newline in it would be a way to put instructions into the frozen system prompt.
 fn clean(text: &str) -> String {
-    one_line(text, MAX_LABEL).replace('"', "'")
-}
-
-fn one_line(text: &str, max: usize) -> String {
-    let flat: String = text
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
-    crate::util::truncate_chars(&flat, max)
+    crate::util::one_line_clean(text, MAX_LABEL).replace('"', "'")
 }
 
 #[cfg(test)]

@@ -1,12 +1,8 @@
-//! `kelir doctor`: which provider is wired to what, and where its key comes
-//! from — the source, never the secret (STEER-2).
-//!
-//! It is a report, not a test: it prints the two providers, their base URL, the
-//! key source that answered (or why none did) and, when the source publishes
-//! one, the key's own expiry plus the fix for a stale one. It never sends a
-//! request, so it works offline and costs nothing, and it never prints a key —
-//! the code path that reads one hands it to [`crate::credentials`] and nothing
-//! else.
+//! `kelir doctor`: which provider is wired to what, and where its key comes from — the source,
+//! never the secret.
+//! It is a report, not a test: it prints the two providers, their base URL, the key source that
+//! answered (or why none did) and, when the source publishes one, the key's own expiry plus the
+//! fix for a stale one.
 
 use serde_json::{Value, json};
 
@@ -40,11 +36,8 @@ pub fn doctor(args: DoctorArgs) -> u8 {
     }
 
     let reports: Vec<Value> = wanted.iter().map(|name| report(&cfg, name)).collect();
-    // Exit 1 only for a provider that matters: the one this session would use,
-    // or one whose credential is *broken* (expired). A machine that uses Go
-    // deliberately has no OPENROUTER_API_KEY, and that is information, not a
-    // failure (STEER-2 review, nit 5) — but an expired store credential is a
-    // real fault wherever it shows up.
+    // Exit 1 only for a provider that matters: the one this session would use, or one whose credential is
+    // *broken* (expired).
     let failing = |report: &Value| {
         !report["ok"].as_bool().unwrap_or(false)
             && (report["default"].as_bool().unwrap_or(false)
@@ -110,11 +103,7 @@ fn report(cfg: &Config, name: &str) -> Value {
             }
         }
         Err(error) => {
-            // The message says what is missing and how to fix it; it never
-            // quotes a key (nothing here holds one). An expired credential
-            // comes back as an error (it is a usage error, not a key), so the
-            // report says *which* fault it is: `expired` is what makes `doctor`
-            // exit 1 for a provider other than the selected one.
+            // The message says what is missing and how to fix it; it never quotes a key (nothing here holds one).
             let expired = error.contains("expired at");
             value["expired"] = json!(expired);
             value["error"] = json!(error);

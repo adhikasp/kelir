@@ -1,41 +1,15 @@
 //! Sources: the base prompt, instruction files and skills directories.
-//!
-//! The system prompt is rendered **once** at `session_started` and then frozen:
-//! a source edited on disk mid-session arrives as a `source` event (a message
-//! at the tail), never as a rewrite of the prefix, because prompt caching is
-//! the point of rendering once.
-//!
-//! Two layers, machine then project, and the project wins on a name clash:
-//!
-//! * the base prompt: the embedded default (at most 1 KB), overridden by an
-//!   explicit `prompt` file, by `<config>/prompt.md` and by `<cwd>/.kelir/prompt.md`;
-//! * instruction files: every `AGENTS.md` and `CLAUDE.md` found walking up from
-//!   the session cwd (nearest first), in the machine config dir too;
-//! * skills directories: the config's `skills_dirs`, `<config>/skills`,
-//!   `~/.claude/skills` for the machine layer, and `.claude/skills`,
-//!   `.kelir/skills` for the project one, read-only.
-//!
-//! Skills are **pull**: the base prompt names the directories and nothing else.
-//! A skill is a directory holding a `SKILL.md` with Agent Skills front matter
-//! (`name`, `description`, optional `metadata`); reading it is the model's job
-//! (with `bash`), so its body never costs a token until the task needs it.
-//!
-//! One rule governs every source text, whoever reads it ([`read_source`]): the
-//! BOM is dropped, invalid UTF-8 is decoded lossily and said so, and the text is
-//! capped with a visible truncation notice. The render, the watcher and the
-//! `skills` verb all go through it, so a file hashes the same everywhere and is
-//! never announced twice.
+//! The system prompt is rendered **once** at `session_started` and then frozen: a source
+//! edited on disk mid-session arrives as a `source` event (a message at the tail), never as
+//! a rewrite of the prefix, because prompt caching is the point of rendering once.
 
 use std::path::{Path, PathBuf};
 
 use crate::event::{LogEvent, SourceInfo};
 
-/// The placeholder in the base prompt where the skills directories go.
 pub const SKILLS_PLACEHOLDER: &str = "{{skills_dirs}}";
 
-/// The most one instruction file contributes to the prompt.
 pub const MAX_INSTRUCTION_BYTES: usize = 64 * 1024;
-/// The most all instruction files together contribute.
 pub const MAX_INSTRUCTIONS_TOTAL: usize = 256 * 1024;
 /// The most one skill's `SKILL.md` contributes to a `source` message.
 pub const MAX_SKILL_BYTES: usize = 64 * 1024;
@@ -59,9 +33,8 @@ pub enum SourceKind {
     Instruction,
     /// A skill's `SKILL.md`.
     Skill,
-    /// A file of the configured memory directory (`memory_dir`): rendered into
-    /// the frozen system at the start, announced as a `source` message when it
-    /// changes (the model writes memory with `edit`).
+    /// A file of the configured memory directory (`memory_dir`): rendered into the frozen system at the
+    /// start, announced as a `source` message when it changes (the model writes memory with `edit`).
     Memory,
     /// The one Herdr line (`src/herdr_ctx.rs`): a fact of the pane, rendered
     /// into the frozen system; it has no file, so it is never watched.
@@ -69,7 +42,6 @@ pub enum SourceKind {
 }
 
 impl SourceKind {
-    /// The render name kelir uses for the source.
     pub fn as_str(self) -> &'static str {
         match self {
             SourceKind::Base => "prompt",
@@ -80,9 +52,8 @@ impl SourceKind {
         }
     }
 
-    /// The `source` event's `kind`. The spec's list has no `prompt`, so the
-    /// base prompt's own edit arrives as an `instruction` (its `name` is
-    /// `prompt.md`, which tells them apart).
+    /// The `source` event's `kind`. The spec's list has no `prompt`, so the base prompt's own
+    /// edit arrives as an `instruction` (its `name` is `prompt.md`, which tells them apart).
     pub fn event_kind(self) -> &'static str {
         match self {
             SourceKind::Base | SourceKind::Instruction => "instruction",
@@ -128,10 +99,6 @@ impl SourcePath {
     }
 
     /// The path a `sources[]` entry (or a `source` event) names.
-    ///
-    /// An old log wrote the literal `embedded` for the base prompt; that
-    /// sentinel is read back as [`SourcePath::Embedded`] for the base prompt
-    /// only, so an unrelated file called `embedded` is a file like any other.
     pub fn from_log(kind: SourceKind, path: &str) -> SourcePath {
         if path.is_empty() || (kind == SourceKind::Base && path == "embedded") {
             return SourcePath::Embedded;
@@ -253,8 +220,7 @@ impl Places {
     }
 
     /// Which layer a directory belongs to: the machine ones come first in
-    /// [`Places::skills_directories`], the project ones (`.claude`, `.kelir`)
-    /// are last.
+    /// [`Places::skills_directories`], the project ones (`.claude`, `.kelir`) are last.
     fn skills_layer(&self, directory: &Path) -> Layer {
         let cwd_skills = [
             self.cwd.join(".claude").join("skills"),
@@ -268,23 +234,14 @@ impl Places {
     }
 }
 
-/// The instruction file names, in the order they render within one directory.
 const INSTRUCTION_FILES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 
-/// The skill kelir ships about itself (`src/docs/skill-kelir.md`, Agent Skills
-/// format). It is discovered like any other skill and named in `sources[]`, but
-/// it is compiled in: it works in a session with no checkout on disk, and a
-/// skills directory that happens to hold a `kelir/` entry replaces it rather
-/// than duplicating it (a *directory* is a file source, and a file wins over
-/// what the binary carries).
+/// The skill kelir ships about itself (`src/docs/skill-kelir.md`, Agent Skills format).
 pub const BUILTIN_SKILL_NAME: &str = "kelir";
 pub const BUILTIN_SKILL: &str = include_str!("docs/skill-kelir.md");
 
-/// The skills compiled into the binary besides `kelir` (M8): guidance on
-/// delegating to children and on living inside a Herdr pane. Each is an Agent
-/// Skill with no file on disk, discovered like any other skill (the pushed hint
-/// can name it, steering can inject it) and replaced by a skills directory
-/// entry of the same name.
+/// The skills compiled into the binary besides `kelir`: guidance on delegating to children and on
+/// living inside a Herdr pane.
 pub const BUILTIN_SKILLS: [(&str, &str); 3] = [
     (BUILTIN_SKILL_NAME, BUILTIN_SKILL),
     ("delegation", include_str!("docs/skill-delegation.md")),
@@ -315,11 +272,6 @@ pub fn discover(places: &Places) -> Vec<Found> {
 }
 
 /// Discover every machine and project source for `places`.
-///
-/// The order is the render order: machine layer, then project layer (nearest
-/// instruction file first). A project source of a name replaces a machine one;
-/// within a layer every file is kept, so a monorepo's root rules and a
-/// subdirectory's rules both reach the model (F4).
 pub fn discover_with_notes(places: &Places, notes: &mut Vec<String>) -> Vec<Found> {
     let mut found: Vec<Found> = Vec::new();
     let mut budget = MAX_INSTRUCTIONS_TOTAL;
@@ -340,9 +292,7 @@ pub fn discover_with_notes(places: &Places, notes: &mut Vec<String>) -> Vec<Foun
             );
         }
     }
-    // Project instruction files: every one found walking up from the cwd,
-    // nearest first. The walk stops at the repository root and at the home
-    // directory (N3), so a file planted above them is not picked up.
+    // Project instruction files: every one found walking up from the cwd, nearest first.
     for current in ancestors(places) {
         for name in INSTRUCTION_FILES {
             let path = current.join(name);
@@ -384,9 +334,8 @@ pub fn discover_with_notes(places: &Places, notes: &mut Vec<String>) -> Vec<Foun
     found
 }
 
-/// The cwd and its ancestors, nearest first, stopping at the repository root
-/// (a directory that holds `.git`) and at the home directory (inclusive: a file
-/// *in* home still belongs to the project, one above it does not).
+/// The cwd and its ancestors, nearest first, stopping at the repository root (a directory that holds
+/// `.git`) and at the home directory (inclusive: a file *in* home still belongs to the project, one
 fn ancestors(places: &Places) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut dir = Some(places.cwd.clone());
@@ -406,10 +355,8 @@ fn ancestors(places: &Places) -> Vec<PathBuf> {
     out
 }
 
-/// Add a source, resolving a name clash the way the two layers demand: a
-/// project source wins over a machine one of the same name. Within one layer
-/// nothing is dropped (F4): a monorepo's root `AGENTS.md` and a subdirectory's
-/// `AGENTS.md` are two files, and both are the model's business.
+/// Add a source, resolving a name clash the way the two layers demand: a project source wins over a
+/// machine one of the same name.
 fn push_source(
     found: &mut Vec<Found>,
     kind: SourceKind,
@@ -447,10 +394,6 @@ fn push_source(
 }
 
 /// Every skill in one directory, sorted by name so the render is stable.
-///
-/// A directory whose `SKILL.md` is missing, unreadable or not valid Agent
-/// Skills front matter is not a skill: it is skipped with a note, never listed
-/// in `sources[]` (F6).
 fn skills_in(directory: &Path, notes: &mut Vec<String>) -> Vec<SkillFile> {
     let mut out: Vec<SkillFile> = Vec::new();
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -491,7 +434,6 @@ fn skills_in(directory: &Path, notes: &mut Vec<String>) -> Vec<SkillFile> {
     out
 }
 
-/// One skill found in a skills directory.
 #[derive(Debug)]
 struct SkillFile {
     /// The skill's name: its directory's name.
@@ -500,12 +442,8 @@ struct SkillFile {
     text: String,
 }
 
-/// Read a source file: BOM dropped, invalid UTF-8 decoded lossily, length
-/// capped, and each of those stated in `notes`.
-///
-/// `budget` is the room left in the total cap for this kind of source; it is
-/// reduced by this file's bytes. `None` means the file is missing, is not a
-/// file, could not be read, or had no room left at all.
+/// Read a source file: BOM dropped, invalid UTF-8 decoded lossily, length capped, and each of
+/// those stated in `notes`.
 pub(crate) fn read_file(
     path: &Path,
     limit: usize,
@@ -532,11 +470,8 @@ pub(crate) fn read_file(
         ));
         return None;
     }
-    // The total budget skips a file rather than truncating it, so every file
-    // that does go in is read the same way the watcher re-reads it later (a
-    // truncation here that the watcher could not reproduce would announce the
-    // file again at the first boundary). A single file over its own cap is
-    // truncated by `decode` instead: the user can see why.
+    // The total budget skips a file rather than truncating it, so every file that does go in is read the
+    // same way the watcher re-reads it later (a truncation here that the watcher could not reproduce would
     let room = limit.min(*budget);
     if bytes.len() > room && room < limit {
         notes.push(format!(
@@ -560,9 +495,8 @@ pub(crate) fn read_file(
     Some(text)
 }
 
-/// The one decode rule every source text goes through: a UTF-8 BOM is dropped,
-/// invalid UTF-8 becomes U+FFFD (and is said so), and text over `limit` bytes is
-/// cut on a char boundary with a visible truncation notice (F7, N6).
+/// The one decode rule every source text goes through: a UTF-8 BOM is dropped, invalid UTF-8 becomes
+/// U+FFFD (and is said so), and text over `limit` bytes is cut on a char boundary with a visible
 fn decode(bytes: &[u8], limit: usize, notes: &mut Vec<String>) -> String {
     let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
     let mut text = match std::str::from_utf8(bytes) {
@@ -588,10 +522,8 @@ fn decode(bytes: &[u8], limit: usize, notes: &mut Vec<String>) -> String {
     text
 }
 
-/// Read one source file whole, the way the watcher and the `skills` verb do:
-/// the same decode rule, so the same bytes hash the same everywhere.
-///
-/// `None` when it is missing or unreadable: a deleted source is silent.
+/// Read one source file whole, the way the watcher and the `skills` verb do: the same decode
+/// rule, so the same bytes hash the same everywhere.
 pub fn read_text(path: &Path) -> Option<String> {
     read_source(path, MAX_INSTRUCTION_BYTES).map(|(text, _)| text)
 }
@@ -617,10 +549,6 @@ pub fn limit_for(kind: SourceKind) -> usize {
 }
 
 /// The base prompt with the skills directories named in it.
-///
-/// The `{{skills_dirs}}` placeholder is where they go; a prompt without it gets
-/// them appended, so a hand-written `prompt.md` can never lose the pull path to
-/// the skills.
 pub fn render_base(base: &str, places: &Places) -> String {
     let directories: Vec<String> = places
         .skills_directories()
@@ -628,7 +556,7 @@ pub fn render_base(base: &str, places: &Places) -> String {
         .map(|dir| format!("  - {}", crate::util::path_string(dir)))
         .collect();
     // The builtin skills have no file to pull: they are named here, with what
-    // each is for and the one command that reads it (M8 fix F5).
+    // each is for and the one command that reads it.
     let mut lines = directories;
     lines.push(builtin_listing());
     let listing = lines.join("\n");
@@ -653,10 +581,6 @@ pub fn builtin_listing() -> String {
 }
 
 /// Parse a `SKILL.md`: the Agent Skills front matter, and the body.
-///
-/// Front matter is a leading `---` fence with `key: value` lines (`name`,
-/// `description`, optional `metadata`). A file without front matter, or without
-/// a `name`, is not a skill: it is skipped with a reason, never rendered.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Skill {
     pub name: String,
@@ -763,26 +687,18 @@ pub struct Inputs<'a> {
     pub cwd: &'a std::path::Path,
     /// `YYYY-MM-DD`: the date goes in, never the time.
     pub date: &'a str,
-    /// The session id, when the caller has one. Stable across a resume, so it
-    /// belongs in the frozen prompt: it makes the agent self-aware of which
-    /// session it is in and able to hand a human the resume command.
+    /// The session id, when the caller has one.
     pub session_id: Option<&'a str>,
     /// The one Herdr line (`herdr_ctx`), when the session runs in a pane.
     pub herdr: Option<&'a str>,
 }
 
-/// Render the system prompt once: the base prompt with the skills directories
-/// named in it, the instruction files, then the environment.
-///
-/// Same inputs, same bytes: the caller passes the date (never the clock), the
-/// sources are sorted by the order [`discover`] finds them in, and nothing
-/// depends on a hash map's iteration order.
+/// Render the system prompt once: the base prompt with the skills directories named in it,
+/// the instruction files, then the environment.
 pub fn render_system(inputs: &Inputs) -> Rendered {
     let mut warnings = Vec::new();
-    // The base prompt: the project's `.kelir/prompt.md` wins over whatever the
-    // config named (an explicit `prompt` file, the config dir's `prompt.md`, or
-    // the embedded default), and each case records the path the text really
-    // came from (F2).
+    // The base prompt: the project's `.kelir/prompt.md` wins over whatever the config named (an explicit
+    // `prompt` file, the config dir's `prompt.md`, or the embedded default), and each case records the
     let project_base = inputs.cwd.join(".kelir").join("prompt.md");
     let (base_text, base_path) = match read_source(&project_base, MAX_INSTRUCTION_BYTES) {
         Some((text, notes)) => {
@@ -824,9 +740,8 @@ pub fn render_system(inputs: &Inputs) -> Rendered {
             ));
         }
     }
-    // Memory is rendered like an instruction file: a heading, the path, the
-    // text. It is the model's own notes, loaded once; later changes are `source`
-    // messages at the tail.
+    // Memory is rendered like an instruction file: a heading, the path, the text. It is the
+    // model's own notes, loaded once; later changes are `source` messages at the tail.
     let memory: Vec<&Found> = discovered
         .iter()
         .filter(|found| found.kind == SourceKind::Memory)
@@ -883,9 +798,8 @@ pub fn render_system(inputs: &Inputs) -> Rendered {
             line,
         ));
     }
-    // Skills are pull: their bodies stay out of the prompt, but they are
-    // recorded (and watched) so a skill edited mid-session arrives as a
-    // `source` message like any other file.
+    // Skills are pull: their bodies stay out of the prompt, but they are recorded (and watched)
+    // so a skill edited mid-session arrives as a `source` message like any other file.
     let mut skills: Vec<&Found> = discovered
         .iter()
         .filter(|found| found.kind == SourceKind::Skill)
@@ -945,10 +859,6 @@ pub fn instructions(places: &Places) -> Vec<Found> {
 }
 
 /// The kind a `sources[]` entry stands for.
-///
-/// The log records the kind (`prompt`, `instruction`, `skill`) where the source
-/// was found, so a skill directory called `notes.md` stays a skill (F9). An
-/// older log has no kind and is read back from the name.
 pub fn kind_of(source: &SourceInfo) -> SourceKind {
     match source.kind.as_deref() {
         Some(kind) => SourceKind::parse(kind),
@@ -960,28 +870,24 @@ pub fn kind_of(source: &SourceInfo) -> SourceKind {
     }
 }
 
-/// One source whose text is in this context, as the watcher re-checks it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tracked {
     pub kind: SourceKind,
     pub name: String,
     pub path: SourcePath,
-    /// The hash of the text this context **currently** carries for the source:
-    /// the frozen system's, or the newest `source` message's. Comparing against
-    /// this one hash (not every hash ever carried) is what makes A→B→A a
-    /// change: the model's latest word on the file is B (F1).
+    /// The hash of the text this context **currently** carries for the source: the frozen system's, or the
+    /// newest `source` message's.
     pub hash: String,
     /// A compaction folded the source's message away: the next boundary says
     /// what the file holds now, even if it holds the same bytes.
     pub stale: bool,
     /// The file was already reported as gone, so a missing source is one note,
-    /// not one per boundary (N4).
+    /// not one per boundary .
     pub gone: bool,
 }
 
-/// A source whose file was deleted: the context still carries its last text,
-/// which is now nothing on disk. Reported once, so a reader knows why the model
-/// still believes it.
+/// A source whose file was deleted: the context still carries its last text, which is now
+/// nothing on disk. Reported once, so a reader knows why the model still believes it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Removal {
     pub kind: SourceKind,
@@ -1001,12 +907,6 @@ pub struct Change {
     pub notes: Vec<String>,
 }
 
-/// The per-boundary mtime/hash check of the recorded sources.
-///
-/// A watcher (a thread, an OS notification, a handle to close) is one more
-/// thing to leak; the recorded sources are a handful of small files, so each
-/// boundary re-reads them and compares a content hash. That is also why the
-/// check is exact: an mtime that changed but a body that did not is not news.
 #[derive(Debug, Clone, Default)]
 pub struct Watch {
     tracked: Vec<Tracked>,
@@ -1033,14 +933,8 @@ impl Watch {
         watch
     }
 
-    /// Rebuild the watcher from a log: the frozen `sources[]` first, then every
-    /// `source` event in order, so the context's *current* word on each source
-    /// is the last message it carries (F8).
-    ///
-    /// A resume therefore does not announce an edit its own log already has,
-    /// does keep watching a source the `skills` verb added (its path is only in
-    /// the event), and does announce a source whose message a compaction folded
-    /// away ([`Watch::forget`] is called for those).
+    /// Rebuild the watcher from a log: the frozen `sources[]` first, then every `source` event in
+    /// order, so the context's *current* word on each source is the last message it carries .
     pub fn rebuild(events: &[LogEvent], dir: &Path) -> Watch {
         let mut watch = Watch::from_sources(&sources_of(events));
         for event in events {
@@ -1069,10 +963,8 @@ impl Watch {
             };
             watch.add(kind, name, &path, &hash_of(&text));
         }
-        // A `source` event a standing compaction folds into its summary is not
-        // in the context any more: the resume says what the file holds at its
-        // first boundary, exactly as a live session would after the same
-        // compaction.
+        // A `source` event a standing compaction folds into its summary is not in the context any more: the
+        // resume says what the file holds at its first boundary, exactly as a live session would after the
         for event in events {
             if let crate::event::EventBody::Compacted {
                 through_seq,
@@ -1086,7 +978,6 @@ impl Watch {
         watch
     }
 
-    /// Track one source as the context's current word on it.
     pub fn add(&mut self, kind: SourceKind, name: &str, path: &SourcePath, hash: &str) {
         if let Some(existing) = self
             .tracked
@@ -1119,10 +1010,8 @@ impl Watch {
         }
     }
 
-    /// A compaction folded every message up to `through_seq` into a summary, so
-    /// a `source` event at or below it (rendered from a pinned user message
-    /// excepted) is no longer in the context. `pinned` are the seqs the fold
-    /// still renders verbatim.
+    /// A compaction folded every message up to `through_seq` into a summary, so a `source` event at or
+    /// below it (rendered from a pinned user message excepted) is no longer in the context.
     pub fn forget_folded(&mut self, events: &[LogEvent], through_seq: u64, pinned: &[u64]) {
         for event in events {
             if event.seq > through_seq || pinned.contains(&event.seq) {
@@ -1138,12 +1027,8 @@ impl Watch {
         &self.tracked
     }
 
-    /// Every tracked source whose file has disappeared since the context last
-    /// heard about it, once per disappearance (N4).
-    ///
-    /// A deleted source is not a `source` event — there is no text to send —
-    /// but it is not silence either: the model still holds the last text of a
-    /// file that no longer exists, so the log says so.
+    /// Every tracked source whose file has disappeared since the context last heard about it,
+    /// once per disappearance .
     pub fn removals(&mut self) -> Vec<Removal> {
         let mut out = Vec::new();
         for tracked in &mut self.tracked {
@@ -1166,10 +1051,7 @@ impl Watch {
         out
     }
 
-    /// Every source whose current content this context does not carry yet. The
-    /// hash is replaced as it is returned, so one edit is one message — and a
-    /// file edited back to an older body is a message again, because the
-    /// model's latest word on it is the one before.
+    /// Every source whose current content this context does not carry yet.
     pub fn changes(&mut self) -> Vec<Change> {
         let mut out = Vec::new();
         for tracked in &mut self.tracked {
@@ -1267,7 +1149,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         }
     }
 
-    /// M8 fix F5: a builtin skill has no path, so the prompt itself must name
+    /// A builtin skill has no path, so the prompt itself must name
     /// each one, say what it is for, and give the command that prints it.
     #[test]
     fn the_rendered_prompt_names_every_builtin_skill_and_how_to_read_it() {
@@ -1287,42 +1169,31 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         assert!(appended.contains("- herdr - "), "{appended}");
     }
 
-    /// The prompt is a contract with the model: a line that survives a retro
-    /// must not vanish in a later edit. This pins the *lines* (not the exact
-    /// bytes, which wrap), so a rewording has to be deliberate.
+    /// The prompt is a contract with the model: a line that survives a must not vanish in a later edit.
     #[test]
     fn the_embedded_prompt_carries_every_retro_rule() {
         let base = crate::config::DEFAULT_PROMPT;
         for (rule, why) in [
-            ("Plan once", "F1: design thrash"),
-            ("reasoning is dropped", "F1: the plan has nowhere to live"),
+            ("Plan once", "design thrash"),
+            ("reasoning is dropped", "the plan has nowhere to live"),
             (
                 ".kelir/notes.md",
-                "STEER-12: the plan is externalised, not re-derived",
+                "the plan is externalised, not re-derived",
             ),
-            ("edits", "F3: multi-hunk edits"),
-            ("python/sed patch", "F3: a patch script fails with exit 0"),
-            ("never chain", "F3: the exit code of each command"),
+            ("edits", "multi-hunk edits"),
+            ("python/sed patch", "a patch script fails with exit 0"),
+            ("never chain", "the exit code of each command"),
             (
                 "One `bash` call per read round",
-                "STEER-12: one command carries every read (F4 refined)",
+                "one command carries every read",
             ),
-            (
-                "echo === name",
-                "STEER-12: each read is labelled in the output",
-            ),
-            (
-                "grep -A/-B",
-                "STEER-12: one search instead of grep -n then sed -n",
-            ),
-            ("git grep", "F7: search hygiene"),
-            ("target/", "F7: do not walk the build directory"),
-            ("no big `cat`", "F7: ranged reads"),
-            (
-                "share no shell state",
-                "STEER-4: every call starts in the cwd",
-            ),
-            ("name the proving command", "F6: verify before claiming"),
+            ("echo === name", "each read is labelled in the output"),
+            ("grep -A/-B", "one search instead of grep -n then sed -n"),
+            ("git grep", "search hygiene"),
+            ("target/", "do not walk the build directory"),
+            ("no big `cat`", "ranged reads"),
+            ("share no shell state", "every call starts in the cwd"),
+            ("name the proving command", "verify before claiming"),
             ("AGENTS.md", "instruction files are already loaded"),
             ("{{skills_dirs}}", "the skills pull path"),
         ] {
@@ -1433,7 +1304,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             .iter()
             .filter(|item| item.kind == SourceKind::Instruction)
             .collect();
-        // Both files are kept (F4), nearest first: a monorepo's root rules and
+        // Both files are kept , nearest first: a monorepo's root rules and
         // a subdirectory's rules are both the model's business.
         assert_eq!(instructions.len(), 2, "{instructions:?}");
         assert_eq!(instructions[0].text, "DEEP");
@@ -1547,17 +1418,17 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
     #[test]
     fn the_decode_rule_drops_the_bom_keeps_a_lossy_read_and_truncates_visibly() {
         let mut notes = Vec::new();
-        // A UTF-8 BOM is dropped (N6), and CRLF is kept as it is.
+        // A UTF-8 BOM is dropped , and CRLF is kept as it is.
         assert_eq!(decode(b"\xef\xbb\xbfA\r\nB", 4096, &mut notes), "A\r\nB");
         assert!(notes.is_empty(), "{notes:?}");
-        // Invalid UTF-8 is decoded lossily, and said so (F5).
+        // Invalid UTF-8 is decoded lossily, and said so .
         notes.clear();
         let text = decode(b"caf\xe9 rules", 4096, &mut notes);
         assert!(text.starts_with("caf"), "{text:?}");
         assert!(text.contains('\u{fffd}'), "{text:?}");
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains("not valid UTF-8"), "{notes:?}");
-        // Over the cap: cut on a char boundary, with a visible mark (F7), and
+        // Over the cap: cut on a char boundary, with a visible mark , and
         // the mark says how much there was.
         notes.clear();
         let text = decode("ééééé".as_bytes(), 5, &mut notes);
@@ -1734,7 +1605,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             vec!["prompt.md", "AGENTS.md", "delegation", "herdr", "kelir"]
         );
         // The embedded default records an empty path and its kind, never a
-        // sentinel a reader could mistake for a file (F2, F2b).
+        // sentinel a reader could mistake for a file.
         assert_eq!(rendered.sources[0].path, "");
         assert_eq!(rendered.sources[0].kind.as_deref(), Some("prompt"));
         assert!(rendered.sources[1].path.ends_with("AGENTS.md"));
@@ -1796,9 +1667,8 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         assert_eq!(changes[0].text, "TWO");
         assert_eq!(changes[0].kind, SourceKind::Instruction);
         assert!(watch.changes().is_empty(), "one edit, one message");
-        // Editing it back to the text the system prompt rendered is a change
-        // again: the model's latest word on the file is TWO, and the file on
-        // disk says ONE (F1).
+        // Editing it back to the text the system prompt rendered is a change again: the model's
+        // latest word on the file is TWO, and the file on disk says ONE .
         write(&file, "ONE");
         let changes = watch.changes();
         assert_eq!(changes.len(), 1, "A->B->A is announced as A again");
@@ -1868,9 +1738,8 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         assert!(notes.is_empty(), "{notes:?}");
     }
 
-    /// The `skills` verb's two shapes, at the level the session uses them: a
-    /// skill directory is read as its `SKILL.md` body, and an instruction file
-    /// as its whole text.
+    /// The `skills` verb's two shapes, at the level the session uses them: a skill directory is
+    /// read as its `SKILL.md` body, and an instruction file as its whole text.
     #[test]
     fn a_skill_directory_reads_as_its_body() {
         let dir = temp_dir("skill-read");
@@ -1914,7 +1783,7 @@ READ THE TAIL
             SourceKind::Instruction
         );
         // A skill directory may legally be called `notes.md`: the recorded kind
-        // wins over the name (F9).
+        // wins over the name .
         assert_eq!(kind_of(&info("notes.md", Some("skill"))), SourceKind::Skill);
         // An older log has no kind: the name is the fallback.
         assert_eq!(kind_of(&info("prompt.md", None)), SourceKind::Base);
@@ -1924,12 +1793,8 @@ READ THE TAIL
         assert_eq!(SourceKind::Instruction.as_str(), "instruction");
     }
 
-    /// N3: the base prompt is a contract with the model, and `include_str!` makes
-    /// it part of every request's frozen prefix — a changed byte moves the cache
-    /// for every session. So the bytes are pinned: `tests/fixtures/
-    /// prompt.md.snapshot` is the prompt as released, and an edit has to update
-    /// the snapshot in the same commit (a rewording is then deliberate, not a
-    /// side effect of an unrelated change).
+    /// the base prompt is a contract with the model, and `include_str!` makes it part of every
+    /// request's frozen prefix — a changed byte moves the cache for every session.
     #[test]
     fn the_base_prompt_is_byte_identical_to_its_snapshot() {
         let prompt = crate::config::DEFAULT_PROMPT;
@@ -1938,13 +1803,12 @@ READ THE TAIL
             prompt,
             snapshot,
             "the base prompt changed ({} bytes now, {} in the snapshot); update \
-             tests/fixtures/prompt.md.snapshot and the retro rule list deliberately",
+             tests/fixtures/prompt.md.snapshot and the rule list deliberately",
             prompt.len(),
             snapshot.len()
         );
-        // The rendered base (the prompt with its skills directories named) is
-        // the prefix's head: same inputs, same bytes, and the placeholder is
-        // the only thing that moved.
+        // The rendered base (the prompt with its skills directories named) is the prefix's head:
+        // same inputs, same bytes, and the placeholder is the only thing that moved.
         let dir = temp_dir("snapshot");
         let places = places_in(&dir);
         let rendered = render_base(prompt, &places);

@@ -1,12 +1,8 @@
-//! Named sessions (M9): `names/<name>` -> a session id, and `kelir sessions`.
-//!
-//! A name is a file in `<state>/names/` holding one small JSON object. It is
-//! published create-or-fail ([`crate::atomic::publish_new`]) so two processes
-//! naming one session at once cannot both win, and replaced with a rename so a
-//! reader never sees half of one. A name whose file is unreadable is tolerated:
-//! it reads as "no such name" (with a warning) and the next bind replaces it.
-//!
-//! The directory is owner-only, like every directory kelir makes.
+//! Named sessions: `names/<name>` -> a session id, and `kelir sessions`.
+//! A name is a file in `<state>/names/` holding one small JSON object.
+//! It is published create-or-fail ([`crate::atomic::publish_new`]) so two processes naming one
+//! session at once cannot both win, and replaced with a rename so a reader never sees half of one.
+//! A name whose file is unreadable is tolerated: it reads as "no such name" (with a warning) and
 
 use std::path::{Path, PathBuf};
 
@@ -14,14 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::atomic::{Published, publish_new, write_atomic};
 
-/// The longest name.
 pub const MAX_LEN: usize = 64;
-/// The file in a session directory that says which process owns it.
 pub const OWNER_FILE: &str = "owner";
 
-/// `[a-z0-9._-]{1,64}`, and nothing that would be a different file on another
-/// platform: it starts with a letter or digit, does not end in a dot (Windows
-/// drops it), and is not a device name.
+/// `[a-z0-9._-]{1,64}`, and nothing that would be a different file on another platform: it starts with
+/// a letter or digit, does not end in a dot (Windows drops it), and is not a device name.
 pub fn validate(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > MAX_LEN {
         return Err(format!(
@@ -73,7 +66,6 @@ fn path_of(name: &str) -> PathBuf {
     dir().join(name)
 }
 
-/// What a name file holds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub session: String,
@@ -199,7 +191,6 @@ pub fn forget(name: &str) -> Result<bool, String> {
     }
 }
 
-/// One row of the names directory.
 #[derive(Debug, Clone)]
 pub struct Listed {
     pub name: String,
@@ -229,9 +220,8 @@ pub fn list() -> Vec<Listed> {
 
 // ------------------------------------------------------------- the owner file
 
-/// Record that this process owns the session in `dir` (pid and start time), so
-/// a refusal can say who holds it. Best effort: the real exclusion is the
-/// session's lock and socket.
+/// Record that this process owns the session in `dir` (pid and start time), so a refusal can
+/// say who holds it. Best effort: the real exclusion is the session's lock and socket.
 pub fn write_owner(dir: &Path) {
     let pid = std::process::id();
     let body = serde_json::json!({
@@ -241,11 +231,6 @@ pub fn write_owner(dir: &Path) {
     let _ = write_atomic(&dir.join(OWNER_FILE), body.to_string().as_bytes());
 }
 
-/// Stop advertising this process as the session's owner. Called by a job's
-/// `finalize` before it releases the job lock: a waiter on that lock would
-/// otherwise resolve the name while the holder process is still winding down
-/// and be refused as "session is running" (STEER-9, red e2e test
-/// `wait_queues_behind_the_holder_instead_of_skipping`).
 pub fn release_owner(dir: &Path) {
     let _ = std::fs::remove_file(dir.join(OWNER_FILE));
 }
@@ -322,7 +307,6 @@ pub fn new_session_id() -> String {
 
 // ------------------------------------------------------------- kelir sessions
 
-/// What the list shows for one session.
 #[derive(Debug, Clone, Serialize)]
 pub struct Summary {
     pub session: String,
@@ -518,7 +502,7 @@ mod tests {
     use super::*;
 
     /// A job releases its session owner before its lock, so a waiter on that
-    /// lock never sees a still-alive owner marker (STEER-9).
+    /// lock never sees a still-alive owner marker.
     #[test]
     fn releasing_the_owner_makes_the_session_resumable() {
         let dir = std::env::temp_dir().join(format!(

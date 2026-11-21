@@ -1,24 +1,13 @@
-//! Memory: a configured directory of notes, loaded as sources (M5-B).
-//!
-//! `memory_dir` in the config names a directory of `.md` / `.txt` files. At
-//! `session_started` they are rendered into the frozen system (a `# Memory`
-//! section) and recorded in `sources[]` with kind `memory`. The model writes
-//! memory with `edit` like any other file; the per-boundary check that already
-//! watches instruction files and skills sees the change and appends it as a
-//! `source` message (kind `memory`) at the tail, never as a system rewrite. A
-//! file *created* mid-session — the common case, a new note — is found by
-//! [`unseen`] and announced the same way.
-//!
-//! Bounded on purpose: memory is context every request pays for. A file is cut
-//! at [`MAX_FILE_BYTES`] with a visible notice, the directory at
-//! [`MAX_TOTAL_BYTES`] and [`MAX_FILES`] files; whatever is left out is named
-//! in a note, never silently dropped.
+//! Memory: a configured directory of notes, loaded as sources.
+//! `memory_dir` in the config names a directory of `.md` / `.txt` files.
+//! At `session_started` they are rendered into the frozen system (a `# Memory` section) and
+//! recorded in `sources[]` with kind `memory`.
+//! The model writes memory with `edit` like any other file; the per-boundary check that already
 
 use std::path::{Path, PathBuf};
 
 use crate::sources::{Found, Layer, SourceKind, Tracked};
 
-/// The most one memory file contributes.
 pub const MAX_FILE_BYTES: usize = 16 * 1024;
 /// The most the whole directory contributes to the frozen system.
 pub const MAX_TOTAL_BYTES: usize = 64 * 1024;
@@ -51,9 +40,7 @@ fn wanted(path: &Path) -> bool {
     )
 }
 
-/// The memory files of `dir`, sorted by name, as discovered sources. A missing
-/// or unreadable directory is no memory (and a note when it exists but cannot
-/// be read); nothing here ever fails a session.
+/// The memory files of `dir`, sorted by name, as discovered sources.
 pub fn scan(dir: &Path, notes: &mut Vec<String>) -> Vec<Found> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -104,9 +91,8 @@ pub fn scan(dir: &Path, notes: &mut Vec<String>) -> Vec<Found> {
     out
 }
 
-/// Memory files in `dir` that the context has not heard of yet: the notes the
-/// model (or a person) created since the session started. The caller announces
-/// each as a `source` message and starts tracking it.
+/// Memory files in `dir` that the context has not heard of yet: the notes the model (or a person)
+/// created since the session started.
 pub fn unseen(dir: &Path, tracked: &[Tracked]) -> Vec<Found> {
     let mut notes = Vec::new();
     scan(dir, &mut notes)

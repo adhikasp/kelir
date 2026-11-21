@@ -1,14 +1,8 @@
-//! What the agent is doing, as one value the state row renders and the tests
-//! can assert on.
-//!
-//! The design note (TUI-v2 §3) asks for exactly this split: the coarse phase
-//! tells a supervisor "working or not", while [`Activity`] carries the detail a
-//! human needs ("thinking for 12 s", "running `cargo test`"). It is a pure
-//! state machine: transitions take an [`Instant`] and touch nothing else, so
-//! every rule below is unit-tested without a terminal, a clock or a session.
-//!
-//! Spinner and elapsed exist **only** in working states. Idle, paused and error
-//! are still pictures, which is also why an idle TUI needs zero wakeups.
+//! What the agent is doing, as one value the state row renders and the tests can assert on.
+//! The design note (TUI-v2 §3) asks for exactly this split: the coarse phase tells a supervisor
+//! "working or not", while [`Activity`] carries the detail a human needs ("thinking for 12 s",
+//! "running `cargo test`").
+//! It is a pure state machine: transitions take an [`Instant`] and touch nothing else, so every
 
 use std::time::{Duration, Instant};
 
@@ -17,7 +11,6 @@ use ratatui::text::{Line, Span};
 
 use crate::theme::Theme;
 
-/// The seven states the state row can show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// Waiting for the human; nothing animates.
@@ -28,7 +21,7 @@ pub enum Kind {
     Writing,
     /// At least one tool call is running.
     Running,
-    /// A retryable provider error is being waited out (STEER-5).
+    /// A retryable provider error is being waited out.
     RateLimited,
     /// An explicit step cap paused the turn: the session waits for a human.
     Paused,
@@ -37,9 +30,6 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// The word the state row shows. One word per state, always present (the
-    /// design's "unmistakable" requirement): it survives `NO_COLOR` and a
-    /// colour-blind theme, where the spinner's colour does not.
     pub fn word(self) -> &'static str {
         match self {
             Kind::Idle => "idle",
@@ -109,7 +99,6 @@ impl Activity {
         }
     }
 
-    /// Elapsed time in this state.
     pub fn elapsed(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.since)
     }
@@ -151,7 +140,6 @@ impl Activity {
         }
     }
 
-    /// A retryable provider error is being waited out.
     pub fn retry(&mut self, now: Instant, retry_in: Duration, attempt: u32, detail: &str) {
         self.retry_in = Some(retry_in);
         self.attempt = attempt;
@@ -166,9 +154,8 @@ impl Activity {
         }
     }
 
-    /// The wait is over and the retry is being sent (or a slot came free): the
-    /// row goes back to waiting for the provider. Idle stays idle, and a turn
-    /// that already ended keeps the state its outcome chose.
+    /// The wait is over and the retry is being sent (or a slot came free): the row goes back to waiting for
+    /// the provider.
     pub fn retry_done(&mut self, now: Instant) {
         if self.kind == Kind::RateLimited {
             self.retry_in = None;
@@ -186,7 +173,6 @@ impl Activity {
         self.enter(Kind::Paused, now);
     }
 
-    /// The turn failed.
     pub fn failed(&mut self, now: Instant, detail: &str) {
         self.tools = 0;
         self.preview.clear();
@@ -194,15 +180,8 @@ impl Activity {
         self.enter(Kind::Error, now);
     }
 
-    /// The turn is over: `done` and `stopped` go back to idle (the summary line
-    /// already said which), but a turn that ended **paused** or **in error**
-    /// keeps that state on the row: it is the one thing a human must act on
-    /// (`S5`; STEER-10 req. 1 lists both as states), and the summary line alone
-    /// scrolls away with the next frame.
-    ///
-    /// The wait's own countdown never outlives its turn: a provider pause ends
-    /// a retry wait, so without this the row stayed `thinking` with a frozen
-    /// countdown instead of saying `paused`.
+    /// The turn is over: `done` and `stopped` go back to idle (the summary line already said which), but a
+    /// turn that ended **paused** or **in error** keeps that state on the row: it is the one thing a human
     pub fn turn_ended(&mut self, now: Instant, outcome: &str) {
         self.tools = 0;
         self.preview.clear();
@@ -226,7 +205,6 @@ impl Activity {
         }
     }
 
-    /// The style of the whole state row.
     pub fn style(&self, theme: Theme) -> Style {
         match self.kind {
             Kind::Idle => theme.idle(),
@@ -250,9 +228,6 @@ impl Activity {
     }
 
     /// The state row: glyph, word, elapsed (working only), then the detail.
-    ///
-    /// The word is never dropped; the detail is clipped with an ellipsis and
-    /// dropped entirely when there is no room for it.
     pub fn line(&self, theme: Theme, frame: u64, now: Instant, width: usize) -> Line<'static> {
         let style = self.style(theme);
         let glyph = Span::styled(format!(" {} ", self.glyph(theme, frame)), style);
@@ -321,10 +296,8 @@ impl Activity {
                 if self.attempt > 0 {
                     parts.push(format!("attempt {}", self.attempt));
                 }
-                // The TUI's key, not a word to say: typing `stop` while the
-                // turn runs is a `say` the model receives as a message, and
-                // only Esc (or `/stop`) cancels (`R5`). Every other working
-                // state says the same thing.
+                // The TUI's key, not a word to say: typing `stop` while the turn runs is a `say` the model receives as
+                // a message, and only Esc (or `/stop`) cancels (`R5`).
                 parts.push("esc stops".to_string());
                 parts.join(" · ")
             }
@@ -358,16 +331,15 @@ pub fn short_elapsed(elapsed: Duration) -> String {
     }
 }
 
-/// The one-line outcome committed to the scrollback for the turns that need a
-/// human: `⏸ paused · 3 steps · 4.8k tok`, `✗ error · …`, `⏹ stopped · …`.
-/// A `done` turn ends on its prose, so it writes no line.
+/// The one-line outcome committed to the scrollback for the turns that need a human: `⏸ paused · 3
+/// steps · 4.8k tok`, `✗ error · …`, `⏹ stopped · …`.
 pub fn summary_line(theme: Theme, outcome: &str, steps: u32, tokens: u64) -> Line<'static> {
     let (glyph, style) = match outcome {
         "stopped" => (theme.glyphs.stopped(), theme.waiting()),
         "paused" => (theme.glyphs.paused(), theme.waiting()),
         _ => (theme.glyphs.error(), theme.error()),
     };
-    // One step is one step (review N4: `1 steps` read like a bug).
+    // One step is one step.
     let mut parts = vec![if steps == 1 {
         "1 step".to_string()
     } else {
@@ -468,7 +440,7 @@ mod tests {
         assert_eq!(activity.attempt, 0);
     }
 
-    /// STEER-5's provider pause ends a retry wait: the pause must win the row,
+    /// 's provider pause ends a retry wait: the pause must win the row,
     /// with no countdown left behind and no spinner.
     #[test]
     fn a_retry_that_ends_in_a_pause_reads_paused() {

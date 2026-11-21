@@ -1,9 +1,8 @@
-//! Jobs (M9): the data side. `jobs.toml`, durations, the `new_session_every`
-//! rule, the date-change source, STATUS and the run history, and the plan the
-//! session loop reads. The orchestration (lock, run, finalize, notify) is in
-//! [`crate::jobrun`].
-//!
-//! kelir has no scheduler: `kelir job run <name>` is what a scheduler calls.
+//! Jobs: the data side.
+//! `jobs.toml`, durations, the `new_session_every` rule, the date-change source, STATUS and the
+//! run history, and the plan the session loop reads.
+//! The orchestration (lock, run, finalize, notify) is in [`crate::jobrun`]. kelir has no
+//! scheduler: `kelir job run <name>` is what a scheduler calls.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,9 +25,8 @@ pub struct PlanSource {
     pub text: String,
 }
 
-/// What the session loop needs to know about a named or job run. Installed once,
-/// before the loop starts; the loop only reads it. Everything else about a job
-/// lives in [`crate::jobrun`].
+/// What the session loop needs to know about a named or job run. Installed once, before the
+/// loop starts; the loop only reads it.
 #[derive(Debug, Default)]
 pub struct Plan {
     /// The id a NEW session must take (the name is already bound to it).
@@ -43,10 +41,8 @@ pub struct Plan {
     pub sources: Vec<PlanSource>,
     /// The wall-clock cap of the run, if any.
     pub deadline: Option<Duration>,
-    /// A job's declared `max_steps`: reaching it pauses the run even when the
-    /// last allowed step produced a final answer (a scheduler resumes the job
-    /// next run). Interactive `--max-steps` keeps STEER-4's rule that an answer
-    /// on the cap-th step is `done`.
+    /// A job's declared `max_steps`: reaching it pauses the run even when the last allowed step produced a
+    /// final answer (a scheduler resumes the job next run).
     pub job_step_cap: Option<u32>,
     /// The deadline fired: the turn was told to stop because of it.
     pub timed_out: AtomicBool,
@@ -112,7 +108,6 @@ pub fn planned_id() -> Option<String> {
         .flatten()
 }
 
-/// The run was stopped by its deadline.
 pub fn timed_out() -> bool {
     plan().is_some_and(|plan| plan.timed_out.load(Ordering::SeqCst))
 }
@@ -159,7 +154,6 @@ pub fn parse_duration(text: &str) -> Result<Duration, String> {
 
 // ------------------------------------------------------------- the job file
 
-/// How a job's session is renewed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rotate {
     /// Never start a fresh session; compaction keeps the context bounded.
@@ -186,7 +180,6 @@ impl Rotate {
     }
 }
 
-/// Where a job was declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     Machine,
@@ -223,7 +216,6 @@ struct RawFile {
     jobs: BTreeMap<String, RawJob>,
 }
 
-/// A job, validated.
 #[derive(Debug, Clone)]
 pub struct JobDef {
     pub name: String,
@@ -246,7 +238,6 @@ pub struct JobDef {
 }
 
 impl JobDef {
-    /// The task text for this run.
     pub fn task_text(&self) -> Result<String, String> {
         if let Some(task) = &self.task {
             return Ok(task.clone());
@@ -396,7 +387,6 @@ pub fn job_dir(name: &str) -> PathBuf {
 
 // ------------------------------------------------------------- rotation rule
 
-/// The share of the window past which a context counts as large.
 pub const LARGE_CONTEXT: f64 = 0.9;
 
 /// Why a fresh session starts instead of resuming the old one.
@@ -470,11 +460,8 @@ pub fn last_announced_date(events: &[LogEvent]) -> Option<String> {
     last_announced_date_from(events, None)
 }
 
-/// [`last_announced_date`], with the date the session's frozen system prompt
-/// was rendered with when it is known. The prompt is what the context actually
-/// saw; the event's `ts` is wall-clock time and can disagree when `KELIR_TODAY`
-/// overrode the prompt (STEER-9). Old logs with no resolvable prompt keep the
-/// timestamp fallback.
+/// [`last_announced_date`], with the date the session's frozen system prompt was rendered with when it
+/// is known.
 pub fn last_announced_date_from(
     events: &[LogEvent],
     rendered_date: Option<&str>,
@@ -493,10 +480,7 @@ pub fn last_announced_date_from(
     })
 }
 
-/// The tail `source` a resume across a date change adds, or `None` when the
-/// context already knows today. The frozen system prompt holds the date it was
-/// rendered on and never changes (the provider's cache lives there), so the
-/// model learns a new day from the tail instead.
+/// The tail `source` a resume across a date change adds, or `None` when the context already knows
 pub fn clock_source(events: &[LogEvent], today: &str) -> Option<PlanSource> {
     clock_source_from(events, today, None)
 }
@@ -585,7 +569,6 @@ pub fn read_status(dir: &Path) -> Result<Option<Status>, String> {
     }
 }
 
-/// The first lines of an answer, for STATUS.
 pub fn head_of(answer: &str) -> String {
     let lines: Vec<&str> = answer.lines().take(12).collect();
     crate::util::truncate_chars(&lines.join("\n"), 1200)
@@ -808,9 +791,8 @@ mod tests {
         )
     }
 
-    /// A `KELIR_TODAY` override freezes the date in the system prompt; the
-    /// event's wall-clock `ts` can be a different day (STEER-9 red test). The
-    /// context knows the prompt's date, not the timestamp's.
+    /// A `KELIR_TODAY` override freezes the date in the system prompt; the event's wall-clock
+    /// `ts` can be a different day. The context knows the prompt's date, not the timestamp's.
     #[test]
     fn a_clock_source_uses_the_date_the_session_was_rendered_with() {
         let log = vec![started("2026-11-21T09:00:00Z")];

@@ -1,7 +1,6 @@
 //! The loop: fold → request → stream → log → tools → boundaries → repeat.
-//!
-//! One session is one process and one append-only log. Every verb that arrives
-//! on the session socket is logged and then applied at exactly one
+//! One session is one process and one append-only log.
+//! Every verb that arrives on the session socket is logged and then applied at exactly one
 //! [`Boundary`], never between a tool call and its result.
 
 use std::collections::BTreeSet;
@@ -34,29 +33,19 @@ use crate::tools::{self, Ctx, ToolOutcome};
 use crate::tui::{self, UiEvent};
 use crate::verbs::{self, Boundary, Pending, Scheduler, Verb};
 
-/// How long a stopped call may take to report back before the session settles
-/// it on the user's behalf. The kill is immediate; this is for the process tree
-/// to unwind. The `say --now` requirement is "within 2 s".
-///
-/// It is armed **per call**: a `stop --call` never bounds a sibling's run
-/// (M1 review F1).
+/// How long a stopped call may take to report back before the session settles it on the
+/// user's behalf. The kill is immediate; this is for the process tree to unwind.
 const STOP_GRACE: Duration = Duration::from_millis(1500);
 /// While a stop is settling, look for calls that started just after the kill
 /// and take them down too.
 const STOP_POLL: Duration = Duration::from_millis(25);
-/// How often a request waiting for a concurrency slot looks again. The slot
-/// appears when another process closes its handle; there is nothing to be told
-/// about, and a person watching sees a shorter delay rather than a poll rate.
 const SLOT_POLL: Duration = Duration::from_millis(100);
-/// How long an idle session sleeps between looks for a metadata fetch that
-/// started with the session, so `state` carries the provider's window as soon
-/// as it is there instead of at the next turn (STEER-1 review S2). Short,
-/// because a session with no turn running has nothing better to do.
+/// How long an idle session sleeps between looks for a metadata fetch that started with the session, so
+/// `state` carries the provider's window as soon as it is there instead of at the next turn.
 const IDLE_MODELS_WAIT: Duration = Duration::from_millis(100);
 
-/// What a resume says to a log whose last turn ended cleanly but was never
-/// closed: the model's last message is its own answer, and a request may not
-/// end on one (M3 review S4).
+/// What a resume says to a log whose last turn ended cleanly but was never closed: the
+/// model's last message is its own answer, and a request may not end on one.
 const CONTINUE_NOTE: &str = "[kelir] the session was interrupted between turns; continue the task \
                              from where it stopped.";
 
@@ -75,9 +64,8 @@ struct McpPending {
 }
 
 pub async fn run(args: RunArgs) -> u8 {
-    // `--child` starts the task as a child of the session this tool call runs
-    // in. Outside any session it is just a run (and `--background` has nothing
-    // to wake).
+    // `--child` starts the task as a child of the session this tool call runs in. Outside any
+    // session it is just a run (and `--background` has nothing to wake).
     if args.child {
         if crate::envs::var_os("KELIR_SOCK").is_some() {
             return crate::childcli::run(args).await;
@@ -183,9 +171,7 @@ pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
     .await
 }
 
-/// `kelir child-host`: a child session's process. Its parent started it and
-/// handed it the task, its place in the tree and the way back to the root on
-/// stdin; the final text goes to stdout, which the parent reads.
+/// `kelir child-host`: a child session's process.
 pub async fn child_host() -> u8 {
     let handoff = match crate::child::read_handoff() {
         Ok(handoff) => handoff,
@@ -218,13 +204,6 @@ pub async fn child_host() -> u8 {
 }
 
 /// `kelir view <path>`: queue an image for the model's next message.
-///
-/// The model reaches this through `bash` (so it costs no tool-schema text). It
-/// sends the `view` verb to the live session over the socket the bash call
-/// already carries (`KELIR_SOCK`); the session checks the model's vision
-/// metadata and records a `source` event (kind `attachment`) at the tail. That
-/// is what keeps the provider cache prefix byte-stable: earlier messages are
-/// never edited.
 pub async fn view(args: crate::cli::ViewArgs) -> u8 {
     let Some(address) =
         crate::envs::var_os("KELIR_SOCK").map(|value| value.to_string_lossy().into_owned())
@@ -264,7 +243,7 @@ struct Options {
     task: Vec<String>,
     /// Continue this session (id or unique prefix) from its log.
     resume: Option<String>,
-    /// This process is a child session (M7): who started it, where the root is.
+    /// This process is a child session: who started it, where the root is.
     child: Option<crate::child::Handoff>,
 }
 
@@ -321,20 +300,17 @@ struct Prepared {
     /// (`config`, `api`, `cache`, `default`).
     window: u64,
     window_source: &'static str,
-    /// Why the window is what it is, when that needs saying: the short reason the
-    /// provider's list did not answer, in words (STEER-1 review N4). `None` for
-    /// a configured window and for a list that answered.
+    /// Why the window is what it is, when that needs saying: the short reason the provider's list
+    /// did not answer, in words. `None` for a configured window and for a list that answered.
     window_note: Option<String>,
     /// The provider's model list as this process learned it, so a `model` swap
     /// resolves without the network.
     models: Option<crate::models::Cache>,
-    /// A metadata fetch still running (or its answer, waiting to be taken):
-    /// resolved at the next `before_step`, so a slow list never holds the first
-    /// request (STEER-1 review S2).
+    /// A metadata fetch still running (or its answer, waiting to be taken): resolved at the next
+    /// `before_step`, so a slow list never holds the first request.
     models_fetch: Option<Fetch>,
-    /// The opt-in concurrency governor for the provider this session starts
-    /// with (`max_concurrent_requests`); `None` when the provider config has no
-    /// limit.
+    /// The opt-in concurrency governor for the provider this session starts with
+    /// (`max_concurrent_requests`); `None` when the provider config has no limit.
     governor: Option<crate::governor::Governor>,
 }
 
@@ -371,10 +347,8 @@ struct Session {
     provider_name: String,
     model: String,
     client: Client,
-    /// The config of the provider the client is talking to, with its key: the
-    /// one a re-read or a `model` verb starts from. Held here (not only in
-    /// `cfg.providers`, whose entry has no key) because the key lives in memory
-    /// and nowhere else.
+    /// The config of the provider the client is talking to, with its key: the one a re-read or a `model`
+    /// verb starts from.
     active_provider: crate::config::ProviderConfig,
     ctx: Ctx,
     json: bool,
@@ -402,7 +376,7 @@ struct Session {
     /// provider never changes.
     disabled: BTreeSet<String>,
     /// The MCP broker: servers started lazily, kept for the session, and the
-    /// only thing that writes `mcp_started`/`mcp_settled` (M6).
+    /// only thing that writes `mcp_started`/`mcp_settled`.
     mcp: crate::mcp::broker::Broker,
     /// The loop's own inbox sender, so broker tasks can hand a finished call
     /// back to the loop that owns the log writer.
@@ -413,19 +387,15 @@ struct Session {
     /// boundary writes them, so a call's results stay contiguous.
     mcp_channel_queue: Vec<(String, String)>,
     /// The provider call ids of this batch that have **not** settled yet, so a
-    /// `stop --call` for a call that is done is refused (M1 review F2).
+    /// `stop --call` for a call that is done is refused.
     live_calls: Vec<String>,
-    /// Verbs waiting for their boundary.
     scheduler: Scheduler,
     /// A compaction waiting for its boundary (`before_step`).
     compact_request: Option<CompactRequest>,
-    /// The last `usage.prompt_tokens` for the current model: the honest size
-    /// of the context the auto trigger compares to the window. Reset after a
-    /// compaction, so the next trigger uses the estimate of the smaller fold.
+    /// The last `usage.prompt_tokens` for the current model: the honest size of the context the auto
+    /// trigger compares to the window.
     last_prompt_tokens: Option<u64>,
-    /// The size at which an automatic compaction was declined because it would
-    /// not shrink the context (M3 review N1). The trigger stays quiet until the
-    /// context has grown past it, instead of paying for a summary every step.
+    /// The size at which an automatic compaction was declined because it would not shrink the context.
     compact_floor: Option<u64>,
     /// The tool names frozen at `session_started`; a resumed session sends the
     /// same list, so its cache prefix is unchanged.
@@ -449,16 +419,12 @@ struct Session {
     window_model: Option<String>,
     /// See [`Prepared::window_note`].
     window_note: Option<String>,
-    /// The provider's model list as this process learned it.
     models: Option<crate::models::Cache>,
     /// A metadata fetch still running (or its answer, waiting to be taken);
     /// applied at the next `before_step`.
     models_fetch: Option<Fetch>,
-    /// Body fields a provider refused with a 400 during this session, by the
-    /// field name: the retry leaves them out and the session remembers, so the
-    /// same 400 is not paid twice (STEER-6 review S3). A provider that rejects
-    /// the field used to make every step a hard error until the person found
-    /// the config key.
+    /// Body fields a provider refused with a 400 during this session, by the field name: the retry leaves
+    /// them out and the session remembers, so the same 400 is not paid twice.
     refused_fields: BTreeSet<String>,
     /// The seq of the newest human prompt already scored (or skipped) for the
     /// pushed hint; a later one is scored at the next `before_step`.
@@ -472,25 +438,20 @@ struct Session {
     /// The client-side concurrency governor, when the provider config asks for
     /// one (`max_concurrent_requests`). `None` is off, the default.
     governor: Option<crate::governor::Governor>,
-    /// This session's socket trust boundary: its token and the jobs it owns
-    /// (STEER-7). The `bg`, `cancel` and `bg-spawn` verbs are refused here
+    /// This session's socket trust boundary: its token and the jobs it owns. The `bg`, `cancel` and `bg-spawn` verbs are refused here
     /// when they name a job this session did not start.
     trust: std::sync::Arc<crate::trust::Trust>,
     /// Job ids whose status file was refused (unsigned or badly signed): the log
     /// records each once, so a child rewriting a file cannot grow it.
     refused_status: std::collections::HashSet<String>,
-    /// The highest signed sequence number believed per job.
     seen_seq: std::collections::HashMap<String, u64>,
-    /// What this session has spent and what state it is in, folded from the
-    /// log as it is written (STEER-8): the `status` verb's answer, and what the
-    /// warnings are decided from.
+    /// What this session has spent and what state it is in, folded from the log as it is written:
+    /// the `status` verb's answer, and what the warnings are decided from.
     tally: crate::spend::Tally,
     /// This session's place in the family of sessions and its registry of
-    /// children (M7).
     kids: children::Kids,
-    /// The retry or slot wait in progress, for `status`: when it ends, the
-    /// status and attempt, and whether it is a slot wait. Set and cleared by
-    /// the same `Retrying`/`RetryingDone` events the screen gets.
+    /// The retry or slot wait in progress, for `status`: when it ends, the status and attempt, and whether
+    /// it is a slot wait.
     retry_wait: std::cell::Cell<Option<RetryWait>>,
     /// The gates for this session (`[gates]` plus skills bound with
     /// `kelir-gate`), `None` when there are none, which is the default.
@@ -512,17 +473,12 @@ struct Session {
 /// A retry or slot wait in progress: ends at, status, attempt, is-a-slot-wait.
 type RetryWait = (Instant, Option<u16>, u32, bool);
 
-/// A compaction asked for by someone. A `/compact` typed by a human runs as
-/// soon as it is safe — immediately when the session is idle, at the next
-/// `before_step` when a turn is running — so the next prompt can be queued
-/// while it works. A tool, resume or auto request keeps the next-boundary model.
 struct CompactRequest {
     by: &'static str,
     focus: Option<String>,
     immediate: bool,
 }
 
-/// What a compaction did, for the UI line.
 struct CompactedInfo {
     through_seq: u64,
     tokens_before: u64,
@@ -530,13 +486,12 @@ struct CompactedInfo {
     pinned: usize,
 }
 
-/// What one compaction attempt ended as.
 enum CompactRun {
     /// Nothing old enough to summarise.
     Nothing,
     /// A `compacted` event was written.
     Applied(CompactedInfo),
-    /// The context would not shrink, so nothing was written (N1); `would_be` is
+    /// The context would not shrink, so nothing was written ; `would_be` is
     /// the size the fold would have had.
     Skipped { before: u64, would_be: u64 },
     /// A verb interrupted the summarising request.
@@ -583,21 +538,16 @@ fn crash_at(point: &str) {
     }
 }
 
-/// What a turn ended as.
 enum TurnEnd {
     Done,
     Stopped(String),
-    /// The turn paused and waits for a human. Not a failure: the session
-    /// stays alive (`--keep`) and the next message opens a new turn. The log
-    /// says `turn_ended` outcome `paused` with the report's `reason`
-    /// (`steps`: the explicit `max_steps` cap; `provider`: the provider stayed
-    /// unavailable past the waiting budget, so the message says how to go on).
+    /// The turn paused and waits for a human. Not a failure: the session stays alive (`--keep`)
+    /// and the next message opens a new turn.
     Paused(PauseReport),
     /// The `end` verb arrived.
     End,
 }
 
-/// What the next turn should be.
 enum TurnStart {
     Messages(Vec<Message>),
     End,
@@ -615,7 +565,6 @@ struct Message {
     from: String,
 }
 
-/// What a boundary did.
 #[derive(Default)]
 struct Applied {
     /// The `end` verb was applied.
@@ -626,14 +575,12 @@ struct Applied {
     messages: usize,
 }
 
-/// What the provider stream ended as.
 enum StreamEnd {
     Assembled(crate::stream::Assembler),
     Stopped(String),
     End,
-    /// The provider stayed unavailable past the request's waiting budget: the
-    /// turn pauses (it does not fail) and the next `say` retries from the same
-    /// fold.
+    /// The provider stayed unavailable past the request's waiting budget: the turn pauses (it
+    /// does not fail) and the next `say` retries from the same fold.
     Paused(PauseReport),
 }
 
@@ -701,9 +648,8 @@ impl PauseReport {
     }
 }
 
-/// Where a request comes from, so it can be rebuilt after a wait: a `model`
-/// verb during the wait changes the model (and the provider), and the next
-/// attempt has to use it.
+/// Where a request comes from, so it can be rebuilt after a wait: a `model` verb during the
+/// wait changes the model (and the provider), and the next attempt has to use it.
 enum RequestFor<'a> {
     /// A step: the fold, built from the session's current model.
     Step,
@@ -722,10 +668,8 @@ impl RequestFor<'_> {
                 let messages = crate::fold::fold(&session.events, &session.dir)
                     .map(|folded| folded.request_messages())
                     .unwrap_or_default();
-                // The same builder `drive_turn` used for the first attempt, so
-                // a retry keeps STEER-6's capability decisions (`parallel_calls`,
-                // the `reasoning_effort` gate and the fields this session already
-                // saw a 400 for) as well as STEER-5's rebuild after a wait.
+                // The same builder `drive_turn` used for the first attempt, so a retry keeps's capability decisions
+                // (`parallel_calls`, the `reasoning_effort` gate and the fields this session already saw a 400 for) as
                 session.step_request(&messages)
             }
         }
@@ -741,10 +685,8 @@ enum AtOnce {
     Rejected,
 }
 
-/// Does this request ask for a verb that is applied the moment it arrives, and
-/// so is answered only after it landed? `say --now` and `model` (STEER-5 review
-/// N1). Read from the raw request, before it is parsed: the answer needs to know
-/// which path to take.
+/// Does this request ask for a verb that is applied the moment it arrives, and so is answered
+/// only after it landed? `say --now` and `model`.
 fn at_once_verb(request: &Request) -> bool {
     match request.verb.as_str() {
         "model" => true,
@@ -757,7 +699,6 @@ fn at_once_verb(request: &Request) -> bool {
     }
 }
 
-/// What one provider attempt did.
 enum Attempt {
     Ok(crate::stream::Assembler),
     Failed(provider::ProviderError),
@@ -769,9 +710,8 @@ enum Attempt {
 enum Waited {
     /// The wait ran out: try again.
     Timeout,
-    /// A verb applied at once ends the wait and the attempt is re-sent right
-    /// away (`say --now`, `model`): the request is a new one, so it is rebuilt
-    /// from the fold the verb just changed.
+    /// A verb applied at once ends the wait and the attempt is re-sent right away (`say --now`,
+    /// `model`): the request is a new one, so it is rebuilt from the fold the verb just changed.
     Retry,
     /// A verb (or a signal) ended the turn.
     End(Box<StreamEnd>),
@@ -784,7 +724,6 @@ enum SlotWait {
     Interrupted(StreamEnd),
 }
 
-/// What a tool batch ended as.
 #[derive(Default)]
 struct Batch {
     stopped: Option<String>,
@@ -792,13 +731,8 @@ struct Batch {
 }
 
 async fn drive(opts: Options) -> u8 {
-    // One interrupt listener for the process, installed before *anything*
-    // observable: before `prepare` (which records `session_started`) and so
-    // before any client can see the session and signal it. Tokio's `signal`
-    // keeps Ctrl-C captured for the whole process once it exists, so this is
-    // also the last safe moment to install it; the flag it sets is
-    // level-triggered, so a signal that lands before the first wait is still
-    // there when the wait begins (STEER-5 fixes round 2).
+    // One interrupt listener for the process, installed before *anything* observable: before `prepare`
+    // (which records `session_started`) and so before any client can see the session and signal it.
     crate::signals::install();
     let mut prepared = match prepare(&opts).await {
         Ok(prepared) => prepared,
@@ -820,10 +754,7 @@ async fn drive(opts: Options) -> u8 {
         }
     };
 
-    // One session is one writer. Take the log's lock before anything is
-    // appended: on Unix the "already running" connect check and the bind are
-    // two steps, and two resumes started together can both pass the first one
-    // (M3 review N3). The guard lives until `drive` returns.
+    // One session is one writer.
     let _lock = match ipc::lock(&prepared.dir) {
         Ok(lock) => lock,
         Err(message) => {
@@ -850,19 +781,11 @@ async fn drive(opts: Options) -> u8 {
             return 1;
         }
     };
-    // On Unix a session dir whose path does not fit in `sun_path` binds a
-    // shorter socket and records it (M1 Linux round 1); take the address that
-    // was really bound for `KELIR_SOCK`.
+    // On Unix a session dir whose path does not fit in `sun_path` binds a shorter socket and
+    // records it; take the address that was really bound for `KELIR_SOCK`.
     prepared.sock = ipc::value(&prepared.dir, &prepared.id);
 
-    // The trust boundary (STEER-7): a token for this session, and the registry
-    // of the jobs it may be told about. Made before anything can connect, so
-    // there is no window in which the socket answers without one.
-    // The session holds every job's signing key for as long as it lives, so it
-    // is closed to its own user's memory reads before the first key exists
-    // (Windows: a DACL that keeps terminate/limited-query for the owner;
-    // Linux: not dumpable). Best effort, said on stderr, never fatal
-    // (STEER-7 review round 4, S2).
+    // The trust boundary: a token for this session, and the registry of the jobs it may be told about.
     if let Err(error) = crate::bg::harden_process() {
         eprintln!("kelir: warning: {error}");
     }
@@ -890,9 +813,8 @@ async fn drive(opts: Options) -> u8 {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
     ipc::serve(listener, trust.clone(), tx.clone());
-    // Background jobs: `kelir bg run` reports itself over the socket, and this
-    // watcher is the safety net that also catches a promoted call settling
-    // while the session runs. Both arrive as one `bg` verb (see [`Session::note_bg`]).
+    // Background jobs: `kelir bg run` reports itself over the socket, and this watcher is the safety net
+    // that also catches a promoted call settling while the session runs.
     watch_bg(session.dir.join("bg"), tx.clone());
     // MCP: broker tasks report back through the same channel, and channel
     // servers connect now.
@@ -929,12 +851,7 @@ async fn drive(opts: Options) -> u8 {
                 crate::util::path_string(&session.ctx.cwd)
             )),
         ];
-        // The window is not ambient: the number is for `state`, not the banner
-        // (tui3). What does belong here is a window that is *not* the
-        // provider's, with the reason: a 401, an offline endpoint or a default
-        // fallback silently changes the compaction threshold, and a person who
-        // cannot see that is being misled (F-window, STEER-1 review N4). One
-        // dim line, only when the start actually fell back.
+        // The window is not ambient: the number is for `state`, not the banner.
         if let Some(line) = window_banner_line(&session) {
             banner.push(tui::BannerLine::dim(line));
         }
@@ -975,9 +892,8 @@ async fn drive(opts: Options) -> u8 {
                 // `attachments/…` in a prompt resolves.
                 handle.app.set_session_dir(session.dir.clone());
                 handle.app.set_session_id(session.id.clone());
-                // A resumed session's title was written when its first prompt
-                // arrived; show it from the first frame instead of waiting for
-                // a new prompt (which may never come).
+                // A resumed session's title was written when its first prompt arrived; show it from the
+                // first frame instead of waiting for a new prompt (which may never come).
                 if let Some(title) = session.events.iter().find_map(|event| match &event.body {
                     crate::event::EventBody::SessionTitle { title } => Some(title.clone()),
                     _ => None,
@@ -986,9 +902,8 @@ async fn drive(opts: Options) -> u8 {
                 }
                 session.ui = Some(to_tui.clone());
                 let task = tokio::spawn(handle.run());
-                // If the UI dies (a panic, a terminal error) the session ends
-                // the same way `/quit` ends it, instead of running forever with
-                // nobody watching.
+                // If the UI dies (a panic, a terminal error) the session ends the same way `/quit` ends it,
+                // instead of running forever with nobody watching.
                 let verbs = tx.clone();
                 let watchdog = tokio::spawn(async move {
                     let _ = task.await;
@@ -1052,10 +967,7 @@ fn watch_children(tx: mpsc::UnboundedSender<Incoming>, key: String) {
     });
 }
 
-/// A child session ends when its parent does. On Windows the parent's Job
-/// Object already takes the child down; on Unix nothing does when the parent is
-/// `kill -9`ed, so the child polls for it and ends itself (its tool calls follow
-/// through their own owner check).
+/// A child session ends when its parent does.
 fn watch_parent(
     handoff: crate::child::Handoff,
     tx: mpsc::UnboundedSender<Incoming>,
@@ -1109,10 +1021,8 @@ fn watch_deadline(deadline: Duration, tx: mpsc::UnboundedSender<Incoming>, token
     });
 }
 
-/// Watch this session's `bg/` for jobs that start or settle, and push each
-/// change into the same channel the socket feeds. The session stays the only
-/// writer of the log: the watcher only says what happened, and the session
-/// records it at the next boundary (or immediately when it is idle).
+/// Watch this session's `bg/` for jobs that start or settle, and push each change into the same channel
+/// the socket feeds.
 fn watch_bg(dir: PathBuf, tx: mpsc::UnboundedSender<Incoming>) {
     tokio::spawn(async move {
         let mut seen: std::collections::HashSet<(String, String)> =
@@ -1142,12 +1052,6 @@ fn watch_bg(dir: PathBuf, tx: mpsc::UnboundedSender<Incoming>) {
 }
 
 /// The provider's model list and how this process came by it.
-///
-/// `cache` is the list kelir is using now (a fresh one from disk, a list this
-/// process fetched, or a failed one kept for its `error`), `fetched` says it
-/// came off the wire in this process, and `why` is the short reason the window
-/// fell back to `default` — `None` when the list answered
-/// (STEER-1 review N4).
 struct ModelList {
     cache: Option<crate::models::Cache>,
     fetched: bool,
@@ -1170,14 +1074,6 @@ impl ModelList {
 }
 
 /// A `GET /models` running beside the session, never on its critical path.
-///
-/// The task is spawned at session start (STEER-1 review S2) and sends its answer
-/// through a channel: the start takes the answer if it is there within
-/// [`crate::models::START_GRACE`] (so the first request carries the capability
-/// data when the endpoint is quick), and the first `before_step` — where the
-/// *window* is first read, after the first step — takes it otherwise. The
-/// channel is what makes the grace non-destructive: running out of grace does
-/// not cancel the fetch, it merely stops waiting for it.
 struct Fetch {
     rx: Option<oneshot::Receiver<ModelList>>,
 }
@@ -1256,12 +1152,6 @@ fn start_fetch(client: &Client, provider: &str, endpoint: &str) -> Fetch {
 }
 
 /// One fetch of `GET /models`, its result written beside the session state.
-///
-/// A failure is remembered for [`crate::models::RETRY_AFTER_MS`] so an offline
-/// box pays it once an hour, not on every start; a *timeout* is not a failure
-/// (the endpoint was slow, not wrong), so the next start asks again and the
-/// cached list keeps its own age. Every failure also records why, which is what
-/// `state` and the banner show instead of a silent `default` (N4).
 async fn fetch_models(
     client: &Client,
     provider: &str,
@@ -1311,24 +1201,14 @@ fn cached_list(provider: &str, base_url: &str) -> ModelList {
     ModelList::from_cache(flushed).with_why(why)
 }
 
-/// The banner's one line about the window, when the window is *not* the
-/// provider's: a start that fell back to the default (an offline endpoint, a
-/// 401, a list that has not landed) measures compaction against
-/// [`crate::compact::DEFAULT_WINDOW`] instead of the model's real window, which
-/// changes when the session compacts. A 401 or an unreachable endpoint must
-/// reach a person without them reading the log (STEER-1 review N4), and tui3's
-/// brief still wants the banner free of the *normal* window line (F-window).
-///
-/// `None` for the provider's own answer and for a configured window: those are
-/// not surprises.
+/// The banner's one line about the window, when the window is *not* the provider's: a start that fell
+/// back to the default (an offline endpoint, a 401, a list that has not landed) measures compaction
 fn window_banner_line(session: &Session) -> Option<String> {
     if session.window_source == "api" || session.window_source == "config" {
         return None;
     }
-    // "fetching" is not a degradation, it is "the answer is not in yet":
-    // [`Session::apply_list`] says the real reason when it lands, so the banner
-    // does not name a window it is about to correct (and a start never sees two
-    // window lines that way).
+    // "fetching" is not a degradation, it is "the answer is not in yet": [`Session::apply_list`] says the
+    // real reason when it lands, so the banner does not name a window it is about to correct (and a start
     if session.window_note.as_deref() == Some("the model list: fetching") {
         return None;
     }
@@ -1348,12 +1228,6 @@ fn window_banner_line(session: &Session) -> Option<String> {
 }
 
 /// The list to start with, and the fetch still running for the rest.
-///
-/// A warm box answers from the cache before the session starts and fetches
-/// nothing; a cold one gives the list [`crate::models::START_GRACE`] — enough
-/// for a local mock or a fast gateway, so the first request carries the
-/// capability data the list answers — and leaves a slower fetch running for the
-/// first `before_step` (STEER-1 review S2).
 async fn begin_models(client: &Client, provider: &str, base_url: &str) -> (ModelList, Fetch) {
     let endpoint = crate::models::endpoint_id(provider, base_url);
     let mut fetch = start_fetch(client, provider, &endpoint);
@@ -1376,9 +1250,8 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let common = &opts.common;
     let mut cfg = config::load(common.config.as_deref())
         .map_err(|error| Failure::Usage(error.to_string()))?;
-    // `--max-steps N` overrides the file, and `0` there means "no cap" as it
-    // does in `config.toml`: a stopgap config must never be able to cap a turn
-    // at zero steps.
+    // `--max-steps N` overrides the file, and `0` there means "no cap" as it does in
+    // `config.toml`: a stopgap config must never be able to cap a turn at zero steps.
     if let Some(steps) = common.max_steps {
         cfg.max_steps = (steps > 0).then_some(steps);
     }
@@ -1480,16 +1353,14 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         Some(child) => child.session.clone(),
         None => crate::jobs::planned_id().unwrap_or_else(new_session_id),
     };
-    // The key is resolved here, at session start, and held in memory only
-    // (STEER-2). `config::load` stays pure: reading opencode's store is a
+    // The key is resolved here, at session start, and held in memory only. `config::load` stays pure: reading opencode's store is a
     // process read, and a config load happens in tests and in `doctor` too.
     let mut provider_cfg = provider_cfg;
     let credential = credentials::resolve(&mut provider_cfg).map_err(Failure::Usage)?;
     let client = Client::new(provider_cfg.clone(), &id, cfg.cache_ttl.clone())
         .map_err(|error| Failure::Usage(error.message))?;
-    // Model metadata from the provider, cached beside the session state and
-    // fetched beside the session (never on the first request's critical path);
-    // a `[model_windows]`/`window` setting still wins over it.
+    // Model metadata from the provider, cached beside the session state and fetched beside the session
+    // (never on the first request's critical path); a `[model_windows]`/`window` setting still wins over
     let base_url = client.base_url();
     let (list, models_fetch) = begin_models(&client, &provider_name, &base_url).await;
     let over = cfg.override_window(&model);
@@ -1503,9 +1374,8 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             dir.display()
         ))
     })?;
-    // The one Herdr line: asked once, here, with a deadline; a pane that cannot
-    // answer is a note, never a failed start.
-    // Only the root asks: a child inherits the pane id but is not the pane's agent.
+    // The one Herdr line: asked once, here, with a deadline; a pane that cannot answer is a note, never a
+    // failed start.
     let probe = if opts.child.is_some() {
         crate::herdr_ctx::Probe::default()
     } else {
@@ -1553,11 +1423,8 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     })
 }
 
-/// Why this start has the window it has, or `None` when the answer needs no
-/// explanation: a configured window is the person's own number, and a fetched
-/// or cached list needs nothing said. The one case worth a line is a fallback
-/// — the list could not be had, so the start used the default (or a stale
-/// cache) and [`crate::models::Cache::error`] says why (STEER-1 review N4).
+/// Why this start has the window it has, or `None` when the answer needs no explanation: a configured
+/// window is the person's own number, and a fetched or cached list needs nothing said.
 fn window_note(over: Option<u64>, why: Option<&str>, source: &str) -> Option<String> {
     let why = why?;
     if over.filter(|window| *window > 0).is_some() || source == "api" || source == "cache" {
@@ -1566,18 +1433,16 @@ fn window_note(over: Option<u64>, why: Option<&str>, source: &str) -> Option<Str
     Some(format!("the model list: {why}"))
 }
 
-/// The opt-in governor for one provider config: `max_concurrent_requests`
-/// slots, advisory file locks under the state root. `None` (the default) is no
-/// limit at all.
+/// The opt-in governor for one provider config: `max_concurrent_requests` slots, advisory
+/// file locks under the state root. `None` (the default) is no limit at all.
 fn governor_for(provider: &crate::config::ProviderConfig) -> Option<crate::governor::Governor> {
     provider
         .max_concurrent_requests
         .map(|slots| crate::governor::Governor::new(&provider_base(provider), slots))
 }
 
-/// The governor's identity for a provider: its base URL, which is what "one
-/// provider" means on the wire (two config names pointing at one endpoint share
-/// the endpoint's limit).
+/// The governor's identity for a provider: its base URL, which is what "one provider" means
+/// on the wire (two config names pointing at one endpoint share the endpoint's limit).
 fn provider_base(provider: &crate::config::ProviderConfig) -> String {
     provider
         .base_url
@@ -1624,11 +1489,6 @@ async fn reopen(
         ))
     })?;
     // A live session owns its log; a second writer would fork the sequence.
-    // The check is connect-then-lock, which is not one atomic step, so `drive`
-    // also takes an exclusive lock on the log; this early answer is what a
-    // caller sees. A session whose log already ends with `session_ended` is on
-    // its way out — `end` acks before the process releases its socket — so give
-    // it a moment instead of refusing to resume a session that has stopped.
     let closed = read
         .events
         .last()
@@ -1761,7 +1621,7 @@ impl Session {
             ctx.session_id = prepared.id.clone();
             ctx.promote_after = prepared.cfg.promote_after;
             // Every tool child exports the session's token as `KELIR_TOKEN`
-            // (STEER-7), exactly as it already gets `KELIR_SOCK`.
+            // , exactly as it already gets `KELIR_SOCK`.
             ctx.token = trust.token().to_string();
             ctx.trust = Some(trust.clone());
             ctx
@@ -1831,10 +1691,8 @@ impl Session {
             pending_task: prepared.task.clone(),
             window: prepared.window,
             window_source: prepared.window_source,
-            // Seeded from the startup answer, so a later `/model` swap announces
-            // a changed window: `apply_list` must see which model the current
-            // number belongs to, and a fresh cache starts no fetch at all, so
-            // nothing else would tell it (tui3 review, F-window addendum).
+            // Seeded from the startup answer, so a later `/model` swap announces a changed window: `apply_list`
+            // must see which model the current number belongs to, and a fresh cache starts no fetch at all, so
             window_model: Some(prepared.model.clone()),
             window_note: prepared.window_note.take(),
             models: prepared.models.take(),
@@ -1859,11 +1717,8 @@ impl Session {
         session.gates = session.build_gates();
         crate::child::set_lineage(session.kids.lineage.clone());
         session.tally = crate::spend::Tally::from_events(&session.events, session.warn());
-        // The watcher re-checks the sources the frozen system was rendered
-        // from; on a resume it is rebuilt from the log's `sources[]` *and* the
-        // `source` events it already carries, so a source the verb added keeps
-        // being watched and an edit the log already announces is not announced
-        // again (F8).
+        // The watcher re-checks the sources the frozen system was rendered from; on a resume it is rebuilt
+        // from the log's `sources[]` *and* the `source` events it already carries, so a source the verb added
         if let Some(read) = prepared.resume {
             session.watch = crate::sources::Watch::rebuild(&read.events, &session.dir);
             // Prompts the log already holds were handled by the process that
@@ -1897,20 +1752,14 @@ impl Session {
             },
             sources: prepared.system.sources.clone(),
             tools: session.tool_names.clone(),
-            // What the loop will ask this model for: the configured effort,
-            // unless the provider's list says the model does not take the
-            // parameter (STEER-6 review S3). `None` means no field is sent at
-            // all — config `none`, or a model the list rules out — and the log
-            // then agrees with the request instead of naming a field the
-            // provider would reject. A `model` verb later swaps the client and
-            // the request follows the new provider.
+            // What the loop will ask this model for: the configured effort, unless the provider's list says the
+            // model does not take the parameter.
             reasoning_effort: session.first_effort(),
-            // Where the key came from, never the key (STEER-2).
+            // Where the key came from, never the key.
             key_origin: prepared.key_origin.clone(),
         })?;
-        // What the render had to say about its sources (a non-UTF-8 file read
-        // lossily, a truncation, a malformed skill skipped): recorded once, so
-        // a file never vanishes without a trace (F5, F6, F7).
+        // What the render had to say about its sources (a non-UTF-8 file read lossily, a truncation, a
+        // malformed skill skipped): recorded once, so a file never vanishes without a trace.
         for warning in &prepared.system.warnings {
             session.record(EventBody::Error {
                 location: "source".into(),
@@ -1929,14 +1778,11 @@ impl Session {
         Ok(session)
     }
 
-    /// Pick the log up where it stopped: report the damage, mark the resume,
-    /// settle the calls nobody settled (as *unknown*, never by running them
-    /// again), and add a new task if one was given.
+    /// Pick the log up where it stopped: report the damage, mark the resume, settle the calls nobody
+    /// settled (as *unknown*, never by running them again), and add a new task if one was given.
     fn reopen(&mut self, read: Reopened) -> Result<(), String> {
-        // Gaps in the log first: a torn last line and every line that never
-        // parsed are reported, never dropped silently — but a gap that a
-        // previous resume already reported is not reported again (M3 review
-        // S3: three resumes, one `error`).
+        // Gaps in the log first: a torn last line and every line that never parsed are reported, never dropped
+        // silently — but a gap that a previous resume already reported is not reported again.
         let reported: Vec<String> = self
             .events
             .iter()
@@ -1971,9 +1817,8 @@ impl Session {
         })?;
         self.sync();
 
-        // A call the log shows as requested or started, with no result, gets
-        // exactly one synthetic result. Re-running it is what a naive replay
-        // does; it is how `rm -rf` runs twice.
+        // A call the log shows as requested or started, with no result, gets exactly one synthetic
+        // result. Re-running it is what a naive replay does; it is how `rm -rf` runs twice.
         let mut unknown = 0usize;
         for call in &read.unsettled {
             let partial = self.interrupted_output(call);
@@ -1995,9 +1840,8 @@ impl Session {
             })?;
             unknown += 1;
         }
-        // The same for `kelir mcp` calls: `mcp_started` with no `mcp_settled`
-        // means the session died while the server was running the tool. The
-        // outcome is unknown (exit 4) and the call is not run again.
+        // The same for `kelir mcp` calls: `mcp_started` with no `mcp_settled` means the session died while the
+        // server was running the tool.
         let settled: std::collections::HashSet<String> = self
             .events
             .iter()
@@ -2043,10 +1887,8 @@ impl Session {
                 "kelir: resumed · {unknown} call(s) had an unknown outcome and were not re-run"
             )));
         }
-        // An agent-called compaction that was settled but never applied — a
-        // kill between the tool's `compaction queued` result and the boundary
-        // that summarises — is queued again here (M3 review N2), so the model's
-        // request survives the restart.
+        // An agent-called compaction that was settled but never applied — a kill between the tool's
+        // `compaction queued` result and the boundary that summarises — is queued again here, so the model's
         if self.compact_request.is_none()
             && let Some(focus) = compact::queued_compaction(&self.events, &self.dir)
         {
@@ -2059,17 +1901,8 @@ impl Session {
                 "kelir: resumed · a queued compaction is applied at the next step".to_string(),
             ));
         }
-        // Background jobs that started or settled while no session was running:
-        // the shim's status file is the record, and this is where it reaches the
-        // log (`bg_started`, `bg_settled` and the message that wakes the model).
-        //
-        // The registry is rebuilt first, **from the log and only from the
-        // log** (STEER-7 review B1): the ids are this session's own — a
-        // `tool_started` carries the call's `commands/<dir>` name, a
-        // `bg_started` a job's id — and a file in `bg/` proves nothing,
-        // because a tool child can write one. A note is recorded only for an
-        // id already adopted here; a status file nobody minted is left alone
-        // (it is still visible to `kelir bg ls`, which reads the files).
+        // Background jobs that started or settled while no session was running: the shim's status file is the
+        // record, and this is where it reaches the log (`bg_started`, `bg_settled` and the message that wakes
         for event in &self.events {
             match &event.body {
                 EventBody::BgStarted { bg_id, pubkey, .. } => {
@@ -2100,8 +1933,6 @@ impl Session {
         }
         if !self.pending_task.trim().is_empty() {
             // `kelir resume <id> <task>`: a new message on the existing log.
-            // When a turn was in flight it lands after the unknown results the
-            // model must read first, so it is `next` rather than `now`.
             let delivery = if read.in_flight { "next" } else { "now" };
             self.submit_task(self.pending_task.clone(), delivery)?;
         } else {
@@ -2111,12 +1942,8 @@ impl Session {
         Ok(())
     }
 
-    /// S4: a kill can leave a log whose last message is the assistant's final
-    /// answer, and a request may not end on one — providers read a trailing
-    /// assistant message as prefill or refuse it. When the resume is about to
-    /// run a turn the log did not leave ready (an unclosed log, or a turn that
-    /// ended stopped or in error), it says what happened in a message of its
-    /// own instead.
+    /// a kill can leave a log whose last message is the assistant's final answer, and a request may not
+    /// end on one — providers read a trailing assistant message as prefill or refuse it.
     fn continue_a_turn_that_ends_on_an_answer(&mut self) -> Result<(), String> {
         if !self.pending_task.trim().is_empty() {
             return Ok(());
@@ -2147,9 +1974,8 @@ impl Session {
         Ok(())
     }
 
-    /// The partial output of a call the previous process started, when its
-    /// `commands/<seq>-*` directory still has one. The model gets the counts
-    /// and the path; the result still says the outcome is unknown.
+    /// The partial output of a call the previous process started, when its `commands/<seq>-*` directory
+    /// still has one.
     fn interrupted_output(&self, call: &UnsettledCall) -> Option<(String, u64, u64)> {
         if !call.started {
             return None;
@@ -2401,9 +2227,8 @@ impl Session {
         }
         self.tally.observe(event.seq, &event.body);
         self.events.push(event.clone());
-        // Name the session from its first human prompt. Deterministic, no model
-        // call (design note §9). Children and jobs get the same title as any
-        // other session; a `continue` note and a compaction do not rename it.
+        // Name the session from its first human prompt. Deterministic, no model call (design note
+        // §9).
         if let Some(title) = title {
             self.titled = true;
             self.record(EventBody::SessionTitle {
@@ -2415,7 +2240,6 @@ impl Session {
         Ok(event)
     }
 
-    /// The thresholds this session warns at.
     fn warn(&self) -> crate::spend::Warn {
         crate::spend::Warn {
             prompt_tokens: self.cfg.warn_prompt_tokens,
@@ -2424,7 +2248,7 @@ impl Session {
     }
 
     /// What a request cost: the provider's number when it gave one, else the
-    /// price table's estimate, else nothing known (STEER-8).
+    /// price table's estimate, else nothing known.
     fn resolve_cost(&self, usage: &crate::stream::Usage) -> (f64, crate::spend::CostSource) {
         let price = crate::spend::lookup(&self.provider_name, &self.model, &self.cfg.prices);
         crate::spend::resolve(
@@ -2436,9 +2260,7 @@ impl Session {
         )
     }
 
-    /// After a `usage` event: say so, once, when a threshold was crossed. The
-    /// log gets a `warning` event and the screen one dim line; the model is
-    /// never told (the fold ignores the event).
+    /// After a `usage` event: say so, once, when a threshold was crossed.
     fn note_spend(&mut self) {
         let warn = self.warn();
         for warning in self.tally.warnings(warn) {
@@ -2455,10 +2277,8 @@ impl Session {
         }
     }
 
-    /// The `status` answer, built on the spot from the tally and the live
-    /// fields. Read-only: it is never queued or logged.
-    /// The gate counters `ctl status` shows: how many are declared and what
-    /// the log's `gate` events say happened (names and counts only).
+    /// The `status` answer, built on the spot from the tally and the live fields. Read-only: it
+    /// is never queued or logged.
     fn gates_status(&self) -> Value {
         let (mut runs, mut denied, mut rewritten, mut failed_open) = (0u64, 0u64, 0u64, 0u64);
         let mut last = Value::Null;
@@ -2509,7 +2329,7 @@ impl Session {
             max_steps: self.cfg.max_steps,
             session_steps: self.step,
             // Until the model list answers (or a window is configured) the
-            // number is a guess, and a guess is `null`, not 128000 (review F2).
+            // number is a guess, and a guess is `null`, not 128000.
             window: (self.window_source != "default").then_some(self.window),
             window_source: self.window_source,
             running: &self.live_calls,
@@ -2566,11 +2386,6 @@ impl Session {
     }
 
     /// Report Herdr status (no-op unless a writer was opened).
-    ///
-    /// In the TUI the record travels as a [`UiEvent`] and the TUI task writes
-    /// it between paints: one thread owns the terminal, so an OSC can never
-    /// split a crossterm sequence (M2 review F2). Non-TUI paths (`run`,
-    /// `run --keep`) write it here, as before.
     fn report(&mut self, state: HerdrState) {
         let Some(herdr) = &self.herdr else {
             return;
@@ -2583,9 +2398,8 @@ impl Session {
         }
     }
 
-    /// Set the Herdr pane title from the session title. In the TUI the record
-    /// travels with the other status records and is written between paints;
-    /// non-TUI paths write it here.
+    /// Set the Herdr pane title from the session title. In the TUI the record travels with the
+    /// other status records and is written between paints; non-TUI paths write it here.
     fn report_title(&mut self, title: &str) {
         if self.herdr.is_none() {
             return;
@@ -2598,9 +2412,6 @@ impl Session {
         }
     }
 
-    /// Fire this session's configured notifications for one event kind.
-    /// Hooks start in the background and never block the session; the
-    /// `notify` event is the record of what was dispatched, like gate events.
     fn notify(&mut self, kind: &str, detail: &str) {
         let dispatch = crate::notify::fire(
             &self.cfg.notify,
@@ -2622,9 +2433,6 @@ impl Session {
     }
 
     /// One turn is over: the UI gets its outcome, Herdr gets its word.
-    ///
-    /// Herdr 0.1.21 takes no `msg` on the record (it drops the whole record),
-    /// so a failed turn's reason stays in the log and on the pane's screen.
     fn finish_turn(&mut self, outcome: &str) {
         self.emit(UiEvent::TurnEnded {
             outcome: outcome.to_string(),
@@ -2634,14 +2442,13 @@ impl Session {
             "done" => HerdrState::Done,
             "error" => HerdrState::Error,
             // A paused turn waits for a human to say `continue`; that is the
-            // one Herdr word a supervisor can see as waiting (review N2).
+            // one Herdr word a supervisor can see as waiting.
             "paused" => HerdrState::Blocked,
             _ => HerdrState::Idle,
         };
         self.report(state);
-        // Notifications are last: the log already has the outcome, so a hook
-        // that reads it sees a complete turn. Clone the detail first: `notify`
-        // records an event, which needs `&mut self`.
+        // Notifications are last: the log already has the outcome, so a hook that reads it sees a
+        // complete turn. Clone the detail first: `notify` records an event, which needs `&mut self`.
         let detail = self.final_text.clone();
         match outcome {
             "done" => self.notify("turn_done", &detail),
@@ -2686,14 +2493,12 @@ impl Session {
         );
     }
 
-    /// The state a verb's answer reports back to its client.
     fn state(&self) -> Value {
         json!({
             "turn": self.turn,
             "step": self.step,
-            // The turn's own count and its cap, so a steering human sees a
-            // pause coming (FINDINGS: "a status line with steps used/limit
-            // would have shown it coming"). `max_steps` is null with no cap.
+            // The turn's own count and its cap, so a steering human sees a pause coming (FINDINGS: "a status line
+            // with steps used/limit would have shown it coming").
             "turn_steps": self.turn_steps,
             "max_steps": self.cfg.max_steps,
             "running": self.live_calls,
@@ -2701,9 +2506,8 @@ impl Session {
             "model": self.model,
             "window": self.window,
             "window_source": self.window_source,
-            // Why this start does not have the provider's window, when it does
-            // not (STEER-1 review N4): `http 401`, `offline`, `timeout`,
-            // `malformed`, `fetching`. Absent when nothing needs saying.
+            // Why this start does not have the provider's window, when it does not: `http 401`,
+            // `offline`, `timeout`, `malformed`, `fetching`. Absent when nothing needs saying.
             "window_note": self.window_note,
             // Whether the list is still being fetched beside the session.
             "models_fetching": self
@@ -2723,9 +2527,8 @@ impl Session {
         self.accept_as(incoming, None)
     }
 
-    /// `accept`, with the answer's `applies` word overridden. The idle loop
-    /// uses it for a `stop` that has nothing to stop: the verb is dropped, so
-    /// the answer says `dropped`, not `now` (M2 review N1).
+    /// `accept`, with the answer's `applies` word overridden. The idle loop uses it for a `stop`
+    /// that has nothing to stop: the verb is dropped, so the answer says `dropped`, not `now`.
     fn accept_as(&mut self, incoming: Incoming, applies: Option<&'static str>) -> Option<Pending> {
         let Incoming {
             request,
@@ -2733,10 +2536,8 @@ impl Session {
             action,
         } = incoming;
         if let Some(pending) = self.note_own(action) {
-            // The session's own watcher, not a client: nothing to log and
-            // nobody to answer, but the note still waits for a boundary like
-            // the `bg` report it stands in for, so `bg_started`/`bg_settled`
-            // land in the same order whichever of the two arrives first.
+            // The session's own watcher, not a client: nothing to log and nobody to answer, but the note still
+            // waits for a boundary like the `bg` report it stands in for, so `bg_started`/`bg_settled` land in the
             self.scheduler.push(pending);
             return None;
         }
@@ -2754,11 +2555,8 @@ impl Session {
             self.child_or_brief(request, reply);
             return None;
         }
-        // `bg-spawn` is the one thing a job cannot do itself: on Windows a
-        // `kelir bg run` inside a call sits in the call's Job Object, which
-        // forbids breakaway (it has to — an escapable job cannot be
-        // cancelled), so the session, which is outside it, starts the shim.
-        // There is nothing to queue: the job's own status file is the record.
+        // `bg-spawn` is the one thing a job cannot do itself: on Windows a `kelir bg run` inside a call sits
+        // in the call's Job Object, which forbids breakaway (it has to — an escapable job cannot be
         if name == "bg-spawn" {
             let answer = self.bg_spawn_answer(&from, &request);
             let _ = reply.send(answer);
@@ -2775,16 +2573,15 @@ impl Session {
             Err(_) => "rejected",
         };
         let error = parsed.as_ref().err().cloned();
-        // A refusal is recorded only while the refusal budget lasts: a token
-        // holder that names foreign jobs one by one cannot grow the log without
-        // bound (STEER-7 review B1). The answer still goes out.
+        // A refusal is recorded only while the refusal budget lasts: a token holder that names
+        // foreign jobs one by one cannot grow the log without bound. The answer still goes out.
         let recorded = if error.is_some() && !self.trust.may_record_refusal() {
             Err("the refusal budget is spent".to_string())
         } else {
             self.log_verb(&name, &request.args, &from, scope, error)
         };
         // The ack must not outrun the log: a crash right after `{"ok": true}`
-        // may not lose a verb the client believes was accepted (M1 review N1).
+        // may not lose a verb the client believes was accepted.
         self.sync();
         match (parsed, recorded) {
             (Ok(verb), Ok(event)) => {
@@ -2807,10 +2604,8 @@ impl Session {
         }
     }
 
-    /// `accept` for a verb a wait is about to apply at once (`say --now`,
-    /// `model`): the answer goes out *after* the verb landed, so it says
-    /// `applies: "now"` and `state.model` (or the queued text) is what the
-    /// next request really carries (STEER-5 review N1).
+    /// `accept` for a verb a wait is about to apply at once (`say --now`, `model`): the answer goes out
+    /// *after* the verb landed, so it says `applies: "now"` and `state.model` (or the queued text) is what
     async fn accept_at_once(&mut self, incoming: Incoming) -> AtOnce {
         let Incoming {
             request,
@@ -2848,9 +2643,8 @@ impl Session {
         let parsed = self.parse_verb(&request, &from);
         let boundary = if parsed.is_ok() { "now" } else { "rejected" };
         let error = parsed.as_ref().err().cloned();
-        // The refusal budget (STEER-7 review B1) applies here too: a token
-        // holder naming foreign jobs one by one gets its answer either way, and
-        // the log grows by no more than the budget.
+        // The refusal budget applies here too: a token holder naming foreign jobs one by one gets
+        // its answer either way, and the log grows by no more than the budget.
         let recorded = if error.is_some() && !self.trust.may_record_refusal() {
             Err("the refusal budget is spent".to_string())
         } else {
@@ -2885,9 +2679,6 @@ impl Session {
     // ----------------------------------------------------------------- MCP
 
     /// The broker's verbs (`mcp`, and the internal `mcp-settle`/`mcp-notify`).
-    /// A `call` is logged here (`mcp_started`), run on a task, and settled by
-    /// the task's `mcp-settle` coming back through the inbox, so the log has
-    /// one writer and the client's answer never outruns `mcp_settled`.
     fn mcp_verb(&mut self, request: Request, reply: oneshot::Sender<Response>) {
         match request.verb.as_str() {
             crate::mcp::broker::VERB_SETTLE | crate::mcp::broker::VERB_NOTIFY => {
@@ -2947,7 +2738,7 @@ impl Session {
             mcp_id: mcp_id.clone(),
             server: server.clone(),
             tool: tool.clone(),
-            // The shape only: a tool argument can be a secret (STEER-7).
+            // The shape only: a tool argument can be a secret.
             args: Payload::value(crate::mcp::loggable_args(&arguments)),
             parent_call_id: parent.clone(),
         }) {
@@ -3070,9 +2861,8 @@ impl Session {
         let _ = pending.reply.send(answer);
     }
 
-    /// An inbound notification from a server. A channel message becomes a
-    /// `source` event (kind `channel`) at the next safe boundary; handling
-    /// policy (waking the model) is M10's.
+    /// An inbound notification from a server. A channel message becomes a `source` event (kind
+    /// `channel`) at the next safe boundary; handling policy (waking the model) is's.
     fn mcp_notify(&mut self, args: &Value) {
         let server = args
             .get("server")
@@ -3131,15 +2921,8 @@ impl Session {
         self.sync();
     }
 
-    /// The `bg-spawn` answer: the shim only ever answers a job, and a job is
-    /// the only sender allowed to ask. A refusal — a foreign job directory, a
-    /// path that escapes this session's own `bg/` — is recorded like any other
-    /// refused verb, so the log says what was tried (STEER-7).
-    ///
-    /// `bg-claim` is the sibling verb a `kelir bg run` sends *before* it starts
-    /// its own shim: the session mints the id and the capability and starts
-    /// nothing. The id is the session's, never the caller's (review B1), so a
-    /// child cannot pick a name it later reports for.
+    /// The `bg-spawn` answer: the shim only ever answers a job, and a job is the only sender allowed to
+    /// ask.
     fn bg_spawn_answer(&mut self, from: &str, request: &Request) -> Response {
         if from != "job" {
             return Response::error("bg-spawn: an internal verb; jobs report themselves");
@@ -3153,9 +2936,8 @@ impl Session {
                 Err(message) => Response::error(message),
             };
         }
-        // Only `cmd`, `shell`, `cwd` and a filtered `env` are the caller's; the
-        // kind, the socket, the token, the job name and the call are the
-        // session's own (STEER-7 review round 4, S1).
+        // Only `cmd`, `shell`, `cwd` and a filtered `env` are the caller's; the kind, the socket,
+        // the token, the job name and the call are the session's own.
         let call_is_live = |call: &str| self.live_calls.iter().any(|live| live == call);
         match crate::trust::spawn_request(request).and_then(|spawn| {
             let spawn = spawn.pinned(&self.ctx.sock, &self.ctx.token, call_is_live);
@@ -3166,9 +2948,8 @@ impl Session {
         }
     }
 
-    /// `bg-claim`, retired: nothing sends it, so it answers an id and nothing
-    /// else, from a small budget of its own (it must not spend the one
-    /// `bg-spawn` mints from).
+    /// `bg-claim`, retired: nothing sends it, so it answers an id and nothing else, from a small
+    /// budget of its own (it must not spend the one `bg-spawn` mints from).
     fn bg_claim_answer(&mut self) -> Response {
         match self.trust.claim_ack() {
             Ok(id) => Response::ok("bg-claim", 0, "now", json!({"id": id})),
@@ -3176,9 +2957,8 @@ impl Session {
         }
     }
 
-    /// Record a refused verb, unless the refusal budget is spent: a token
-    /// holder can name foreign jobs one by one and the log must not grow by one
-    /// event per try (STEER-7 review B1).
+    /// Record a refused verb, unless the refusal budget is spent: a token holder can name foreign
+    /// jobs one by one and the log must not grow by one event per try.
     fn refuse_verb(
         &mut self,
         name: &str,
@@ -3195,21 +2975,17 @@ impl Session {
         Ok(())
     }
 
-    /// Validate one arrival. `bg` is internal, and `stop --call` for a call that
-    /// is not running (`live_calls` holds only the unsettled calls of the
-    /// batch) is a refusal rather than a silent no-op.
     fn parse_verb(&self, request: &Request, from: &str) -> Result<Verb, String> {
         let name = request.verb.as_str();
         if name == "bg" && from != "job" {
             return Err("bg: an internal verb; jobs report themselves".to_string());
         }
         // Only for the session's own jobs: a foreign id is refused here, where
-        // it is recorded as a `verb` event marked refused (STEER-7).
+        // it is recorded as a `verb` event marked refused.
         self.trust.check_job(request)?;
         let parsed = verbs::parse(name, &request.args)?;
-        // `view` is validated when it arrives, not when it applies: the CLI
-        // prints "image queued" from the ack, so a bad path must be refused in
-        // the ack and not a boundary later (where nobody is listening).
+        // `view` is validated when it arrives, not when it applies: the CLI prints "image queued" from the
+        // ack, so a bad path must be refused in the ack and not a boundary later (where nobody is listening).
         if let Verb::View { path } = &parsed
             && let Err(message) = self.check_view(path)
         {
@@ -3237,7 +3013,6 @@ impl Session {
         self.record(EventBody::Verb {
             name: name.to_string(),
             // Never the request's args wholesale: a whitelist per verb
-            // (STEER-7 review round 4, B1).
             args: Payload::value(verbs::loggable_args(name, args)),
             from: from.to_string(),
             boundary: boundary.to_string(),
@@ -3256,10 +3031,7 @@ impl Session {
         Ok(applied)
     }
 
-    /// Apply the pending verbs that are *actions* rather than messages. A
-    /// `cancel` kills a job and records it; it never starts a turn, and while
-    /// the session is idle no boundary arrives to apply it — so it is applied
-    /// here, at once, instead of sitting in the queue for ever (STEER-7).
+    /// Apply the pending verbs that are *actions* rather than messages.
     async fn apply_actions(&mut self) -> Result<(), String> {
         let actions = self.scheduler.take_where(Verb::is_action);
         if actions.is_empty() {
@@ -3289,11 +3061,13 @@ impl Session {
                     // A message from anywhere but this UI gets echoed, so a
                     // steering `ctl say` is visible in the pane it steers.
                     if pending.from != "tui" {
-                        self.emit(UiEvent::Info(format!("› {}", one_line(&text))));
+                        self.emit(UiEvent::Info(format!(
+                            "› {}",
+                            crate::util::one_line_visible(&text, 200)
+                        )));
                     }
-                    // The text carries the pointers; the list carries the paths
-                    // they name, so a reader (and a later tool) can see which
-                    // images a message was about without parsing prose (N5).
+                    // The text carries the pointers; the list carries the paths they name, so a reader (and a
+                    // later tool) can see which images a message was about without parsing prose .
                     let attachments = crate::attachments::paths_in(&text)
                         .into_iter()
                         .map(serde_json::Value::String)
@@ -3336,10 +3110,8 @@ impl Session {
                     }
                 }
                 Verb::View { path } => {
-                    // An image queued by `kelir view` from inside a call: it
-                    // becomes a `source` event at the tail, so the next request
-                    // carries an image part and every earlier message (and the
-                    // cached prefix) stays byte-identical.
+                    // An image queued by `kelir view` from inside a call: it becomes a `source` event at the tail, so the
+                    // next request carries an image part and every earlier message (and the cached prefix) stays byte-
                     match self.apply_view(&path) {
                         Ok((rel, bytes)) => {
                             applied.messages += 1;
@@ -3362,9 +3134,8 @@ impl Session {
                 }
                 Verb::End => applied.end = true,
                 Verb::Compact { focus } => {
-                    // Applies at `before_step`: the compaction needs a provider
-                    // call and must never land between a tool call and its
-                    // result.
+                    // Applies at `before_step`: the compaction needs a provider call and must never land between
+                    // a tool call and its result.
                     self.emit(UiEvent::Info(match &focus {
                         Some(focus) => format!("» compact: {focus}"),
                         None => "» compact".to_string(),
@@ -3391,10 +3162,7 @@ impl Session {
                 Verb::Brief { .. } => {}
                 // Answered where it arrives; it never gets this far.
                 Verb::Status => {}
-                // A job of this session's own, killed on request (STEER-7).
-                // The refusal (a foreign id) already answered the client; here
-                // the kill happens and, if it worked, the job's own settled
-                // report reaches the log through the next `bg` arrival.
+                // A job of this session's own, killed on request.
                 Verb::Cancel { id } => {
                     match crate::bg::cancel_in(
                         &self.trust.bg_dir(),
@@ -3445,17 +3213,8 @@ impl Session {
         Ok(())
     }
 
-    /// `skills`: read one skill or instruction source (from a file, a skill
-    /// directory, or the verb's own text) and add it to the context as a
-    /// `source` message.
-    ///
-    /// The body is the file's whole text, the same bytes the watcher hashes, so
-    /// a skill added here is not announced again at the next boundary (F3, N5)
-    /// — for a skill that also means its `description`, which lives in the
-    /// front matter, arrives too. Repeating the text the last message for that
-    /// name already carried is refused; going *back* to an earlier body is not,
-    /// because the model's latest word on the source is the one in between
-    /// (F1b).
+    /// `skills`: read one skill or instruction source (from a file, a skill directory, or the
+    /// verb's own text) and add it to the context as a `source` message.
     fn apply_skills(
         &mut self,
         kind: crate::sources::SourceKind,
@@ -3477,9 +3236,8 @@ impl Session {
                         .ok_or_else(|| {
                             format!("skills: cannot read {}", crate::util::path_string(&file))
                         })?;
-                // A skill's front matter must parse: a broken `SKILL.md` is
-                // refused here rather than handed to the model as if it were
-                // one.
+                // A skill's front matter must parse: a broken `SKILL.md` is refused here rather than handed
+                // to the model as if it were one.
                 if kind == crate::sources::SourceKind::Skill {
                     let skill = crate::sources::parse_skill(&body)?;
                     if skill.name != name {
@@ -3521,9 +3279,6 @@ impl Session {
     }
 
     /// Does the *last* thing this context says about a source carry `hash`?
-    ///
-    /// Only the last one counts: an earlier message with the same text is not
-    /// the current word on the file (F1b).
     fn latest_source_is(&self, kind: crate::sources::SourceKind, name: &str, hash: &str) -> bool {
         let last = self
             .events
@@ -3551,10 +3306,8 @@ impl Session {
         matches!(last, Some(Some(seen)) if seen == hash)
     }
 
-    /// `model` swaps the provider/model for the rest of the session. It applies
-    /// at the next step, so the cache restart is expected: another model has
-    /// another cache. The verb event records the swap; the next `step_started`
-    /// records it in the log.
+    /// `model` swaps the provider/model for the rest of the session. It applies at the next step,
+    /// so the cache restart is expected: another model has another cache.
     fn swap_model(&mut self, target: &str) -> Result<(), String> {
         let (provider, model) = split_model_target(target, &self.cfg.providers);
         let provider = provider
@@ -3566,9 +3319,8 @@ impl Session {
             // a re-read here could only cost a process start.
             self.active_provider.clone()
         } else {
-            // A swap to another provider needs *that* provider's key, resolved
-            // the same way the start resolved this one (STEER-2). It happens
-            // once, on a verb, so the bounded read is fine here.
+            // A swap to another provider needs *that* provider's key, resolved the same way the start
+            // resolved this one. It happens once, on a verb, so the bounded read is fine here.
             let mut provider_cfg = self
                 .cfg
                 .provider(&provider)
@@ -3576,11 +3328,8 @@ impl Session {
             credentials::resolve(&mut provider_cfg)?;
             provider_cfg
         };
-        // The governor belongs to the provider a request goes to: a swap to a
-        // governed provider must take its slots (and a swap away must stop
-        // being held to the old limit). `max_concurrent_requests` is read from
-        // the provider config the swap resolved to, never from the one the
-        // session started on (STEER-5 review S1).
+        // The governor belongs to the provider a request goes to: a swap to a governed provider must take its
+        // slots (and a swap away must stop being held to the old limit).
         let governor = governor_for(&provider_cfg);
         let client = Client::new(provider_cfg.clone(), &self.id, self.cfg.cache_ttl.clone())
             .map_err(|error| error.message)?;
@@ -3589,12 +3338,8 @@ impl Session {
         self.client = client;
         self.active_provider = provider_cfg;
         self.governor = governor;
-        // Another model, possibly another provider: resolve from that
-        // endpoint's cache (never the network mid-turn) and start a fetch
-        // beside the session when it is stale, so the new provider's list
-        // arrives at the next `before_step` instead of waiting for another
-        // process to write it. A model no list knows falls back to the default
-        // window and `state` says why (STEER-1 review S2/S4).
+        // Another model, possibly another provider: resolve from that endpoint's cache (never the network mid-
+        // turn) and start a fetch beside the session when it is stale, so the new provider's list arrives at
         let base_url = self.client.base_url();
         let endpoint = crate::models::endpoint_id(&self.provider_name, &base_url);
         self.models = crate::models::load(&endpoint);
@@ -3602,13 +3347,8 @@ impl Session {
         let over = self.cfg.override_window(&self.model);
         let (window, source) =
             crate::models::resolve(over, self.models.as_ref(), false, &self.model);
-        // A swap is the one moment a person must be told the window changed:
-        // it is not the startup answer any more, and it sets the compaction
-        // threshold for the rest of the session. The banner no longer carries
-        // the number, so this is where it is said (F-window). A later answer
-        // for the same model that changes it again is announced by
-        // [`Session::apply_list`], which knows when the swap's own cache was
-        // already right.
+        // A swap is the one moment a person must be told the window changed: it is not the startup answer any
+        // more, and it sets the compaction threshold for the rest of the session.
         if window != self.window || source != self.window_source {
             self.emit(UiEvent::Info(format!(
                 "» window {window} tokens ({source})"
@@ -3621,14 +3361,8 @@ impl Session {
         Ok(())
     }
 
-    /// Take the metadata fetch's answer if it has landed, and apply it: the
-    /// list a `model` swap or a later step will read, and the window if the
-    /// configuration does not override it.
-    ///
-    /// Called at `before_step`, which is the first place the window is read
-    /// (the auto-compaction trigger), so a slow `/models` never holds the first
-    /// request (STEER-1 review S2). Never waits: a fetch still running is
-    /// picked up at a later boundary.
+    /// Take the metadata fetch's answer if it has landed, and apply it: the list a `model` swap
+    /// or a later step will read, and the window if the configuration does not override it.
     async fn apply_models(&mut self) {
         let ready = match self.models_fetch.as_mut() {
             Some(fetch) => fetch.take_ready(),
@@ -3639,9 +3373,8 @@ impl Session {
         }
     }
 
-    /// Apply one answer from the metadata fetch: the list every later step and
-    /// a `model` swap read, and the window when the configuration does not
-    /// override it.
+    /// Apply one answer from the metadata fetch: the list every later step and a `model` swap
+    /// read, and the window when the configuration does not override it.
     fn apply_list(&mut self, list: ModelList) {
         if let Some(cache) = list.cache {
             self.models = Some(cache);
@@ -3649,23 +3382,14 @@ impl Session {
         let over = self.cfg.override_window(&self.model);
         let (window, source) =
             crate::models::resolve(over, self.models.as_ref(), list.fetched, &self.model);
-        // The startup answer is silent: the banner no longer carries the window
-        // (tui3). Two cases are not silent, and both are one dim line:
-        //
-        // * the start fell back (a dead endpoint, a 401): the banner's note is
-        //   written before this answer exists, so a fallback that the start
-        //   could not see is said here instead — once, when the source changes
-        //   to the fallback or its reason does (F-window);
-        // * a `/model` swap moved the number: the new model's window is what
-        //   compaction now measures against (STEER-1 review N4).
+        // The startup answer is silent: the banner no longer carries the window. Two cases
+        // are not silent, and both are one dim line:
         let note = window_note(over, list.why.as_deref(), source);
         let previous = self.window_model.replace(self.model.clone());
         let swapped = previous.is_some_and(|model| model != self.model);
         let moved = swapped && (window != self.window || source != self.window_source);
-        // A start whose fetch had not landed says the fallback here instead:
-        // the banner could only say "fetching" (the answer did not exist yet),
-        // and the reason is what a person needs (F-window). Once: the same
-        // answer twice says nothing new.
+        // A start whose fetch had not landed says the fallback here instead: the banner could only say
+        // "fetching" (the answer did not exist yet), and the reason is what a person needs (F-window).
         let fell_back = source == "default"
             && note.is_some()
             && (note != self.window_note || source != self.window_source);
@@ -3734,37 +3458,21 @@ impl Session {
         }
     }
 
-    /// Record what a job's status file says: `bg_started` once, and — when it
-    /// settled — `bg_settled` plus the `user` message from `job` that wakes the
-    /// agent. Returns whether a wake message was written.
-    ///
-    /// The log is the record and the dedupe: a report that arrives twice (the
-    /// socket and the watcher, or a watcher restarted by a resume) is recorded
-    /// once.
+    /// Record what a job's status file says: `bg_started` once, and — when it settled — `bg_settled` plus
+    /// the `user` message from `job` that wakes the agent.
     fn note_bg(&mut self, reported: &crate::bg::Status) -> Result<bool, String> {
         use crate::trust::Seal;
         // The id is this session's own or nothing: a status file nobody minted
-        // never reaches the log as a job (STEER-7 review B1).
+        // never reaches the log as a job.
         let id = reported.id.clone();
         if !self.trust.owns(&id) {
             return Ok(false);
         }
-        // The file is the truth as of now, the argument is a snapshot from when
-        // the report was made. Re-reading matters: a job can die between the
-        // two (a `cancel` in flight kills the shim, then writes `cancelled`),
-        // and recording the snapshot after calling its dead shim `lost` put
-        // the wrong outcome in the log (STEER-7).
-        //
-        // And a file is not evidence by itself (steer7b review B1'): a tool
-        // child can write `bg/<id>.status` as easily as the shim. Only a record
-        // signed with the key the session gave that job's shim is believed;
-        // the snapshot is held to the same rule.
+        // The file is the truth as of now, the argument is a snapshot from when the report was made.
         let dir = self.trust.bg_dir();
         let file = crate::bg::Status::read(&crate::bg::status_path(&dir, &id));
-        // A final record is terminal: the shim also keeps it beside the status
-        // file, and a validly signed final record wins over whatever the status
-        // file now says, so putting an older record back cannot un-settle the
-        // job (a replay can withhold a result, never change it).
+        // A final record is terminal: the shim also keeps it beside the status file, and a validly signed
+        // final record wins over whatever the status file now says, so putting an older record back cannot un-
         let last = crate::bg::Status::read(&crate::bg::final_path(&dir, &id)).filter(|last| {
             last.id == id && last.is_job() && last.settled() && self.trust.seal(last) == Seal::Good
         });
@@ -3794,11 +3502,8 @@ impl Session {
         let status = match sealed {
             Seal::Good => crate::bg::observed_in(&dir, candidate),
             Seal::Unowned => return Ok(false),
-            // A resumed session adopted this id from its log and no longer holds
-            // the key (it died with the process that minted it), so a record
-            // cannot be authenticated. What the log already says is the only
-            // thing believed: the job is recorded as lost, with the output path
-            // the log holds, never the file's.
+            // A resumed session adopted this id from its log and no longer holds the key (it died with the process
+            // that minted it), so a record cannot be authenticated.
             Seal::NoKey => match self.adopted_outcome(&id, candidate) {
                 Some(lost) => lost,
                 None => return Ok(false),
@@ -3844,10 +3549,8 @@ impl Session {
         }
         self.record(crate::bg::settled_body(status))?;
         let text = crate::bg::wake_text(status);
-        // M11: a settled background job is its own notification kind. It uses
-        // the same fire-and-record path as turn_done/error/paused. The
-        // `BgSettled` dedupe above means one notify per settled job, even when
-        // several reports (socket, watcher, resume) arrive for it.
+        // : a settled background job is its own notification kind. It uses the same fire-and-record
+        // path as turn_done/error/paused.
         self.notify("bg_settled", &text);
         self.record(EventBody::User {
             text: Payload::text(text.clone()),
@@ -3855,15 +3558,16 @@ impl Session {
             delivery: "next".into(),
             attachments: Vec::new(),
         })?;
-        self.emit(UiEvent::Info(format!("» {}", one_line(&text))));
+        self.emit(UiEvent::Info(format!(
+            "» {}",
+            crate::util::one_line_visible(&text, 200)
+        )));
         self.sync();
         Ok(true)
     }
 
-    /// What a resumed session may say about a job whose status it cannot
-    /// authenticate: nothing while the file says it runs, and `lost` (built
-    /// from the log's own `bg_started`) once the file says it stopped. A job the
-    /// log never recorded is left alone.
+    /// What a resumed session may say about a job whose status it cannot authenticate: nothing while the
+    /// file says it runs, and `lost` (built from the log's own `bg_started`) once the file says it stopped.
     fn adopted_outcome(&self, id: &str, file: &crate::bg::Status) -> Option<crate::bg::Status> {
         if !file.settled() {
             return None;
@@ -3894,30 +3598,20 @@ impl Session {
         Some(lost)
     }
 
-    /// A wake-up the session raised itself (its own `bg/` watcher) is not a
-    /// request: there is no `Request` to answer and nobody is waiting. It is
-    /// turned into a `Pending` here and queued through the scheduler like any
-    /// other verb, so `bg_started`/`bg_settled` keep the order the old
-    /// `bg`-verb path gave them (STEER-7: the watcher used to send a `bg`
-    /// request pretending to be `job`, which is exactly the shape a foreign
-    /// caller had).
+    /// A wake-up the session raised itself (its own `bg/` watcher) is not a request: there is no `Request`
+    /// to answer and nobody is waiting.
     fn note_own(&self, action: Option<crate::ipc::Action>) -> Option<Pending> {
         action.map(|crate::ipc::Action::Note(status)| Pending {
-            // The watcher wrote no `verb` event, so there is no seq of its
-            // own; the scheduler keeps arrival order and `note_bg` writes
-            // the `bg_*` events in the order the notes apply.
+            // The watcher wrote no `verb` event, so there is no seq of its own; the scheduler keeps
+            // arrival order and `note_bg` writes the `bg_*` events in the order the notes apply.
             seq: 0,
             verb: Verb::Bg(Box::new(status)),
             from: "job".into(),
         })
     }
 
-    /// One image queued by `kelir view`: resolve the path, record the `source`
-    /// event (kind `attachment`), and return what the TUI shows.
-    ///
-    /// The event carries the relative path (`attachments/1-x.png`) and it is
-    /// the fold that turns it into a data URL at request time, so the log stays
-    /// small and free of base64.
+    /// One image queued by `kelir view`: resolve the path, record the `source` event (kind
+    /// `attachment`), and return what the TUI shows.
     fn apply_view(&mut self, named: &str) -> Result<(String, u64), String> {
         let path = self.check_view(named)?;
         let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
@@ -3938,9 +3632,8 @@ impl Session {
             self.sync();
             return Ok((rel, bytes));
         }
-        // The image is copied into the session's attachments dir, so the
-        // request does not depend on a path outside the session (and a later
-        // resume still finds it).
+        // The image is copied into the session's attachments dir, so the request does not depend on
+        // a path outside the session (and a later resume still finds it).
         let rel = self.import_attachment(&path)?;
         self.record(EventBody::Source {
             kind: "attachment".to_string(),
@@ -3976,7 +3669,7 @@ impl Session {
         }
         let mime = crate::attachments::mime_of(&path);
         if mime == "application/octet-stream" {
-            // A PDF is refused on purpose (m5bfix F3): kelir sends no document
+            // A PDF is refused on purpose: kelir sends no document
             // formats, only images; the message says what to do instead.
             let pdf = path
                 .extension()
@@ -4000,11 +3693,8 @@ impl Session {
                 crate::attachments::bytes_label(crate::attachments::MAX_BYTES)
             ));
         }
-        // An extension is a claim, not proof: the bytes have to start with a
-        // format's signature and carry a header kelir can read a size from.
-        // Queueing garbage would put it in every later request (the shared
-        // conversation is poisoned by a provider 400 that repeats), so a file
-        // that is not really an image is refused here, before the log (`S3`).
+        // An extension is a claim, not proof: the bytes have to start with a format's signature and carry a
+        // header kelir can read a size from.
         match crate::attachments::sniff(&path) {
             Ok(Some(_)) => {}
             Ok(None) => {
@@ -4026,9 +3716,8 @@ impl Session {
         Ok(path)
     }
 
-    /// Whether the provider says the current model takes images: `Some(true)`
-    /// and `Some(false)` are answers, `None` is "not stated" (the fetched or
-    /// cached model list has no entry, or the entry has no vision field).
+    /// Whether the provider says the current model takes images: `Some(true)` and `Some(false)` are
+    /// answers, `None` is "not stated" (the fetched or cached model list has no entry, or the entry has no
     fn vision_support(&self) -> Option<bool> {
         self.models
             .as_ref()
@@ -4046,10 +3735,7 @@ impl Session {
         if let Ok(rest) = path.strip_prefix(&self.dir) {
             return Ok(crate::util::path_string(rest));
         }
-        // The sequence number counts the session's copies, so two different
-        // files get two numbers (review N6: they all used to be `1-…`). Names
-        // stay unique either way, but a human reading the session's
-        // `attachments/` should be able to count them.
+        // The sequence number counts the session's copies, so two different files get two numbers.
         let mut seen = std::collections::HashMap::new();
         let seq = crate::attachments::next_seq(&self.dir);
         let saved = crate::attachments::save(&self.dir, seq, path, &mut seen)
@@ -4057,9 +3743,8 @@ impl Session {
         Ok(saved.rel)
     }
 
-    /// Record one `source` event: context that arrived after the start. It
-    /// renders as a message at the tail, so the system prefix (and its cache)
-    /// is untouched.
+    /// Record one `source` event: context that arrived after the start. It renders as a message
+    /// at the tail, so the system prefix (and its cache) is untouched.
     fn record_source(
         &mut self,
         kind: crate::sources::SourceKind,
@@ -4073,22 +3758,18 @@ impl Session {
             text: Some(Payload::text(text)),
             path: path.file().map(crate::util::path_string),
         })?;
-        // The context's current word on the source is now this message: the
-        // watcher compares against this one hash, so the file on disk and the
-        // watcher agree at once (no second announcement) and an edit back to an
-        // older body is news (F1, F3).
+        // The context's current word on the source is now this message: the watcher compares against this one
+        // hash, so the file on disk and the watcher agree at once (no second announcement) and an edit back to
         self.watch
             .add(kind, name, path, &crate::sources::hash_of(text));
         Ok(())
     }
 
-    /// The per-boundary mtime/hash check of the recorded sources: a file
-    /// edited on disk since it went into the context becomes one `source`
-    /// message. The system prompt is never rewritten (that is what keeps the
-    /// provider's cache warm).
+    /// The per-boundary mtime/hash check of the recorded sources: a file edited on disk since it went into
+    /// the context becomes one `source` message.
     fn check_sources(&mut self) -> Result<usize, String> {
         // A source whose file is gone is one note per disappearance, never a
-        // silent hole (N4).
+        // silent hole .
         for removed in self.watch.removals() {
             self.record(EventBody::Error {
                 location: "source".into(),
@@ -4106,9 +3787,8 @@ impl Session {
                 "» source deleted on disk: {}",
                 crate::util::path_string(&removed.path)
             )));
-            // The model curates its memory, so a note it can no longer find
-            // must not stay a live fact in its context (m5bfix N2): a one-line
-            // tail message, the system prefix untouched.
+            // The model curates its memory, so a note it can no longer find must not stay a live fact in
+            // its context: a one-line tail message, the system prefix untouched.
             if removed.kind == crate::sources::SourceKind::Memory {
                 // Recorded directly, not through `record_source`: that would
                 // re-arm the watcher and announce the same absence every time.
@@ -4173,11 +3853,8 @@ impl Session {
         Ok(count)
     }
 
-    /// The pushed hint: one scoring call for the newest human prompt, answered
-    /// as a `source` message (kind `hint`) at the tail. Fails open in every
-    /// way: no scorer, no key, a timeout or garbage is at most one `error`
-    /// note and the turn goes on without it. The system prefix is never
-    /// touched, so the provider's cache of everything before the hint stays.
+    /// The pushed hint: one scoring call for the newest human prompt, answered as a `source` message (kind
+    /// `hint`) at the tail.
     async fn maybe_hint(&mut self) {
         let Some(config) = self.cfg.hint.clone() else {
             return;
@@ -4242,10 +3919,8 @@ impl Session {
         }
     }
 
-    /// The scoring call's own spend, as a `usage` event of kind `hint` (m5bfix
-    /// F2): it counts in `ctl status` and the cost warnings, and the cache
-    /// ratio (which reads `kind: None`) stays about the main model only. The
-    /// cost is the table's estimate for the scorer's model, or the provider's.
+    /// The scoring call's own spend, as a `usage` event of kind `hint`: it counts in `ctl
+    /// status` and the cost warnings, and the cache ratio (which reads `kind: None`) stays about the main
     fn record_hint_usage(&mut self, scorer: &dyn crate::hint::Scorer) {
         let Some(usage) = scorer.take_usage() else {
             return;
@@ -4286,10 +3961,8 @@ impl Session {
         });
     }
 
-    /// The scorer for `[hint]`: the named provider's base URL (or the
-    /// configured `endpoint`) and key. The key is resolved off the async
-    /// thread and held in memory only. Without a key a provider endpoint is
-    /// "off"; a configured `endpoint` is tried keyless (a local server).
+    /// The scorer for `[hint]`: the named provider's base URL (or the configured `endpoint`) and
+    /// key. The key is resolved off the async thread and held in memory only.
     async fn build_scorer(
         &self,
         config: &crate::config::HintConfig,
@@ -4319,9 +3992,8 @@ impl Session {
             .endpoint
             .clone()
             .unwrap_or_else(|| provider.base_url.clone());
-        // A provider's key goes to that provider's origin only (m5bfix F1): a
-        // `[hint] endpoint` on another host is called without a key, as the
-        // docs say for a local server, never with the session's key.
+        // A provider's key goes to that provider's origin only: a `[hint] endpoint` on another
+        // host is called without a key, as the docs say for a local server, never with the session's key.
         if config.endpoint.is_some() && !crate::hint::same_origin(&base, &provider.base_url) {
             provider.key = None;
         }
@@ -4339,12 +4011,13 @@ impl Session {
             };
             message.text = text;
             if message.from != "tui" {
-                self.emit(UiEvent::Info(format!("› {}", one_line(&message.text))));
+                self.emit(UiEvent::Info(format!(
+                    "› {}",
+                    crate::util::one_line_visible(&message.text, 200)
+                )));
             }
-            // A message deferred to the end of a turn (`/later`) is the same
-            // message: the list of the images its text points at goes with it
-            // (N5), or a queued prompt would be the one shape whose
-            // `attachments[]` lied.
+            // A message deferred to the end of a turn (`/later`) is the same message: the list of the images its
+            // text points at goes with it , or a queued prompt would be the one shape whose `attachments[]`
             let attachments = crate::attachments::paths_in(&message.text)
                 .into_iter()
                 .map(serde_json::Value::String)
@@ -4362,9 +4035,8 @@ impl Session {
 
     // ---------------------------------------------------------- compaction
 
-    /// The effort the first request will carry: the configured value, unless the
-    /// provider's list says the model does not take the parameter. Recorded in
-    /// `session_started`, so the log and the request agree from the first step.
+    /// The effort the first request will carry: the configured value, unless the provider's list says the
+    /// model does not take the parameter.
     fn first_effort(&self) -> Option<String> {
         if !self.effort_allowed() {
             return None;
@@ -4375,10 +4047,8 @@ impl Session {
             .and_then(|provider| provider.reasoning_effort)
     }
 
-    /// Whether the loop may ask this model for several tool calls in one
-    /// message: the provider's list when it has an entry, else the built-in
-    /// family table, so a first session (cold or slow list) still asks a model
-    /// that can do it (STEER-6 review S2).
+    /// Whether the loop may ask this model for several tool calls in one message: the provider's list when
+    /// it has an entry, else the built-in family table, so a first session (cold or slow list) still asks a
     fn parallel_calls(&self) -> bool {
         crate::models::parallel_calls(
             self.models.as_ref().map(|cache| cache.models.as_slice()),
@@ -4386,9 +4056,8 @@ impl Session {
         )
     }
 
-    /// Whether `reasoning_effort` may go in the body: only where the provider
-    /// advertises the parameter, or for a model the list says nothing about
-    /// when the person configured an effort explicitly (STEER-6 review S3).
+    /// Whether `reasoning_effort` may go in the body: only where the provider advertises the parameter, or
+    /// for a model the list says nothing about when the person configured an effort explicitly.
     fn effort_allowed(&self) -> bool {
         let explicit = self
             .cfg
@@ -4412,9 +4081,8 @@ impl Session {
         ))
     }
 
-    /// Apply what this provider/model actually takes: `reasoning_effort` only
-    /// where the provider advertises it or the config asked for it on an
-    /// unknown model, and nothing this session already saw a 400 for.
+    /// Apply what this provider/model actually takes: `reasoning_effort` only where the provider advertises
+    /// it or the config asked for it on an unknown model, and nothing this session already saw a 400 for.
     fn capabilities(&self, request: provider::BuiltRequest) -> provider::BuiltRequest {
         let mut request = request;
         if !self.effort_allowed() {
@@ -4426,9 +4094,8 @@ impl Session {
         request
     }
 
-    /// The tool list sent to the provider: the specs for the names frozen at
-    /// `session_started`, in that order. A session started before a tool existed
-    /// keeps its old list, so the request prefix (and its cache) is unchanged.
+    /// The tool list sent to the provider: the specs for the names frozen at `session_started`, in that
+    /// order.
     fn tool_specs(&self) -> Vec<Value> {
         let all = tools::specs();
         self.tool_names
@@ -4441,17 +4108,12 @@ impl Session {
             .collect()
     }
 
-    /// Compact the context if something asked for it: the `compact` tool, the
-    /// `compact` verb, or the auto trigger at the configured fraction of the
-    /// model's window.
-    ///
-    /// `Some(end)` when a verb interrupted the summarising request: the turn
-    /// ends there, exactly as `stop` during a step would.
+    /// Compact the context if something asked for it: the `compact` tool, the `compact` verb, or
+    /// the auto trigger at the configured fraction of the model's window.
     async fn maybe_compact(&mut self, rx: &mut Inbox) -> Result<Option<TurnEnd>, String> {
         if self.compact_request.is_none() {
-            // Nothing to compact before the first step: the estimate would be
-            // little more than the system prompt, and the "conversation" is the
-            // task alone.
+            // Nothing to compact before the first step: the estimate would be little more than the
+            // system prompt, and the "conversation" is the task alone.
             let has_history = self
                 .events
                 .iter()
@@ -4463,9 +4125,8 @@ impl Session {
                 // covers the step after a compaction.
                 let tokens = self.last_prompt_tokens.unwrap_or(estimate);
                 let window = self.window;
-                // After a compaction that did not shrink anything, wait for the
-                // context to grow past it instead of paying for a summary on
-                // every step (M3 review N1).
+                // After a compaction that did not shrink anything, wait for the context to grow past it
+                // instead of paying for a summary on every step.
                 let above_floor = self
                     .compact_floor
                     .map(|floor| tokens > floor)
@@ -4492,10 +4153,7 @@ impl Session {
         self.run_compact(rx, &request).await
     }
 
-    /// Run a requested compaction and report what it did. Shared by the turn
-    /// boundary and the idle path: an immediate `/compact` uses the same code,
-    /// so the UI line, the cost-control floor and the error event are identical.
-    /// `Some(end)` when a verb interrupted the summarising request.
+    /// Run a requested compaction and report what it did.
     async fn run_compact(
         &mut self,
         rx: &mut Inbox,
@@ -4521,11 +4179,8 @@ impl Session {
                 ));
             }
             Ok(CompactRun::Skipped { before, would_be }) => {
-                // Cost control (N1): a summary that cannot shrink the context
-                // buys nothing, so it is not requested again until the context
-                // grows. The floor is on the scale the trigger measures with —
-                // the provider's own count when there is one — so the trigger
-                // goes quiet instead of repeating the decision every step.
+                // A summary that cannot shrink the context buys nothing, so it is not requested
+                // again until the context grows.
                 let first_refusal = self.compact_floor.is_none();
                 self.compact_floor = Some(self.last_prompt_tokens.unwrap_or(before));
                 let message = format!(
@@ -4575,11 +4230,6 @@ impl Session {
     }
 
     /// Summarise the range and write the `compacted` event.
-    ///
-    /// The summarising request is a provider call like any other: verbs are
-    /// read while it is in flight, so a `stop` does not wait for a large
-    /// transcript to be summarised (M3 review S2), and the turn ends without a
-    /// `compacted` event.
     async fn compact(
         &mut self,
         rx: &mut Inbox,
@@ -4588,14 +4238,13 @@ impl Session {
         let Some(plan) = compact::plan(&self.events, self.cfg.compact_keep) else {
             return Ok(CompactRun::Nothing);
         };
-        // The transcript is the fold of the range, not the raw events: a
-        // compaction that covers an earlier one summarises its summary instead
-        // of losing it (B2).
+        // The transcript is the fold of the range, not the raw events: a compaction that covers an
+        // earlier one summarises its summary instead of losing it .
         let range = crate::fold::range_events(&self.events, plan.through_seq);
         let folded_range = crate::fold::fold(&range, &self.dir)?;
         let transcript = compact::render_transcript(&folded_range.messages);
         // Both numbers describe the whole request the provider sees, so asking
-        // "did it shrink?" is a real question about the context (N1).
+        // "did it shrink?" is a real question about the context.
         let whole = crate::fold::fold(&self.events, &self.dir)?;
         let tokens_before = compact::estimate_tokens(&whole.request_messages());
         let mut body = EventBody::Compacted {
@@ -4607,9 +4256,8 @@ impl Session {
             tokens_after: 0,
             cache_restart: true,
         };
-        // The smallest possible result: an empty summary. If even that is not
-        // smaller, no summary can be, so an automatic compaction declines
-        // before paying for one.
+        // The smallest possible result: an empty summary. If even that is not smaller, no summary
+        // can be, so an automatic compaction declines before paying for one.
         let smallest = self.preview_tokens(&body, self.writer.next_seq())?;
         if request.by == "auto" && smallest >= tokens_before {
             return Ok(CompactRun::Skipped {
@@ -4638,14 +4286,12 @@ impl Session {
             StreamEnd::Assembled(assembler) => assembler,
             StreamEnd::Stopped(reason) => return Ok(CompactRun::Stopped(reason)),
             StreamEnd::End => return Ok(CompactRun::End),
-            // A summary is tried once and has no budget to spend, so it can
-            // never pause; if that ever changes, a paused summary is a summary
-            // that did not happen.
+            // A summary is tried once and has no budget to spend, so it can never pause; if that ever
+            // changes, a paused summary is a summary that did not happen.
             StreamEnd::Paused(_) => return Ok(CompactRun::End),
         };
         // The summary's spend belongs in the log like any step's, marked so a
         // reader (and `kelir ls`) can tell it is not a step of the turn
-        // (M3 review N4).
         if let Some(usage) = &assembler.usage {
             let (cost, source) = self.resolve_cost(usage);
             self.record(EventBody::Usage {
@@ -4691,9 +4337,8 @@ impl Session {
             *slot = tokens_after;
         }
         let pinned = plan.pinned_seqs.len();
-        // A `source` message folded into the summary is no longer in the
-        // context: the watcher will say what the file holds at the next
-        // boundary, even when its bytes did not change (F1's compaction case).
+        // A `source` message folded into the summary is no longer in the context: the watcher will say what
+        // the file holds at the next boundary, even when its bytes did not change.
         self.watch
             .forget_folded(&self.events, plan.through_seq, &plan.pinned_seqs);
         self.record(body)?;
@@ -4718,9 +4363,8 @@ impl Session {
         // Every way out of the loop below sets it (the loop always runs at
         // least one turn).
         let mut reason: String;
-        // A resumed session with nothing in flight and nothing new has no turn
-        // to run: `kelir resume <id>` on a finished session reports and leaves.
-        // A TUI resume still waits for the next message (`keep`).
+        // A resumed session with nothing in flight and nothing new has no turn to run: `kelir resume <id>` on
+        // a finished session reports and leaves.
         if self.resumed && !self.in_flight && !self.has_task && !self.keep {
             let _ = self.record(EventBody::SessionEnded {
                 reason: "resumed".into(),
@@ -4728,9 +4372,8 @@ impl Session {
             self.sync();
             return 0;
         }
-        // `session_start` gates, then the command-line task through
-        // `prompt_submit`. A task a gate dropped ends a one-shot run (exit 1)
-        // and leaves a TUI waiting for the next message.
+        // `session_start` gates, then the command-line task through `prompt_submit`. A task a gate
+        // dropped ends a one-shot run (exit 1) and leaves a TUI waiting for the next message.
         let task_kept = self.start_gates().await;
         if !task_kept && !self.keep {
             self.end_gates("denied").await;
@@ -4794,12 +4437,7 @@ impl Session {
                     reason = "end".into();
                     false
                 }
-                // A pause is never a failure: nothing is broken and the fold is
-                // intact. The hint is the whole point of `paused` over `error`:
-                // it goes to stderr even under `--json` (stdout stays NDJSON)
-                // and into the TUI's scrollback, never only into the log. A
-                // one-shot run exits 0. `reason` tells a step cap from an
-                // unavailable provider.
+                // A pause is never a failure: nothing is broken and the fold is intact.
                 Ok(TurnEnd::Paused(report)) => {
                     let message = report.message();
                     if report.reason == PauseReason::Steps {
@@ -4838,9 +4476,8 @@ impl Session {
                         final_text: String::new().into(),
                     });
                     self.finish_turn("error");
-                    // A long-lived session survives a failed turn: the error is
-                    // in the log and the next `say` gets another chance (M1
-                    // review N6). A one-shot run still exits 1.
+                    // A long-lived session survives a failed turn: the error is in the log and the next `say`
+                    // gets another chance ( ). A one-shot run still exits 1.
                     if !self.keep {
                         code = 1;
                     }
@@ -4849,11 +4486,8 @@ impl Session {
                 }
             };
             self.sync();
-            // A resumed turn that failed on an error the provider called
-            // retryable — an outage — gets the turn tried again: surviving one
-            // is what `resume` is for, and a provider often recovers within
-            // seconds. The budget is the same one a step gets, so a resume can
-            // never turn into a loop against a dead provider.
+            // A resumed turn that failed on an error the provider called retryable — an outage — gets the turn
+            // tried again: surviving one is what `resume` is for, and a provider often recovers within seconds.
             let retry_the_turn = failed
                 && !self.keep
                 && self.resumed
@@ -4897,16 +4531,13 @@ impl Session {
             }
         }
         self.end_gates(&reason).await;
-        // Give detached notify hooks a short grace period before a one-shot
-        // process exits: otherwise the runtime is dropped with the hook task
-        // still queued and `turn_done` never fires (M11).
+        // Give detached notify hooks a short grace period before a one-shot process exits: otherwise
+        // the runtime is dropped with the hook task still queued and `turn_done` never fires.
         crate::notify::wait_outstanding(Duration::from_secs(5)).await;
         let _ = self.record(EventBody::SessionEnded { reason });
         self.sync();
-        // The session is ending: the token it minted is no longer served by
-        // anything, so it must not stay on disk for whoever comes next (STEER-7
-        // review S1). Jobs that outlive the session keep their capabilities: a
-        // resume adopts them from the registry.
+        // The session is ending: the token it minted is no longer served by anything, so it must not stay on
+        // disk for whoever comes next ( ).
         self.trust.retire();
         code
     }
@@ -4914,10 +4545,8 @@ impl Session {
     /// `--keep` and no turn running: take verbs until one starts a turn.
     async fn idle(&mut self, rx: &mut Inbox) -> Idle {
         loop {
-            // A metadata fetch that started with the session lands here as well
-            // as at `before_step`: an idle session answers `state` too, and a
-            // list that arrived while nobody was asking should still be applied
-            // (STEER-1 review S2).
+            // A metadata fetch that started with the session lands here as well as at `before_step`: an idle
+            // session answers `state` too, and a list that arrived while nobody was asking should still be applied
             let landed = match self.models_fetch.as_mut() {
                 Some(fetch) if fetch.is_running() => fetch.wait(IDLE_MODELS_WAIT).await,
                 _ => None,
@@ -4926,12 +4555,8 @@ impl Session {
                 self.apply_list(list);
                 continue;
             }
-            // A fetch still running must not strand its answer: blocking on
-            // `rx.recv()` here would keep the idle session from ever applying
-            // a list that lands a second later (the offline reason the banner
-            // and `state` owe a person, STEER-1 review N4). So while one runs,
-            // wait for a verb and for the next look at the fetch, whichever
-            // comes first; with none running, wait for the verb alone.
+            // A fetch still running must not strand its answer: blocking on `rx.recv` here would keep the idle
+            // session from ever applying a list that lands a second later (the offline reason the banner and
             let incoming = match self.models_fetch.as_ref().map(Fetch::is_running) {
                 Some(true) => {
                     tokio::select! {
@@ -4945,15 +4570,12 @@ impl Session {
                 return Idle::End;
             };
             if let Some(note) = self.note_own(incoming.action.take()) {
-                // Its own watcher: a job started or settled while idle. It is
-                // queued like the `bg` report it stands in for, and the turn it
-                // may start begins below, through `take_turn_messages`.
+                // Its own watcher: a job started or settled while idle. It is queued like the `bg` report it
+                // stands in for, and the turn it may start begins below, through `take_turn_messages`.
                 self.scheduler.push(note);
             } else {
-                // Nothing is running in idle, so a `stop` has nothing to stop:
-                // queueing it would stop the *next* turn at its first boundary,
-                // and answering "now" would be a lie. It is dropped, and both
-                // the screen and the client are told so (M2 review N1).
+                // Nothing is running in idle, so a `stop` has nothing to stop: queueing it would stop the *next* turn
+                // at its first boundary, and answering "now" would be a lie.
                 let bare_stop =
                     incoming.request.verb == "stop" && incoming.request.args.get("call").is_none();
                 let pending = self.accept_as(incoming, bare_stop.then_some("dropped"));
@@ -4961,11 +4583,7 @@ impl Session {
                     if matches!(pending.verb, Verb::Stop { call: None, .. }) {
                         self.emit(UiEvent::Info("» stop: nothing is running".into()));
                     } else if let Verb::Compact { focus } = &pending.verb {
-                        // A human asked to compact while idle: nothing is
-                        // running, so this is safe to do *now*. Setting the
-                        // request and running it here means the answer lands
-                        // before we wait again — the next prompt can already
-                        // be typed and queued while the summary is produced.
+                        // A human asked to compact while idle: nothing is running, so this is safe to do *now*.
                         self.emit(UiEvent::Info(match focus {
                             Some(focus) => format!("» compact: {focus}"),
                             None => "» compact".to_string(),
@@ -4980,9 +4598,7 @@ impl Session {
                     }
                 }
             }
-            // An immediate `/compact` runs here, at a point with no tool call
-            // in flight. Any message typed meanwhile stays in the inbox (or
-            // the scheduler) and opens its turn after this returns.
+            // An immediate `/compact` runs here, at a point with no tool call in flight.
             if self.compact_request.as_ref().is_some_and(|r| r.immediate) {
                 let request = self.compact_request.take().expect("checked above");
                 if let Err(message) = self.run_compact(rx, &request).await {
@@ -5024,13 +4640,8 @@ impl Session {
         self.turn_blocked = false;
         self.turn_tool_calls = 0;
         loop {
-            // An explicit cap counts the steps of *this* turn: reaching it
-            // pauses the turn (the work so far is kept, and the next message
-            // opens a new turn with a fresh count). No cap at all, the
-            // default, never stops a turn. The test comes *before* the
-            // increment, so a paused turn's count is the number of steps that
-            // ran, not one more: `state` says `2` of `2`, never `3` of `2`
-            // (review S1).
+            // An explicit cap counts the steps of *this* turn: reaching it pauses the turn (the work so far is
+            // kept, and the next message opens a new turn with a fresh count).
             if let Some(cap) = self.cfg.max_steps
                 && self.turn_steps >= cap
             {
@@ -5039,11 +4650,8 @@ impl Session {
             }
             self.turn_steps += 1;
 
-            // ---------------------------------------------------- before_step
-            // A metadata fetch that ran beside the session is applied here:
-            // this is the first boundary that reads the window, so the list
-            // has had the first step's worth of time to arrive (STEER-1
-            // review S2).
+            // ---------------------------------------------------- before_step A metadata fetch that ran beside
+            // the session is applied here: this is the first boundary that reads the window, so the list has had
             self.apply_models().await;
             let applied = self.apply(Boundary::BeforeStep).await?;
             if applied.end {
@@ -5053,10 +4661,8 @@ impl Session {
                 return Ok(TurnEnd::Stopped(reason));
             }
 
-            // Compaction applies here and nowhere else: after the previous
-            // batch settled, before the next request, never between a tool call
-            // and its result. All three triggers arrive as one request. A
-            // `stop` or `end` during the summarising request ends the turn.
+            // Compaction applies here and nowhere else: after the previous batch settled, before the next request,
+            // never between a tool call and its result.
             if let Some(end) = self.maybe_compact(rx).await? {
                 return Ok(end);
             }
@@ -5064,20 +4670,13 @@ impl Session {
             // each, at the tail. Never a system rewrite.
             self.check_sources()?;
             self.maybe_hint().await;
-            // A key that is within two minutes of its expiry is re-read before
-            // the request: opencode refreshes its token whenever it runs, so a
-            // copied-out one goes stale before its own `expires` does
-            // (STEER-2).
+            // A key that is within two minutes of its expiry is re-read before the request: opencode refreshes its
+            // token whenever it runs, so a copied-out one goes stale before its own `expires` does
             self.refresh_expiring_key();
 
             let folded = crate::fold::fold(&self.events, &self.dir)?;
-            // Ask for several calls in one message when the provider says the
-            // model takes them, or (cold or slow list) when the model's family
-            // is known to; the loop already runs a batch concurrently and
-            // appends results in call order. `reasoning_effort` goes only where
-            // the provider advertises it (or where the config asked for it on
-            // an unknown model). Both do not depend on the cache being warm
-            // (STEER-6 review S2/S3).
+            // Ask for several calls in one message when the provider says the model takes them, or (cold or slow
+            // list) when the model's family is known to; the loop already runs a batch concurrently and appends
             let request = self.step_request(&folded.request_messages());
             let request_text = serde_json::to_string(&request.body).unwrap_or_default();
             self.step += 1;
@@ -5163,10 +4762,8 @@ impl Session {
 
             if calls.is_empty() {
                 self.final_text = text;
-                // ------------------------------------------------------ turn_end
-                // A gate can send the model back once per turn with a reason,
-                // or replace the final text. It runs on the model's answer, not
-                // on a stop or a pause.
+                // ------------------------------------------------------ turn_end A gate can send the model back once
+                // per turn with a reason, or replace the final text.
                 if self.gated(crate::gates::Event::TurnEnd, None) {
                     let payload = json!({
                         "final_text": self.final_text,
@@ -5232,11 +4829,8 @@ impl Session {
                 if applied.messages > 0 {
                     continue;
                 }
-                // A job's declared `max_steps` caps the run itself: if this was
-                // the last allowed step, the job is `paused` even when the model
-                // answered on it, so the scheduler's next invocation resumes it.
-                // Interactive `--max-steps` keeps STEER-4's `done` on an answer
-                // that lands on the cap-th step.
+                // A job's declared `max_steps` caps the run itself: if this was the last allowed step, the job is
+                // `paused` even when the model answered on it, so the scheduler's next invocation resumes it.
                 if let Some(cap) = crate::jobs::plan().and_then(|p| p.job_step_cap)
                     && self.turn_steps >= cap
                 {
@@ -5263,10 +4857,8 @@ impl Session {
         }
     }
 
-    /// A 400 that names one of the capability fields kelir added: remove it
-    /// from the request being retried and remember it, so no later request in
-    /// this session pays the same 400 (STEER-6 review S3). Answers `true` when
-    /// the request should be retried, once, without the field.
+    /// A 400 that names one of the capability fields kelir added: remove it from the request being retried
+    /// and remember it, so no later request in this session pays the same 400.
     fn drop_refused_field(
         &mut self,
         request: &mut provider::BuiltRequest,
@@ -5295,13 +4887,6 @@ impl Session {
     }
 
     /// Re-read a key that is about to expire, before the next request uses it.
-    ///
-    /// The credential the log's source published may be minutes from its
-    /// `expires`; opencode refreshes its own token whenever it runs, so reading
-    /// the source again is the cheapest fix there is. A re-read that fails or
-    /// hands back the same value is not an error here: the request goes out, and
-    /// if the provider refuses it the 401/403 path does the rest. Never printed,
-    /// never logged beyond a one-line `error` event that names the source.
     fn refresh_expiring_key(&mut self) {
         let Some(expires) = self.active_provider.key_expires_at_ms else {
             return;
@@ -5347,14 +4932,8 @@ impl Session {
         }
     }
 
-    /// Re-read the key after a refusal that means "this credential is stale"
-    /// (HTTP 401/403) and rebuild the request with it, once per request.
-    ///
-    /// opencode refreshes its token whenever it runs, so a re-read can return a
-    /// live one even though ours expired; when it does not, the failure stays
-    /// the failure it was. The OAuth refresh endpoint is deliberately not
-    /// called: opencode rotates the refresh token, and a second refresher would
-    /// invalidate the account it shares with us.
+    /// Re-read the key after a refusal that means "this credential is stale" (HTTP 401/403) and
+    /// rebuild the request with it, once per request.
     fn reread_credential(
         &mut self,
         error: &provider::ProviderError,
@@ -5375,9 +4954,8 @@ impl Session {
             }
         };
         if self.active_provider.key == before {
-            // The source had nothing newer: retrying the same key buys nothing,
-            // and the provider's own message (a refusal, not a wait) is the
-            // answer.
+            // The source had nothing newer: retrying the same key buys nothing, and the provider's own
+            // message (a refusal, not a wait) is the answer.
             return false;
         }
         if let Ok(client) = Client::new(
@@ -5415,23 +4993,8 @@ impl Session {
         });
     }
 
-    /// Stream one response, taking verbs while it is in flight. A `stop` ends
-    /// the turn without committing the half-response; anything else waits for
-    /// the next boundary.
-    ///
-    /// A retryable failure — 429, 408, 5xx, a dead socket, a stream that ended
-    /// early **before any tool call of the step began** — is waited out and the
-    /// same request re-sent from the same fold. Every wait is an `error` event
-    /// (`where: "provider"`, `retryable: true`, the status, the attempt and the
-    /// wait) plus a line on the screen, and it is interruptible: `stop`,
-    /// `say --now`, `later`, `model`, `end` and a signal take effect at once.
-    /// When the request's waiting budget is spent the turn **pauses** instead of
-    /// failing: the fold is intact, so the next `say` retries from it.
-    ///
-    /// `summary` is the compaction's own request: its text is not rendered as
-    /// the answer being streamed, the crash hook stays where a *step* would
-    /// land, and it is tried exactly once (a summary that failed the first time
-    /// buys nothing the second; M3 review N4).
+    /// Stream one response, taking verbs while it is in flight. A `stop` ends the turn without
+    /// committing the half-response; anything else waits for the next boundary.
     async fn stream(
         &mut self,
         rx: &mut Inbox,
@@ -5451,23 +5014,18 @@ impl Session {
         // The first request is the one `drive_turn` built (and hashed into
         // `step_started`); a retry is a new request and is built again.
         let mut built = request.build(self);
-        // A `model`/`say --now` that cut a wait short already applied its verb,
-        // so the next request is built (new model, new fold) but the
-        // `before_step` boundary is not run again.
+        // A `model`/`say --now` that cut a wait short already applied its verb, so the next request
+        // is built (new model, new fold) but the `before_step` boundary is not run again.
         let mut rebuild = false;
-        // The body field a 400 asked kelir to drop, once per request
-        // (STEER-6 review S3): the second 400 is the answer, not a queue of
-        // fields to keep removing.
+        // The body field a 400 asked kelir to drop, once per request : the second 400 is the answer,
+        // not a queue of fields to keep removing.
         let mut dropped: Option<String> = None;
         // Whether this request already re-read the key once (see
         // [`Session::reread_credential`]).
         let mut reread = false;
         loop {
-            // The governor (opt-in) can make this request wait for a slot that
-            // another local kelir holds. That wait is visible and interruptible
-            // like any other. A compaction's summary is a provider request on
-            // the same account, so it takes a slot like every other request
-            // (STEER-5 review S1; only a turn's first request used to).
+            // The governor (opt-in) can make this request wait for a slot that another local kelir
+            // holds. That wait is visible and interruptible like any other.
             let mut slot: Option<crate::governor::Slot> = None;
             if let Some(governor) = self.governor.clone() {
                 match self.await_slot(rx, &governor, &mut inbox_open).await? {
@@ -5475,14 +5033,8 @@ impl Session {
                     SlotWait::Interrupted(end) => return Ok(end),
                 }
             }
-            // A *retry* is a new request, so a wait is a `before_step`
-            // boundary: a `model` verb that arrived during the wait changes the
-            // model, a queued `say` joins the fold, and `end`/`stop` take
-            // effect here. The brief asks for exactly that ("`model` (the retry
-            // uses the new model)"), and the `verb` event already records the
-            // swap. The first attempt is not one: `drive_turn` applied that
-            // boundary before it built the request, and applying it again here
-            // would swallow a verb the caller has already accounted for.
+            // A *retry* is a new request, so a wait is a `before_step` boundary: a `model` verb that arrived
+            // during the wait changes the model, a queued `say` joins the fold, and `end`/`stop` take effect here.
             if !summary && attempt > 1 {
                 let applied = self.apply(Boundary::BeforeStep).await?;
                 if applied.end {
@@ -5507,12 +5059,8 @@ impl Session {
                 Attempt::Ok(assembler) => return Ok(StreamEnd::Assembled(assembler)),
                 Attempt::Failed(error) => error,
             };
-            // A 400 that names a field kelir put in the body: drop it, remember
-            // it for the session, and try once more with the same request
-            // without it. Not a rate limit or a server error — the same request
-            // would fail the same way — so it is not the retryable *wait* budget
-            // (STEER-6 review S3). `refused_fields` (filled by the drop) keeps
-            // the field out of every later request this session builds.
+            // A 400 that names a field kelir put in the body: drop it, remember it for the session, and try once
+            // more with the same request without it.
             if self.drop_refused_field(&mut built, &error, &mut dropped) {
                 self.record(EventBody::Error {
                     location: "provider".into(),
@@ -5530,10 +5078,8 @@ impl Session {
                 self.sync();
                 continue;
             }
-            // The credential went stale: opencode rotates its own token, so the
-            // store may hold a fresh one already (STEER-2). One re-read per
-            // request, then the request is sent again. Never our own OAuth
-            // refresh: rotating the refresh token would break opencode.
+            // The credential went stale: opencode rotates its own token, so the store may hold a fresh
+            // one already. One re-read per request, then the request is sent again.
             if self.reread_credential(&error, &mut built, attempt, &mut reread) {
                 self.sync();
                 continue;
@@ -5557,9 +5103,8 @@ impl Session {
                 if !summary {
                     self.retryable_failure = error.retryable;
                 }
-                // A retryable failure whose budget is spent is an outage, not a
-                // bug: the turn pauses and a later `say` starts the next
-                // attempt from the same fold.
+                // A retryable failure whose budget is spent is an outage, not a bug: the turn pauses and a
+                // later `say` starts the next attempt from the same fold.
                 if error.retryable && !summary {
                     self.sync();
                     return Ok(StreamEnd::Paused(PauseReport {
@@ -5572,9 +5117,8 @@ impl Session {
                 return Err(error.message);
             }
             self.sync();
-            // A wait the budget cannot afford (or the count cap reached) means
-            // the provider asked for longer than what is left: pausing now is
-            // honest, waiting a little and failing is not.
+            // A wait the budget cannot afford (or the count cap reached) means the provider asked for
+            // longer than what is left: pausing now is honest, waiting a little and failing is not.
             let Some(wait) = wait else {
                 self.sync();
                 return Ok(StreamEnd::Paused(PauseReport {
@@ -5588,12 +5132,7 @@ impl Session {
             self.show_wait(error.status, wait, attempt);
             match self.wait_for(rx, wait, &mut inbox_open).await? {
                 Waited::Timeout => {}
-                // `model`/`say --now`: a *new* request, sent now, with a fresh
-                // slot and a fresh budget. The wait belonged to a request that
-                // is no longer the one being made (the review's "a model swap
-                // to a provider that is not rate limited must not sit out the
-                // old provider's wait"), and the message must reach the model
-                // now, not at the end of a `Retry-After` that can be days long.
+                // `model`/`say --now`: a *new* request, sent now, with a fresh slot and a fresh budget.
                 Waited::Retry => {
                     self.emit(UiEvent::RetryingDone);
                     budget = crate::retry::Budget::new(budget_wait, policy.max_attempts);
@@ -5601,9 +5140,8 @@ impl Session {
                     rebuild = true;
                     continue;
                 }
-                // A verb ended the turn during the wait: the wait's note is
-                // cleared here too, so no swap/`end` race can leave a stale
-                // countdown behind (STEER-5 review N4).
+                // A verb ended the turn during the wait: the wait's note is cleared here too, so no
+                // swap/`end` race can leave a stale countdown behind.
                 Waited::End(end) => {
                     self.emit(UiEvent::RetryingDone);
                     return Ok(*end);
@@ -5680,16 +5218,6 @@ impl Session {
     }
 
     /// Wait `wait`, taking verbs.
-    ///
-    /// A wait is where a person's correction must not be made to sit still
-    /// (STEER-5 review B2): `stop`, `end` and a signal end the turn now,
-    /// `say --now` and `model` end the *wait* now — the verb is applied, and
-    /// the caller re-sends the request at once rather than finishing somebody
-    /// else's `Retry-After` (up to seven days of it). `later`, `tools`,
-    /// `compact` and `skills` apply at their boundary as always, and a queued
-    /// `say` joins the fold at the next boundary. A signal is handled the same
-    /// way as `stop`: it must not kill a session mid-wait while the log says
-    /// nothing.
     async fn wait_for(
         &mut self,
         rx: &mut Inbox,
@@ -5699,10 +5227,8 @@ impl Session {
         if wait.is_zero() {
             return Ok(Waited::Timeout);
         }
-        // An interrupt that landed before this wait began is still pending (the
-        // flag is level-triggered and no one else consumes it), so a wait never
-        // has to be entered at exactly the right instant to see it — the race
-        // that made the Linux gate flake (STEER-5 fixes round 2).
+        // An interrupt that landed before this wait began is still pending (the flag is level- triggered and
+        // no one else consumes it), so a wait never has to be entered at exactly the right instant to see it —
         let deadline = tokio::time::sleep(wait);
         tokio::pin!(deadline);
         loop {
@@ -5742,9 +5268,8 @@ impl Session {
         incoming: Incoming,
         interrupt: &mut Option<StreamEnd>,
     ) -> Result<bool, String> {
-        // `say --now` and `model` are applied here and now, so they are
-        // accepted and answered as such: `applies: "now"`, with the state the
-        // next request will really see (STEER-5 review N1).
+        // `say --now` and `model` are applied here and now, so they are accepted and answered as
+        // such: `applies: "now"`, with the state the next request will really see.
         if at_once_verb(&incoming.request) {
             return Ok(match self.accept_at_once(incoming).await {
                 AtOnce::Applied(end) => {
@@ -5771,9 +5296,8 @@ impl Session {
                 *interrupt = Some(StreamEnd::End);
                 Ok(false)
             }
-            // `say --now` and `model` never reach here: the branch above
-            // applies them through `accept_at_once`, which is what makes the
-            // ack truthful about a swap that already happened.
+            // `say --now` and `model` never reach here: the branch above applies them through
+            // `accept_at_once`, which is what makes the ack truthful about a swap that already happened.
             Verb::Say { .. } | Verb::Model { .. } => {
                 let mut applied = Option::<StreamEnd>::None;
                 self.apply_one(pending, &mut applied).await?;
@@ -5809,9 +5333,8 @@ impl Session {
         Ok(())
     }
 
-    /// Wait for a governor slot, polling (there is nothing to be told about: the
-    /// slot appears when another process closes its handle). The status line
-    /// says so while it lasts.
+    /// Wait for a governor slot, polling (there is nothing to be told about: the slot appears
+    /// when another process closes its handle). The status line says so while it lasts.
     async fn await_slot(
         &mut self,
         rx: &mut Inbox,
@@ -5840,9 +5363,8 @@ impl Session {
                 });
             }
             match self.wait_for(rx, SLOT_POLL, inbox_open).await? {
-                // The slot poll is a poll: a verb that ends the *wait* just
-                // means "look again", and the next look takes the slot if it is
-                // free. The verb itself was already applied or queued.
+                // The slot poll is a poll: a verb that ends the *wait* just means "look again", and the next
+                // look takes the slot if it is free. The verb itself was already applied or queued.
                 Waited::Timeout | Waited::Retry => {}
                 Waited::End(end) => {
                     self.emit(UiEvent::RetryingDone);
@@ -5869,19 +5391,14 @@ impl Session {
     }
 
     /// Run one batch of calls concurrently, taking verbs while it runs.
-    /// `stop`/`say --now` kill the process trees; results are still committed
-    /// in call order, and a user message never lands between a call and its
-    /// result.
     async fn run_tools(
         &mut self,
         rx: &mut Inbox,
         step: u32,
         calls: &[ToolCall],
     ) -> Result<Batch, String> {
-        // `before_tool` gates (M8): a deny settles the call as `denied` without
-        // running it; a rewrite replaces the input the call runs with (and
-        // that `tool_started` records). The model's own `assistant` event keeps
-        // what it asked for.
+        // `before_tool` gates: a deny settles the call as `denied` without running it; a rewrite replaces the
+        // input the call runs with (and that `tool_started` records).
         let mut calls: Vec<ToolCall> = calls.to_vec();
         let mut vetoed: Vec<Option<(String, String)>> = vec![None; calls.len()];
         self.turn_tool_calls += calls.len() as u32;
@@ -5916,7 +5433,6 @@ impl Session {
                 pid: None,
                 // The call's own directory name: a resume adopts the call's job
                 // id from the log, not from a directory a child could make
-                // (STEER-7 review B1).
                 dir: Some(format!("{}-{}-{}", self.writer.next_seq(), step, index + 1)),
             })?;
             self.emit(UiEvent::ToolStarted {
@@ -5924,19 +5440,14 @@ impl Session {
                 input: call.args.clone(),
             });
             let dir = format!("{}-{}-{}", started.seq, step, index + 1);
-            // The job registry (STEER-7): a call's output dir name is the id
-            // its `bg` reports carry, so the session registers it — with a
-            // capability minted here and handed to that call's shim only —
-            // before the call can report anything (review B1). A machine with
-            // no secure randomness still runs the call: it simply has no job
-            // id it will answer for.
+            // The job registry: a call's output dir name is the id its `bg` reports carry, so the session
+            // registers it — with a capability minted here and handed to that call's shim only — before the call
             let _ = self.trust.issue_call(&dir, &call.id);
             plan.push((dir, call.clone()));
         }
         self.sync();
-        // Documented test hook: die after the intent is durable, before any
-        // process started, which is where a crash right after the log write
-        // lands.
+        // Documented test hook: die after the intent is durable, before any process started, which
+        // is where a crash right after the log write lands.
         crash_at("tool_started");
 
         let count = plan.len();
@@ -5961,9 +5472,8 @@ impl Session {
             } else if disabled {
                 Some(ToolOutcome::disabled(&name))
             } else if self.kids.brief && (name == "compact" || name == "edit") {
-                // The tool list is the parent's, byte for byte (that is what
-                // lets the prefix hit its cache); a brief answers, it does not
-                // change anything, so these two are refused by result.
+                // The tool list is the parent's, byte for byte (that is what lets the prefix hit its cache);
+                // a brief answers, it does not change anything, so these two are refused by result.
                 Some(ToolOutcome::error(format!(
                     "refused: this is a brief, a read-only side question on a snapshot; `{name}` is not available here. Answer from what you can read with bash"
                 )))
@@ -6010,7 +5520,7 @@ impl Session {
         // Killed calls: their result becomes `stopped by user: <reason>`.
         let mut forced: Vec<Option<String>> = (0..count).map(|_| None).collect();
         // A grace window per killed call, never one for the batch: a sibling
-        // that legitimately runs longer must not be cut off (M1 review F1).
+        // that legitimately runs longer must not be cut off.
         let mut deadlines: Vec<Option<Instant>> = (0..count).map(|_| None).collect();
         let mut batch = Batch::default();
 
@@ -6129,10 +5639,10 @@ impl Session {
             });
             if let Some(reason) = &forced[index] {
                 // The call was stopped: keep the partial output the model can
-                // still use, and say where the whole of it is (M1 review N2).
+                // still use, and say where the whole of it is.
                 outcome = self.stopped_outcome(dir, reason);
             }
-            // `after_tool` gates (M8) may replace the result the model reads,
+            // `after_tool` gates may replace the result the model reads,
             // or append a note to it. Only a call that ran and finished.
             if forced[index].is_none()
                 && matches!(outcome.outcome.as_str(), "ok" | "error")
@@ -6166,14 +5676,8 @@ impl Session {
                 spilled: outcome.spilled,
                 result: outcome.result.clone().into(),
             })?;
-            // A promoted call became a background job at this instant: a reader
-            // of the log should see the job, not have to infer it from the
-            // `promoted` outcome. The status file the shim already wrote is
-            // the truth (`bg_started`, and the wake message if it settled
-            // while the model was still reading this result). It is recorded
-            // after the whole batch's results, never between them: a wake
-            // message is a `user` event, and a call's results must stay
-            // contiguous (M4 review N5).
+            // A promoted call became a background job at this instant: a reader of the log should see the job, not
+            // have to infer it from the `promoted` outcome.
             if outcome.outcome == "promoted" {
                 promoted.push(dir.clone());
             }
@@ -6188,9 +5692,8 @@ impl Session {
                     outcome.bytes,
                     elapsed.as_secs_f64()
                 );
-                // A child's stdout is its answer, which its parent reads: the
-                // progress lines go to stderr, where the parent keeps them in
-                // the child's `host.err`.
+                // A child's stdout is its answer, which its parent reads: the progress lines go to stderr,
+                // where the parent keeps them in the child's `host.err`.
                 if self.kids.link.is_some() {
                     eprintln!("{line}");
                 } else {
@@ -6220,9 +5723,8 @@ impl Session {
             });
         }
         self.sync();
-        // Now that the batch's results are all in the log, a promoted call's
-        // job can be recorded (`bg_started`, and the wake message if it settled
-        // while the model was reading the result).
+        // Now that the batch's results are all in the log, a promoted call's job can be recorded
+        // (`bg_started`, and the wake message if it settled while the model was reading the result).
         for dir in promoted {
             if let Some(status) =
                 crate::bg::Status::read(&crate::bg::status_path(&self.dir.join("bg"), &dir))
@@ -6241,9 +5743,8 @@ impl Session {
         self.live_calls.retain(|id| id != call_id);
     }
 
-    /// The `stopped` result of a call that had already written output: the
-    /// byte and line counts, the file, and the last 1 KB, so the model can pick
-    /// up the partial work (M1 review N2).
+    /// The `stopped` result of a call that had already written output: the byte and line counts,
+    /// the file, and the last 1 KB, so the model can pick up the partial work.
     fn stopped_outcome(&self, dir: &str, reason: &str) -> ToolOutcome {
         let out_path = self.ctx.call_dir(dir).join("out");
         match crate::spill::partial(&out_path) {
@@ -6279,10 +5780,8 @@ impl Session {
                 self.ctx.running.kill(dir);
                 forced[index] = Some(reason.to_string());
             }
-            // Every unsettled call gets its own window, whether or not it had
-            // a process yet: one that starts just after the gate closed is
-            // taken down by the poll, and a task that never reports back must
-            // not hold the batch open.
+            // Every unsettled call gets its own window, whether or not it had a process yet: one that starts just
+            // after the gate closed is taken down by the poll, and a task that never reports back must not hold
             deadlines[index] = Some(Instant::now() + STOP_GRACE);
         }
     }
@@ -6311,11 +5810,8 @@ impl Session {
     }
 }
 
-/// `provider/model` splits only when the prefix is a configured provider:
-/// `deepseek/deepseek-chat` is a model id on the current provider, while
-/// `openrouter/deepseek/deepseek-chat` names a provider.
-/// One MCP call through the `before_tool`/`after_tool` gates, as tool
-/// `mcp:<server>.<tool>`. Returns the output and the gate runs to log.
+/// `provider/model` splits only when the prefix is a configured provider: `deepseek/deepseek- chat` is
+/// a model id on the current provider, while `openrouter/deepseek/deepseek-chat` names a provider.
 async fn gated_mcp_call(
     gates: Option<&crate::gates::Runner>,
     broker: &crate::mcp::broker::Broker,
@@ -6416,9 +5912,8 @@ fn print_result_event(
     let _ = lock.flush();
 }
 
-/// The head of a settled call in headless output: every native tool's
-/// human-readable `description` when it supplied one, otherwise the command,
-/// path or focus. The full args stay in the log and in `/expand`.
+/// The head of a settled call in headless output: every native tool's human-readable `description` when
+/// it supplied one, otherwise the command, path or focus.
 fn compact_input(args: &Value) -> String {
     if let Some(label) = crate::tools_view::description(args) {
         return label;
@@ -6452,20 +5947,11 @@ fn last_result_line(result: &str) -> Option<String> {
 }
 
 /// One line for the UI: newlines folded, length bounded.
-fn one_line(text: &str) -> String {
-    crate::util::truncate_chars(&text.replace('\n', " ↵ "), 200)
-}
-
 fn new_session_id() -> String {
     format!("ses_{}", ulid::Ulid::generate().to_string().to_lowercase())
 }
 
 /// Render the system prompt once, from the config and the cwd's sources.
-///
-/// The skills directories come from the config (`skills_dirs`) plus the
-/// conventional ones; the base prompt is the config's, the machine
-/// `prompt.md`, or the embedded default (the project's `.kelir/prompt.md` wins
-/// inside [`crate::sources::render_system`]).
 fn render_system(
     cfg: &Config,
     cwd: &Path,
@@ -6852,10 +6338,8 @@ mod tests {
         );
     }
 
-    /// F-window: the banner is silent about the window the provider answered,
-    /// and says one line when the start fell back — with the reason a person
-    /// needs (a 401, an offline endpoint) — because that fallback changes the
-    /// compaction threshold.
+    /// F-window: the banner is silent about the window the provider answered, and says one line when the
+    /// start fell back — with the reason a person needs (a 401, an offline endpoint) — because that
     #[test]
     fn the_banner_names_a_window_only_when_it_is_not_the_providers() {
         let mut session = test_session("m");
@@ -6885,10 +6369,7 @@ mod tests {
         assert!(line.contains("did not answer"), "{line}");
     }
 
-    /// F-window (addendum): a `/model` swap after a fresh-cache startup still
-    /// announces a changed window. `window_model` is seeded from the startup
-    /// answer, so the answer that lands after the swap knows it is a different
-    /// model — the case a startup with a fresh list used to lose silently.
+    /// F-window (addendum): a `/model` swap after a fresh-cache startup still announces a changed window.
     #[test]
     fn a_window_that_changes_after_a_swap_is_announced_once() {
         let mut session = test_session("first/model");
@@ -6897,9 +6378,8 @@ mod tests {
             Some("first/model"),
             "the startup answer names its model"
         );
-        // The swap itself is the first announcement, from `swap_model`: this
-        // test only has the constructor's seeding to check, so it drives
-        // `apply_list` the way a landed fetch does after a swap.
+        // The swap itself is the first announcement, from `swap_model`: this test only has the constructor's
+        // seeding to check, so it drives `apply_list` the way a landed fetch does after a swap.
         session.model = "second/model".into();
         session.window = 1_000;
         session.window_source = "default";

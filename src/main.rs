@@ -3,14 +3,8 @@ use std::process::ExitCode;
 
 use kelir::cli::{Cli, Command};
 
-/// Windows: stop children (and their children) from inheriting this process's
-/// own stdout/stderr handles.
-///
-/// A background job must not hold the caller's pipe open: with the inherit flag
-/// on, `kelir run --json | jq` would stay open until a promoted job exits, even
-/// though kelir itself is long gone. `CreateProcess` still hands a child the
-/// stdio handles it is asked for (they are made inheritable per spawn), so this
-/// takes nothing away from a child that needs one.
+/// Windows: stop children (and their children) from inheriting this process's own
+/// stdout/stderr handles.
 #[cfg(windows)]
 fn close_handle_inheritance() {
     use windows_sys::Win32::Foundation::{

@@ -1,13 +1,11 @@
 //! The TUI's `/` commands: one line in, one verb out.
-//!
-//! Every action that changes the session is a verb (the same verb `kelir ctl`
-//! sends, applied at the same boundary), and [`Action::request`] is the only
-//! place that translates one into the other. Local views (`/help`, the output
-//! tail, scrolling) carry no session state and are not actions.
+//! Every action that changes the session is a verb (the same verb `kelir ctl` sends, applied at
+//! the same boundary), and [`Action::request`] is the only place that translates one into the
+//! other.
+//! Local views (`/help`, the output tail, scrolling) carry no session state and are not actions.
 
 use serde_json::{Value, json};
 
-/// What the human asked for. One variant per session-affecting TUI action.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// Plain text: a `say` at the next boundary.
@@ -25,14 +23,13 @@ pub enum Action {
         disable: Vec<String>,
         enable: Vec<String>,
     },
-    /// `/compact [focus]` — the verb exists from M2, the compactor from M3.
+    /// `/compact [focus]` — the verb exists from, the compactor from.
     Compact(Option<String>),
     /// `/quit`: the `end` verb.
     Quit,
 }
 
 impl Action {
-    /// The verb this action sends.
     pub fn verb(&self) -> &'static str {
         match self {
             Action::Submit(_) | Action::SayNow(_) => "say",
@@ -97,10 +94,6 @@ impl Action {
 }
 
 /// A local view command: no verb, no session state, no event.
-///
-/// Every tool call already prints one line, so there is no fold or output
-/// policy to toggle. Only `/expand n|last` remains: it appends that call's
-/// output here, now. `/collapse` and bare `/expand` are not commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum View {
     /// `/expand n|last`: append call `n`'s output to the scrollback (the
@@ -127,11 +120,6 @@ fn split_command(line: &str) -> (&str, &str) {
     }
 }
 
-/// Parse one submitted editor line.
-///
-/// A line that does not start with `/` is a message; anything else is a
-/// command. An empty line is an error with no message, which the TUI treats as
-/// "nothing to do".
 pub fn parse(line: &str) -> Result<Parsed, String> {
     let trimmed = line.trim_end();
     if trimmed.trim().is_empty() {
@@ -259,9 +247,7 @@ mod tests {
         }
     }
 
-    /// Every action, with a sample of the data it needs. `Action::verb` and
-    /// `Action::args` match on every variant, so a new action cannot be added
-    /// without being handled — and the test below then checks its verb.
+    /// Every action, with a sample of the data it needs.
     fn every_action() -> Vec<Action> {
         vec![
             Action::Submit("hello".into()),

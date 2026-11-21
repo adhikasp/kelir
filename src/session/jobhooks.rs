@@ -1,14 +1,12 @@
-//! What a named or job run adds to a session's log (M9): the date-change source
-//! and the plan's own sources. Kept apart from `session.rs` so the loop has two
-//! calls to these and nothing else.
+//! What a named or job run adds to a session's log: the date-change source and the plan's
+//! own sources.
+//! Kept apart from `session.rs` so the loop has two calls to these and nothing else.
 
 use super::*;
 
 impl Session {
-    /// The date the session's frozen system prompt was rendered with (the
-    /// `date:` line in its Environment block). The event's `ts` is wall-clock
-    /// time; with a `KELIR_TODAY` override the two can disagree, and the model
-    /// only knows what the prompt said (STEER-9).
+    /// The date the session's frozen system prompt was rendered with (the `date:` line in its Environment
+    /// block).
     fn rendered_date(&self) -> Option<String> {
         let text = self.events.iter().find_map(|event| {
             if let EventBody::SessionStarted { system, .. } = &event.body {
@@ -26,10 +24,8 @@ impl Session {
             .map(str::to_string)
     }
 
-    /// Record the sources a run owes the context before its task: on a resume,
-    /// the new date if the day changed (the frozen system prompt keeps the old
-    /// one, the provider's cache lives in it), then the plan's sources (a job's
-    /// one status line, a carried summary). Everything is appended at the tail.
+    /// Record the sources a run owes the context before its task: on a resume, the new date if the day
+    /// changed (the frozen system prompt keeps the old one, the provider's cache lives in it), then the
     pub(super) fn record_plan_sources(&mut self, resumed: bool) -> Result<(), String> {
         let mut sources: Vec<crate::jobs::PlanSource> = Vec::new();
         // A child or a brief reads its parent's log; the date is the parent's

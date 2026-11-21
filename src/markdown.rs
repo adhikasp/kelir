@@ -1,31 +1,11 @@
 //! The agent's markdown, rendered into styled rows.
-//!
-//! Three pieces, each testable alone (STEER-3):
-//!
-//! - [`Tone`] / [`Run`] / [`Row`]: a tiny intermediate model between the parser
-//!   and ratatui. A `Tone` names *what the text is* (prose, strong, code, a
-//!   heading…) and [`Theme`](crate::theme::Theme) decides how that looks, so
-//!   `NO_COLOR` and the plain fallback are the same code path with a different
-//!   style map.
-//! - [`render`]: markdown text in, [`Row`]s out, wrapped to a width. The same
-//!   function renders one block while streaming and the whole document at once,
-//!   which is what makes "the final streamed render equals the one-shot render"
-//!   an invariant rather than a hope.
-//! - [`Stream`]: a line-oriented splitter that cuts the incoming text into
-//!   complete blocks at blank lines outside fences and tables, so a finished
-//!   block is parsed exactly once and never re-parsed (the earlier O(n²) wrap
-//!   fix must survive).
-//!
-//! No syntax highlighting in v1 (binary size, startup, and width accounting
-//! with escapes inside cells). [`Highlighter`] is the seam for a later
-//! optional feature; the default returns its input unchanged.
+//! Three pieces, each testable alone:
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthChar;
 
 use crate::theme::Theme;
 
-/// What a run of text *is*. The theme decides how it looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     Prose,
@@ -99,7 +79,6 @@ impl Row {
             .sum()
     }
 
-    /// The row as a ratatui line, styled by the theme.
     pub fn line(
         &self,
         theme: Theme,
@@ -153,10 +132,8 @@ impl Highlighter for NoHighlight {
 #[derive(Debug, Clone, Copy)]
 pub struct Layout {
     pub width: usize,
-    /// The glyph set: quotes, bullets, the code gutter, the ellipsis and the
-    /// table borders come from here, so `KELIR_ASCII`/`TERM=dumb` reaches the
-    /// rendered text too (a Unicode table would be mojibake on a legacy
-    /// console).
+    /// The glyph set: quotes, bullets, the code gutter, the ellipsis and the table borders come from here,
+    /// so `KELIR_ASCII`/`TERM=dumb` reaches the rendered text too (a Unicode table would be mojibake on a
     pub glyphs: crate::theme::Glyphs,
 }
 
@@ -190,11 +167,6 @@ fn parser() -> Options {
 }
 
 /// Render markdown into rows no wider than `layout.width`.
-///
-/// The whole document goes through one pass, block by block; [`render_block`]
-/// renders a single block with the same machinery, which is what the streaming
-/// path uses. Both obey the same wrapping, so a document streamed in blocks
-/// renders exactly as the same document rendered at once.
 pub fn render(text: &str, layout: Layout) -> Vec<Row> {
     let mut stream = Stream::new();
     let mut blocks = stream.push(text);
@@ -209,11 +181,7 @@ pub fn render(text: &str, layout: Layout) -> Vec<Row> {
     rows
 }
 
-/// The blocks a splitter cut, with a loose list item's continuation joined back
-/// on. The splitter cuts at a blank line; CommonMark keeps a list item open
-/// across that line when the following block is indented to the item's content,
-/// so the two must be parsed as one text (the whole message render and the
-/// streamed one agree row for row because both call this).
+/// The blocks a splitter cut, with a loose list item's continuation joined back on.
 pub fn join_blocks(blocks: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for block in blocks {
@@ -229,9 +197,6 @@ pub fn join_blocks(blocks: Vec<String>) -> Vec<String> {
     out
 }
 
-/// Does this block start indented? A list item's continuation paragraph must be
-/// indented to the item's content (CommonMark), so an indented block after a
-/// block that ended inside an item is that item's continuation.
 fn continues_item(block: &str) -> bool {
     let first = block
         .lines()
@@ -263,29 +228,21 @@ struct Renderer {
     layout: Layout,
     theme_glyphs: crate::theme::Glyphs,
     rows: Vec<Row>,
-    /// The logical line being built.
     line: Vec<Run>,
-    /// The tone stack (emphasis inside a heading inside a link…).
     tones: Vec<Tone>,
     lists: Vec<ListKind>,
     quote: usize,
-    /// Whether this logical line is a list item's own text (used for the
-    /// bullet/number prefix).
     item_prefix: Option<Vec<Run>>,
     heading: Option<Tone>,
     code: Option<Code>,
     table: Option<TableState>,
     /// The parser is inside a link: its destination, for the `(url)` suffix.
     link: Option<String>,
-    /// An image's alt text is being collected.
     image_alt: Option<String>,
     /// Just after a paragraph/heading inside a list item: the next line is that
     /// item's continuation, not a new item.
     in_item: bool,
-    /// The prefix a not-yet-flushed line inherits: a list item's first marker or
-    /// its hanging indent. It survives a flush so a continuation paragraph
-    /// after a blank line (CommonMark: still inside the item) keeps its indent,
-    /// and so a fence inside an item carries it too.
+    /// The prefix a not-yet-flushed line inherits: a list item's first marker or its hanging indent.
     pending_prefix: Option<(Vec<Run>, Vec<Run>)>,
     /// The quote bar and indent a fenced block inside a list item carries.
     code_prefix: Option<(Vec<Run>, Vec<Run>)>,
@@ -342,22 +299,14 @@ impl Renderer {
         }
     }
 
-    /// Whether the next container-level line belongs to a list item that is
-    /// still open *and* outside an open fence: that one thing the block
-    /// splitter cannot see, because it cuts at blank lines and the CommonMark
-    /// parser (not the splitter) decides that a blank line does not end the
-    /// item.
+    /// Whether the next container-level line belongs to a list item that is still open *and* outside an
+    /// open fence: that one thing the block splitter cannot see, because it cuts at blank lines and the
     fn wants_more(&self) -> bool {
         !self.lists.is_empty() && self.code.is_none()
     }
 
-    /// Render `block`, and say whether a following block may continue it: the
-    /// block ended inside a list item (a loose item's blank line is a
-    /// separator, not the end of the item, and CommonMark keeps the
-    /// continuation inside it). The TUI joins such a block with the next one
-    /// before rendering, so the indent survives.
-    /// Render `text` as a chunk of a longer list: its first ordered item takes
-    /// `first`, so the numbers read as they do in the whole list.
+    /// Render `block`, and say whether a following block may continue it: the block ended inside a list
+    /// item (a loose item's blank line is a separator, not the end of the item, and CommonMark keeps the
     pub fn render_with(text: &str, layout: Layout, first: Option<u64>) -> Vec<Row> {
         let mut renderer = Renderer::new(layout);
         renderer.first_number = first;
@@ -445,17 +394,14 @@ impl Renderer {
             }
             (None, None) => (bar.clone(), bar),
         };
-        // The prefix must leave room for text: at a narrow width a deep list's
-        // indent alone can be wider than the pane, and the ellipsis of a clipped
-        // row then overflowed it (review N2). Both prefixes are cut back so at
-        // least one column is left for the line.
+        // The prefix must leave room for text: at a narrow width a deep list's indent alone can be wider than
+        // the pane, and the ellipsis of a clipped row then overflowed it.
         let room = self.layout.width.saturating_sub(1).max(1);
         (fit_prefix(first, room), fit_prefix(cont, room))
     }
 
-    /// The hanging indent for a list item's marker: the quote bar, then spaces
-    /// as wide as the marker, so a continuation paragraph sits under the item's
-    /// text and not under a second bullet.
+    /// The hanging indent for a list item's marker: the quote bar, then spaces as wide as the marker, so a
+    /// continuation paragraph sits under the item's text and not under a second bullet.
     fn hang(&self, marker: &[Run]) -> Vec<Run> {
         let mut runs = Vec::new();
         for _ in 0..self.quote {
@@ -470,11 +416,6 @@ impl Renderer {
     /// blocks (so streaming and one-shot join them identically).
     fn start_block(&mut self) {}
 
-    /// A paragraph starts inside a list item. CommonMark's *loose* list puts a
-    /// blank line between the item's own paragraphs, and the join `S7` keeps
-    /// them in one block; the renderer restores it as one blank row (`N-para`).
-    /// A tight list's items are not separated, so a paragraph after an `Item`
-    /// (its marker, `pending_prefix` cleared) gets no gap.
     fn paragraph_start(&mut self) {
         self.start_block();
         let continues_item = self.in_item && self.pending_prefix.is_some();
@@ -488,13 +429,6 @@ impl Renderer {
         self.flush_line();
     }
 
-    /// Emit the current logical line, wrapped.
-    ///
-    /// A list item's prefix is kept for the *next* line of the item (a
-    /// continuation paragraph after a blank line, or a fence inside the item):
-    /// CommonMark keeps both inside the item, so the hanging indent must stay.
-    /// The first line of the item keeps the marker, everything after it the
-    /// continuation indent.
     fn flush_line(&mut self) {
         if self.line.is_empty() {
             return;
@@ -767,9 +701,8 @@ impl Renderer {
         }
     }
 
-    /// A fenced block: an optional dim language label, then every source line
-    /// with a gutter, hard-clipped rather than re-wrapped (a wrapped command is
-    /// not a command you can copy).
+    /// A fenced block: an optional dim language label, then every source line with a gutter,
+    /// hard-clipped rather than re-wrapped (a wrapped command is not a command you can copy).
     fn finish_code(&mut self) {
         let Some(code) = self.code.take() else {
             return;
@@ -796,9 +729,8 @@ impl Renderer {
         }
         let prefix_width = text_width(&prefix);
         if !code.language.trim().is_empty() {
-            // The label sits at the item's indent too, like the code under it
-            // (review N-label): a fence inside a list item is the item's, not
-            // the document's.
+            // The label sits at the item's indent too, like the code under it: a fence
+            // inside a list item is the item's, not the document's.
             self.rows.push(Row::plain(
                 format!("{bar}{indent}{}", code.language.trim()),
                 Tone::Label,
@@ -812,7 +744,7 @@ impl Renderer {
         }
         let room = self.layout.width.saturating_sub(prefix_width);
         for line in lines {
-            let clipped = clip(&line, room.max(1), self.theme_glyphs.ellipsis());
+            let clipped = clip_columns(&line, room.max(1), self.theme_glyphs.ellipsis());
             self.rows
                 .push(Row::plain(format!("{prefix}{clipped}"), Tone::Dim));
         }
@@ -830,14 +762,7 @@ impl Renderer {
 
 // ---------------------------------------------------------------- wrapping
 
-/// Wrap `runs` to `width`, prefixing the first row with `first` and every
-/// continuation row with `cont`. Styles carry across the break and the prefix
-/// is repeated, so a quote bar or a list indent stays on every row.
-///
-/// Greedy by word: the row takes as many characters as fit, then breaks at the
-/// last space in that window (dropping the space) or, when the window holds a
-/// single long word (a URL, a JSON blob), in the middle of it. Every character
-/// is written exactly once, in order: nothing is lost at a break.
+/// Wrap `runs` to `width`, prefixing the first row with `first` and every continuation row with `cont`.
 #[optimize(speed)]
 pub fn wrap_runs(first: &[Run], cont: &[Run], runs: &[Run], width: usize) -> Vec<Row> {
     let width = width.max(1);
@@ -851,7 +776,7 @@ pub fn wrap_runs(first: &[Run], cont: &[Run], runs: &[Run], width: usize) -> Vec
             runs: cont.to_vec(),
         };
         row.runs.push(Run::new(
-            clip(&text, room, '…'),
+            clip_columns(&text, room, '…'),
             runs.first().map(|run| run.tone).unwrap_or(Tone::Prose),
         ));
         return vec![row];
@@ -967,7 +892,7 @@ fn trim_end(row: &mut Row) {
 
 /// Clip `text` to `width` columns with `marker` at the end when something was
 /// cut.
-pub fn clip(text: &str, width: usize, marker: char) -> String {
+pub fn clip_columns(text: &str, width: usize, marker: char) -> String {
     if text_width(text) <= width {
         return text.to_string();
     }
@@ -991,7 +916,7 @@ pub fn clip(text: &str, width: usize, marker: char) -> String {
 // ------------------------------------------------------------------ tables
 
 /// A table, boxed when it fits and as plain `a | b | c` rows when it does not
-/// (narrow panes and wide records), per STEER-3's rule.
+/// (narrow panes and wide records), per's rule.
 fn render_table(table: &TableState, layout: Layout, glyphs: crate::theme::Glyphs) -> Vec<Row> {
     let columns = table
         .body
@@ -1098,7 +1023,7 @@ fn table_row(
             text.push_str(&run.text);
         }
         text = text.replace('\n', " ");
-        let clipped = clip(&text, *width, glyphs.ellipsis());
+        let clipped = clip_columns(&text, *width, glyphs.ellipsis());
         let pad = width.saturating_sub(text_width(&clipped));
         let cell_tone = tone
             .or_else(|| cell.first().map(|run| run.tone))
@@ -1129,7 +1054,7 @@ fn plain_table(table: &TableState, width: usize, glyphs: crate::theme::Glyphs) -
             }
             let text = text.trim_end().replace('\n', " ");
             rows.push(Row::plain(
-                clip(&text, width, glyphs.ellipsis()),
+                clip_columns(&text, width, glyphs.ellipsis()),
                 Tone::Prose,
             ));
         }
@@ -1139,9 +1064,8 @@ fn plain_table(table: &TableState, width: usize, glyphs: crate::theme::Glyphs) -
 }
 
 fn plain_table_rows(table: &TableState, width: usize, glyphs: crate::theme::Glyphs) -> Vec<Row> {
-    // The cells and the ` | ` between them must fit the pane, not the other way
-    // round: a fixed minimum cell width made a 3-column table one column too
-    // wide at width 8 and 5 (review N-table8).
+    // The cells and the ` | ` between them must fit the pane, not the other way round: a fixed minimum
+    // cell width made a 3-column table one column too wide at narrow widths.
     let separators = 3usize;
     let mut columns = table
         .body
@@ -1188,16 +1112,15 @@ fn plain_row(cells: &[Vec<Run>], each: usize, strong: bool, glyphs: crate::theme
         } else {
             cell.first().map(|run| run.tone).unwrap_or(Tone::Prose)
         };
-        runs.push(Run::new(clip(&text, each, glyphs.ellipsis()), tone));
+        runs.push(Run::new(clip_columns(&text, each, glyphs.ellipsis()), tone));
     }
     Row { runs }
 }
 
 // ---------------------------------------------------------------- streaming
 
-/// A block the splitter has finished, and how many of its rows were already
-/// committed while it streamed (`S1b`): the TUI continues the block from there
-/// instead of writing those rows again.
+/// A block the splitter has finished, and how many of its rows were already committed while it streamed
+/// (`S1b`): the TUI continues the block from there instead of writing those rows again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Closed {
     pub text: String,
@@ -1211,13 +1134,6 @@ impl From<Closed> for String {
 }
 
 /// Splits streamed markdown into complete blocks.
-///
-/// A block ends at a blank line that is *outside* a fence and outside a table;
-/// a fence's opening line and every line after it belong to the same block
-/// until its closing fence arrives, and a table's rows stay together (their
-/// column widths need every row). Complete blocks are handed out once and
-/// forgotten, so a long answer is parsed block by block and never re-parsed:
-/// the same O(total) property the incremental wrapper already guarantees.
 #[derive(Debug, Default)]
 pub struct Stream {
     /// The block being collected, its last line included but without that
@@ -1229,9 +1145,8 @@ pub struct Stream {
     /// The open block's last line looks like a table row, so a following row
     /// belongs to it.
     in_table: bool,
-    /// The line being collected (the last line of `open`, without its
-    /// newline): the block's structure is decided from this, never from the
-    /// whole block.
+    /// The line being collected (the last line of `open`, without its newline): the block's
+    /// structure is decided from this, never from the whole block.
     line: String,
     /// What the open block is (fence, list, prose): decided once its first line
     /// is complete, and what decides which of its rows are final early (`S1b`).
@@ -1247,7 +1162,6 @@ impl Stream {
         Self::default()
     }
 
-    /// Feed a delta; returns the blocks it completed, in order.
     pub fn push(&mut self, delta: &str) -> Vec<String> {
         let mut done: Vec<String> = Vec::new();
         for line in delta.split_inclusive('\n') {
@@ -1297,9 +1211,8 @@ impl Stream {
             return;
         }
         if line.trim().is_empty() {
-            // A blank line closes the block. A table's blank line closes it
-            // too: the table is complete, and its widths need every row it
-            // has, which it now has.
+            // A blank line closes the block. A table's blank line closes it too: the table is complete,
+            // and its widths need every row it has, which it now has.
             if !self.open.trim().is_empty() {
                 self.hand_over(done);
             }
@@ -1348,14 +1261,8 @@ impl Stream {
         self.delivered_bytes
     }
 
-    /// The rows of the open block that can be committed now (`S1b`): a fence's
-    /// finished lines and a top-level list's finished items, keeping `keep`
-    /// complete lines behind for the live area. The shape is decided from the
-    /// block's first line, so this costs what just arrived, not what the block
-    /// now holds (`P1`).
-    ///
-    /// The returned rows are a prefix of the rows the finished block will
-    /// render, so they are written once and never re-rendered.
+    /// The rows of the open block that can be committed now (`S1b`): a fence's finished lines and a top-
+    /// level list's finished items, keeping `keep` complete lines behind for the live area.
     pub fn settle(&mut self, layout: Layout, keep: usize) -> Vec<Row> {
         if self.shape.is_none() {
             self.shape = Shape::of(&self.open);
@@ -1376,7 +1283,6 @@ impl Stream {
         rows
     }
 
-    /// How many rows of the open block its delivered bytes stand for.
     pub fn delivered_rows(&self) -> usize {
         self.delivered_rows
     }
@@ -1386,9 +1292,8 @@ impl Stream {
     pub fn tail(&self) -> String {
         let text = self.open.trim_end_matches('\n');
         if self.in_fence.is_some() {
-            // An unfinished fence still renders as code: give the renderer the
-            // closing fence the stream has not sent yet. One small string per
-            // frame is cheaper than leaking one per frame.
+            // An unfinished fence still renders as code: give the renderer the closing fence the stream
+            // has not sent yet. One small string per frame is cheaper than leaking one per frame.
             format!(
                 "{text}
 ```"
@@ -1454,14 +1359,10 @@ fn opens_or_closes(line: &str, open: &str) -> bool {
     }
 }
 
-/// Does this block end inside a list item that a following, indented block
-/// continues? (The renderer knows: the item's container is still open at the
-/// end of the block — a loose item's blank line does not close it.)
+/// Does this block end inside a list item that a following, indented block continues? (The renderer
+/// knows: the item's container is still open at the end of the block — a loose item's blank line does
 pub fn ends_in_item(text: &str) -> bool {
-    // The splitter's cut is a blank line: the one place where CommonMark's
-    // *loose* list rule matters. A block whose last content line is still
-    // indented to its item continues inside it; one that ends with the item's
-    // own text may be continued by an indented block after the cut.
+    // The splitter's cut is a blank line: the one place where CommonMark's *loose* list rule matters.
     let last = text
         .lines()
         .rev()
@@ -1499,9 +1400,8 @@ fn is_table_row(line: &str) -> bool {
     trimmed.len() > 1 && trimmed.starts_with('|') && trimmed.ends_with('|')
 }
 
-/// Is this text a table, or the start of one? A boxed table's column widths are
-/// the widest cell of every column, so no row of it is final before its last
-/// row has arrived.
+/// Is this text a table, or the start of one? A boxed table's column widths are the widest
+/// cell of every column, so no row of it is final before its last row has arrived.
 pub fn looks_like_table(text: &str) -> bool {
     text.lines().any(is_table_row)
 }
@@ -1528,9 +1428,7 @@ pub enum Shape {
 }
 
 impl Shape {
-    /// The shape of a block from its lines so far. `None` while the block's
-    /// first line is still arriving: a half-typed ```` ``ru ```` could still
-    /// become a fence, and a row committed before that would be wrong.
+    /// The shape of a block from its lines so far.
     pub fn of(text: &str) -> Option<Shape> {
         let head = text.split_inclusive('\n').next().unwrap_or_default();
         let line = head.strip_suffix('\n')?;
@@ -1567,12 +1465,8 @@ fn complete_lines(text: &str) -> Vec<usize> {
     ends
 }
 
-/// How much of `text` (an open block, from `from` on) is final, keeping at least
-/// `keep` complete lines after the cut for the live area.
-///
-/// `in_fence` says whether the block is *currently* inside a fence: a fence can
-/// open inside a list item, and then nothing is cut, because those lines are
-/// code inside an item whose indent only that item's own render knows.
+/// How much of `text` (an open block, from `from` on) is final, keeping at least `keep`
+/// complete lines after the cut for the live area.
 pub fn stable_cut(
     text: &str,
     from: usize,
@@ -1636,15 +1530,8 @@ fn list_start(text: &str) -> u64 {
     digits.parse().unwrap_or(1)
 }
 
-/// The rows of the block `text[from..to]` — a piece of a block that is being
-/// streamed (`to` a cut), or all of what is left when the block closes
-/// (`to == text.len()`).
-///
-/// The rows are the corresponding slice of what the whole block renders:
-/// rendering a piece on its own is only safe where that holds (a fence's lines,
-/// a list's items), which is exactly where [`stable_cut`] cuts. A piece that
-/// starts mid-block carries no language label and continues the list's
-/// numbering, so the two renders agree row for row.
+/// The rows of the block `text[from..to]` — a piece of a block that is being streamed (`to` a
+/// cut), or all of what is left when the block closes (`to == text.len()`).
 pub fn piece_rows(text: &str, from: usize, to: usize, shape: &Shape, layout: Layout) -> Vec<Row> {
     let Some(piece) = text.get(from.min(text.len())..to.min(text.len())) else {
         return Vec::new();
@@ -1667,9 +1554,8 @@ pub fn piece_rows(text: &str, from: usize, to: usize, shape: &Shape, layout: Lay
             if !body.is_empty() && !body.ends_with('\n') {
                 text.push('\n');
             }
-            // A fence that has not closed yet still renders as code: give the
-            // renderer the closing line the model has not sent, so the rows are
-            // the ones the block will have.
+            // A fence that has not closed yet still renders as code: give the renderer the closing line
+            // the model has not sent, so the rows are the ones the block will have.
             text.push_str(marker);
             render_block(&text, layout)
         }
@@ -1681,10 +1567,7 @@ pub fn piece_rows(text: &str, from: usize, to: usize, shape: &Shape, layout: Lay
     }
 }
 
-/// The rows of the open block that are not out yet: what the live area shows
-/// while a block streams. Starts at the bytes already delivered, so a block
-/// that streams row by row costs what is left of it, not all of it (`S1b`,
-/// `P1`).
+/// The rows of the open block that are not out yet: what the live area shows while a block streams.
 pub fn open_rows(text: &str, shape: Option<&Shape>, delivered: usize, layout: Layout) -> Vec<Row> {
     let from = delivered.min(text.len());
     match shape {
@@ -1931,7 +1814,7 @@ mod tests {
 
     // -------------------------------------------------------------- streaming
 
-    /// The invariant STEER-3 names: the final render of a message streamed in
+    /// The invariant names: the final render of a message streamed in
     /// chunks equals the one-shot render of the same text.
     #[test]
     fn streaming_a_document_in_blocks_renders_it_exactly_as_one_pass_does() {
@@ -2009,9 +1892,8 @@ mod tests {
     #[test]
     fn a_fence_and_a_list_stream_rows_and_prose_does_not() {
         let fence = Shape::of("```\n").unwrap();
-        // Every complete line but the last few is final: `keep` lines stay for
-        // the live area, so with 5 complete lines and keep 2 the cut is after
-        // the third.
+        // Every complete line but the last few is final: `keep` lines stay for the live area, so
+        // with 5 complete lines and keep 2 the cut is after the third.
         assert_eq!(
             stable_cut("```\na\nb\nc\nd\ne\n", 0, &fence, true, 2),
             Some(10)
@@ -2120,9 +2002,8 @@ mod tests {
 
     #[test]
     fn a_stream_never_splits_a_multibyte_character() {
-        // The stream takes `&str` deltas (the provider decodes UTF-8 first), so
-        // a chunk boundary is a character boundary; this proves the splitter
-        // does not re-encode anything on the way through.
+        // The stream takes `&str` deltas (the provider decodes UTF-8 first), so a chunk boundary is a
+        // character boundary; this proves the splitter does not re-encode anything on the way through.
         let mut stream = Stream::new();
         let mut blocks = Vec::new();
         for chunk in "## 中文标题\n\nok\n".chars() {
@@ -2188,9 +2069,7 @@ mod tests {
                 .contains(ratatui::style::Modifier::BOLD)
         );
     }
-    /// STEER-3 asks for a corpus split at *every* boundary. A byte boundary is
-    /// not always a character boundary, so the chunking is done on characters
-    /// (which is what the provider hands the stream: decoded text deltas).
+    /// asks for a corpus split at *every* boundary.
     #[test]
     fn a_document_split_at_every_character_boundary_renders_the_same_way() {
         let document = "# Head\n\ntext with **bold** and `code`\n\n```sh\ncargo test\n```\n\n\

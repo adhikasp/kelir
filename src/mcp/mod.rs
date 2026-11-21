@@ -1,18 +1,8 @@
-//! MCP as a CLI (M6): `kelir mcp …`.
-//!
-//! The model never gets MCP tool schemas in its request. It runs
-//! `kelir mcp <server> <tool> k=v` in a bash call; inside a session that call
-//! reaches the **broker** in the session process over `KELIR_SOCK`, which keeps
-//! each server alive for the session and writes `mcp_started`/`mcp_settled`.
-//! Outside a session the CLI starts the server for that one call.
-//!
-//! * [`config`] — `mcp.toml`, two layers
-//! * [`rpc`] — the JSON-RPC subset over a child's stdio (hand-rolled, see
-//!   docs/DEVIATIONS.md)
-//! * [`args`] — the command line, `k=v` typing, schema validation
-//! * [`render`] — a result as stdout/stderr/files, and the exit codes
-//! * [`broker`] — the session side
-//! * [`cli`] — the client side
+//! MCP as a CLI: `kelir mcp …`.
+//! The model never gets MCP tool schemas in its request.
+//! It runs `kelir mcp <server> <tool> k=v` in a bash call; inside a session that call reaches the
+//! **broker** in the session process over `KELIR_SOCK`, which keeps each server alive for the
+//! session and writes `mcp_started`/`mcp_settled`.
 
 pub mod args;
 pub mod broker;
@@ -38,9 +28,7 @@ pub struct CallOutput {
     pub outcome: String,
     pub stdout: String,
     pub stderr: String,
-    /// Size of the text the call produced.
     pub bytes: u64,
-    /// Where the full text is on disk (empty for a one-shot call).
     pub out_path: String,
 }
 
@@ -118,10 +106,7 @@ pub async fn run_call(
     output
 }
 
-/// What `mcp_started` records of a call's arguments: their shape, never their
-/// values. A tool argument can be a secret (a token, a key); the log, the NDJSON
-/// stream and `observe` must not hold one (STEER-7). The values the model chose
-/// are already in the `tool_started` of the bash call that carried them.
+/// What `mcp_started` records of a call's arguments: their shape, never their values.
 pub fn loggable_args(args: &Value) -> Value {
     match args {
         Value::Object(map) => Value::Object(

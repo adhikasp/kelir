@@ -1,28 +1,8 @@
-//! "Only its owner may use it": the second half of the session socket's trust
-//! boundary (STEER-7, retro M5-A F8).
-//!
-//! A token ([`crate::trust`]) authenticates a caller; permissions decide who can
-//! reach the socket at all. Both are needed, because the token's own file is
-//! protected by nothing but the directory it lives in, and a socket an unrelated
-//! user can connect to is a prompt-injection channel into a fully autonomous
-//! agent (`say` is a message from the caller).
-//!
-//! * **Unix.** `bind` chmods the socket `0600`; [`check_socket`] re-reads the
-//!   mode afterwards, because a umask, a pre-existing file or a platform
-//!   quirk must not leave a group- or world-accessible socket behind. A socket
-//!   that is not owner-only is an error, not a warning: the session refuses to
-//!   serve it.
-//! * **Windows.** A named pipe's DACL comes from the default descriptor, which
-//!   grants `FILE_ALL_ACCESS` to the user's SID and to `SYSTEM` and `Administrators`
-//!   only — but only if the pipe was created with the default descriptor, and
-//!   nothing in the code said so. Here the listener is created with an explicit
-//!   descriptor (owner = the creating user, one ACE: `FILE_ALL_ACCESS` for the
-//!   owner, no inheritance, no `Everyone`), and [`check_pipe`] re-reads the DACL
-//!   from the pipe handle and refuses anything wider.
-//!
-//! Both checks are cheap and run once, before `session_started` is recorded, so
-//! a client that sees the event can connect to a socket that is already
-//! restricted.
+//! "Only its owner may use it": the second half of the session socket's trust boundary.
+//! A token ([`crate::trust`]) authenticates a caller; permissions decide who can reach the socket
+//! at all.
+//! Both are needed, because the token's own file is protected by nothing but the directory it
+//! lives in, and a socket an unrelated user can connect to is a prompt-injection channel into a
 
 /// Is this socket/pipe restricted to its owner? Called after the listener is
 /// bound and before it accepts anything.
@@ -49,9 +29,8 @@ pub fn check_socket(_path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The Windows side: a pipe created by [`crate::trust::pipe_descriptor`] is
-/// owner-only, and this is the proof. It re-reads the DACL of the name and
-/// refuses if any ACE grants access to a SID that is not the current user.
+/// The Windows side: a pipe created by [`crate::trust::pipe_descriptor`] is owner-only, and this is the
+/// proof.
 #[cfg(windows)]
 pub fn check_pipe(name: &str) -> Result<(), String> {
     win::check_pipe(name)
@@ -62,9 +41,8 @@ pub fn check_pipe(_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The security descriptor a session's named pipe is created with: owner-only,
-/// one ACE for the creating user. Handed to interprocess's
-/// `ListenerOptionsExt::security_descriptor`.
+/// The security descriptor a session's named pipe is created with: owner-only, one ACE for
+/// the creating user. Handed to interprocess's `ListenerOptionsExt::security_descriptor`.
 #[cfg(windows)]
 pub fn pipe_descriptor()
 -> std::io::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
@@ -124,10 +102,8 @@ mod win {
 
     const SDDL_REVISION_1: u32 = 1;
 
-    /// `D:P(A;;FA;;;<the current user>)`: a protected DACL (no inheritance from
-    /// the parent) with one allow-ACE, `FILE_ALL_ACCESS`, for this process's user
-    /// and nobody else. Not `OW` (owner-rights): the owner is not known until the
-    /// object exists, and spelling the SID out makes the descriptor readable here.
+    /// `D:P(A;;FA;;;<the current user>)`: a protected DACL (no inheritance from the parent) with one allow-
+    /// ACE, `FILE_ALL_ACCESS`, for this process's user and nobody else.
     pub fn owner_only_descriptor() -> std::io::Result<SecurityDescriptor> {
         let user = current_user_sid()?;
         let sddl = format!("D:P(A;;FA;;;{user})");
@@ -161,9 +137,8 @@ mod win {
         TooWide(&'static str),
     }
 
-    /// Re-read the DACL of the pipe and refuse anything wider than the owner.
-    /// The pipe is opened for `READ_CONTROL` only, so this cannot disturb a
-    /// client that is connecting.
+    /// Re-read the DACL of the pipe and refuse anything wider than the owner. The pipe is opened
+    /// for `READ_CONTROL` only, so this cannot disturb a client that is connecting.
     pub fn check_pipe(pipe_name: &str) -> Result<(), String> {
         let handle = open_for_read_dacl(pipe_name)
             .map_err(|error| format!("cannot open the session pipe to read its DACL: {error}"))?;
@@ -279,13 +254,8 @@ mod win {
         Ok(Verdict::OwnerOnly)
     }
 
-    /// Give one file an owner-only DACL: the same SDDL the pipe gets, written
-    /// onto the file itself by name.
-    ///
-    /// By name, not by handle: a handle opened for `WRITE_DAC` alone is refused
-    /// with `ERROR_ACCESS_DENIED` for an ordinary user's file, while
-    /// `SetNamedSecurityInfoW` — the same operation, taking the filename — is
-    /// allowed for the file's owner.
+    /// Give one file an owner-only DACL: the same SDDL the pipe gets, written onto the file
+    /// itself by name.
     pub fn restrict_file_to_owner(path: &std::path::Path) -> Result<(), String> {
         let user = current_user_sid().map_err(|error| error.to_string())?;
         let sddl = format!("D:P(A;;FA;;;{user})");
@@ -498,10 +468,8 @@ mod tests {
         let _ = descriptor;
     }
 
-    /// A file written with the owner-only DACL reads back as owner-only, and a
-    /// file in the temp directory (inherited ACL: `Everyone` is not there, but
-    /// `SYSTEM` and `Administrators` are) is refused — the check has to be able
-    /// to say no, or it is decoration.
+    /// A file written with the owner-only DACL reads back as owner-only, and a file in the temp directory
+    /// (inherited ACL: `Everyone` is not there, but `SYSTEM` and `Administrators` are) is refused — the
     #[cfg(windows)]
     #[test]
     fn a_token_file_gets_a_dacl_and_the_read_back_notices_a_wide_one() {

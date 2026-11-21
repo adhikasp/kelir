@@ -1,8 +1,7 @@
 //! `kelir mcp …`: the client side.
-//!
-//! Inside a session (`KELIR_SOCK` set) every request goes to the session's
-//! broker, which keeps servers alive and logs the call. Outside one, or when
-//! the socket cannot be reached (a background job that outlived its session),
+//! Inside a session (`KELIR_SOCK` set) every request goes to the session's broker, which keeps
+//! servers alive and logs the call.
+//! Outside one, or when the socket cannot be reached (a background job that outlived its session),
 //! the CLI starts the server itself for this one command.
 
 use std::collections::{BTreeMap, HashMap};
@@ -127,11 +126,8 @@ impl Backend {
         }
     }
 
-    /// One request to the broker. `Ok(None)` means the session cannot be
-    /// reached, and the caller falls back to one-shot. Only a failed *connect*
-    /// qualifies for a `retryable == false` request (a tool call): once the
-    /// request may have been delivered, the outcome is unknown and the call is
-    /// never run again (exit 4).
+    /// One request to the broker. `Ok(None)` means the session cannot be reached, and the caller
+    /// falls back to one-shot.
     async fn ask(address: &str, args: Value, retryable: bool) -> Result<Option<Value>, Fail> {
         let request = Request::new(broker::VERB, args, "mcp");
         let response = match ipc::request_value_within(address, &request, BROKER_WAIT).await {
@@ -290,10 +286,6 @@ fn emit(text: &str, to_stderr: bool) {
     }
 }
 
-fn first_line(text: &str) -> &str {
-    text.lines().next().unwrap_or("").trim()
-}
-
 /// `kelir mcp …`. Returns the process exit code.
 pub async fn run(words: Vec<String>) -> u8 {
     let command = match args::parse(&words) {
@@ -367,7 +359,7 @@ async fn execute(backend: &mut Backend, command: Command) -> Result<i32, Fail> {
                     "{:width$}  {:state_width$}  {tools}{channel}  {}",
                     text(entry, "name"),
                     text(entry, "state"),
-                    first_line(&text(entry, "description")),
+                    crate::util::first_line(&text(entry, "description")),
                 );
                 emit(line.trim_end(), false);
             }
@@ -388,7 +380,7 @@ async fn execute(backend: &mut Backend, command: Command) -> Result<i32, Fail> {
                         let description = tool
                             .get("description")
                             .and_then(Value::as_str)
-                            .map(first_line)
+                            .map(crate::util::first_line)
                             .unwrap_or("");
                         if detail == Detail::Name || description.is_empty() {
                             emit(name, false);

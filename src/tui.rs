@@ -1,25 +1,8 @@
-//! The inline TUI: live rows, a state row, the editor, a facts row, and
-//! finished turns pushed into the terminal's scrollback.
-//!
-//! Three things keep it small and predictable. The viewport is fixed
-//! ([`VIEWPORT_HEIGHT`] rows at the bottom of the screen) and only it is
-//! repainted; everything a turn produces is written *above* it with ratatui's
-//! `insert_before`, so the terminal keeps it and the user can scroll back. Every
-//! action the TUI takes is a [`crate::commands::Action`], which is one verb sent
-//! through the same [`crate::ipc::Incoming`] channel the session socket feeds —
-//! the TUI has no private path into the session. And every style comes from
-//! [`crate::theme::Theme`], so `NO_COLOR`, the ASCII glyph set and the 16-colour
-//! rule are enforced in one place.
-//!
-//! The rows, top to bottom (TUI-v2 §7):
-//!
-//! ```text
-//!   (scrollback: the conversation so far)
-//!   live rows   (3): the tail of the streaming answer, or a running call
-//!   state row   (1): ● idle · ready   /  ⠹ thinking 12s · waiting …  /  …
-//!   editor      (3): › your message
-//!   facts row   (1): kelir · model · tok
-//! ```
+//! The inline TUI: live rows, a state row, the editor, a facts row, and finished turns pushed into
+//! the terminal's scrollback.
+//! Three things keep it small and predictable.
+//! The viewport is fixed ([`VIEWPORT_HEIGHT`] rows at the bottom of the screen) and only it is
+//! repainted; everything a turn produces is written *above* it with ratatui's `insert_before`, so
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
@@ -53,41 +36,28 @@ use crate::theme::Theme;
 pub const PROMPT_WIDTH: usize = 2;
 use crate::tools_view::{self, CallLine};
 
-/// Rows the inline viewport occupies when the answer is streaming: three live
-/// rows, the state row, three editor rows and the facts row. When nothing is
-/// live the viewport shrinks: empty live rows are never painted, so there is
-/// no blank gap between the scrollback and the input.
+/// Rows the inline viewport occupies when the answer is streaming: three live rows, the state row,
+/// three editor rows and the facts row.
 pub const VIEWPORT_HEIGHT: u16 = 8;
-/// Most rows the editor may occupy on its own. Beyond this the window scrolls
-/// to keep the cursor visible (the pane has to end somewhere).
 pub const MAX_EDITOR_ROWS: u16 = 12;
-/// Most rows the live area may occupy (the tail of a streamed answer).
 pub const MAX_LIVE_ROWS: u16 = 3;
 
-/// The viewport height for `editor_rows` wrapped prompt rows and `live_rows`
-/// streamed rows: the state and facts rows are constant, and the editor and
-/// live area grow only with their own content. With nothing streaming the live
-/// area is zero rows, so the input sits immediately below the last committed
-/// scrollback line. Kept between 2 and the screen height by the caller.
+/// The viewport height for `editor_rows` wrapped prompt rows and `live_rows` streamed rows: the state
+/// and facts rows are constant, and the editor and live area grow only with their own content.
 pub fn viewport_height_for(editor_rows: u16, live_rows: u16) -> u16 {
     2 + editor_rows.clamp(1, MAX_EDITOR_ROWS) + live_rows.min(MAX_LIVE_ROWS)
 }
 /// A second Ctrl-C within this window quits instead of stopping.
 pub const DOUBLE_CTRL_C: Duration = Duration::from_millis(1000);
-/// How far ahead a countdown is still a countdown. A slot wait is armed far in
-/// the future on purpose (it ends when another process frees the slot), so the
-/// status line shows its words without a number that means nothing.
 pub const RETRY_COUNTDOWN_MAX: Duration = Duration::from_secs(6 * 60 * 60);
-/// How much of a call's output the tail view shows.
 pub const TAIL_BYTES: usize = 2048;
 /// The spinner changes this often while working; the elapsed text once a
 /// second. Nothing ticks while idle.
 pub const SPINNER_TICK: Duration = Duration::from_millis(100);
 /// Frames are coalesced to at most one per this interval.
 pub const FRAME_MIN: Duration = Duration::from_millis(33);
-/// How many complete lines of the block being streamed stay in the live area:
-/// rows behind them are final and go into the scrollback as they arrive, so a
-/// long fence is never a three-row ticker (`S1b`).
+/// How many complete lines of the block being streamed stay in the live area: rows behind them are
+/// final and go into the scrollback as they arrive, so a long fence is never a three-row ticker
 const LIVE_KEEP: usize = 3;
 
 // ------------------------------------------------------------------ events
@@ -143,7 +113,6 @@ pub enum UiEvent {
         lines: u64,
         spilled: bool,
         out_path: String,
-        /// The last non-empty line of the call's output (a failed call's tail).
         tail: String,
     },
     /// An image landed at the tail (a `kelir view` from a tool call).
@@ -155,11 +124,8 @@ pub enum UiEvent {
     /// Something the session wants said but which is not an error.
     Info(String),
     Error(String),
-    /// The session is waiting before it tries the provider again: the facts row
-    /// carries this line and a countdown to `until`, and a provider retry (not
-    /// a governor slot wait) also feeds the state row's `rate limited` state.
-    /// Every wait is also a line via [`UiEvent::Info`] and an `error` event in
-    /// the log.
+    /// The session is waiting before it tries the provider again: the facts row carries this line and a
+    /// countdown to `until`, and a provider retry (not a governor slot wait) also feeds the state row's
     Retrying {
         line: String,
         until: Instant,
@@ -199,9 +165,8 @@ pub enum Phase {
     Idle,
     Working,
     Done,
-    /// The turn paused somewhere the user can pick it up again: an explicit
-    /// `max_steps` cap, or a provider that stayed unavailable past the waiting
-    /// budget. The session is still up.
+    /// The turn paused somewhere the user can pick it up again: an explicit `max_steps` cap, or a
+    /// provider that stayed unavailable past the waiting budget. The session is still up.
     Paused,
     Error,
 }
@@ -238,17 +203,15 @@ pub struct Status {
     pub turn: u32,
     pub step: u32,
     pub prompt_tokens: u64,
-    /// Input tokens of the *last* request sent to the model (the full context:
-    /// system, history, tool inputs and results) — not the accumulated sum.
-    /// This is what the status line shows.
+    /// Input tokens of the *last* request sent to the model (the full context: system, history,
+    /// tool inputs and results) — not the accumulated sum. This is what the status line shows.
     pub last_prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: u64,
     pub cost: f64,
     pub running: usize,
-    /// Steps taken in the turn now running, and the turn's cap when one is set
-    /// (`None` = no limit, the default). Shown only when a cap exists: a
-    /// counter with no limit is noise.
+    /// Steps taken in the turn now running, and the turn's cap when one is set (`None` = no
+    /// limit, the default). Shown only when a cap exists: a counter with no limit is noise.
     pub turn_steps: u32,
     pub limit: Option<u32>,
     pub phase: Phase,
@@ -290,11 +253,6 @@ pub fn tokens(count: u64) -> String {
     }
 }
 
-/// The facts row, as one string (the renderer clips it to the width).
-///
-/// A wait replaces the usual summary: "kelir working · rate limited (429):
-/// retrying in 34 s, attempt 5" is what a person needs to see while nothing
-/// else happens (STEER-5's countdown, shown in the row that is always there).
 pub fn status_text(status: &Status) -> String {
     let word = status_word(status);
     if let Some((line, until)) = &status.retrying {
@@ -312,10 +270,8 @@ pub fn status_text(status: &Status) -> String {
     facts_text(status)
 }
 
-/// One state, one word: `done` reads as `idle` here (the state row's kind for
-/// it is idle too, so the two rows cannot disagree), while `paused` and `error`
-/// keep their own word because they are not idle (S5). A finished turn ends on
-/// its prose; only the two states that need a human announce themselves.
+/// One state, one word: `done` reads as `idle` here (the state row's kind for it is idle too, so the
+/// two rows cannot disagree), while `paused` and `error` keep their own word because they are not idle
 fn status_word(status: &Status) -> &'static str {
     match status.phase {
         Phase::Done => Phase::Idle.word(),
@@ -325,9 +281,8 @@ fn status_word(status: &Status) -> &'static str {
 
 /// The facts row when nothing is waiting.
 fn facts_text(status: &Status) -> String {
-    // The state row already says whether kelir is idle or working. The facts
-    // row names the session instead: the first prompt's own words, or just the
-    // token count before one is sent.
+    // The state row already says whether kelir is idle or working. The facts row names the
+    // session instead: the first prompt's own words, or just the token count before one is sent.
     let mut parts = Vec::new();
     if !status.title.is_empty() {
         parts.push(status.title.clone());
@@ -335,9 +290,8 @@ fn facts_text(status: &Status) -> String {
     if !status.model.is_empty() {
         parts.push(status.model.clone());
     }
-    // The input tokens of the last request to the model: the whole context
-    // it saw (system, history, tool inputs and results from earlier steps),
-    // not the accumulated sum across the session.
+    // The input tokens of the last request to the model: the whole context it saw (system, history, tool
+    // inputs and results from earlier steps), not the accumulated sum across the session.
     parts.push(format!("{} tok in", tokens(status.last_prompt_tokens)));
     parts.join(" · ")
 }
@@ -370,12 +324,8 @@ pub fn facts_for_width(status: &Status, width: usize) -> String {
     )
 }
 
-/// A retry line as the TUI's facts row shows it: the same facts, with the
-/// stop hint replaced by the key that actually stops the wait here (`R5`).
-///
-/// `retry::wait_line` is shared with the CLI and the event log, where the
-/// sentence `say stop to cancel` is true; in this pane it is not (plain text is
-/// a `say`), and every other working state says `esc stops`.
+/// A retry line as the TUI's facts row shows it: the same facts, with the stop hint replaced
+/// by the key that actually stops the wait here (`R5`).
 pub fn tui_wait_line(line: &str) -> String {
     line.replace("say stop to cancel", "esc stops")
         .replace(", say stop", ", esc stops")
@@ -418,20 +368,22 @@ pub fn call_head(name: &str, input: &Value) -> String {
     }
     match name {
         "bash" => match input.get("command").and_then(Value::as_str) {
-            Some(command) => format!("$ {}", one_line(command)),
+            Some(command) => format!("$ {}", crate::util::one_line_visible(command, 60)),
             None => "$ bash".to_string(),
         },
         "edit" => match input.get("path").and_then(Value::as_str) {
             Some(path) => format!("edit {path}"),
             None => "edit".to_string(),
         },
-        other => format!("{other} {}", one_line(&input.to_string())),
+        other => format!(
+            "{other} {}",
+            crate::util::one_line_visible(&input.to_string(), 60)
+        ),
     }
 }
 
-/// The reason out of a pause message: "provider unavailable after 2 attempts,
-/// 92 ms: provider error (503); say continue to retry" is a scrollback line,
-/// and the state row already says how to go on, so only the reason is kept.
+/// The reason out of a pause message: "provider unavailable after 2 attempts, 92 ms: provider error
+/// (503); say continue to retry" is a scrollback line, and the state row already says how to go on, so
 fn pause_reason(message: &str) -> Option<String> {
     let reason = message.split("; say continue").next().unwrap_or("");
     let reason = reason.trim();
@@ -447,14 +399,8 @@ fn plural(count: u32, noun: &str) -> String {
     }
 }
 
-fn one_line(text: &str) -> String {
-    crate::util::truncate_chars(&text.replace('\n', " ↵ "), 60)
-}
-
-/// The session's one-line label for a running call, which the state row shows:
-/// a call's human-readable `description` when it has one, otherwise the tool's
-/// name and its own first line of input, never the raw JSON (a long argument
-/// blob in a status row is noise).
+/// The session's one-line label for a running call, which the state row shows: a call's human-readable
+/// `description` when it has one, otherwise the tool's name and its own first line of input, never the
 pub fn call_label(name: &str, input: &Value) -> String {
     if let Some(label) = tools_view::description(input) {
         return label;
@@ -503,7 +449,6 @@ pub fn read_tail(path: &std::path::Path, max: usize) -> std::io::Result<String> 
     Ok(tail_of(&bytes, max))
 }
 
-/// The last non-empty line of a call's output, for a failed call's tail row.
 pub fn last_line(text: &str) -> String {
     text.lines()
         .rev()
@@ -519,9 +464,8 @@ pub fn last_line(text: &str) -> String {
 #[derive(Debug, Clone)]
 struct Block {
     text: String,
-    /// The block's rows, rendered once at the width they were committed at.
-    /// `None` until the block's first row goes out; a resize clears it for the
-    /// blocks that have rows left.
+    /// The block's rows, rendered once at the width they were committed at. `None` until the
+    /// block's first row goes out; a resize clears it for the blocks that have rows left.
     rows: Option<Vec<Row>>,
     /// How many of `rows` are out.
     committed: usize,
@@ -532,30 +476,6 @@ struct Block {
     joins: bool,
 }
 
-/// The message being streamed, committed as its rows settle.
-///
-/// Three invariants this type exists for:
-///
-/// - **Every rendered row reaches the scrollback exactly once, in the order the
-///   model produced it.** Only rows that can still change are held back: the
-///   open line of the block being streamed, and one block that a following,
-///   indented block might continue (`S7`). Everything else is out. That is why
-///   a long fence, list or table streams into the scrollback instead of
-///   becoming a three-row ticker (`S1b`), why the previous block's rows cannot
-///   vanish while a later one streams (`S1`), and why prose can never be
-///   written before the tool lines that preceded it (`B1`: calls commit as
-///   they settle).
-/// - **A loose list item keeps its continuation inside it** (`S7`): a block that
-///   a following, indented block continues is joined to it and rendered as one,
-///   exactly as the one-shot render reads the same text.
-/// - **The work per delta does not grow with the message.** A closed block is
-///   rendered once, when it closes, and its rows are cached; the delta path
-///   only re-renders the open text, whose length is bounded by the two things it
-///   can hold (the last completed line and the partial line after it). The cost
-///   of a message is therefore linear in its size (`P1`).
-///
-/// What `Block::committed` holds once every row of the block is in the
-/// scrollback: its text will never be rendered again.
 const DELIVERED: usize = usize::MAX;
 
 #[derive(Debug, Default)]
@@ -584,14 +504,8 @@ impl Message {
         self.blocks.iter().all(|block| block.text.trim().is_empty())
     }
 
-    /// A closed block arrived. It is joined to the previous block when CommonMark
-    /// reads it as that block's continuation, and kept as its own block
-    /// otherwise.
-    ///
-    /// `delivered` is how many of the block's rows already went out while it was
-    /// still streaming (a fence or a list streams row by row, `S1b`): its rows
-    /// are the same prefix at the same width, so the closed block continues from
-    /// there instead of writing those rows again.
+    /// A closed block arrived. It is joined to the previous block when CommonMark reads it as
+    /// that block's continuation, and kept as its own block otherwise.
     fn push_block(&mut self, text: &str, delivered: usize) {
         if let Some(last) = self.blocks.last_mut()
             && last.committed == 0
@@ -616,9 +530,7 @@ impl Message {
         self.next = self.next.min(self.blocks.len() - 1);
     }
 
-    /// Forget what is cached but not out yet, at a new width. Rows already in
-    /// the terminal are final (the terminal owns them and cannot reflow):
-    /// only the blocks with rows left are rendered again, and only their rows.
+    /// Forget what is cached but not out yet, at a new width.
     fn restyle(&mut self, layout: Layout) {
         if self.width == layout.width {
             return;
@@ -667,22 +579,14 @@ impl Message {
     }
 
     /// Every block is decided: nothing held may be joined to what comes next.
-    /// Called when something other than prose interrupts the message (a tool
-    /// call), so a held list block cannot swallow the sentence after it.
     fn settle(&mut self) {
         for block in &mut self.blocks {
             block.joins = false;
         }
     }
 
-    /// The rows of every final block: all but the last, plus the last one when
-    /// nothing is streaming any more. Handed out once each.
-    ///
-    /// Starts at the first block with a row left, so the delta path costs
-    /// nothing for what is already out: that first undelivered index (plus the
-    /// per-block row cache) is what keeps a long answer linear (`P1`). The one
-    /// block held back is the last one of a message that is still open, because
-    /// the next block may be its continuation (`S7`).
+    /// The rows of every final block: all but the last, plus the last one when nothing is
+    /// streaming any more. Handed out once each.
     fn settled_rows(&mut self, layout: Layout) -> Vec<Row> {
         self.restyle(layout);
         let last = self.blocks.len().saturating_sub(1);
@@ -710,12 +614,8 @@ impl Message {
         out
     }
 
-    /// The rows of the held block that are not out yet: what the live area
-    /// shows above the open tail.
-    ///
-    /// At most one block is ever held (the last one of an open message, which
-    /// the next block may continue), so this renders one block, not the
-    /// message (`P1`).
+    /// The rows of the held block that are not out yet: what the live area shows above the open
+    /// tail.
     fn live_rows(&self, layout: Layout) -> Vec<Row> {
         let Some(index) = self.blocks.len().checked_sub(1) else {
             return Vec::new();
@@ -753,36 +653,24 @@ impl Message {
 pub struct App {
     pub editor: Editor,
     pub theme: Theme,
-    /// The state machine the state row renders.
     pub activity: Activity,
     pub status: Status,
     pub width: usize,
     pub height: usize,
-    /// Rows the inline viewport reserved for the editor and live area this
-    /// frame. Set by `render()` from the content counts. `None` before the
-    /// first frame (e.g. a bare `App` in a unit test) means the live area can
-    /// hold up to `MAX_LIVE_ROWS` rows.
+    /// Rows the inline viewport reserved for the editor and live area this frame. Set by
+    /// `render()` from the content counts.
     editor_rows: u16,
     live_rows: Option<usize>,
-    /// Rows ready to be written above the viewport, styled.
     pub scroll: Vec<Line<'static>>,
     /// Whether a message row has reached the scrollback in this message (so the
     /// blank row after it is not written twice).
     committed_message: bool,
-    /// Whether the last committed row was blank, and `None` before anything is
-    /// committed at all. Kept here because a paint drains `scroll` between two
-    /// events: a spacing rule must not depend on whether a frame was drawn in
-    /// between (that is how `N-echo` came back in a real pane while the unit
-    /// test, which never drains, was green).
+    /// Whether the last committed row was blank, and `None` before anything is committed at all.
     last_row: Option<bool>,
-    /// The streamed message, committed a block at a time as the blocks close:
-    /// the text of every block, its rendered rows, and how many of those rows
-    /// are already in the scrollback. Every row is written exactly once and
-    /// nothing is held back, so no row can vanish while a later block streams
-    /// (the B1/S1 class) and a long block can no longer become a ticker.
+    /// The streamed message, committed a block at a time as the blocks close: the text of every block, its
+    /// rendered rows, and how many of those rows are already in the scrollback.
     message: Message,
     stream: markdown::Stream,
-    /// The output tail view (Ctrl-O).
     pub tail: VecDeque<String>,
     pub show_tail: bool,
     /// The session-wide call ordinal: what `/expand n` names.
@@ -793,7 +681,6 @@ pub struct App {
     /// line.
     turn_steps: u32,
     turn_tokens: u64,
-    /// The spinner frame, advanced by the working-state tick.
     frame: u64,
     /// Images saved from pastes, by content hash: a second paste of the same
     /// bytes reuses the file.
@@ -873,7 +760,6 @@ impl App {
         self.session_dir = Some(dir);
     }
 
-    /// The session id, used on exit to print the exact resume command.
     pub fn set_session_id(&mut self, id: String) {
         self.session_id = Some(id);
     }
@@ -895,36 +781,25 @@ impl App {
         }
         self.width = width;
         self.height = height;
-        // Committed scrollback cannot reflow (the terminal owns those rows):
-        // only what has not been committed yet is re-rendered, and it picks up
-        // the new width when it is next committed (`Message::restyle`). What a
-        // resize does change here is the live area's own height, which is read
-        // at paint time.
+        // Committed scrollback cannot reflow (the terminal owns those rows): only what has not been committed
+        // yet is re-rendered, and it picks up the new width when it is next committed (`Message::restyle`).
     }
 
     fn layout(&self) -> Layout {
         Layout::with_glyphs(self.width, self.theme.glyphs)
     }
 
-    /// Live rows the current message still needs, capped at the viewport's
-    /// reserved live area. The viewport is rebuilt to this count in `draw()`,
-    /// and the layout uses what the viewport reserved, so no empty live row is
-    /// painted. Does not call `live_view()` (that would recurse).
     fn live_height(&self) -> usize {
         self.live_rows.unwrap_or(MAX_LIVE_ROWS as usize)
     }
 
-    /// Set the frame to the viewport's real height before rendering. The
-    /// viewport was sized by `draw()` to `state + editor + facts + live`; from
-    /// the height we recover the live rows so `live_view()` trims to exactly
-    /// what fits.
+    /// Set the frame to the viewport's real height before rendering.
     pub fn set_viewport_height(&mut self, height: u16, editor_rows: u16, live_rows: u16) {
         self.editor_rows = editor_rows;
         self.live_rows = Some(live_rows as usize);
         self.height = height as usize;
     }
 
-    /// Rows to write above the viewport, in order.
     pub fn take_scroll(&mut self) -> Vec<Line<'static>> {
         if let Some(last) = self.scroll.last() {
             self.last_row = Some(is_blank(last));
@@ -946,7 +821,6 @@ impl App {
         self.tail_blank().is_some()
     }
 
-    /// Herdr records queued for the next write between two paints.
     pub fn take_status_records(&mut self) -> Vec<String> {
         std::mem::take(&mut self.status_records)
     }
@@ -974,9 +848,8 @@ impl App {
         rows
     }
 
-    /// The live rows: the tail of the message — every
-    /// row the streamed text has produced that is not in the scrollback yet,
-    /// trimmed to the live area's height.
+    /// The live rows: the tail of the message — every row the streamed text has produced that is
+    /// not in the scrollback yet, trimmed to the live area's height.
     pub fn live_view(&self) -> Vec<Row> {
         let mut rows = self.live_content();
         let start = rows.len().saturating_sub(self.live_height());
@@ -999,16 +872,14 @@ impl App {
             .collect()
     }
 
-    /// Queue plain text for the scrollback (banner, notes, verb replies).
     pub fn push_text(&mut self, text: &str) {
         for row in scrollback::wrap(text, self.width) {
             self.scroll.push(Line::from(row));
         }
     }
 
-    /// Queue plain text dimmed: the banner's note about a degraded window
-    /// (F-window). It is information, not prose, and it never outranks the
-    /// answer below it.
+    /// Queue plain text dimmed: the banner's note about a degraded window (F-window). It is
+    /// information, not prose, and it never outranks the answer below it.
     pub fn push_dim_text(&mut self, text: &str) {
         let style = self.theme.dim();
         for row in scrollback::wrap(text, self.width) {
@@ -1024,16 +895,11 @@ impl App {
         }
     }
 
-    /// Queue styled rows (a tool line, a summary).
     pub fn push_lines(&mut self, lines: Vec<Line<'static>>) {
         self.scroll.extend(lines);
     }
 
     /// Commit every row that can no longer change and every finished block.
-    /// Called after every delta and every block, so the scrollback always holds
-    /// everything the streamed text has produced up to the rows that can still
-    /// change. It starts at the first block with a row left, so what is already
-    /// out costs nothing (`P1`).
     fn commit_settled(&mut self) {
         let rows = self.message.settled_rows(self.layout());
         self.queue_rows(rows);
@@ -1050,19 +916,15 @@ impl App {
         self.committed_message = true;
     }
 
-    /// Commit the rows of the open block that can no longer change (`S1b`): a
-    /// fence's finished lines and a top-level list's finished items, keeping
-    /// `LIVE_KEEP` complete lines in the live area so the frame still shows the
-    /// text while it grows.
+    /// Commit the rows of the open block that can no longer change (`S1b`): a fence's finished lines and a
+    /// top-level list's finished items, keeping `LIVE_KEEP` complete lines in the live area so the frame
     fn commit_streaming(&mut self) {
         let rows = self.stream.settle(self.layout(), LIVE_KEEP);
         self.queue_rows(rows);
     }
 
-    /// Prose is starting: the first block of the message gets one blank row
-    /// above it (the echo is its own block, review N-echo). An empty assistant
-    /// turn (a reasoning-only step between tool calls) is not prose: it must
-    /// not put a blank row into a run of calls.
+    /// Prose is starting: the first block of the message gets one blank row above it (the echo is its own
+    /// block).
     fn begin_prose(&mut self, has_text: bool) {
         if !has_text || !self.committed_any() {
             return;
@@ -1072,10 +934,8 @@ impl App {
         }
     }
 
-    /// A tool call interrupts the message: the text that had streamed before it
-    /// is a finished block and goes into the scrollback *now*, so the call's
-    /// line lands after it and before whatever the model says next (`B1`).
-    /// Returns whether there was prose to flush.
+    /// A tool call interrupts the message: the text that had streamed before it is a finished block and
+    /// goes into the scrollback *now*, so the call's line lands after it and before whatever the model says
     fn interrupt_prose(&mut self) -> bool {
         // Only prose in flight needs flushing; an empty stream must not reset
         // the splitter's fence/table state mid-block.
@@ -1127,13 +987,8 @@ impl App {
         self.committed_message = false;
     }
 
-    /// The outcome line, for the turns that need a human: `paused`, `stopped`
-    /// and `error`. A `done` turn ends on its prose, so it gets no checkmark
-    /// line and no cost or timing noise.
-    ///
-    /// The final text above it (`turn paused after 2 steps; say continue to
-    /// resume`) and this line are separate blocks: one blank row between them,
-    /// the same rule every other pair of blocks follows (review N-paused).
+    /// The outcome line, for the turns that need a human: `paused`, `stopped` and `error`. A
+    /// `done` turn ends on its prose, so it gets no checkmark line and no cost or timing noise.
     fn turn_summary(&mut self, outcome: &str) {
         let steps = self.turn_steps.max(self.status.turn_steps);
         if outcome != "done" {
@@ -1146,10 +1001,8 @@ impl App {
         self.turn_tokens = 0;
     }
 
-    /// One blank row between two visual blocks, and never more than one (the
-    /// design note's spacing rule, review N1): a prompt echo starts its own
-    /// block, as does prose after tool lines. Nothing is written at the top of
-    /// an empty scrollback.
+    /// One blank row between two visual blocks, and never more than one (the design note's spacing rule,):
+    /// a prompt echo starts its own block, as does prose after tool lines.
     fn separate(&mut self) {
         if self.tail_blank() == Some(false) {
             self.scroll.push(Line::from(""));
@@ -1196,7 +1049,7 @@ impl App {
             }
             UiEvent::Paused { steps } => {
                 // A notice is prose: the call lines that ran before it are
-                // already committed, in event order (`B1`).
+                // already committed, in event order.
                 self.status.phase = Phase::Paused;
                 self.status.running = 0;
                 self.status.turn_steps = steps;
@@ -1210,26 +1063,18 @@ impl App {
                 ));
             }
             UiEvent::Delta(text) => {
-                // Prose follows call lines: the first row of it gets one blank
-                // row above it, and the transcript's order is the order the
-                // events happened in (`B1`). An empty delta (a step whose only
-                // output was reasoning or a tool call) is not prose: seeing
-                // one between calls must not split them with a blank row.
-                // (The stream was flushed when the call started: see
-                // `interrupt_prose`.)
+                // Prose follows call lines: the first row of it gets one blank row above it, and the transcript's
+                // order is the order the events happened in.
                 self.begin_prose(!text.trim().is_empty());
                 self.status.phase = Phase::Working;
                 self.activity.text(now, text.chars().count());
-                // Every closed block carries its own separator row
-                // (`Message::rows_after`), so nothing is written here: one
-                // blank row between blocks, exactly once, whether or not a
-                // frame was painted in between.
+                // Every closed block carries its own separator row (`Message::rows_after`), so nothing is written
+                // here: one blank row between blocks, exactly once, whether or not a frame was painted in between.
                 for block in self.stream.push_blocks(&text) {
                     self.absorb_block(&block);
                 }
-                // The rows of the block still open that can no longer change go
-                // out now, so a long fence, list or table fills the scrollback
-                // as it arrives instead of being a three-row ticker (`S1b`).
+                // The rows of the block still open that can no longer change go out now, so a long fence, list or
+                // table fills the scrollback as it arrives instead of being a three-row ticker (`S1b`).
                 self.commit_streaming();
             }
             UiEvent::Usage {
@@ -1246,17 +1091,14 @@ impl App {
                 self.turn_tokens += prompt + completion;
             }
             UiEvent::Assistant { text } => {
-                // A reasoning-only step ends with an empty assistant text: it
-                // is not prose and must not split a run of calls. Real text
-                // gets its blank row before the first block.
+                // A reasoning-only step ends with an empty assistant text: it is not prose and must not
+                // split a run of calls. Real text gets its blank row before the first block.
                 self.begin_prose(!text.trim().is_empty());
                 self.commit_live(&text);
             }
             UiEvent::ToolStarted { name, input } => {
-                // A call is the one thing that cannot be part of a paragraph:
-                // the prose that announced it is finished and goes into the
-                // scrollback now, so the call's line lands after it and before
-                // whatever the model says next (`B1`).
+                // A call is the one thing that cannot be part of a paragraph: the prose that announced it is finished
+                // and goes into the scrollback now, so the call's line lands after it and before whatever the model
                 if self.interrupt_prose() && self.committed_any() {
                     self.separate();
                 }
@@ -1298,9 +1140,8 @@ impl App {
                 };
                 self.last_out = Some(out_path).filter(|path| !path.is_empty());
                 self.calls.insert(call.ordinal, call.clone());
-                // One dim line per call, the moment it settles: the
-                // transcript's order is the events' order. `/expand` appends a
-                // call's output later; the line itself is never folded away.
+                // One dim line per call, the moment it settles: the transcript's order is the events' order.
+                // `/expand` appends a call's output later; the line itself is never folded away.
                 self.scroll.push(call.line(self.theme, self.width));
                 if call.failed()
                     && let Some(tail) = call.tail_line(self.theme, self.width)
@@ -1317,12 +1158,7 @@ impl App {
                 ))]);
             }
             UiEvent::Info(text) => {
-                // A notice is prose: the call lines before it are already out,
-                // in event order (`B1`).
-                // A wait's own line is the CLI's sentence, and in this pane
-                // `stop` typed is a `say` the model receives: the scrollback
-                // names the key that works here too (`R5`, the same rule the
-                // facts row follows).
+                // A notice is prose: the call lines before it are already out, in event order.
                 let text = if text.contains("say stop") {
                     tui_wait_line(&text)
                 } else {
@@ -1336,9 +1172,8 @@ impl App {
                 status,
                 attempt,
             } => {
-                // STEER-5's wait, in both rows: the state row becomes `rate
-                // limited` with a live countdown (tui2's activity machine), and
-                // the facts row carries the whole line (main's status line).
+                // A provider wait, in both rows: the state row becomes `rate limited` with a live countdown,
+                // activity machine), and the facts row carries the whole line (main's status line).
                 let wait = until.saturating_duration_since(now);
                 if self.activity.kind == Kind::RateLimited {
                     self.activity.tick_retry(wait);
@@ -1349,14 +1184,11 @@ impl App {
                 if status.is_some() || attempt > 0 {
                     self.retry_deadline = Some(until);
                 }
-                // The facts row's wording is the TUI's, not the CLI's: the
-                // line the retry event carries ends `say stop to cancel`, and
-                // `stop` typed into this prompt is a message to the model, not
-                // a stop (`R5`). The key hint is the state row's job.
+                // The facts row's wording is the TUI's, not the CLI's: the line the retry event carries ends `say stop
+                // to cancel`, and `stop` typed into this prompt is a message to the model, not a stop (`R5`).
                 self.status.retrying = Some((tui_wait_line(&line), until));
-                // The facts row carries the line and the state row carries the
-                // countdown, so the transient note stays out of the way (it
-                // would repeat the line over the state row's own detail).
+                // The facts row carries the line and the state row carries the countdown, so the transient
+                // note stays out of the way (it would repeat the line over the state row's own detail).
                 self.note.clear();
             }
             UiEvent::RetryingDone => {
@@ -1371,14 +1203,14 @@ impl App {
                 // Same rule: what settled before the failure is already out,
                 // so the notice reads after the last tool line.
                 self.status.phase = Phase::Error;
-                self.activity.failed(now, &one_line(&text));
+                self.activity
+                    .failed(now, &crate::util::one_line_visible(&text, 60));
                 self.push_text(&format!("kelir: {text}"));
             }
             UiEvent::Reply(response) => {
                 if response.ok {
-                    // A `say`/`later` was already echoed as the user's line,
-                    // and an idle `stop` was already answered on screen as
-                    // dropped; neither needs a second line.
+                    // A `say`/`later` was already echoed as the user's line, and an idle `stop` was already
+                    // answered on screen as dropped; neither needs a second line.
                     let quiet = matches!(response.verb.as_deref(), Some("say") | Some("later"))
                         || (response.verb.as_deref() == Some("stop")
                             && response.applies.as_deref() == Some("dropped"));
@@ -1392,7 +1224,7 @@ impl App {
                         .error
                         .unwrap_or_else(|| "the session refused the verb".into());
                     self.push_text(&format!("kelir: {message}"));
-                    self.note = one_line(&message);
+                    self.note = crate::util::one_line_visible(&message, 60);
                 }
             }
             UiEvent::TurnEnded {
@@ -1401,10 +1233,8 @@ impl App {
             } => {
                 self.commit_live("");
                 self.activity.turn_ended(now, &outcome);
-                // A provider pause ends a retry wait, and the wait's own reason
-                // is gone: what the human needs is why the turn paused. The
-                // session's message carries it ahead of the "say continue"
-                // tail, which the row adds itself.
+                // A provider pause ends a retry wait, and the wait's own reason is gone: what the human needs is why
+                // the turn paused.
                 if outcome == "paused"
                     && let Some(reason) = pause_reason(&final_text)
                 {
@@ -1435,7 +1265,6 @@ impl App {
         read_tail(std::path::Path::new(&call.out_path), TAIL_BYTES).unwrap_or_default()
     }
 
-    /// One key press.
     pub fn press(&mut self, press: Press) {
         match press {
             Press::Edit(key) => {
@@ -1444,13 +1273,8 @@ impl App {
                     Outcome::Submitted(text) => self.submit(&text),
                     Outcome::ChipRemoved(chip) => self.discard_chip(&chip),
                     Outcome::Edited | Outcome::Ignored => {
-                        // A terminal whose bracketed paste arrives as keystrokes
-                        // (Windows: crossterm decodes `ESC[200~` only on Unix)
-                        // has just typed a path character by character. The
-                        // moment a complete image path ends at the cursor it
-                        // becomes the same chip the paste would have made (S8),
-                        // so the chip is what the user sees and edits on every
-                        // platform, not only on Unix.
+                        // A terminal whose bracketed paste arrives as keystrokes (Windows: crossterm decodes `ESC[200~` only
+                        // on Unix) has just typed a path character by character.
                         if typed {
                             self.adopt_typed_image();
                         }
@@ -1478,14 +1302,8 @@ impl App {
         }
     }
 
-    /// Take the image path that was just typed (or pasted as keystrokes) at the
-    /// cursor and turn it into a chip: the file is saved into the session, the
-    /// path text is removed from the buffer and `[image N]` takes its place.
-    ///
-    /// The whole run of text ending at the cursor is considered, not just the
-    /// last character: a path can arrive in pieces (a drag and drop types it in
-    /// one burst, a slow paste in several), and a partial path is simply not a
-    /// file yet, so nothing happens until it is.
+    /// Take the image path that was just typed (or pasted as keystrokes) at the cursor and turn it into a
+    /// chip: the file is saved into the session, the path text is removed from the buffer and `[image N]`
     fn adopt_typed_image(&mut self) {
         if self.session_dir.is_none() {
             return;
@@ -1519,10 +1337,6 @@ impl App {
     }
 
     /// A bracket paste: an image *path* becomes a chip, anything else is text.
-    ///
-    /// The image work (read, hash, copy) is a few hundred kilobytes of file
-    /// I/O; it happens here, on the input path, and the chip appears when it is
-    /// done. Never the path text itself: the prompt must carry the pointer.
     pub fn paste(&mut self, text: &str) {
         if let Some(paste) = attachments::pasted_image(text)
             && let Some(saved) = self.save_image(&paste.path)
@@ -1545,7 +1359,7 @@ impl App {
         match attachments::save(&dir, seq, path, &mut self.seen_images) {
             Ok(saved) => Some(saved),
             Err(message) => {
-                self.note = one_line(&message);
+                self.note = crate::util::one_line_visible(&message, 60);
                 None
             }
         }
@@ -1566,13 +1380,11 @@ impl App {
         if let Some(dir) = &self.session_dir {
             let path = dir.join(&chip.rel);
             let _ = std::fs::remove_file(path);
-            // The file is gone: a later paste of the same bytes must save again,
-            // and a path that was taken into a chip can be taken again (its
-            // file no longer exists, so it is not "the same paste twice").
+            // The file is gone: a later paste of the same bytes must save again, and a path that was taken into a
+            // chip can be taken again (its file no longer exists, so it is not "the same paste twice").
             self.seen_images.retain(|_, rel| rel != &chip.rel);
-            // The text forms the same file was absorbed in (`C:/x/shot.png`,
-            // `"C:/x/shot.png"`) name a file that no longer exists, so they must
-            // be takeable again.
+            // The text forms the same file was absorbed in (`C:/x/shot.png`, `"C:/x/shot.png"`) name a
+            // file that no longer exists, so they must be takeable again.
             let stem = chip
                 .rel
                 .rsplit('/')
@@ -1586,14 +1398,8 @@ impl App {
         }
     }
 
-    /// Parse one submitted line and send what it asks for. Chips become pointer
-    /// text here: the editor showed `[image 1]`, the model sees the pointer.
-    ///
-    /// A line that contains an image *path* (a drag and drop, or a paste on a
-    /// terminal whose bracketed paste arrives as keystrokes — crossterm 0.29
-    /// only decodes `ESC[200~` on Unix) gets the same treatment: the file is
-    /// saved and the path is replaced with the pointer. So a dropped path is a
-    /// pointer on every platform, never a raw path and never bytes.
+    /// Parse one submitted line and send what it asks for. Chips become pointer text here: the
+    /// editor showed `[image 1]`, the model sees the pointer.
     pub fn submit(&mut self, line: &str) {
         let chips = self.editor.take_chips();
         let mut text = line.to_string();
@@ -1625,12 +1431,8 @@ impl App {
         }
     }
 
-    /// Replace every existing image path in `text` with a pointer, saving the
-    /// file into the session first. Words that are not images are left alone.
-    /// Replace every existing image path in `text` with a pointer, saving the
-    /// file into the session first. A path may be quoted (`"C:\… b.png"`, what
-    /// Explorer's drag and drop and a clipboard paste produce) or bare; words
-    /// that are not images are left exactly as they were.
+    /// Replace every existing image path in `text` with a pointer, saving the file into the
+    /// session first. Words that are not images are left alone.
     pub fn absorb_image_paths(&mut self, text: &str) -> String {
         if self.session_dir.is_none() {
             return text.to_string();
@@ -1660,9 +1462,8 @@ impl App {
     /// Send one action through the session's verb channel — the same channel
     /// the socket feeds, logged and answered the same way.
     pub fn dispatch(&mut self, action: &Action) {
-        // The UI runs inside the session, so it carries the session's own token
-        // from memory (STEER-7): it goes through the same channel the socket
-        // feeds, which is where every verb is authenticated.
+        // The UI runs inside the session, so it carries the session's own token from memory: it goes
+        // through the same channel the socket feeds, which is where every verb is authenticated.
         let request =
             Request::new(action.verb(), action.args(), "tui").with_token(Some(self.token.clone()));
         let (reply, answer) = oneshot::channel();
@@ -1722,7 +1523,6 @@ impl App {
         self.show_tail = true;
     }
 
-    /// The most recent settled call, which the Ctrl-O overlay's header names.
     pub fn last_call(&self) -> Option<&CallLine> {
         self.calls.values().max_by_key(|call| call.ordinal)
     }
@@ -1770,10 +1570,6 @@ impl App {
 // ------------------------------------------------------------------- input
 
 /// The next quoted or bare path-shaped token in `text`, as `(start, token)`.
-///
-/// Quoted first (a Windows path with spaces arrives quoted), then bare: a token
-/// of non-space characters whose extension is one kelir knows. The caller
-/// decides whether it is a real file; this only finds the candidates.
 fn next_path(text: &str) -> Option<(usize, String)> {
     let mut best: Option<(usize, String)> = None;
     for quote in ['"', '\''] {
@@ -1818,15 +1614,6 @@ pub enum Press {
     Redraw,
 }
 
-/// Ask the host terminal to report modified keys as CSI-u sequences.
-///
-/// Without this, a terminal multiplexer (Herdr in particular) sees a plain
-/// legacy terminal and downgrades Shift-Enter to a bare carriage return before
-/// it reaches us, so `translate` never sees the SHIFT modifier. Only
-/// `DISAMBIGUATE_ESCAPE_CODES` is pushed: `REPORT_ALTERNATE_KEYS` would make
-/// crossterm replace the Enter keycode with the shifted character, and
-/// `REPORT_ALL_KEYS` would break the shell's plain Enter/Tab/Backspace.
-/// Terminals that do not know the protocol ignore the sequence.
 fn push_keyboard_enhancements(stdout: &mut impl Write) {
     let _ = ratatui::crossterm::execute!(
         stdout,
@@ -1871,15 +1658,10 @@ pub fn translate(key: KeyEvent) -> Option<Press> {
         }
         KeyCode::Esc => Some(Press::Stop),
         // Enter sends; Shift-Enter / Alt-Enter (and Ctrl-J) start a new line.
-        // Ghostty sends Shift-Enter as CSI-u `ESC[13;2u`, which crossterm
-        // decodes to Enter+SHIFT; terminals without that protocol send a bare
-        // Enter, which keeps the send behaviour.
         KeyCode::Enter if alt || shift => Some(Press::Edit(Key::Newline)),
         KeyCode::Enter => Some(Press::Edit(Key::Enter)),
-        // Ctrl-Backspace deletes a word. In a legacy terminal it arrives as
-        // 0x08 (Backspace with no CONTROL bit); with the kitty keyboard
-        // protocol it is Backspace+CONTROL. Both mean "delete previous word".
-        // Alt-Backspace deletes the word *after* the cursor on most GUIs.
+        // Ctrl-Backspace deletes a word. In a legacy terminal it arrives as 0x08 (Backspace with no
+        // CONTROL bit); with the kitty keyboard protocol it is Backspace+CONTROL.
         KeyCode::Backspace if ctrl => Some(Press::Edit(Key::KillPrevWord)),
         KeyCode::Backspace if alt => Some(Press::Edit(Key::KillNextWord)),
         KeyCode::Backspace => Some(Press::Backspace),
@@ -1907,12 +1689,7 @@ pub struct Areas {
     pub facts: Rect,
 }
 
-/// Three live rows at most, the state row, up to `MAX_EDITOR_ROWS` editor
-/// rows, and the facts row. The viewport is built from the content counts in
-/// `draw()`, so `layout_of` uses those counts to hand each row exactly the
-/// space it needs: no blank live rows above the state row. On a short screen
-/// the live rows go first, then the facts row, then the editor down to one row;
-/// the state row is the last to go.
+/// Three live rows at most, the state row, up to `MAX_EDITOR_ROWS` editor rows, and the facts row.
 pub fn layout(area: Rect, editor_rows: u16, live_rows: u16) -> Areas {
     let mut areas = layout_of(
         area.width as usize,
@@ -1920,9 +1697,8 @@ pub fn layout(area: Rect, editor_rows: u16, live_rows: u16) -> Areas {
         editor_rows,
         live_rows,
     );
-    // The rects are built from the row count alone; move them to where the
-    // caller's area really starts (an inline viewport does not start at row 0,
-    // and drawing at row 0 would paint over the scrollback above it).
+    // The rects are built from the row count alone; move them to where the caller's area really starts (an
+    // inline viewport does not start at row 0, and drawing at row 0 would paint over the scrollback above
     for row in [
         &mut areas.live,
         &mut areas.state,
@@ -1945,10 +1721,8 @@ fn layout_of(width: usize, height: usize, editor_rows: u16, live_rows: u16) -> A
             facts: area,
         };
     }
-    // The viewport was sized to `2 + editor_rows + live_rows`, so the
-    // content counts describe exactly how to split the space. The live area
-    // takes its rows first (streamed text must not be clipped); the editor
-    // takes its own wrapped rows. Neither gets blank spare rows.
+    // The viewport was sized to `2 + editor_rows + live_rows`, so the content counts describe exactly how
+    // to split the space.
     let facts_height = u16::from(area.height >= 3);
     let state_height = u16::from(area.height >= 2);
     let space = area.height.saturating_sub(facts_height + state_height);
@@ -1971,9 +1745,8 @@ fn layout_of(width: usize, height: usize, editor_rows: u16, live_rows: u16) -> A
 
 // -------------------------------------------------------------------- draw
 
-/// The top row of the last painted inline viewport, for the panic hook: a
-/// panic erases the same rows a clean exit does. `u16::MAX` means "never
-/// painted".
+/// The top row of the last painted inline viewport, for the panic hook: a panic erases the
+/// same rows a clean exit does. `u16::MAX` means "never painted".
 static VIEWPORT_Y: AtomicU16 = AtomicU16::new(u16::MAX);
 
 /// Paint the viewport. Everything else goes through `insert_before`.
@@ -1986,9 +1759,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         app.wanted_live_rows(),
     );
     VIEWPORT_Y.store(area.y, Ordering::Relaxed);
-    // The Ctrl-O overlay replaces the live, state and editor rows with the
-    // captured output; only the facts row survives. Give it a layout that
-    // puts facts at the very bottom so the overlay gets all the rows above.
+    // The Ctrl-O overlay replaces the live, state and editor rows with the captured output; only the facts
+    // row survives.
     let areas = if app.show_tail {
         layout(area, VIEWPORT_HEIGHT, 0)
     } else {
@@ -2004,7 +1776,6 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     render_facts(app, frame, areas.facts);
 }
 
-/// The streamed text (markdown, styled) in the live area.
 fn render_live(app: &App, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
@@ -2015,9 +1786,8 @@ fn render_live(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines[start..].to_vec()), area);
 }
 
-/// The editor: the window of rows that keeps the cursor visible, the prompt
-/// dimmed while the agent works, the image chips reversed, and the cursor
-/// itself counted in display columns.
+/// The editor: the window of rows that keeps the cursor visible, the prompt dimmed while the
+/// agent works, the image chips reversed, and the cursor itself counted in display columns.
 fn render_editor(app: &mut App, frame: &mut Frame, screen: Rect, area: Rect) {
     if area.height == 0 {
         return;
@@ -2090,9 +1860,8 @@ fn chip_spans(app: &App, line: &str, theme: Theme) -> Vec<Span<'static>> {
 
 /// The output tail (Ctrl-O): the whole area above the state row, dim.
 fn render_tail(app: &App, frame: &mut Frame, screen: Rect, facts: Rect) {
-    // Everything above the facts row: the overlay replaces the live area, the
-    // state row and the editor while it is open, and the facts row says how to
-    // close it.
+    // Everything above the facts row: the overlay replaces the live area, the state row and the
+    // editor while it is open, and the facts row says how to close it.
     let height = facts.y.saturating_sub(screen.y);
     let area = Rect {
         x: screen.x,
@@ -2163,7 +1932,6 @@ fn render_facts(app: &App, frame: &mut Frame, area: Rect) {
 
 // -------------------------------------------------------------------- loop
 
-/// Everything the run loop needs to paint one inline view.
 pub struct Tui {
     pub app: App,
     terminal: ratatui::DefaultTerminal,
@@ -2173,10 +1941,7 @@ pub struct Tui {
     tick: Option<Instant>,
     /// When the last frame went out, for the frame cap.
     last_paint: Option<Instant>,
-    /// Rows the current inline viewport was created with. When the editor
-    /// wraps to more (or shrinks to fewer) rows, `draw` rebuilds the terminal
-    /// at this many rows so the whole prompt is visible and no blank editor
-    /// row sits above the input.
+    /// Rows the current inline viewport was created with.
     viewport_rows: u16,
 }
 
@@ -2187,17 +1952,11 @@ enum Step {
     Tick,
 }
 
-/// How long the input thread waits for a key before checking again. A short
-/// poll, never a blocking `read`: on Unix the cursor-position query ratatui
-/// makes when the window is resized needs the same event-reader lock, and a
-/// thread parked in `read()` makes that query time out (and the UI die) the
-/// first time the terminal changes size.
+/// How long the input thread waits for a key before checking again.
 const KEY_POLL: Duration = Duration::from_millis(30);
 
-/// `kelir`'s own words above the viewport, in the order they appear: the
-/// banner's identity lines, then a note or the cap. `dim` marks a line that is
-/// information rather than the banner's plain text (the degraded window's
-/// reason, F-window).
+/// `kelir`'s own words above the viewport, in the order they appear: the banner's identity lines, then
+/// a note or the cap.
 pub struct BannerLine {
     pub text: String,
     pub dim: bool,
@@ -2219,9 +1978,8 @@ impl BannerLine {
     }
 }
 
-/// Take the terminal (raw mode, panic hook, inline viewport), the keyboard, and
-/// the session's event stream. The caller has already checked that stdout is a
-/// terminal.
+/// Take the terminal (raw mode, panic hook, inline viewport), the keyboard, and the session's
+/// event stream. The caller has already checked that stdout is a terminal.
 pub fn start(
     events: mpsc::UnboundedReceiver<UiEvent>,
     to_tui: mpsc::UnboundedSender<UiEvent>,
@@ -2232,21 +1990,18 @@ pub fn start(
     theme: Theme,
 ) -> std::io::Result<Tui> {
     let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, VIEWPORT_HEIGHT));
-    // Start with the input only: no streaming rows yet, so no blank gap
-    // between the welcome banner and the prompt. `draw()` grows the live area
-    // on the first token and shrinks it again when the message settles.
+    // Start with the input only: no streaming rows yet, so no blank gap between the welcome banner and the
+    // prompt.
     let initial_rows = viewport_height_for(1, 0).min(height);
     let terminal = ratatui::try_init_with_options(ratatui::TerminalOptions {
         viewport: ratatui::Viewport::Inline(initial_rows),
     })?;
     install_panic_hook();
-    // Negotiate CSI-u key reporting so Shift-Enter survives a multiplexer
-    // (Herdr forwards it as ESC[13;2u only when the pane asked for kitty
-    // keyboard mode). Popped in finish() and in the panic hook.
+    // Negotiate CSI-u key reporting so Shift-Enter survives a multiplexer (Herdr forwards it as ESC[13;2u
+    // only when the pane asked for kitty keyboard mode).
     push_keyboard_enhancements(&mut std::io::stdout());
-    // Bracketed paste, so a pasted block of text arrives as one `Paste` event
-    // (with its newlines) instead of a burst of keystrokes whose Enter would
-    // submit it.
+    // Bracketed paste, so a pasted block of text arrives as one `Paste` event (with its
+    // newlines) instead of a burst of keystrokes whose Enter would submit it.
     let _ = ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::event::EnableBracketedPaste
@@ -2266,9 +2021,8 @@ pub fn start(
             app.push_text(&line.text);
         }
     }
-    // The cap is known before the first turn (it comes from config or the
-    // flag), so the idle facts row can already say `step 0/N` instead of a
-    // bare `step 0` that would hide the limit until a turn started (review N1).
+    // The cap is known before the first turn (it comes from config or the flag), so the idle facts row can
+    // already say `step 0/N` instead of a bare `step 0` that would hide the limit until a turn started.
     app.status.limit = cap;
     let (key_tx, keys) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
@@ -2303,10 +2057,8 @@ pub fn start(
     })
 }
 
-/// On a panic, do what [`Tui::finish`] does with the last painted viewport
-/// (erase it, put the cursor on the next line, show it, turn paste and raw mode
-/// off) before ratatui's hook and the original hook print the message.
-/// `KELIR_TEST_PANIC` exercises this path in `tests/e2e_tui.rs`.
+/// On a panic, do what [`Tui::finish`] does with the last painted viewport (erase it, put the cursor on
+/// the next line, show it, turn paste and raw mode off) before ratatui's hook and the original hook
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -2340,9 +2092,8 @@ impl Tui {
             self.flush_status()?;
             self.flush_scroll()?;
             self.draw()?;
-            // A documented, test-only panic with the terminal fully owned (raw
-            // mode on, bracketed paste on, a painted viewport): it exercises
-            // the restore path a real crash takes (`tests/e2e_tui.rs`).
+            // A documented, test-only panic with the terminal fully owned (raw mode on, bracketed paste on, a
+            // painted viewport): it exercises the restore path a real crash takes (`tests/e2e_tui.rs`).
             if crate::envs::var_os("KELIR_TEST_PANIC").is_some() {
                 panic!("KELIR_TEST_PANIC: injected panic to prove the terminal is restored");
             }
@@ -2381,10 +2132,8 @@ impl Tui {
         Ok(())
     }
 
-    /// Everything already queued is applied before the next paint, so a burst
-    /// of streamed deltas costs one frame, not one frame each. The frame cap
-    /// bounds the other direction: a fast provider cannot make the TUI repaint
-    /// more often than [`FRAME_MIN`].
+    /// Everything already queued is applied before the next paint, so a burst of streamed deltas costs one
+    /// frame, not one frame each.
     fn drain(&mut self, first: UiEvent) {
         self.app.apply(first);
         let mut applied = 1usize;
@@ -2395,10 +2144,8 @@ impl Tui {
         while let Ok(event) = self.keys.try_recv() {
             self.on_terminal(event);
         }
-        // Frame cap: a burst of provider deltas is coalesced into one frame, and
-        // two bursts closer together than `FRAME_MIN` are held to it, so a fast
-        // provider cannot make the TUI repaint more than ~30 times a second.
-        // A single key press is never delayed here.
+        // Frame cap: a burst of provider deltas is coalesced into one frame, and two bursts closer together
+        // than `FRAME_MIN` are held to it, so a fast provider cannot make the TUI repaint more than ~30 times
         if applied > 1
             && let Some(last) = self.last_paint
         {
@@ -2441,10 +2188,7 @@ impl Tui {
         let _ = self.terminal.autoresize();
     }
 
-    /// Rebuild the inline viewport at a new height while keeping its top row
-    /// anchored. The terminal owns the rows above the viewport (committed
-    /// scrollback), so we clear only our own rows, move the cursor to their
-    /// top, and let ratatui anchor the fresh inline viewport there.
+    /// Rebuild the inline viewport at a new height while keeping its top row anchored.
     fn rebuild_viewport(&mut self, rows: u16) -> std::io::Result<()> {
         let top = VIEWPORT_Y.load(Ordering::Relaxed);
         let mut stdout = std::io::stdout();
@@ -2488,10 +2232,7 @@ impl Tui {
         result
     }
 
-    /// Write Herdr's status records between two complete frames, from the task
-    /// that paints. Nothing else writes to stdout while the viewport is up, so
-    /// an OSC can never land inside one of crossterm's CSI sequences (M2
-    /// review F2).
+    /// Write Herdr's status records between two complete frames, from the task that paints.
     fn flush_status(&mut self) -> std::io::Result<()> {
         let records = self.app.take_status_records();
         if records.is_empty() {
@@ -2507,19 +2248,14 @@ impl Tui {
     /// One frame, wrapped in synchronised output: terminals that do not know
     /// the sequence ignore it, so there is no capability probing.
     fn draw(&mut self) -> std::io::Result<()> {
-        // The editor may have wrapped onto more rows since the last frame, and
-        // the streamed answer may have grown or settled. Rebuild the inline
-        // viewport at exactly the height the content needs: the state and facts
-        // rows, the editor's visual rows, and only the live rows the message is
-        // actually using. With nothing streaming that leaves no blank rows
-        // between the scrollback and the input.
+        // The editor may have wrapped onto more rows since the last frame, and the streamed answer may have
+        // grown or settled.
         let width = self.app.width.max(1);
         self.app.editor.set_width(width);
         let live_rows = self.app.wanted_live_rows();
         let mut wanted = viewport_height_for(self.app.editor.visual_rows().len() as u16, live_rows);
-        // The Ctrl-O overlay replaces the live/state/editor rows with the
-        // captured output: reserve a row for the call header plus one per tail
-        // line (capped at the old eight-row height), so nothing is clipped.
+        // The Ctrl-O overlay replaces the live/state/editor rows with the captured output: reserve a row for
+        // the call header plus one per tail line (capped at the old eight-row height), so nothing is clipped.
         if self.app.show_tail {
             wanted = wanted
                 .max((self.app.tail.len() as u16 + 2).min(VIEWPORT_HEIGHT))
@@ -2548,9 +2284,8 @@ impl Tui {
         result.map(|_| ())
     }
 
-    /// Leave the terminal usable: raw mode off, bracketed paste off, the
-    /// viewport erased, and the cursor on the first free row below it so the
-    /// shell's prompt cannot overwrite a committed line (M2 review F3).
+    /// Leave the terminal usable: raw mode off, bracketed paste off, the viewport erased, and the cursor on
+    /// the first free row below it so the shell's prompt cannot overwrite a committed line.
     fn finish(&mut self) {
         let mut stdout = std::io::stdout();
         let _ =
@@ -2566,10 +2301,7 @@ impl Tui {
                 Clear(ClearType::FromCursorDown)
             );
         }
-        // The cursor is at the (now blank) viewport's first row; one newline
-        // puts the shell prompt below it. When the viewport reached the bottom
-        // row, that newline scrolls the screen once, which is exactly the free
-        // line the prompt needs.
+        // The cursor is at the (now blank) viewport's first row; one newline puts the shell prompt below it.
         let _ =
             ratatui::crossterm::execute!(stdout, Show, ratatui::crossterm::style::Print("\r\n"));
         // The welcome banner deliberately omits the session id; on exit, hand
@@ -2700,7 +2432,7 @@ mod tests {
         assert!(!status_text(&status).contains("cache"));
         assert!(!status_text(&status).contains('$'));
         assert!(!status_text(&status).contains("running"));
-        // `done` reads as `idle`, so the two rows cannot disagree (S5).
+        // `done` reads as `idle`, so the two rows cannot disagree .
         let done = Status {
             phase: Phase::Done,
             ..Status::default()
@@ -2785,9 +2517,8 @@ mod tests {
             status: Some(429),
             attempt: 5,
         });
-        // The countdown feeds both rows and neither repeats the other: the
-        // facts row carries the line, the state row its own `rate limited`
-        // state with the remaining seconds, so the transient note stays empty.
+        // The countdown feeds both rows and neither repeats the other: the facts row carries the line, the
+        // state row its own `rate limited` state with the remaining seconds, so the transient note stays
         assert!(app.note().is_empty(), "{}", app.note());
         let facts = status_text(&app.status);
         assert!(facts.contains("retrying in 34 s"), "{facts}");
@@ -2941,7 +2672,7 @@ mod tests {
     }
 
     /// One step is one step: the pause line never says `1 steps` (the same
-    /// rule the summary line follows, review N4).
+    /// rule the summary line follows,).
     #[test]
     fn a_one_step_pause_reads_one_step() {
         let mut app = app_of_width(80);
@@ -3048,7 +2779,7 @@ mod tests {
     fn markdown_is_rendered_in_the_live_area_and_committed_with_its_styles() {
         let mut app = app_of_width(60);
         app.apply(UiEvent::Delta("## Files\n\nsome **bold** text\n".into()));
-        // A closed block never waits for the message to end (S1): the heading is
+        // A closed block never waits for the message to end : the heading is
         // in the scrollback, and the block still streaming is the live area.
         let committed: Vec<String> = app.take_scroll().iter().map(line_text).collect();
         assert!(committed.iter().any(|row| row == "Files"), "{committed:?}");
@@ -3073,10 +2804,8 @@ mod tests {
         assert!(styled, "the bold run survives into the scrollback");
     }
 
-    /// The turn shapes the review named: calls then an answer, an answer then
-    /// calls, and the two interleaved. The committed rows are in event order in
-    /// every case (`B1`) — a model that writes its sentence before running the
-    /// call it announces must not have that sentence land above the call.
+    /// The turn shapes the review named: calls then an answer, an answer then calls, and the two
+    /// interleaved.
     #[test]
     fn the_committed_rows_follow_the_order_of_events_in_every_turn_shape() {
         // calls, then prose.
@@ -3106,9 +2835,8 @@ mod tests {
         let prose = rows.iter().position(|r| r.contains("Both are")).unwrap();
         assert!(git < python && python < prose, "{rows:?}");
 
-        // Prose, then calls, then prose: the piece before the calls stays above
-        // them, and the piece after them below, even with no blank line between
-        // the pieces (the model streams one paragraph across the call).
+        // Prose, then calls, then prose: the piece before the calls stays above them, and the piece after them
+        // below, even with no blank line between the pieces (the model streams one paragraph across the call).
         let mut app = app_of_width(80);
         app.apply(UiEvent::Delta("Let me check both versions first.\n".into()));
         app.apply(tool_settled("git --version"));
@@ -3157,11 +2885,8 @@ mod tests {
         assert!(!rows.iter().any(|r| r.contains("3 calls")), "{rows:?}");
     }
 
-    /// The spacing rules hold across a *paint*, not only inside one buffer
-    /// (`N-echo`, round 2): a real pane drains the committed rows between two
-    /// events, and the rules must not depend on whether a frame was drawn in
-    /// between. Draining after every event is what the event loop does, and the
-    /// rows must still be exactly one blank apart.
+    /// The spacing rules hold across a *paint*, not only inside one buffer: a real pane
+    /// drains the committed rows between two events, and the rules must not depend on whether a frame was
     #[test]
     fn the_spacing_rules_hold_when_every_event_is_painted() {
         fn drain(app: &mut App, out: &mut Vec<String>) {
@@ -3228,10 +2953,8 @@ mod tests {
         assert_eq!(tight, vec!["• a".to_string(), "• b".to_string()]);
     }
 
-    /// A notice (a pause, a provider error, a verb reply) is prose too:
-    /// calls that settled before it are history and must be written first, or
-    /// the notice lands between two tool lines of the group it followed (`B1`
-    /// in the paused drive).
+    /// A notice (a pause, a provider error, a verb reply) is prose too: calls that settled before it are
+    /// history and must be written first, or the notice lands between two tool lines of the group it
     #[test]
     fn a_notice_lands_after_the_tool_lines_that_came_before_it() {
         let mut app = app_of_width(100);
@@ -3264,9 +2987,8 @@ mod tests {
         assert!(call < error, "{rows:?}");
     }
 
-    /// The wait's own scrollback line names this pane's key (`R5`): the CLI's
-    /// `say stop to cancel` is false here, because `stop` typed into the prompt
-    /// is a `say` the model receives.
+    /// The wait's own scrollback line names this pane's key (`R5`): the CLI's `say stop to
+    /// cancel` is false here, because `stop` typed into the prompt is a `say` the model receives.
     #[test]
     fn the_wait_line_in_the_scrollback_names_the_key_that_stops_here() {
         let mut app = app_of_width(100);
@@ -3293,9 +3015,8 @@ mod tests {
         assert_eq!(rows, vec!["» stop (Esc)".to_string()]);
     }
 
-    /// The design note's spacing rule (review N1): one blank row between a
-    /// prompt echo and what follows it, one between tool lines and the prose
-    /// after them, and never two in a row.
+    /// The design note's spacing rule: one blank row between a prompt echo and what follows it,
+    /// one between tool lines and the prose after them, and never two in a row.
     #[test]
     fn blocks_of_history_are_separated_by_exactly_one_blank_row() {
         let mut app = app_of_width(60);
@@ -3334,9 +3055,8 @@ mod tests {
             .iter()
             .position(|row| row.contains("all good"))
             .expect("prose");
-        // The design note's rules: a blank row before a user echo (not this
-        // one, it opens the scrollback) and before prose after tool lines; none
-        // between the echo and the tool lines of the same block.
+        // The design note's rules: a blank row before a user echo (not this one, it opens the scrollback) and
+        // before prose after tool lines; none between the echo and the tool lines of the same block.
         assert!(
             rows[echo + 1].contains("$ ls"),
             "a call follows its echo directly: {rows:?}"
@@ -3390,9 +3110,8 @@ mod tests {
         assert!(!texts.iter().any(|r| r.contains(" ok")), "{texts:?}");
     }
 
-    /// A step whose model message is empty — it only thought, then called a
-    /// tool — is not prose. The two calls stay one contiguous block: no blank
-    /// row, no split in the transcript.
+    /// A step whose model message is empty — it only thought, then called a tool — is not prose.
+    /// The two calls stay one contiguous block: no blank row, no split in the transcript.
     #[test]
     fn calls_interleaved_with_empty_assistant_text_stay_contiguous() {
         let mut app = app_of_width(80);
@@ -3613,10 +3332,8 @@ mod tests {
         assert!(!echoed.contains("what the"), "{echoed:?}");
     }
 
-    /// The maintainer's platform: on Windows a terminal's paste arrives as
-    /// keystrokes (crossterm decodes `ESC[200~` only on Unix). The chip must
-    /// appear when the path has been typed, as it does after a bracketed paste —
-    /// not only at submit, and not as raw path text (`S8`).
+    /// The maintainer's platform: on Windows a terminal's paste arrives as keystrokes (crossterm decodes
+    /// `ESC[200~` only on Unix).
     #[test]
     fn a_typed_image_path_burst_becomes_a_chip_at_paste_time() {
         let dir = tempfile::tempdir().unwrap();
@@ -3647,12 +3364,8 @@ mod tests {
         );
     }
 
-    /// A typed path that is only half a file stays text until it is a file: a
-    /// prefix of a real path is not an image, and nothing is saved for it.
-    /// A chip removed before it was sent takes its file with it, so the same
-    /// path must be able to become a chip again: the "already absorbed" memory
-    /// is dropped with the file (the live drive typed the path a second time
-    /// and it stayed text).
+    /// A typed path that is only half a file stays text until it is a file: a prefix of a real path is not
+    /// an image, and nothing is saved for it.
     #[test]
     fn a_path_whose_chip_was_removed_becomes_a_chip_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -3775,9 +3488,8 @@ mod tests {
         assert!(texts.iter().any(|row| row.contains("stop")), "{texts:?}");
     }
 
-    /// STEER-5's wait feeds tui2's state row: a provider retry turns the row
-    /// into `rate limited` with the countdown and the attempt, and the following
-    /// step leaves it behind.
+    /// A provider wait feeds the state row: a provider retry turns the row into `rate limited` with
+    /// the countdown and the attempt, and the following step leaves it behind.
     #[test]
     fn a_retry_event_puts_the_countdown_in_the_state_row() {
         let mut app = app_of_width(100);
@@ -3813,9 +3525,8 @@ mod tests {
         assert_eq!(app.activity.kind, Kind::Thinking);
     }
 
-    /// A governor slot wait is not a provider retry: the facts row says what
-    /// the session is waiting for, and the state row keeps the work it was
-    /// doing rather than claiming the provider rate-limited us.
+    /// A governor slot wait is not a provider retry: the facts row says what the session is waiting for,
+    /// and the state row keeps the work it was doing rather than claiming the provider rate-limited us.
     #[test]
     fn a_slot_wait_does_not_become_a_rate_limited_state() {
         let mut app = app_of_width(100);
@@ -3890,8 +3601,6 @@ mod tests {
         push_keyboard_enhancements(&mut out);
         pop_keyboard_enhancements(&mut out);
         // ESC[>1u pushes flag 1 (disambiguate escape codes); ESC[<1u pops it.
-        // No REPORT_ALTERNATE_KEYS (4): crossterm would replace Enter with the
-        // shifted character and break the SHIFT branch in translate().
         assert_eq!(out, b"\x1b[>1u\x1b[<1u");
     }
 
@@ -3922,14 +3631,11 @@ mod tests {
         assert!(!app.tick(Instant::now()));
     }
 
-    /// An inline viewport does not start at row 0: the rows must be positioned
-    /// from the frame's own origin, or every row is clipped (a real terminal
-    /// showed a stale screen because of exactly this).
+    /// An inline viewport does not start at row 0: the rows must be positioned from the frame's own origin,
+    /// or every row is clipped (a real terminal showed a stale screen because of exactly this).
     #[test]
     fn the_viewport_has_no_blank_live_rows_when_idle() {
         // Two fixed rows (state, facts) plus exactly the editor's visual rows.
-        // Nothing is streaming, so no blank live rows are painted above the
-        // input — that was the gap between the banner and the first prompt.
         assert_eq!(viewport_height_for(1, 0), 3);
         assert_eq!(viewport_height_for(3, 0), 5);
         assert_eq!(viewport_height_for(5, 0), 7);

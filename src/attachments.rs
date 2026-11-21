@@ -1,24 +1,8 @@
-//! Pasted images become a file in the session's state dir plus a *pointer* in
-//! the prompt; the bytes never ride in a message (design note TUI-v2 §5).
-//!
-//! Why a pointer: image bytes in the prompt are paid for on **every** later
-//! request (both opencode and Claude Code do that), and they would break the
-//! byte-stable cache prefix. Instead the model decides whether to look, with
-//! `kelir view <path>`, which appends a `source` event (kind `attachment`) at the
-//! **tail** of the conversation. Every earlier message stays byte-identical.
-//!
-//! Three ingress paths, one result:
-//!
-//! 1. A pasted or drag-dropped **path** (`Event::Paste`): trim, unquote, accept
-//!    the PowerShell `& '…'` form, a `file://` URL and backslash escapes. This
-//!    is the one that works in every terminal, so it ships first.
-//! 2. The **clipboard image** on Ctrl-V, where the terminal sends the key
-//!    instead of a paste (a stub here: [`clipboard_image`]).
-//! 3. A terminal's own image paste: no portable protocol, so it simply degrades
-//!    into 1 or 2.
-//!
-//! Dimensions come from the file header by hand (PNG IHDR, JPEG SOF, GIF, WebP
-//! VP8/VP8L/VP8X): no decoder crate, no allocation of the pixels.
+//! Pasted images become a file in the session's state dir plus a *pointer* in the prompt; the
+//! bytes never ride in a message (design note TUI-v2 §5).
+//! Why a pointer: image bytes in the prompt are paid for on **every** later request (both opencode
+//! and Claude Code do that), and they would break the byte-stable cache prefix.
+//! Instead the model decides whether to look, with `kelir view <path>`, which appends a `source`
 
 use std::path::{Path, PathBuf};
 
@@ -28,21 +12,14 @@ pub struct PastedImage {
     pub path: PathBuf,
 }
 
-/// The image extensions kelir treats as an attachment.
 pub const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
 /// The most a paste may weigh (and the most a clipboard image may).
 pub const MAX_BYTES: u64 = 10 * 1024 * 1024;
-/// How many images one prompt may carry.
 pub const MAX_PER_PROMPT: usize = 8;
 
-/// Strip the wrappers a terminal, a shell or PowerShell puts around a dropped
-/// path, without touching a path that only looks quoted.
-///
-/// Handles: surrounding whitespace, one pair of `"…"` or `'…'`, the PowerShell
-/// drag form `& 'C:\…'`, a `file://` URL (with percent escapes for the three
-/// characters a Windows path uses: `%20`, `%23`, `%25`), and backslash-escaped
-/// spaces (`\ `), which shells add.
+/// Strip the wrappers a terminal, a shell or PowerShell puts around a dropped path, without
+/// touching a path that only looks quoted.
 pub fn clean(text: &str) -> String {
     let mut text = text.trim();
     // PowerShell's drag-and-drop prefix.
@@ -96,10 +73,6 @@ fn unescape_url(text: &str) -> String {
 }
 
 /// The file a paste names, when it is one image path and nothing else.
-///
-/// A paste that is not exactly this (a very long line of text, a sentence that
-/// happens to end in `.png`, a path that does not exist) is text, and the
-/// caller pastes it as text.
 pub fn pasted_image(text: &str) -> Option<PastedImage> {
     let cleaned = clean(text);
     if cleaned.is_empty() {
@@ -112,9 +85,8 @@ pub fn pasted_image(text: &str) -> Option<PastedImage> {
     if !extension_ok(path) || !path.is_file() {
         return None;
     }
-    // The extension is a claim: a text file named `fake.png` is not an image,
-    // and a chip that promises one is a chip the model cannot use (`N-chip`).
-    // The bytes decide, the same check `kelir view` makes (`S3`).
+    // The extension is a claim: a text file named `fake.png` is not an image, and a chip that promises one
+    // is a chip the model cannot use (`N-chip`).
     match sniff(path) {
         Ok(Some(_)) => {}
         _ => return None,
@@ -124,14 +96,7 @@ pub fn pasted_image(text: &str) -> Option<PastedImage> {
     })
 }
 
-/// The path-shaped tail of `text`: the run of characters a dropped or typed
-/// path could be. A quoted run wins (`"C:\a b.png"`, `& 'C:\a.png'`) because it
-/// can hold spaces; otherwise the last non-space token is the candidate.
-///
-/// Returns `None` when the tail cannot be an image path at all (empty, no image
-/// extension in it, too long to be one). Nothing here touches the file system:
-/// the caller asks [`pasted_image`], which is the one rule both ingress paths
-/// (a bracketed paste and a keystroke burst) obey.
+/// The path-shaped tail of `text`: the run of characters a dropped or typed path could be.
 pub fn path_tail(text: &str) -> Option<String> {
     let text = text.trim_end();
     if text.is_empty() || text.chars().count() > MAX_PATH_CHARS {
@@ -179,16 +144,6 @@ fn extension_ok(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The MIME type of a saved attachment.
-///
-/// The bytes decide it, never the file's name: an extension is a claim (a WebP
-/// saved as `shot.png` is what browsers produce, a GIF renamed `.png` is a
-/// rename), and a declared type that contradicts the bytes is what a provider
-/// that checks either of them against the other rejects — a 400 that repeats on
-/// every later request, because the `source` event stays in the log (`S3b`).
-///
-/// The extension is the fallback for a file that cannot be read, so a missing
-/// attachment is still named by what it claimed rather than as an opaque blob.
 pub fn mime_of(path: &Path) -> &'static str {
     match sniff(path) {
         Ok(Some((format, _))) => mime_of_format(format),
@@ -236,12 +191,7 @@ pub const MEDIA_MAX_BYTES: u64 = 256 * 1024 * 1024;
 /// The `kind` of the `source` event that carries a media note.
 pub const MEDIA_SOURCE_KIND: &str = "attachment-note";
 
-/// `audio` or `video` when the file's extension says so. Audio and video are
-/// not decoded, transcribed or framed in M5: the file is stored under the
-/// session and the model is told it exists. **Later hook:** a transcriber
-/// (audio) or frame sampler (video) would turn the stored file into a text
-/// `source` event of the same shape, so nothing about the log or the cache
-/// prefix changes when it lands; see `kelir docs files`.
+/// `audio` or `video` when the file's extension says so.
 pub fn media_kind(path: &Path) -> Option<&'static str> {
     let extension = path
         .extension()
@@ -288,9 +238,7 @@ pub fn save_media(session_dir: &Path, seq: u32, source: &Path) -> Result<String,
     Ok(format!("attachments/{name}"))
 }
 
-/// `attachments/<seq>-<name>.png`: the name inside the session dir. The source
-/// name is sanitised to `[A-Za-z0-9._-]` and shortened, so a pasted path can
-/// never escape the directory or blow the name budget.
+/// `attachments/<seq>-<name>.png`: the name inside the session dir.
 pub fn file_name(seq: u32, source: &Path) -> String {
     let extension = source
         .extension()
@@ -307,12 +255,8 @@ pub fn file_name(seq: u32, source: &Path) -> String {
     format!("{seq}-{stem}.{extension}")
 }
 
-/// Every image path a message names, in the order they appear: what the `user`
-/// event's `attachments[]` carries (the design note: the list holds the path
-/// while the text holds the pointer).
-///
-/// A pointer is `[image: <path>, …]`, written only by [`pointer`], so the scan
-/// is the inverse of that one function and cannot drift from it.
+/// Every image path a message names, in the order they appear: what the `user` event's `attachments[]`
+/// carries (the design note: the list holds the path while the text holds the pointer).
 pub fn paths_in(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = text;
@@ -333,10 +277,8 @@ pub fn paths_in(text: &str) -> Vec<String> {
     out
 }
 
-/// The sequence number the session's next copy gets: one more than the highest
-/// `<n>-…` already in `<session>/attachments/` (`1` for the first). A number is
-/// a count and a label, not an identity: the file name only has to be unique,
-/// which it is by suffix as well.
+/// The sequence number the session's next copy gets: one more than the highest `<n>-…` already in
+/// `<session>/attachments/` (`1` for the first).
 pub fn next_seq(session_dir: &Path) -> u32 {
     let dir = dir(session_dir);
     let highest = std::fs::read_dir(&dir)
@@ -366,13 +308,8 @@ fn sanitise(text: &str) -> String {
         .collect()
 }
 
-/// `[image: attachments/1-clipboard.png, 1280x720, 312 KB]`: the pointer the
-/// prompt carries instead of the bytes.
-///
-/// The pointer says how to look at what it names (`kelir view <path>`), because
-/// the model otherwise has no way to learn that it can: the review's live run
-/// spent seven steps guessing a picture that a pointer and a hint would have
-/// given it in two (`S4`).
+/// `[image: attachments/1-clipboard.png, 1280x720, 312 KB]`: the pointer the prompt carries
+/// instead of the bytes.
 pub fn pointer(path_in_session: &str, size: Option<(u32, u32)>, bytes: u64) -> String {
     let mut parts = vec![path_in_session.to_string()];
     if let Some((width, height)) = size {
@@ -404,21 +341,14 @@ pub fn bytes_label(bytes: u64) -> String {
 /// its header states.
 pub type Identity = (&'static str, (u32, u32));
 
-/// What a file's first bytes say it is: `Ok(Some(identity))` for a format
-/// kelir reads, `Ok(None)` when the bytes are not one (an empty file, a text
-/// file with a `.png` name), `Err` when it cannot even be read.
-///
-/// The extension is a claim the file makes; this is the file's own signature.
-/// An image is refused before it reaches the log because a bad one stays in the
-/// conversation: every later request repeats it, and the provider's refusal
-/// repeats with it (`S3`).
+/// What a file's first bytes say it is: `Ok(Some(identity))` for a format kelir reads, `Ok(None)` when
+/// the bytes are not one (an empty file, a text file with a `.png` name), `Err` when it cannot even be
 pub fn sniff(path: &Path) -> Result<Option<Identity>, String> {
     use std::io::Read as _;
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    // Headers live in the first few hundred bytes (a JPEG walks its segments up
-    // to the SOF, so it gets a generous window); never read a whole image just
-    // to identify it.
+    // Headers live in the first few hundred bytes (a JPEG walks its segments up to the SOF, so
+    // it gets a generous window); never read a whole image just to identify it.
     let mut head = vec![0u8; SNIFF_BYTES];
     let mut filled = 0usize;
     while filled < head.len() {
@@ -563,11 +493,9 @@ pub fn dir(session_dir: &Path) -> PathBuf {
 pub struct Saved {
     /// The per-prompt sequence number (1-based), also the chip's number.
     pub seq: u32,
-    /// `attachments/1-clipboard.png`: relative to the session dir, which is
-    /// what the prompt carries (never an absolute path: the model resolves it
-    /// against the session dir, and the log stays free of host paths).
+    /// `attachments/1-clipboard.png`: relative to the session dir, which is what the prompt carries (never
+    /// an absolute path: the model resolves it against the session dir, and the log stays free of host
     pub rel: String,
-    /// The full pointer text the prompt gets.
     pub pointer: String,
     pub bytes: u64,
     /// The bytes were already saved in this session (same content).
@@ -575,11 +503,6 @@ pub struct Saved {
 }
 
 /// Copy `source` into `<session>/attachments/` and describe the result.
-///
-/// The name is `[seq]-<sanitised stem>.<ext>`; a second paste of the same bytes
-/// reuses the first file (a hash of the content, [`fingerprint`], is the key),
-/// so a chatty paste does not fill the disk. Refuses anything over
-/// [`MAX_BYTES`].
 pub fn save(
     session_dir: &Path,
     seq: u32,
@@ -637,9 +560,8 @@ pub fn fingerprint(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// `kelir view`'s path resolution: a path that starts with `attachments/`
-/// resolves against the session dir first (that is what the prompt carries),
-/// then the cwd; anything else is taken from the cwd.
+/// `kelir view`'s path resolution: a path that starts with `attachments/` resolves against the session
+/// dir first (that is what the prompt carries), then the cwd; anything else is taken from the cwd.
 pub fn resolve(session_dir: &Path, cwd: &Path, named: &str) -> PathBuf {
     let cleaned = clean(named);
     let path = Path::new(&cleaned);
@@ -780,7 +702,7 @@ mod tests {
         );
     }
 
-    /// Review N5: the `user` event's `attachments[]` names the images the text
+    /// The `user` event's `attachments[]` names the images the text
     /// points at, so a reader does not have to parse prose.
     #[test]
     fn a_pointer_is_the_inverse_of_the_path_list() {
@@ -807,7 +729,7 @@ mod tests {
         assert!(paths_in("[image: attachments/1-a.png").is_empty());
     }
 
-    /// Review N6: copies are numbered in the order they arrive, not all `1-…`.
+    /// Copies are numbered in the order they arrive, not all `1-…`.
     #[test]
     fn a_sessions_copies_are_numbered_in_sequence() {
         let session = tempfile::tempdir().unwrap();
@@ -822,7 +744,7 @@ mod tests {
         assert_eq!(next_seq(session.path()), 3);
     }
 
-    /// Review S3: the signature decides, not the extension.
+    /// the signature decides, not the extension.
     #[test]
     fn sniff_reads_the_signature_and_the_header() {
         let dir = tempfile::tempdir().unwrap();
@@ -845,7 +767,7 @@ mod tests {
         assert!(sniff(&dir.path().join("missing.png")).is_err());
     }
 
-    /// Review S4: the path tail a keystroke burst is matched against.
+    /// the path tail a keystroke burst is matched against.
     #[test]
     fn a_path_tail_is_the_word_or_the_quoted_run_that_ends_the_text() {
         assert_eq!(

@@ -1,26 +1,8 @@
-//! How tool calls appear: one dim line per call, plus the append-only expansion
-//! for `/expand`.
-//!
-//! This is the design note's central claim (TUI-v2 §4): **prose is the only
-//! default-weight text in the transcript**. A call is two columns of indent, a
-//! dim line, and a right-aligned dim verdict; a call that failed keeps its line
-//! but goes red and gains one dim tail line, so the failure is visible without
-//! unfolding anything.
-//!
-//! Scrollback is append-only (`insert_before` cannot rewrite a committed row),
-//! so there are two tiers, and no third:
-//!
-//! 1. While a call runs it lives in the live area (`⠹ $ cargo test · 12s`, from
-//!    [`crate::activity`]).
-//! 2. When it settles it commits one line, immediately, in event order. Every
-//!    call keeps its own line: a plain success shows only its output size, a
-//!    failure (with its tail) is red, and a call a human stopped reads
-//!    `⏹ cancelled`. There is no folding: which file an agent touched and which
-//!    command it ran are what a reader wants from the transcript. The prose
-//!    between runs is what stays at full weight.
-//!
-//! `/expand [n]` appends a call's output tail to the scrollback; it cannot
-//! unfold the line that is already committed, and the help text says so.
+//! How tool calls appear: one dim line per call, plus the append-only expansion for `/expand`.
+//! This is the design note's central claim (TUI-v2 §4): **prose is the only default-weight text in
+//! the transcript**.
+//! A call is two columns of indent, a dim line, and a right-aligned dim verdict; a call that
+//! failed keeps its line but goes red and gains one dim tail line, so the failure is visible
 
 use std::time::Duration;
 
@@ -33,20 +15,14 @@ use crate::theme::Theme;
 /// A label is a glance, never a second copy of the command.
 pub const DESCRIPTION_MAX: usize = 120;
 
-/// The `description` every native tool call supplies, cleaned for one-line
-/// display: folded
-/// whitespace, capped at [`DESCRIPTION_MAX`] characters. `None` for anything
-/// else (a missing field, a wrong type, an empty label), so callers fall back
-/// to today's truncated command. The full command stays in the log and in
-/// `/expand`; only this label is bounded.
+/// The `description` every native tool call supplies, cleaned for one-line display: folded whitespace,
+/// capped at [`DESCRIPTION_MAX`] characters.
 pub fn description(input: &Value) -> Option<String> {
     let raw = input.get("description")?.as_str()?.trim();
     if raw.is_empty() {
         return None;
     }
-    // Model-supplied labels must never put control bytes into a terminal or
-    // a Herdr OSC record. Fold them to spaces first; one function then covers
-    // the TUI, the live row and headless stdout. Raw bytes stay in the log.
+    // Model-supplied labels must never put control bytes into a terminal or a Herdr OSC record.
     let chars: Vec<char> = raw.chars().collect();
     let mut clean = String::new();
     let mut i = 0;
@@ -77,7 +53,6 @@ pub fn description(input: &Value) -> Option<String> {
     Some(format!("{cut}…"))
 }
 
-/// One settled call, as the transcript shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallLine {
     /// Session-wide ordinal: what `/expand n` names.
@@ -92,7 +67,6 @@ pub struct CallLine {
     pub lines: u64,
     pub spilled: bool,
     pub out_path: String,
-    /// The last non-empty output line, for a failed call's tail row.
     pub tail: String,
     /// How long the call took, when the caller measured it.
     pub elapsed: Option<Duration>,
@@ -111,9 +85,6 @@ impl CallLine {
     }
 
     /// The right-hand dim verdict: `29 B`, `✗ exit 101`.
-    ///
-    /// A clean call says nothing about itself — the line and its dim weight
-    /// already say it ran. Only a failure or a stop adds a word.
     pub fn verdict(&self, theme: Theme) -> String {
         let mut parts = Vec::new();
         if self.failed() {

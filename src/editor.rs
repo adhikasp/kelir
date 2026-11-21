@@ -1,10 +1,8 @@
 //! The input editor: a small multi-line buffer with a cursor and history.
-//!
-//! The state machine takes [`Key`] values, not terminal events, so every rule
-//! here is unit-tested without a terminal. The TUI translates
-//! `crossterm` events into [`Key`] and renders the buffer.
+//! The state machine takes [`Key`] values, not terminal events, so every rule here is unit-
+//! tested without a terminal.
+//! The TUI translates `crossterm` events into [`Key`] and renders the buffer.
 
-/// One editor input. Everything the editor reacts to lives here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key {
     Char(char),
@@ -35,19 +33,16 @@ pub enum Key {
     Paste(String),
     /// Insert a chip (a saved image) at the cursor, as one atomic element.
     Chip(Chip),
-    /// Remove the chip whose label is at the cursor (or just before it), as one
-    /// element: Backspace on a chip removes the whole thing, never one
-    /// character of its label.
+    /// Remove the chip whose label is at the cursor (or just before it), as one element:
+    /// Backspace on a chip removes the whole thing, never one character of its label.
     RemoveChip,
-    /// Drop every chip from the buffer (a submitted or cleared prompt): the
-    /// chip decision belongs to the text, so this is what a caller after
-    /// `Submitted` uses to forget them.
+    /// Drop every chip from the buffer (a submitted or cleared prompt): the chip decision belongs
+    /// to the text, so this is what a caller after `Submitted` uses to forget them.
     DropChips,
     HistoryPrev,
     HistoryNext,
 }
 
-/// What a key did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// The buffer changed (or the cursor moved).
@@ -57,19 +52,10 @@ pub enum Outcome {
     Submitted(String),
     /// The key means nothing here (or the buffer was empty on Enter).
     Ignored,
-    /// A chip was removed: the caller deletes its file (nothing else referred to
-    /// it yet). Returned by Backspace on a chip and by word deletes that swallow
-    /// a chip label, so a chip is always one atomic element.
+    /// A chip was removed: the caller deletes its file (nothing else referred to it yet).
     ChipRemoved(Chip),
 }
 
-/// A saved image in the input, as one atomic element.
-///
-/// The buffer holds the chip's *label* (`[image 1]`) as ordinary characters, so
-/// every cursor rule stays simple; the label is deliberately unlikely to occur
-/// in typed text. When the chip is on the row, the renderer paints the label
-/// reversed; on submit the caller replaces it with the pointer text the model
-/// sees.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chip {
     /// The per-prompt number: also the number in the label and the saved file.
@@ -83,7 +69,6 @@ pub struct Chip {
 }
 
 impl Chip {
-    /// The chip for a saved attachment.
     pub fn new(seq: u32, rel: &str, pointer: &str) -> Self {
         Self {
             seq,
@@ -102,9 +87,7 @@ impl Chip {
 #[derive(Debug, Clone)]
 pub struct Editor {
     lines: Vec<String>,
-    /// The images this buffer names, in insertion order.
     chips: Vec<Chip>,
-    /// Cursor line, always a valid index.
     row: usize,
     /// Cursor column, in `char`s, never past the end of the line.
     col: usize,
@@ -113,14 +96,11 @@ pub struct Editor {
     browsing: Option<usize>,
     /// The buffer as it was before browsing started.
     draft: Option<Vec<String>>,
-    /// Width of the terminal, in columns, for visual (wrapped) rows.
     width: usize,
 }
 
-/// One painted row of the editor. `logical` is the buffer line it came
-/// from; `start..end` is the half-open range of *characters* on that line
-/// that this row shows. `first` marks the first visual row of logical line
-/// 0, which is the only row that gets the prompt glyph.
+/// One painted row of the editor. `logical` is the buffer line it came from; `start..end` is
+/// the half-open range of *characters* on that line that this row shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisualRow {
     pub logical: usize,
@@ -190,7 +170,6 @@ impl Editor {
         &self.history
     }
 
-    /// The images the buffer names.
     pub fn chips(&self) -> &[Chip] {
         &self.chips
     }
@@ -224,15 +203,8 @@ impl Editor {
         self.col += added;
     }
 
-    /// Take the word that ends at the cursor (a keystroke burst's path, before
-    /// it is typed), leaving the buffer and the cursor as they were minus that
-    /// word. `None` when no word ends at the cursor.
-    ///
-    /// The word is the run of non-space characters ending at the cursor, with a
-    /// closing quote and its matching opening quote taken along: the shapes a
-    /// dropped path arrives in (`C:\x\a.png`, `"C:\x\a b.png"`,
-    /// `& 'C:\x\a.png'`). A path with spaces is only a word when it is quoted,
-    /// which is exactly what Explorer and the shell hand over.
+    /// Take the word that ends at the cursor (a keystroke burst's path, before it is typed), leaving the
+    /// buffer and the cursor as they were minus that word.
     pub fn take_word_before_cursor(&mut self) -> Option<String> {
         let row = self.row;
         let col = self.char_to_byte(row, self.col);
@@ -289,9 +261,8 @@ impl Editor {
         let row = self.row;
         let col = self.char_to_byte(row, self.col);
         let line = self.lines[row].clone();
-        // The chip the cursor belongs to: the label that starts at the cursor,
-        // or the one the cursor is inside or immediately after (a chip is one
-        // element, so anywhere on its label means the whole chip).
+        // The chip the cursor belongs to: the label that starts at the cursor, or the one the cursor is inside
+        // or immediately after (a chip is one element, so anywhere on its label means the whole chip).
         let mut hit: Option<(usize, usize, usize)> = None;
         for (index, chip) in self.chips.iter().enumerate() {
             let mut from = 0usize;
@@ -321,18 +292,13 @@ impl Editor {
         Some(chip)
     }
 
-    /// Tell the editor how wide the terminal is, so visual rows (wrapping)
-    /// and the cursor's display position can be computed. Called by the
-    /// renderer on every paint (a resize changes it).
+    /// Tell the editor how wide the terminal is, so visual rows (wrapping) and the cursor's display
+    /// position can be computed.
     pub fn set_width(&mut self, width: usize) {
         self.width = width.max(1);
     }
 
-    /// Split the buffer into visual rows no wider than the terminal. Wrapping
-    /// is by display column (wide characters count two) and never breaks in
-    /// the middle of a character, so the cursor math stays exact. Characters
-    /// are never dropped: on a narrow terminal the text spans more rows and
-    /// the window scrolls to keep the cursor visible.
+    /// Split the buffer into visual rows no wider than the terminal.
     pub fn visual_rows(&self) -> Vec<VisualRow> {
         use unicode_width::UnicodeWidthChar as _;
         let text_width = self.width.saturating_sub(crate::tui::PROMPT_WIDTH).max(1);
@@ -381,10 +347,8 @@ impl Editor {
         (first, rows)
     }
 
-    /// The cursor as the renderer needs it on the *wrapped* view:
-    /// `(visual row, display column)`, the prompt width included. Every
-    /// character is measured by its terminal width (a chip label is ordinary
-    /// text, so it counts its own width).
+    /// The cursor as the renderer needs it on the *wrapped* view: `(visual row, display column)`, the
+    /// prompt width included.
     pub fn cursor_display(&self) -> (usize, usize) {
         use unicode_width::UnicodeWidthChar as _;
         let (visual, _) = self.cursor_visual();
@@ -402,10 +366,7 @@ impl Editor {
         (visual, crate::tui::PROMPT_WIDTH + before - row_start_col)
     }
 
-    /// Which visual row the cursor is on, and its index among all rows. A
-    /// cursor exactly at a wrap boundary belongs to the *next* row (the
-    /// character after it is on that row); only the very end of a line stays
-    /// on its last row.
+    /// Which visual row the cursor is on, and its index among all rows.
     fn cursor_visual(&self) -> (usize, usize) {
         let rows = self.visual_rows();
         let candidates: Vec<usize> = rows
@@ -446,9 +407,8 @@ impl Editor {
             return false;
         }
         let row = rows[target as usize].clone();
-        // Keep the display column *within the current visual row*; that is
-        // what a person sees and follows when pressing up/down. Clamp to the
-        // target row's length.
+        // Keep the display column *within the current visual row*; that is what a person sees and
+        // follows when pressing up/down. Clamp to the target row's length.
         let wanted = self.visual_column();
         let chars: Vec<char> = self.lines[row.logical]
             .chars()
@@ -460,7 +420,6 @@ impl Editor {
         true
     }
 
-    /// Apply one key.
     pub fn handle(&mut self, key: Key) -> Outcome {
         // A line feed that arrives as a character (a paste, an unusual
         // terminal) is a newline, never a literal 0x0A in the buffer.
@@ -670,10 +629,8 @@ impl Editor {
         }
     }
 
-    /// The character range of the word immediately before the cursor, in the
-    /// current line, including the whitespace run between it and the cursor.
-    /// Follows the GUI convention: one press removes the word and the gap it
-    /// left. At the start of a line it removes just the leading whitespace.
+    /// The character range of the word immediately before the cursor, in the current line, including the
+    /// whitespace run between it and the cursor.
     fn word_before_cursor(&self) -> (usize, usize) {
         let chars: Vec<char> = self.lines[self.row].chars().collect();
         let col = self.col.min(chars.len());
@@ -696,9 +653,8 @@ impl Editor {
         (start, col)
     }
 
-    /// Word left for navigation: the start of the word before the cursor,
-    /// skipping the whitespace in between (Ctrl-Left lands on the word, not
-    /// on the space after it).
+    /// Word left for navigation: the start of the word before the cursor, skipping the whitespace
+    /// in between (Ctrl-Left lands on the word, not on the space after it).
     fn word_left_start(&self) -> usize {
         let chars: Vec<char> = self.lines[self.row].chars().collect();
         let mut col = self.col.min(chars.len());
@@ -711,9 +667,7 @@ impl Editor {
         col
     }
 
-    /// Where Ctrl-Right lands: the start of the next word. Skip the rest of
-    /// the current word, then any whitespace, and stop at the first character
-    /// of the following word (or the end of the line).
+    /// Where Ctrl-Right lands: the start of the next word.
     fn word_right_start(&self) -> usize {
         let chars: Vec<char> = self.lines[self.row].chars().collect();
         let mut col = self.col.min(chars.len());
@@ -726,9 +680,7 @@ impl Editor {
         col
     }
 
-    /// The character range of the word immediately after the cursor, in the
-    /// current line. Skips leading spaces, then takes the run of non-space
-    /// characters and the whitespace that follows, so a delete leaves no gap.
+    /// The character range of the word immediately after the cursor, in the current line.
     fn word_after_cursor(&self) -> (usize, usize) {
         let chars: Vec<char> = self.lines[self.row].chars().collect();
         let col = self.col.min(chars.len());
@@ -746,10 +698,7 @@ impl Editor {
         (col, end)
     }
 
-    /// Remove `start..end` (character indices) from the cursor's line and put
-    /// the cursor at `start`. A chip label is one atomic element: if the range
-    /// eats any part of one, the whole label goes and the chip is returned so
-    /// the caller deletes its file. At most one chip per word delete.
+    /// Remove `start..end` (character indices) from the cursor's line and put the cursor at `start`.
     fn remove_range(&mut self, start: usize, end: usize) -> Option<Chip> {
         let row = self.row;
         let line = self.lines[row].clone();

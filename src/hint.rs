@@ -1,23 +1,8 @@
-//! The pushed hint (M5-B): "might be relevant: name - description".
-//!
-//! Skills are *pulled*: the base prompt names the directories and carries no
-//! listing. The pushed hint is the other half. When a human prompt arrives and
-//! a scorer is configured, kelir makes **one** cheap scoring call that is shown
-//! the prompt and a catalogue of `name - description` lines (skills now, MCP
-//! servers when M6 lands) and answers with the names that may help. The result
-//! is appended as a `source` event of kind `hint` at the *tail* of the
-//! conversation: never a body, never a system rewrite, so every earlier byte of
-//! the request (and the provider's cache of it) stays as it was.
-//!
-//! Off by default: no `[hint]` table with a `model` means no scorer, no call and
-//! no source. Fail-open throughout: no key, a timeout ([`crate::config::HINT_TIMEOUT_MS`]
-//! by default, 2 s), a non-2xx, garbage, or names that are not in the catalogue
-//! all mean "no hint" — never an error, never a retry, never a stalled turn.
-//!
-//! The scorer is a trait ([`Scorer`]) so tests script it ([`Scripted`]); the
-//! real implementation ([`Chat`]) is one Chat Completions request that asks for
-//! a JSON array of names. Nothing about the answer is trusted beyond "is this
-//! one of the names I offered".
+//! The pushed hint: "might be relevant: name - description".
+//! Skills are *pulled*: the base prompt names the directories and carries no listing.
+//! The pushed hint is the other half.
+//! When a human prompt arrives and a scorer is configured, kelir makes **one** cheap scoring call
+//! that is shown the prompt and a catalogue of `name - description` lines (skills now, MCP servers
 
 use std::future::Future;
 use std::pin::Pin;
@@ -25,23 +10,19 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-/// The most names one hint carries.
 pub const MAX_NAMES: usize = 3;
 /// The most characters of a description shown to the scorer and in the hint.
 pub const MAX_DESCRIPTION: usize = 200;
-/// The most characters of the prompt shown to the scorer.
 pub const MAX_PROMPT: usize = 2000;
-/// The most catalogue entries shown to the scorer.
 pub const MAX_CANDIDATES: usize = 64;
 /// The `name` of the `source` event.
 pub const SOURCE_NAME: &str = "hint";
 /// The `kind` of the `source` event.
 pub const SOURCE_KIND: &str = "hint";
 
-/// One thing the hint may name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
-    /// `skill` (or, from M6, `mcp`).
+    /// `skill` (or, from, `mcp`).
     pub kind: &'static str,
     pub name: String,
     pub description: String,
@@ -49,10 +30,6 @@ pub struct Candidate {
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Something that can say which candidates a prompt might need.
-///
-/// It returns *names*; [`select`] drops any that are not in the catalogue, so a
-/// scorer cannot make kelir say something it was not offered.
 pub trait Scorer: Send + Sync {
     fn score<'a>(
         &'a self,
@@ -60,7 +37,7 @@ pub trait Scorer: Send + Sync {
         candidates: &'a [Candidate],
     ) -> BoxFuture<'a, Result<Vec<String>, String>>;
 
-    /// The usage the last call reported, taken once (m5bfix F2). A scorer that
+    /// The usage the last call reported, taken once. A scorer that
     /// reports none (a test double) returns `None`.
     fn take_usage(&self) -> Option<crate::stream::Usage> {
         None
@@ -68,10 +45,6 @@ pub trait Scorer: Send + Sync {
 }
 
 /// The catalogue: the skills a session can see, as `name - description`.
-///
-/// Read from the places sources are discovered in (so a skill added to a skills
-/// directory since the start is offered too), one entry per name; a skill whose
-/// front matter does not parse is not offered.
 pub fn catalogue(places: &crate::sources::Places) -> Vec<Candidate> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
@@ -102,18 +75,11 @@ pub fn catalogue(places: &crate::sources::Places) -> Vec<Candidate> {
     out
 }
 
-/// One line, collapsed whitespace, bounded.
 fn flat(text: &str, max: usize) -> String {
     let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
     crate::util::truncate_chars(&joined, max)
 }
 
-/// The names in a scorer's raw reply, in the order given.
-///
-/// Accepts a JSON array of strings, an object with an array under `names`,
-/// `skills`, `relevant` or `result`, or either of those inside prose or a code
-/// fence (the first-to-last `[` ... `]` or `{` ... `}` span that parses).
-/// Anything else is `None`: garbage is "no hint".
 pub fn parse_reply(reply: &str) -> Option<Vec<String>> {
     if let Ok(value) = serde_json::from_str::<Value>(reply.trim())
         && let Some(names) = names_of(&value)
@@ -201,9 +167,6 @@ pub fn render(chosen: &[&Candidate]) -> Option<String> {
 }
 
 /// Run a scorer under the deadline and turn its answer into the hint text.
-///
-/// `Ok(None)` is "nothing to say" (no candidates, an empty answer); `Err` is a
-/// fail-open reason the caller may log. Neither stops anything.
 pub async fn hint_for(
     scorer: &dyn Scorer,
     prompt: &str,
@@ -223,7 +186,7 @@ pub async fn hint_for(
 }
 
 /// Whether two base URLs name the same scheme, host and port. A key that was
-/// issued for one origin is only ever sent there (m5bfix F1).
+/// issued for one origin is only ever sent there.
 pub fn same_origin(a: &str, b: &str) -> bool {
     let (Ok(a), Ok(b)) = (reqwest::Url::parse(a), reqwest::Url::parse(b)) else {
         return false;
@@ -235,7 +198,6 @@ pub fn same_origin(a: &str, b: &str) -> bool {
 
 // ---------------------------------------------------------------- the real one
 
-/// A scorer that asks a Chat Completions endpoint for a JSON array of names.
 pub struct Chat {
     http: reqwest::Client,
     url: String,
@@ -244,9 +206,8 @@ pub struct Chat {
     usage: std::sync::Mutex<Option<crate::stream::Usage>>,
 }
 
-/// Room for a reasoning model to think and still answer (m5bfix F4): the
-/// answer itself is a few names, but a reasoning scorer spent 39-111 tokens on
-/// thinking against the old cap of 120.
+/// Room for a reasoning model to think and still answer: the answer itself is a few names,
+/// but a reasoning scorer spent 39-111 tokens on thinking against the old cap of 120.
 pub const SCORER_MAX_TOKENS: u64 = 600;
 
 impl Chat {
@@ -349,9 +310,8 @@ impl Scorer for Chat {
 
 // --------------------------------------------------------------- the test one
 
-/// A scorer for tests: answers from a fixed script, optionally slowly or with
-/// an error. 10 held-out prompts through it prove the wiring (the quality check
-/// is a live one).
+/// A scorer for tests: answers from a fixed script, optionally slowly or with an error. 10
+/// held-out prompts through it prove the wiring (the quality check is a live one).
 pub struct Scripted {
     pub answers: Vec<(String, Result<Vec<String>, String>)>,
     pub delay: Option<Duration>,

@@ -1,23 +1,8 @@
 //! Model metadata from the provider, not from a table in this source.
-//!
-//! Both providers publish it: OpenRouter's `GET {base}/models` carries
-//! `context_length` per model and `supported_parameters` naming what it can do
-//! (`tools`, `parallel_tool_calls`, `reasoning`, ...), and OpenCode Go's carries
-//! `limit.context` plus a `capabilities` object. kelir reads whichever it is
-//! given, caches the normalised list beside the session state, and refreshes it
-//! once a day.
-//!
-//! A configuration override (`[model_windows]`, then `window`) still wins: it is
-//! the one thing the provider cannot know. With neither a fetch nor a cache the
-//! window is [`crate::compact::DEFAULT_WINDOW`], and the reason a start landed
-//! there is recorded (see [`Cache::error`]).
-//!
-//! The cache belongs to an *endpoint*, not to a provider name: the file is named
-//! after [`endpoint_id`] (a slug of the provider name plus a hash of the
-//! normalised base URL), so a proxy or a second gateway that shares a state dir
-//! never inherits another server's numbers (STEER-1 review S1/S5/N5). It is
-//! written temp-file-then-rename, so a reader never sees a half-written list
-//! (S3).
+//! Both providers publish it: OpenRouter's `GET {base}/models` carries `context_length` per model
+//! and `supported_parameters` naming what it can do (`tools`, `parallel_tool_calls`,
+//! `reasoning`...), and OpenCode Go's carries `limit.context` plus a `capabilities` object. kelir
+//! reads whichever it is given, caches the normalised list beside the session state, and refreshes
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,19 +15,10 @@ pub const CACHE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 /// pays the fetch timeout once an hour instead of on every start.
 pub const RETRY_AFTER_MS: u64 = 60 * 60 * 1000;
 
-/// How long the *background* fetch of `GET /models` is allowed to take. It is
-/// not a bound on a turn: the fetch runs beside the session, so a 1 MB list on
-/// a slow link is no longer paid for by the first request (STEER-1 review S2),
-/// and a timeout is not remembered as a failure (the next start tries again).
+/// How long the *background* fetch of `GET /models` is allowed to take.
 pub const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// How long a *cold* start waits for the list before its first request. The
-/// capabilities the list answers (`reasoning_effort`, `parallel_tool_calls`)
-/// are part of the first request, so the start gives a local list (or one
-/// through a proxy) this long to arrive; a slower answer keeps being fetched in
-/// the background and is applied when it lands. The *window* is only needed at
-/// the first `before_step` compaction check, which is after the first step, so
-/// this grace bounds a capability decision and never a turn.
+/// How long a *cold* start waits for the list before its first request.
 pub const START_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// One model, with only the fields kelir acts on: a provider adding a field
@@ -59,39 +35,29 @@ pub struct ModelInfo {
     /// Whether the model accepts images, when the provider states it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<bool>,
-    /// Whether the model accepts several tool calls in one assistant message.
-    /// Advertised by OpenRouter in `supported_parameters`; Go states it
-    /// nowhere, so `None` there means "kelir asks anyway" (see
-    /// [`crate::provider::build_request`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_calls: Option<bool>,
-    /// Whether the model accepts the `reasoning_effort` field, when the
-    /// provider lists `supported_parameters`: OpenRouter advertises it for the
-    /// families that take it. `None` means "the provider says nothing", which
-    /// is not the same as "no": see the effort gate in `session.rs`.
+    /// Whether the model accepts the `reasoning_effort` field, when the provider lists
+    /// `supported_parameters`: OpenRouter advertises it for the families that take it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<bool>,
 }
 
-/// The cached answer for one endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cache {
     /// The provider name as configured (`openrouter`); informational, and part
     /// of [`endpoint_id`].
     pub provider: String,
-    /// Which endpoint this answer belongs to: [`endpoint_id`] of the provider
-    /// name and the base URL it was fetched from. A cache that does not match
-    /// is ignored, so a proxy or a second gateway never inherits the first
-    /// one's numbers (STEER-1 review S1).
+    /// Which endpoint this answer belongs to: [`endpoint_id`] of the provider name and the base URL it was
+    /// fetched from.
     #[serde(default)]
     pub endpoint: String,
     pub fetched_at_ms: u64,
     /// When the last fetch failed, so the next start does not retry at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed_at_ms: Option<u64>,
-    /// Why the last fetch did not land, in a few words (`http 401`, `offline`,
-    /// `malformed`, `timeout`): what `state` and the TUI banner show instead of
-    /// a silent `default` (STEER-1 review N4). Never a key, a header or a body.
+    /// Why the last fetch did not land, in a few words (`http 401`, `offline`, `malformed`, `timeout`):
+    /// what `state` and the TUI banner show instead of a silent `default`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default)]
@@ -110,17 +76,13 @@ impl Cache {
         }
     }
 
-    /// A list fetched less than [`CACHE_TTL_MS`] ago. A stamp in the future (a
-    /// clock that was ahead when the file was written, a VM restore) is not
-    /// fresh: refetching is cheap and wrong numbers are not (N2).
+    /// A list fetched less than [`CACHE_TTL_MS`] ago.
     pub fn is_fresh(&self, now_ms: u64) -> bool {
         self.fetched_at_ms <= now_ms && now_ms - self.fetched_at_ms < CACHE_TTL_MS
     }
 
-    /// A fetch failed less than [`RETRY_AFTER_MS`] ago, so asking again now
-    /// would only pay the timeout once more. A failure stamped in the future is
-    /// clock skew, not an hour of backoff: the `at <= now` guard keeps it from
-    /// locking the refresh out for as long as the skew (STEER-1 review N2).
+    /// A fetch failed less than [`RETRY_AFTER_MS`] ago, so asking again now would only pay the timeout once
+    /// more.
     pub fn in_backoff(&self, now_ms: u64) -> bool {
         self.failed_at_ms
             .map(|at| at <= now_ms && now_ms - at < RETRY_AFTER_MS)
@@ -131,26 +93,14 @@ impl Cache {
         lookup(&self.models, model).and_then(|info| info.context)
     }
 
-    /// Whether the model takes images, when the provider says. `None` means
-    /// "not stated", which `kelir view` treats as "try it": a provider that
-    /// rejects the request says so plainly, and refusing on a missing flag
-    /// would block a model that works.
+    /// Whether the model takes images, when the provider says.
     pub fn vision_for(&self, model: &str) -> Option<bool> {
         lookup(&self.models, model).and_then(|info| info.vision)
     }
 }
 
-/// The entry for `model`: the exact id first, then case-insensitively, then the
-/// same last segment **within the same vendor**.
-///
-/// The last step exists because a Go id (`deepseek-v4.1-flash`) and an
-/// OpenRouter id (`deepseek/deepseek-v4.1-flash-1017`) name the same family with
-/// different prefixes, and a list served by one gateway may use either shape.
-/// It never crosses vendors: `deepseek/x` does not match `fireworks/x`, even
-/// though that entry has the same last segment, because the two ids name
-/// different models that happen to share a name (STEER-1 review N3). A query
-/// with no `/` at all (the Go shape) matches either shape, which is what it is
-/// for.
+/// The entry for `model`: the exact id first, then case-insensitively, then the same last
+/// segment **within the same vendor**.
 pub fn lookup<'a>(models: &'a [ModelInfo], model: &str) -> Option<&'a ModelInfo> {
     models
         .iter()
@@ -198,10 +148,7 @@ struct RawModel {
     architecture: Option<RawArchitecture>,
 }
 
-/// OpenRouter's `architecture` object. Its `input_modalities` is where that
-/// provider actually says a model takes images (`["text","image"]`); the
-/// `supported_parameters` list does not carry vision at all, so a check wired
-/// to it alone would refuse every vision model on OpenRouter.
+/// OpenRouter's `architecture` object.
 #[derive(Deserialize)]
 struct RawArchitecture {
     #[serde(default)]
@@ -265,10 +212,8 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
                         .as_ref()
                         .map(|names| names.iter().any(|name| name == "tools"))
                 });
-            // Three shapes say it, in this order: an explicit capability flag
-            // (the Go provider), the input modalities (OpenRouter), and a
-            // capability named in `supported_parameters`. A provider that says
-            // nothing leaves it `None`, which `kelir view` reads as "try it".
+            // Three shapes say it, in this order: an explicit capability flag (the Go provider), the input
+            // modalities (OpenRouter), and a capability named in `supported_parameters`.
             let modalities = model.architecture.as_ref().and_then(|architecture| {
                 architecture.input_modalities.as_ref().map(|names| {
                     names.iter().any(|name| {
@@ -282,11 +227,7 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
                 .and_then(|capabilities| capabilities.vision.as_ref())
                 .map(RawFlag::supported)
                 .or(modalities)
-                // A capability named in `supported_parameters` is a *yes* when
-                // it is there; its absence is not a no. OpenRouter lists the
-                // knobs a model takes (`tools`, `reasoning`, …) and never
-                // mentions images, so reading a missing entry as "no images"
-                // would refuse every vision model on that provider.
+                // A capability named in `supported_parameters` is a *yes* when it is there; its absence is not a no.
                 .or_else(|| {
                     model.supported_parameters.as_ref().and_then(|names| {
                         names
@@ -299,10 +240,8 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
                 .supported_parameters
                 .as_ref()
                 .map(|names| names.iter().any(|name| name == "parallel_tool_calls"));
-            // OpenRouter names the flat field `reasoning_effort` for the models
-            // that take it; some list `reasoning` (the object form it is a
-            // shorthand for). Either name means the model takes reasoning
-            // controls, which is what the gate needs to know.
+            // OpenRouter names the flat field `reasoning_effort` for the models that take it; some list
+            // `reasoning` (the object form it is a shorthand for).
             let reasoning_effort = model.supported_parameters.as_ref().map(|names| {
                 names
                     .iter()
@@ -323,16 +262,8 @@ pub fn parse(body: &str) -> Result<Vec<ModelInfo>, String> {
         .collect())
 }
 
-/// Which endpoint a cached list belongs to: a slug of the provider name plus a
-/// hash of the normalised base URL (`openrouter-a1b2c3d4e5f60718`).
-///
-/// The hash is what makes two endpoints distinct (a proxy, a gateway, a
-/// `KELIR_BASE_URL` stand-in), and the slug is what keeps the file name
-/// readable and *safe*: a config provider key is never interpolated into a
-/// path as-is, so a name like `..\x` cannot write outside the state dir
-/// (STEER-1 review S1/S5/N5). The normalisation is the one
-/// [`crate::provider::models_url`] uses, so two spellings of the same endpoint
-/// (`http://h/v1` and `http://h/v1/`) share one cache.
+/// Which endpoint a cached list belongs to: a slug of the provider name plus a hash of the
+/// normalised base URL (`openrouter-a1b2c3d4e5f60718`).
 pub fn endpoint_id(provider: &str, base_url: &str) -> String {
     format!(
         "{}-{}",
@@ -366,9 +297,8 @@ pub fn slug(name: &str) -> String {
     }
 }
 
-/// The base URL as the cache key and the `/models` URL both see it: trimmed,
-/// no trailing `/`, no trailing `/chat/completions`, lower-case scheme and
-/// host. Two spellings of one endpoint must not make two caches.
+/// The base URL as the cache key and the `/models` URL both see it: trimmed, no trailing `/`, no
+/// trailing `/chat/completions`, lower-case scheme and host.
 pub fn normalise_base(base_url: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
     let base = base.strip_suffix("/chat/completions").unwrap_or(base);
@@ -406,10 +336,8 @@ pub fn load(endpoint: &str) -> Option<Cache> {
 pub fn load_in(dir: &Path, endpoint: &str) -> Option<Cache> {
     let text = std::fs::read_to_string(cache_path_in(dir, endpoint)).ok()?;
     let cache: Cache = serde_json::from_str(&text).ok()?;
-    // A file that does not name this endpoint is another server's answer (a
-    // cache written before the keying changed, a hand-copied state dir):
-    // ignoring it is what makes a cold start fall back to `default` instead of
-    // reusing numbers that belong to a different gateway (STEER-1 review S1).
+    // A file that does not name this endpoint is another server's answer (a cache written before the
+    // keying changed, a hand-copied state dir): ignoring it is what makes a cold start fall back to
     if cache.endpoint.is_empty() || cache.endpoint == endpoint {
         Some(cache)
     } else {
@@ -421,11 +349,7 @@ pub fn store(cache: &Cache) -> Result<(), String> {
     store_in(&crate::paths::state_dir(), cache)
 }
 
-/// Write the cache atomically: a temp file in the same directory, then a
-/// rename over the target. A reader sees the old list or the new one, never a
-/// truncated file, and a process killed mid-write leaves the old list intact
-/// (STEER-1 review S3). No fsync: the file is a cache, and a lost write only
-/// costs one refetch.
+/// Write the cache atomically: a temp file in the same directory, then a rename over the target.
 pub fn store_in(dir: &Path, cache: &Cache) -> Result<(), String> {
     std::fs::create_dir_all(dir)
         .map_err(|error| format!("models: cannot create {}: {error}", dir.display()))?;
@@ -453,18 +377,8 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Families whose models accept `parallel_tool_calls`, from what the providers
-/// document and what has been measured. This is the *fallback* for a model the
-/// provider's list does not know (a first session, a slow list, a proxy that
-/// answers nothing): without it, whether the loop asks for batching would
-/// depend on a cache that may be an hour stale or empty (STEER-6 review S2 —
-/// live: a 480-model list took > 1.5 s through a forwarding proxy, the cache
-/// was written empty, and the request had no `parallel_tool_calls` although the
-/// model advertises it).
-///
-/// It is a *prefix/substring* test on the model id, deliberately conservative:
-/// a family named here supports it for every model the providers serve, and a
-/// model the provider's own list is authoritative for wins over this table.
+/// Families whose models accept `parallel_tool_calls`, from what the providers document and what has
+/// been measured.
 pub const PARALLEL_CALL_FAMILIES: [&str; 12] = [
     "deepseek/",
     "deepseek-v",
@@ -489,13 +403,6 @@ pub fn family_takes_parallel(model: &str) -> bool {
         .any(|family| model.starts_with(family) || model.contains(family))
 }
 
-/// Whether the loop may ask this model for several tool calls in one message.
-///
-/// Precedence: the provider's own list (`supported_parameters`), then the
-/// built-in family table, then `false` — a model nobody says anything about is
-/// not asked, because not every gateway accepts the field. `listed` is the
-/// list as this process has it (cache or a fetch); `None`/no entry means the
-/// provider said nothing about this model, not that it said "no".
 pub fn parallel_calls(list: Option<&[ModelInfo]>, model: &str) -> bool {
     if let Some(info) = list.and_then(|models| lookup(models, model))
         && let Some(capable) = info.parallel_calls
@@ -506,21 +413,6 @@ pub fn parallel_calls(list: Option<&[ModelInfo]>, model: &str) -> bool {
 }
 
 /// Whether `reasoning_effort` may be sent to this model.
-///
-/// `listed` is the provider's list (see [`parallel_calls`]); `explicit` says the
-/// person configured an effort for this provider, which is the one case where an
-/// unknown model is sent the field anyway (they asked for it).
-///
-/// * the list has the model with a `supported_parameters` list -> only when it
-///   names `reasoning_effort` (or the `reasoning` object form it is shorthand
-///   for): a provider that says a model does not take it is believed, and a
-///   400 on every step is the thing this avoids;
-/// * the list has the model but no capability list at all (OpenCode Go) ->
-///   nothing is known, so kelir's default still goes; a gateway that refuses it
-///   is caught by the one-shot 400 retry in `session.rs`;
-/// * the list does not have the model (a first session, a proxy, a new model)
-///   -> only when the person configured an effort, because an unknown gateway
-///   is the case most likely to refuse an unknown field.
 pub fn reasoning_effort_allowed(list: Option<&[ModelInfo]>, model: &str, explicit: bool) -> bool {
     match list.and_then(|models| lookup(models, model)) {
         Some(info) => info.reasoning_effort.unwrap_or(true),
@@ -529,9 +421,6 @@ pub fn reasoning_effort_allowed(list: Option<&[ModelInfo]>, model: &str, explici
 }
 
 /// The window to compact against, and where it came from, for the session log.
-///
-/// `over` is a configuration override for this model; `fetched_now` says the
-/// list came from the provider in this process rather than from its cache.
 pub fn resolve(
     over: Option<u64>,
     cache: Option<&Cache>,
@@ -547,9 +436,7 @@ pub fn resolve(
     (crate::compact::DEFAULT_WINDOW, "default")
 }
 
-/// A fetch failure in a few words, for `state` and the banner (STEER-1 review
-/// N4). The provider's own message is never carried: it can hold a URL, a body
-/// fragment or a header value, and none of it belongs in a status line.
+/// A fetch failure in a few words, for `state` and the banner.
 pub fn short_reason(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("timed out") || lower.contains("timeout") {
@@ -621,9 +508,8 @@ mod tests {
         assert_eq!(models[1].reasoning_effort, Some(false));
     }
 
-    /// S2: the batching decision does not depend on a warm list. What the list
-    /// says wins; a model it does not know falls back to its family; a model
-    /// nobody knows is not asked.
+    /// the batching decision does not depend on a warm list. What the list says wins; a model
+    /// it does not know falls back to its family; a model nobody knows is not asked.
     #[test]
     fn parallel_calls_falls_back_to_the_model_family() {
         let models = parse(OPENROUTER).unwrap();
@@ -650,7 +536,7 @@ mod tests {
         assert!(!parallel_calls(Some(&models), "unknown/thing"));
     }
 
-    /// S3: the effort gate, in the three cases the provider's list can be in.
+    /// the effort gate, in the three cases the provider's list can be in.
     #[test]
     fn reasoning_effort_is_gated_on_what_the_provider_advertises() {
         let models = parse(OPENROUTER).unwrap();
@@ -783,7 +669,7 @@ mod tests {
         failed.failed_at_ms = Some(5_000);
         assert!(failed.in_backoff(5_000 + RETRY_AFTER_MS - 1));
         assert!(!failed.in_backoff(5_000 + RETRY_AFTER_MS));
-        // N2: a stamp in the future is clock skew, not an hour of backoff, and
+        // a stamp in the future is clock skew, not an hour of backoff, and
         // a list stamped in the future is not fresh either.
         let mut skewed = read.clone();
         skewed.failed_at_ms = Some(10_000_000);
@@ -803,9 +689,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// S1: the cache belongs to an endpoint. A list written for one base URL is
-    /// not read for another, so a proxy or a gateway cannot inherit numbers
-    /// from the server they replaced.
+    /// the cache belongs to an endpoint. A list written for one base URL is not read for
+    /// another, so a proxy or a gateway cannot inherit numbers from the server they replaced.
     #[test]
     fn the_cache_is_keyed_by_the_endpoint_not_the_provider_name() {
         let dir = std::env::temp_dir().join(format!("kelir-models-{}", ulid::Ulid::generate()));
@@ -838,7 +723,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// S5/N5: a config provider name never reaches a path as-is, and two
+    /// A config provider name never reaches a path as-is, and two
     /// spellings of one base URL share one cache.
     #[test]
     fn a_provider_name_is_a_slug_and_a_base_url_is_normalised() {
@@ -878,7 +763,7 @@ mod tests {
         );
     }
 
-    /// S3: a write replaces the file atomically, so a reader never sees a
+    /// a write replaces the file atomically, so a reader never sees a
     /// truncated list.
     #[test]
     fn the_cache_is_written_atomically() {
@@ -911,7 +796,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// N3: the last-segment fallback matches a differently-prefixed id of the
+    /// the last-segment fallback matches a differently-prefixed id of the
     /// same vendor, never another vendor's entry with the same last segment.
     #[test]
     fn the_last_segment_fallback_does_not_cross_vendors() {
@@ -944,7 +829,7 @@ mod tests {
         );
     }
 
-    /// N1: `/models` is derived from the same base as the completion URL, so a
+    /// `/models` is derived from the same base as the completion URL, so a
     /// `base_url` that already names a path does not get a second one.
     #[test]
     fn the_models_url_is_derived_from_any_base() {
@@ -963,7 +848,7 @@ mod tests {
         );
     }
 
-    /// N4: a failure becomes a short reason for `state` and the banner, never
+    /// a failure becomes a short reason for `state` and the banner, never
     /// the provider's own text.
     #[test]
     fn a_fetch_failure_gets_a_short_reason() {

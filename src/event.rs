@@ -1,14 +1,7 @@
 //! The event log: the only source of truth for a session.
-//!
-//! One JSON object per line, `{"seq": n, "ts": "<RFC 3339>", "type": …}`,
-//! `seq` monotonic from 1, fsync'd per batch. A torn last line is tolerated on
-//! read (skipped and reported), never half-applied.
-//!
-//! Payload rule: a string field over [`PAYLOAD_LIMIT`] is never inline. It is
-//! written to `blobs/<seq>-<field>` in the session dir and the event holds
-//! `{"spilled": true, "path": …, "bytes": N, "preview": …}` instead; `fold`
-//! reads the blob back, so the request bytes (and the cache prefix) are the
-//! same as if it had been inline.
+//! One JSON object per line, `{"seq": n, "ts": "<RFC 3339>", "type": …}`, `seq` monotonic
+//! from 1, fsync'd per batch.
+//! A torn last line is tolerated on read (skipped and reported), never half-applied.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -28,9 +21,7 @@ pub fn now_ts() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
-/// A session's title, derived deterministically from its first prompt. No
-/// model call: a title is a label for a human, never part of the request, and
-/// spending tokens on one would break the cache-prefix story (design note §9).
+/// A session's title, derived deterministically from its first prompt.
 pub fn title_from_prompt(prompt: &str) -> String {
     let first = prompt
         .lines()
@@ -521,9 +512,8 @@ pub struct SourceInfo {
     /// The file the text came from; empty for the embedded base prompt (never
     /// a sentinel such as `embedded`, which a reader could mistake for a file).
     pub path: String,
-    /// `prompt`, `instruction` or `skill`: what the source *is*, recorded where
-    /// it was found rather than guessed from its name. Absent in a log written
-    /// before M5-A's fixes.
+    /// `prompt`, `instruction` or `skill`: what the source *is*, recorded where it was found
+    /// rather than guessed from its name. Absent in a log written before's fixes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub hash: String,
@@ -548,16 +538,11 @@ pub enum EventBody {
         sources: Vec<SourceInfo>,
         #[serde(default)]
         tools: Vec<String>,
-        /// The `reasoning_effort` sent with every request of this session, when
-        /// one is set. Recorded so the log and the request agree: the value is
-        /// part of what the provider was asked for, and a reader of a session
-        /// should not have to guess it (STEER-6).
+        /// The `reasoning_effort` sent with every request of this session, when one is set.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
-        /// Where this session's key came from (`env OPENROUTER_API_KEY`,
-        /// `opencode auth export opencode`), never the key itself. A log reader
-        /// can then tell a copied env credential from opencode's own store, and
-        /// a stale one is diagnosed from the log alone (STEER-2).
+        /// Where this session's key came from (`env OPENROUTER_API_KEY`, `opencode auth export opencode`),
+        /// never the key itself.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_origin: Option<String>,
     },
@@ -600,17 +585,13 @@ pub enum EventBody {
         cached_tokens: u64,
         cache_write_tokens: u64,
         cost: f64,
-        /// Where `cost` came from: `provider` (its own number), `table` (tokens
-        /// times a known price) or `unknown` (no cost reported, no price known:
-        /// the 0.0 is "not known", not "free"). Absent in logs from before
-        /// STEER-8.
+        /// Where `cost` came from: `provider` (its own number), `table` (tokens times a known price) or
+        /// `unknown` (no cost reported, no price known: the 0.0 is "not known", not "free").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_source: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allowance: Option<Value>,
-        /// `None` for a model step. `"compact"` marks the summarising request,
-        /// which is not a step of the turn: it has no `step_started` of its
-        /// own, but its spend belongs in the log all the same (M3 review N4).
+        /// `None` for a model step.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kind: Option<String>,
     },
@@ -634,10 +615,7 @@ pub enum EventBody {
         input: Payload,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pid: Option<u32>,
-        /// The call's own directory under `commands/` (its job id, STEER-7).
-        /// A resumed session adopts it as a job it may be told about: the
-        /// registry is this process's memory, and a resume rebuilds it from
-        /// the log. Absent from a log written by an older kelir.
+        /// The call's own directory under `commands/` (its job id,).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dir: Option<String>,
     },
@@ -654,16 +632,14 @@ pub enum EventBody {
     },
     TurnEnded {
         outcome: String,
-        /// Why the turn paused (`steps`: an explicit `max_steps` cap,
-        /// `provider`: the retry budget ran out). Absent for every other
-        /// outcome.
+        /// Why the turn paused (`steps`: an explicit `max_steps` cap, `provider`: the retry budget
+        /// ran out). Absent for every other outcome.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         final_text: Payload,
     },
-    /// A `kelir mcp <server> <tool>` call reached the session broker. Written
-    /// before the call goes to the server (intent, like `tool_started`).
-    /// `parent_call_id` is the bash call it was made from, when there was one.
+    /// A `kelir mcp <server> <tool>` call reached the session broker. Written before the call
+    /// goes to the server (intent, like `tool_started`).
     McpStarted {
         mcp_id: String,
         server: String,
@@ -672,10 +648,7 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_call_id: Option<String>,
     },
-    /// The call's one commit. `outcome` is `ok`, `error` (the tool said
-    /// `isError`, or the server answered with a JSON-RPC error), `timeout`
-    /// (unknown outcome, never retried) or `unavailable` (the server could not
-    /// be started or died). The result itself is in the file `out_path` names.
+    /// The call's one commit.
     McpSettled {
         mcp_id: String,
         server: String,
@@ -687,12 +660,8 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_call_id: Option<String>,
     },
-    /// A background job exists: an explicit `kelir bg run` (which reports
-    /// itself over the session socket) or a bash call promoted past
-    /// `promote_after`. `bg_id` is the job's id: the call's output directory
-    /// name for a promoted call, `bg_<ulid>` for an explicit job. `call_id` is
-    /// the provider call id of the bash call that started it, when there was
-    /// one.
+    /// A background job exists: an explicit `kelir bg run` (which reports itself over the session socket)
+    /// or a bash call promoted past `promote_after`.
     BgStarted {
         bg_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -701,16 +670,11 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pid: Option<u32>,
         out_path: String,
-        /// The job's Ed25519 **public** key (hex), the one its shim's status
-        /// records verify under. A resume adopts it from here, so a job that
-        /// outlived its session still settles with its real exit code
-        /// (STEER-7 round 2). Not a secret.
+        /// The job's Ed25519 **public** key (hex), the one its shim's status records verify under.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pubkey: Option<String>,
     },
-    /// A background job settled (exited or was cancelled) while this session
-    /// owned its log. `state` is `exited` or `cancelled`; the wake-up message
-    /// the model reads is the `user` event that follows it.
+    /// A background job settled (exited or was cancelled) while this session owned its log.
     BgSettled {
         bg_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -721,15 +685,10 @@ pub enum EventBody {
         state: String,
         out_path: String,
     },
-    /// A child session was admitted to the root's registry (M7). The root
-    /// writes one for every descendant it admits (that is the registry); a
-    /// parent that is not the root writes the same event for its own direct
-    /// children, so its log holds what it must wake for and resume.
+    /// A child session was admitted to the root's registry.
     ChildStarted {
         child_id: String,
-        /// The child's own session id (its log is in its own dir).
         session: String,
-        /// The session that started it.
         parent: String,
         depth: u32,
         /// `child` (`kelir run --child`) or `brief` (`kelir brief`).
@@ -750,10 +709,7 @@ pub enum EventBody {
         exit_code: Option<i32>,
         result: Payload,
     },
-    /// A compaction: everything up to `through_seq` is replaced by `summary`,
-    /// except the pinned messages. `by` is `user`, `agent` or `auto`; the cache
-    /// restart is inherent (it is the reason the field is here) and recorded so
-    /// a reader of the log does not have to infer it from the seq numbers.
+    /// A compaction: everything up to `through_seq` is replaced by `summary`, except the pinned messages.
     Compacted {
         through_seq: u64,
         summary: Payload,
@@ -765,9 +721,8 @@ pub enum EventBody {
         #[serde(default)]
         cache_restart: bool,
     },
-    /// A session reopened from its log: where it continued from, and which
-    /// calls were started but never settled (they are reported to the model as
-    /// unknown outcomes and never re-run).
+    /// A session reopened from its log: where it continued from, and which calls were started but
+    /// never settled (they are reported to the model as unknown outcomes and never re-run).
     Resumed {
         from_seq: u64,
         #[serde(default)]
@@ -797,7 +752,7 @@ pub enum EventBody {
     SessionTitle {
         title: String,
     },
-    /// A notification hook ran (M11): one event per event kind, with its
+    /// A notification hook ran: one event per event kind, with its
     /// outcome. Never part of the conversation the model reads.
     Notify {
         /// `turn_done`, `error`, `paused`, `bg_settled`, `child_settled`.
@@ -807,10 +762,9 @@ pub enum EventBody {
         /// A hook's failure, when there was one (no key, no secret).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
-        /// How many hooks ran.
         hooks: u32,
     },
-    /// One gate run (M8): every run, including the ones that failed open
+    /// One gate run: every run, including the ones that failed open
     /// (`error` says why). `rewritten` is only present when the gate rewrote.
     Gate {
         gate: String,
@@ -823,9 +777,7 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    /// A threshold the human or the driver set was crossed (`warn_prompt_tokens`,
-    /// `warn_cost`). It informs whoever watches; it is never part of the
-    /// conversation the model reads, so it renders nothing in the fold.
+    /// A threshold the human or the driver set was crossed (`warn_prompt_tokens`, `warn_cost`).
     Warning {
         /// `prompt_tokens` or `cost`.
         kind: String,
@@ -903,10 +855,8 @@ impl EventLog {
         } else {
             1
         };
-        // A torn last line (a crash mid-write) is cut off here, so the log holds
-        // whole events only: no unparseable line, and never two lines with the
-        // same seq (M3 review S3). The fragment goes to `events.jsonl.torn`
-        // first, so nothing is dropped silently.
+        // A torn last line (a crash mid-write) is cut off here, so the log holds whole events only: no
+        // unparseable line, and never two lines with the same seq.
         remove_torn_tail(path)?;
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
@@ -920,14 +870,12 @@ impl EventLog {
         &self.path
     }
 
-    /// The seq the next appended event will get (used to name blob files).
     pub fn next_seq(&self) -> u64 {
         self.seq
     }
 
-    /// Append one event, assigning the next `seq` and a fresh timestamp.
-    /// The line is flushed to the OS; call [`EventLog::sync`] at a batch
-    /// boundary to fsync it.
+    /// Append one event, assigning the next `seq` and a fresh timestamp. The line is flushed to
+    /// the OS; call [`EventLog::sync`] at a batch boundary to fsync it.
     pub fn append(&mut self, body: EventBody) -> io::Result<LogEvent> {
         let event = LogEvent::new(self.seq, body);
         self.seq += 1;
@@ -945,13 +893,6 @@ impl EventLog {
     }
 }
 
-/// Cut a torn final line off a log, keeping the fragment in a sidecar.
-///
-/// A final line that is a whole event without its terminator is *kept*: it is
-/// what a crash between a payload write and its newline leaves, and dropping it
-/// would lose a committed event. Anything shorter cannot be parsed, and is
-/// copied to `<log>.torn` before it is truncated away, so a reader of the log
-/// (`jq`, the TUI, the next resume) never sees it again.
 fn remove_torn_tail(path: &Path) -> io::Result<()> {
     if !path.exists() {
         return Ok(());
@@ -1031,9 +972,8 @@ pub fn read_events(path: &Path) -> io::Result<LogRead> {
     }
     if last_complete < bytes.len() {
         let tail = &bytes[last_complete..];
-        // A crash can land between the payload and its newline. If what is
-        // there is a whole event, keep it: losing a complete event would be
-        // worse than a missing terminator. Anything less is torn.
+        // A crash can land between the payload and its newline. If what is there is a whole event,
+        // keep it: losing a complete event would be worse than a missing terminator.
         match serde_json::from_slice::<LogEvent>(tail) {
             Ok(event) => out.events.push(event),
             Err(_) => out.torn_last = Some(String::from_utf8_lossy(tail).into_owned()),
@@ -1407,9 +1347,8 @@ mod tests {
         let read = read_events(&path).unwrap();
         assert_eq!(read.events.len(), 1);
         assert!(read.torn_last.is_some());
-        // Reopening cuts the fragment off, so the log holds whole lines only:
-        // `jq` reads it, seq stays monotonic and the next resume reports
-        // nothing. The fragment itself is in the sidecar, not dropped.
+        // Reopening cuts the fragment off, so the log holds whole lines only: `jq` reads it, seq stays
+        // monotonic and the next resume reports nothing.
         let mut log = EventLog::open(&path).unwrap();
         assert_eq!(log.append(started()).unwrap().seq, 2);
         let read = read_events(&path).unwrap();
@@ -1464,9 +1403,8 @@ mod tests {
             bytes.push(b'\n');
             bytes.extend_from_slice(&second.as_bytes()[..cut]);
             std::fs::write(&path, &bytes).unwrap();
-            // The only cut that parses is the whole line (a crash between the
-            // payload and its newline); it is kept, and every shorter prefix is
-            // reported as torn.
+            // The only cut that parses is the whole line (a crash between the payload and its newline);
+            // it is kept, and every shorter prefix is reported as torn.
             let kept = usize::from(cut == second.len());
             let read = read_events(&path).unwrap();
             assert_eq!(read.events.len(), 1 + kept, "cut {cut}: {read:?}");

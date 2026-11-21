@@ -1,13 +1,8 @@
 //! The MCP client: the small JSON-RPC subset kelir needs, over a child's stdio.
-//!
-//! Hand-rolled instead of `rmcp` (docs/DEVIATIONS.md): `initialize`,
-//! `tools/list`, `tools/call`, `notifications/cancelled`, a `ping` answer and
-//! forwarding of inbound notifications are all there is. The transport is
-//! newline-delimited JSON, one message per line.
-//!
-//! The server is a child in its own process group (Unix) or Job Object
-//! (Windows, kill-on-close), exactly like a bash call's tree: killing it takes
-//! its children too, and a session that dies takes it along.
+//! Hand-rolled instead of `rmcp` (docs/DEVIATIONS.md): `initialize`, `tools/list`, `tools/call`,
+//! `notifications/cancelled`, a `ping` answer and forwarding of inbound notifications are all
+//! there is.
+//! The transport is newline-delimited JSON, one message per line.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -53,7 +48,6 @@ impl CallError {
     }
 }
 
-/// An inbound notification (a channel message, a progress report…).
 #[derive(Debug, Clone)]
 pub struct Notification {
     pub server: String,
@@ -85,9 +79,8 @@ impl Drop for Client {
     }
 }
 
-/// Where `command` really is. Windows resolves `.exe` only, but MCP servers
-/// are routinely `npx`/`uvx`-style `.cmd` shims, so the PATH is searched for
-/// those too.
+/// Where `command` really is. Windows resolves `.exe` only, but MCP servers are routinely
+/// `npx`/`uvx`-style `.cmd` shims, so the PATH is searched for those too.
 pub fn resolve_command(command: &str) -> PathBuf {
     let direct = Path::new(command);
     if direct.components().count() > 1 || direct.is_absolute() || !cfg!(windows) {
@@ -108,9 +101,8 @@ pub fn resolve_command(command: &str) -> PathBuf {
     direct.to_path_buf()
 }
 
-/// Variables a server inherits from the session (matched without regard to
-/// case, since Windows has none). Everything else, `KELIR_*` and provider keys
-/// included, is withheld.
+/// Variables a server inherits from the session (matched without regard to case, since
+/// Windows has none). Everything else, `KELIR_*` and provider keys included, is withheld.
 const INHERITED: &[&str] = &[
     "PATH",
     "PATHEXT",
@@ -164,9 +156,6 @@ pub(crate) fn inherited(key: &str) -> bool {
 
 impl Client {
     /// Start the server and complete the `initialize` handshake.
-    ///
-    /// `label` names the Windows Job Object (unique per start). `notify`
-    /// receives every inbound notification.
     pub async fn start(
         config: &ServerConfig,
         cwd: &Path,
@@ -184,10 +173,8 @@ impl Client {
         }
         #[cfg(unix)]
         let mut command = {
-            // The server runs under a tiny watcher (same process group) that
-            // kills the group when this process is gone, so a `kill -9` of the
-            // session leaves no server and no grandchild even if the server
-            // ignores stdin EOF (M6 round 2, F2).
+            // The server runs under a tiny watcher (same process group) that kills the group when this process is
+            // gone, so a `kill -9` of the session leaves no server and no grandchild even if the server ignores
             let mut command = Command::new("sh");
             command
                 .arg("-c")
@@ -205,10 +192,8 @@ impl Client {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        // The server gets a small allow-list of the session's environment, not
-        // all of it: a third-party `npx` package must not receive the provider
-        // key (`KELIR_*`), the session's socket, or anything else ambient.
-        // What it needs beyond that goes in its `env` table.
+        // The server gets a small allow-list of the session's environment, not all of it: a third- party `npx`
+        // package must not receive the provider key (`KELIR_*`), the session's socket, or anything else
         command.env_clear();
         for (key, value) in crate::envs::all_os() {
             if inherited(&key.to_string_lossy()) {
@@ -335,7 +320,6 @@ impl Client {
         self.notify("notifications/initialized", json!({})).await
     }
 
-    /// The last of the server's stderr, as a suffix for an error message.
     pub fn stderr_hint(&self) -> String {
         hint_from(&self.stderr_tail, &self.secrets)
     }
@@ -350,7 +334,6 @@ impl Client {
         self.alive.load(Ordering::SeqCst)
     }
 
-    /// Kill the server's whole tree.
     pub fn kill(&self) {
         self.alive.store(false, Ordering::SeqCst);
         self.group.kill();
@@ -399,9 +382,8 @@ impl Client {
         if let Ok(mut pending) = self.pending.lock() {
             pending.insert(id, tx);
         }
-        // The reader clears `alive` before it drains the waiters, so checking
-        // after the insert cannot miss a death: either the drain finds this
-        // entry or `alive` is already false.
+        // The reader clears `alive` before it drains the waiters, so checking after the insert
+        // cannot miss a death: either the drain finds this entry or `alive` is already false.
         if !self.is_alive() {
             self.forget(id);
             return Err(CallError::Unavailable(format!(
@@ -479,9 +461,8 @@ impl Client {
     }
 }
 
-/// Shell wrapper for Unix servers: a watcher in the server's process group
-/// polls the session's pid and kills the group (server, its children, itself)
-/// once the session is gone or the server has exited.
+/// Shell wrapper for Unix servers: a watcher in the server's process group polls the session's pid and
+/// kills the group (server, its children, itself) once the session is gone or the server has exited.
 #[cfg(unix)]
 const UNIX_GUARD: &str = concat!(
     // A zombie counts as gone (a parent that was killed but not yet reaped).

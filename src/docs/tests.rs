@@ -1,20 +1,12 @@
-//! The drift test: the code and `docs/reference/` must agree, in **both**
-//! directions.
-//!
-//! The generated blocks ([`super::check`]) prove that the files on disk are
-//! what the generators produce. That is one direction only: it cannot see a
-//! verb, a key, an event type or an environment variable that exists in the
-//! code and nowhere in `tables.rs`/`envs.rs`, because a name missing from the
-//! table produces no row at all. So these tests also read the *source*: the
-//! files are `include_str!`-ed at compile time, parsed with enough care to
-//! collect the names, and compared as sets with the tables. A name on one side
-//! only is a failure that says which side is missing it.
+//! The drift test: the code and `docs/reference/` must agree, in **both** directions.
+//! The generated blocks ([`super::check`]) prove that the files on disk are what the generators
+//! produce.
+//! That is one direction only: it cannot see a verb, a key, an event type or an environment
+//! variable that exists in the code and nowhere in `tables.rs`/`envs.rs`, because a name missing
 
 use super::*;
 
-// The code the reference is generated from, as it is compiled. `include_str!`
-// rather than a runtime read keeps the test independent of the cwd, and makes a
-// moved file a compile error instead of a silent skip.
+// The code the reference is generated from, as it is compiled.
 const VERBS_SRC: &str = include_str!("../verbs.rs");
 const CONFIG_SRC: &str = include_str!("../config.rs");
 const EVENT_SRC: &str = include_str!("../event.rs");
@@ -35,9 +27,8 @@ fn parsed_verbs(src: &str) -> Vec<String> {
         if !inside {
             continue;
         }
-        // The catch-all arm ends the match (it is at the match's own
-        // indentation: a nested one, inside `skills`, is deeper); every arm
-        // above it is a verb.
+        // The catch-all arm ends the match (it is at the match's own indentation: a nested one,
+        // inside `skills`, is deeper); every arm above it is a verb.
         if line.len() - line.trim_start().len() == 8 && line.trim_start().starts_with("other =>") {
             break;
         }
@@ -48,7 +39,7 @@ fn parsed_verbs(src: &str) -> Vec<String> {
     names
 }
 
-/// `        "say" => {` (or `=> Ok(…`) on a line of its own: the arm's string.
+/// ` "say" => {` (or `=> Ok(…`) on a line of its own: the arm's string.
 fn arm_name(line: &str) -> Option<String> {
     // The arms of `parse`'s outer match sit at eight spaces; a nested match
     // (the `kind` of a `skills` verb) is deeper and is not a verb name.
@@ -95,9 +86,7 @@ fn every_verb_the_code_parses_is_in_the_table_and_the_other_way() {
 #[test]
 fn every_verbs_row_says_where_the_code_applies_it() {
     for row in tables::VERBS {
-        // Build the smallest args `parse` accepts for the verb, then ask the
-        // code where it applies. No `bg` row: its args are a job status file,
-        // which is the session's own bookkeeping (covered by src/verbs.rs).
+        // Build the smallest args `parse` accepts for the verb, then ask the code where it applies.
         let args = match row.name {
             "say" | "later" => serde_json::json!({"text": "x"}),
             "model" => serde_json::json!({"model": "openrouter/test/model"}),
@@ -262,10 +251,7 @@ fn every_variable_the_code_names_is_declared_and_the_other_way() {
     let mut names: Vec<(String, String)> = Vec::new();
     walk_sources(&root, &mut |path, text| {
         for (number, line) in text.lines().enumerate() {
-            // A quoted literal that *looks* like one of the variables kelir
-            // owns. The scan is on strings, not on calls, so a variable kelir
-            // only *sets* (`command.env("KELIR_SOCK", …)`) is caught too, and
-            // so is a name behind a constant.
+            // A quoted literal that *looks* like one of the variables kelir owns.
             for name in quoted_variables(line) {
                 names.push((format!("{}:{}", path.display(), number + 1), name));
             }
@@ -296,10 +282,7 @@ fn every_variable_the_code_names_is_declared_and_the_other_way() {
     }
 }
 
-/// Is this one of the namespaces kelir owns, so that any name in it has to be
-/// documented? `KELIR_*` and `HC_*` (Herdr's pane variables) are; `PATH`,
-/// `HOME` and `TERM` are the platform's, and are in the table because the code
-/// reads them, which the other direction checks.
+/// Is this one of the namespaces kelir owns, so that any name in it has to be documented?
 fn owned_family(name: &str) -> bool {
     ["KELIR_", "HC_"]
         .iter()
@@ -407,9 +390,8 @@ fn every_topic_is_embedded_opens_with_its_summary_and_matches_its_file() {
             entry.name
         );
     }
-    // The embedded copy is the file: a `--generate` edits the file, and the
-    // binary must ship what the file says (a stale embed is a docs bug that
-    // only a rebuild could reveal).
+    // The embedded copy is the file: a `--generate` edits the file, and the binary must ship
+    // what the file says (a stale embed is a docs bug that only a rebuild could reveal).
     if let Some(root) = docs_root() {
         for entry in TOPICS {
             let path = root.join(format!("{}.md", entry.name));
@@ -531,10 +513,8 @@ fn every_generator_is_named_and_renders_something() {
     for kind in GENERATORS {
         let rendered = generate(kind).unwrap_or_else(|| panic!("{kind}: no generator"));
         assert!(!rendered.trim().is_empty(), "{kind} renders nothing");
-        // Tables, not prose: a block's cells are rows, with a heading or the
-        // one-line `about` of a command above each table.
-        // A cell may not hold a raw newline or an unescaped pipe: either would
-        // split the row and lose a column.
+        // Tables, not prose: a block's cells are rows, with a heading or the one-line `about` of a command
+        // above each table.
         for line in rendered.lines().filter(|line| line.starts_with('|')) {
             assert!(line.ends_with('|'), "{kind}: row does not end: {line}");
             assert!(!line.contains(" | |"), "{kind}: an empty cell in {line}");
@@ -672,9 +652,8 @@ fn occurrences_counts_case_insensitively() {
 
 // -------------------------------------------------------------------- budget
 
-/// The footprint of the embedded reference, reported so a growth is a decision
-/// rather than an accident (a binary that carries 300 KB of prose is a
-/// different footprint from one that carries 60 KB).
+/// The footprint of the embedded reference, reported so a growth is a decision rather than an accident
+/// (a binary that carries 300 KB of prose is a different footprint from one that carries 60 KB).
 #[test]
 fn the_embedded_reference_fits_its_size_budget() {
     let body: usize = TOPICS.iter().map(|topic| topic.body.len()).sum();
@@ -692,10 +671,8 @@ fn the_embedded_reference_fits_its_size_budget() {
             entry.body.len()
         );
     }
-    // 145 KB: room for the reference to grow, small enough that it is a
-    // rounding error next to the binary's budget.
-    // M10/M11 topics, the session-title docs and the load-project-agents
-    // example gate landed near 143.5 KB; 140 KB was already too tight for main.
+    // 145 KB: room for the reference to grow, small enough that it is a rounding error next to the
+    // binary's budget. / topics, the session-title docs and the load-project-agents example gate landed
     assert!(body <= 145 * 1024, "the reference is {body} bytes");
 }
 
@@ -975,9 +952,8 @@ fn the_delegation_and_herdr_skills_are_valid_short_and_say_what_they_must() {
 
 // ------------------------------------------- a skill names only commands that exist
 
-/// Every `kelir …` command a skill shows in a code span or block, as the words
-/// after `kelir` that look like a subcommand path, and the `--flags` that follow
-/// on the same command.
+/// Every `kelir …` command a skill shows in a code span or block, as the words after `kelir`
+/// that look like a subcommand path, and the `--flags` that follow on the same command.
 fn commands_in(text: &str) -> Vec<(String, Vec<String>, Vec<String>)> {
     let mut code = String::new();
     let mut fenced = false;
