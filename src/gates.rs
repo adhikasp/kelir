@@ -2037,10 +2037,11 @@ sleep 1
         // The script's own sleeps determine when a survivor would write
         // `flag.txt`: 1 s in the gate and 3 s in the detached child. Check
         // after both would have elapsed, measured from the end of the gate:
-        // a fixed 4 s wait could look before a delayed descendant got
-        // scheduled on a busy CI runner (the macOS failure). This does not
-        // weaken the no-leak check on any platform.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // a fixed wait could look before a delayed descendant got
+        // scheduled on a loaded CI runner (the macOS failure). 12 s leaves
+        // ample room for a 3 s child sleep even there; this does not weaken
+        // the no-leak check on any platform.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
