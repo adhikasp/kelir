@@ -5,45 +5,62 @@
 <h1 align="center">kelir</h1>
 
 <p align="center">
-  <b>A tiny, fully autonomous coding agent you can steer from anywhere.</b><br>
-  One Rust binary · three tools · no approval prompts · Linux, macOS and Windows
+  <b>A thin coding-agent harness, built for the next model, not the last one.</b><br>
+  One Rust binary · three tools · a 1 KB prompt · Linux, macOS and Windows
 </p>
 
 ---
 
-kelir gives a model your real shell and then gets out of its way. There are no
-"allow this command?" dialogs. A session is one process writing one append-only
-log, so you can watch it from another terminal, redirect it mid-task, drive it
-from a script, a cron job or another agent, kill it, and resume it later without
-re-running a single command.
+Most agent harnesses grow scaffolding to make *today's* model behave: a tool for
+every verb, plan modes, checklists, guard rails, retries tuned to one model's
+quirks. Every new model generation makes some of that scaffolding obsolete, and
+some of it starts to get in the way.
 
-It is a 9 MB binary that idles at about 10 MB of memory, with no daemon, no
-database and no Node, and it keeps the provider's prompt cache warm by
-construction.
+kelir bets the other way: **models get better faster than harnesses do.** So the
+core stays thin and prompt-driven. The model gets your real shell, three tools and
+a base prompt of about 1 KB, and is trusted to work things out. Everything that
+shapes its behaviour lives in text you can rewrite in a minute when the next model
+needs less hand-holding, not in code you would have to fork.
+
+What the harness does take on is the work a model can't do for itself: a durable
+log, process trees that never leak, a prompt cache that keeps hitting, and a
+session you can watch, steer, script and resume from anywhere.
 
 > In Javanese shadow puppetry (*wayang kulit*) the **kelir** is the white screen
 > the shadows fall on. It adds nothing of its own; it is where the performance
 > happens. That is the job description.
 
+## The bet, in practice
+
+- **Three tools.** `bash`, `edit` and `compact`. No separate read, grep, glob or
+  fetch tools re-implementing what a shell already does: the model uses the `git`,
+  `rg`, `sed`, compilers and test runners it already knows.
+- **Behaviour is prompts, not code.** The 1 KB base prompt, your `AGENTS.md`, skills
+  and memory are plain text you own. Replace the base prompt outright with one file.
+- **New abilities arrive as CLIs, not schemas.** Background jobs, sub-agents, MCP
+  servers and kelir's own manual are commands the model calls through `bash` and
+  discovers with `--help` and `kelir docs`, so they cost nothing in the prompt and
+  a better model simply uses them better.
+- **No policing in the core.** No approval prompts, no plan mode, no filter on tool
+  calls. When you do want a rule, it is a [gate](#2-rules-gates): a script you own,
+  and can delete once the model no longer needs it.
+- **Thick plumbing.** The parts below are where the code goes, because they are what
+  a model cannot fix from inside a conversation.
+
+It is a 9 MB binary that idles at about 10 MB of memory, with no daemon, no
+database and no Node.
+
 ## Why kelir
 
 | | What you may be used to | kelir |
 |---|---|---|
-| **Permission** | approve commands one by one, or turn checks off and hope | no prompts at all; when you want a rule, write a [gate](#2-rules-gates) |
-| **Steering** | type into the one window the agent owns | `say`, `stop`, `model`, `compact` from any terminal, script or agent |
+| **Where behaviour lives** | tools, modes and checks compiled into the harness | a 1 KB prompt, `AGENTS.md`, skills and gates you can edit |
 | **Tools in the prompt** | dozens, plus every MCP server's schema | three (`bash`, `edit`, `compact`); MCP is a CLI the model calls through `bash` |
+| **Steering** | type into the one window the agent owns | `say`, `stop`, `model`, `compact` from any terminal, script or agent |
 | **Crash or restart** | the chat survives; whether that last command ran is a guess | `kelir resume`: an unfinished call is reported to the model as unknown, **never re-run** |
 | **A 20-minute build** | killed by a tool timeout | promoted to a background job that outlives the session and wakes it when done |
 | **What did it see?** | a rendered transcript | `kelir observe` prints the exact next request; `events.jsonl` is the whole truth |
 | **Footprint** | a language runtime per session | one 9 MB binary, ~10 MB RSS idle |
-
-### It doesn't ask
-
-kelir is a fully autonomous agent. The model runs commands as you, in your shell,
-with your tools on `PATH`. That is deliberate: an agent that stops every thirty
-seconds for a yes is an agent you have to babysit. Guardrails are still possible;
-they live in code you own ([gates](#2-rules-gates)) instead of in modal dialogs.
-Read [Safety](#safety) before you point it at anything you care about.
 
 ### You can steer it while it works
 
@@ -149,9 +166,10 @@ kelir docs gates                                # the full reference ships in th
 
 ## Make it yours
 
-kelir's core has almost no opinions. Its 1 KB base prompt tells the model what it
-is and how to read files cheaply; everything else is yours to add, roughly in order
-of effort.
+This is the thin-core bet from the other side: kelir's core has almost no
+opinions. Its 1 KB base prompt tells the model what it is and how to read files
+cheaply; everything else is yours to add, roughly in order of effort, and to take
+away again when a better model stops needing it.
 
 ### 1. Words: instructions, skills, memory
 
