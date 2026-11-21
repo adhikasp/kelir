@@ -559,8 +559,10 @@ pub struct Launch<'a> {
 /// The command that runs one shim. The caller may add platform grouping flags
 /// (`ProcessGroup::configure`) or detach it ([`detach`]).
 pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> {
-    let binary = std::env::current_exe()
-        .map_err(|error| format!("cannot find the kelir binary: {error}"))?;
+    // Resolve with a PATH fallback: `current_exe()` goes stale (deleted) when
+    // `cargo install --force` replaces the binary under a live session, which
+    // used to make every bash call fail ENOENT.
+    let binary = crate::util::self_binary()?;
     let mut command = tokio::process::Command::new(binary);
     if let Some(env) = &launch.env {
         command.env_clear();
@@ -1185,7 +1187,7 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     if let Some(session_dir) = dir.parent() {
         command.env("KELIR_SESSION_DIR", session_dir);
     }
-    if let Ok(binary) = std::env::current_exe() {
+    if let Ok(binary) = crate::util::self_binary() {
         // The same binary this shim is: `kelir bg run` inside a call works even
         // when kelir is not on PATH.
         command.env("KELIR_BIN", binary);
