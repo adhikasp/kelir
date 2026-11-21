@@ -12,7 +12,7 @@
 # lock. Override the path with KELIR_GATE_LOCK (a shared gate driver outside the
 # repo must point it here so both serialize).
 #
-# The lock is a file holding one record, and it is published with `ln -T` of a
+# The lock is a file holding one record, and it is published with `ln` (portable create-or-fail) of a
 # record written beforehand: create-or-fail, on a file, a directory or a symlink
 # alike. So a lock that exists always names its owner, and two gates can never
 # both publish (buildinfra-review B2: the old script `mkdir`ed and then wrote
@@ -230,22 +230,18 @@ release() {
   rm -f "$grp_file" 2>/dev/null
 }
 
-# Publish the record atomically: create-or-fail, so one gate wins and a lock
-# without an owner cannot exist. `ln -T` refuses an existing file, directory and
-# symlink alike (plain `ln` into a directory lock would link *inside* it, which
-# is how the first draft of this fix stole an outside driver's lock).
+# Publish the record atomically with noclobber: create-or-fail, so one gate
+# wins and a lock without an owner cannot exist.
 try_publish() {
-  local tmp="$lock.tmp.$my_token.$RANDOM"
-  if ! write_record "$tmp" "$$" "$my_start" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null
-    return 1
-  fi
-  if ln -T "$tmp" "$lock" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null
+  # POSIX `set -C` makes `>` fail if the path already exists (file OR directory),
+  # atomically, on Linux, macOS and MSYS. The temp record is written first, then
+  # renamed into place only if the lock path is free - but rename would replace a
+  # directory, so instead write DIRECTLY to the lock under noclobber. If it
+  # fails, nothing was created. This is the portable replacement for GNU ln -T.
+  if ( set -C; write_record "$lock" "$$" "$my_start" ) 2>/dev/null; then
     held=1
     return 0
   fi
-  rm -f "$tmp" 2>/dev/null
   return 1
 }
 
@@ -254,7 +250,7 @@ try_publish() {
 # over and published, and that gate's lock must be handed back, not deleted.
 takeover() { # <reason>
   local reason="$1" tomb="$lock.stale.$my_token" moved="" try=0
-  mv -T "$lock" "$tomb" 2>/dev/null || return 1
+  mv "$lock" "$tomb" 2>/dev/null || return 1
   if [ -f "$tomb" ]; then
     moved=$(sed -n 's/^token //p' "$tomb" 2>/dev/null | head -1)
   elif [ -f "$tomb/owner" ]; then
@@ -267,7 +263,7 @@ takeover() { # <reason>
     return 0
   fi
   while :; do
-    if ln -T "$tomb" "$lock" 2>/dev/null; then
+    if ( set -C; cat "$tomb" >"$lock" ) 2>/dev/null; then
       rm -f "$tomb" 2>/dev/null
       echo "gate-lock: a lock changed while it was examined; it was kept for its owner" >&2
       return 1
