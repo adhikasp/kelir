@@ -92,8 +92,8 @@ test in its own process, names a retry and enforces the leak rule. Nothing else 
 
 | file | what it sets |
 |---|---|
-| `.cargo/config.toml` | `profile.dev`/`profile.test` `debug = "line-tables-only"`; `rust-lld` for `x86_64-pc-windows-msvc` |
-| `Cargo.toml` | `[profile.review]` (inherits release, thin LTO, 16 codegen units) |
+| `Cargo.toml` | `[profile.dev]`/`[profile.test]` `debug = "line-tables-only"` (the project default; ships with the source); `[profile.review]` (inherits release, thin LTO, 16 codegen units) |
+| `.cargo/config.toml` | `rust-lld` for `x86_64-pc-windows-msvc` only; no `[profile]` overrides (those would shadow the manifest default above) |
 | `.config/nextest.toml` | gate profile: `retries = 2`, `fail-fast = false`, `test-threads = 4`, `slow-timeout`, and `leak-timeout` with `result = "fail"` so a leaked process is a failure |
 | `scripts/gate.sh` | the gate itself: lock, fmt, clippy, nextest, doctests, optional Linux, optional load |
 | `scripts/gate-lock.sh` | one gate at a time across every worktree of this clone (atomic publish; waits on an outside driver's lock) |

@@ -47,29 +47,35 @@ fn bash_command(script: &str) -> Command {
 
 // ---------------------------------------------------------------- Cargo config
 
-/// The values cargo actually resolved, which is the only thing a build obeys:
-/// `cargo config get` reads the same config.toml a build does.
+/// The profiles are the project default in Cargo.toml (so every clone gets
+/// them); the config must not override them with a different value.
 #[test]
 fn the_dev_and_test_profiles_keep_only_line_tables_of_debug_info() {
-    // The same file and the same parser a human reads; `cargo config get` is
-    // nightly-only and `cargo metadata` does not report profiles, so the
-    // checked value has to come from the TOML itself.
+    // `cargo config get` is nightly-only and `cargo metadata` does not report
+    // profiles, so the checked value has to come from the TOML itself.
     // toml 1.x: parse the document with `from_str`, not `str::parse::<Value>`
     // (the latter parses a single value and rejects a whole document).
-    let config: toml::Value =
-        toml::from_str(&read(".cargo/config.toml")).expect("the cargo config parses as TOML");
+    let manifest: toml::Value = toml::from_str(&read("Cargo.toml")).expect("Cargo.toml is TOML");
     for profile in ["dev", "test"] {
-        let debug = &config["profile"][profile]["debug"];
+        let debug = &manifest["profile"][profile]["debug"];
         assert_eq!(
             debug.as_str(),
             Some("line-tables-only"),
-            "profile.{profile}.debug should be line-tables-only, got {debug}"
+            "profile.{profile}.debug in Cargo.toml should be line-tables-only, got {debug}"
         );
     }
     // A build that only gets the dev profile right is still slow to test.
     assert!(
-        config["profile"]["test"].is_table(),
+        manifest["profile"]["test"].is_table(),
         "[profile.test] must be set explicitly, not inherited by luck"
+    );
+    // .cargo/config.toml [profile] overrides the manifest: if it reintroduced
+    // a full-debug profile, the default above would not be what cargo builds.
+    let config: toml::Value =
+        toml::from_str(&read(".cargo/config.toml")).expect("the cargo config parses as TOML");
+    assert!(
+        config.get("profile").is_none(),
+        "the manifest is the default; .cargo/config.toml must not override profiles"
     );
 }
 
