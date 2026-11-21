@@ -96,7 +96,7 @@ impl OneShot {
             std::process::id(),
             self.starts
         );
-        let client = Client::start(&config, &self.cwd, &label, None)
+        let client = Client::start(&config, &self.cwd, &label, None, None)
             .await
             .map_err(|error| {
                 Fail::new(EXIT_UNAVAILABLE, format!("kelir mcp: {}", error.message()))

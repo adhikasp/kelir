@@ -249,6 +249,21 @@ Named sessions: ls, rename, forget
 | flag | takes | what it does |
 |---|---|---|
 
+### `kelir channel`
+
+Headless channel bridge: serve conversations from channel MCP servers
+
+| flag | takes | what it does |
+|---|---|---|
+| `--model` | `<MODEL>` | Model id for this run (overrides the config) |
+| `--provider` | `<PROVIDER>` | Provider name: `openrouter` or `opencode-go` (there are exactly two) |
+| `--cwd` | `<CWD>` | Working directory for the session (defaults to the current directory) |
+| `--config` | `<CONFIG>` | Config file to use instead of the machine/project search |
+| `--max-steps` | `<N>` | Cap one turn at N steps, then pause it (overrides `max_steps`). There is no cap by default; `0` also means no cap |
+| `--server` | `<NAME>` | Serve only these channel servers (default: every `channel = true` server) |
+| `--max-messages` | `<N>` | Stop after this many inbound messages have been answered (tests; default: forever) |
+| `--status-once` | nothing | Dump one JSON status line at startup, then serve (for `ctl status` tests) |
+
 ### `kelir doctor`
 
 Show which key each provider would use (never the key itself)

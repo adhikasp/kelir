@@ -172,6 +172,7 @@ impl Client {
         cwd: &Path,
         label: &str,
         notify: Option<mpsc::UnboundedSender<Notification>>,
+        capabilities: Option<Value>,
     ) -> Result<Client, CallError> {
         let resolved = resolve_command(&config.command);
         #[cfg(unix)]
@@ -301,14 +302,16 @@ impl Client {
             }
         });
 
-        client.handshake().await?;
+        client
+            .handshake(capabilities.unwrap_or_else(|| json!({})))
+            .await?;
         Ok(client)
     }
 
-    async fn handshake(&self) -> Result<(), CallError> {
+    async fn handshake(&self, capabilities: Value) -> Result<(), CallError> {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
+            "capabilities": capabilities,
             "clientInfo": {"name": "kelir", "version": crate::VERSION},
         });
         self.request("initialize", params, INIT_TIMEOUT)

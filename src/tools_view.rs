@@ -28,8 +28,56 @@
 use std::time::Duration;
 
 use ratatui::text::{Line, Span};
+use serde_json::Value;
 
 use crate::theme::Theme;
+
+/// The maximum length of a `bash` call's human-readable `description`.
+/// A label is a glance, never a second copy of the command.
+pub const DESCRIPTION_MAX: usize = 120;
+
+/// The `description` a call supplied, cleaned for one-line display: folded
+/// whitespace, capped at [`DESCRIPTION_MAX`] characters. `None` for anything
+/// else (a missing field, a wrong type, an empty label), so callers fall back
+/// to today's truncated command. The full command stays in the log and in
+/// `/expand`; only this label is bounded.
+pub fn description(input: &Value) -> Option<String> {
+    let raw = input.get("description")?.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // Model-supplied labels must never put control bytes into a terminal or
+    // a Herdr OSC record. Fold them to spaces first; one function then covers
+    // the TUI, the live row and headless stdout. Raw bytes stay in the log.
+    let chars: Vec<char> = raw.chars().collect();
+    let mut clean = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Drop OSC introducers (]8;;, ]7501;, ...) too: without the leading
+        // ESC they are still text a viewer could mistake for a control record.
+        if c == ']' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && j < chars.len() && chars[j] == ';' {
+                i = j + 1;
+                continue;
+            }
+        }
+        clean.push(if c.is_control() { ' ' } else { c });
+        i += 1;
+    }
+    // The cap is in characters, not bytes: a 60-column pane cares about what
+    // the human sees, and a non-ASCII label is not shorter for being wide.
+    let one_line: String = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= DESCRIPTION_MAX {
+        return Some(one_line);
+    }
+    let cut: String = one_line.chars().take(DESCRIPTION_MAX - 1).collect();
+    Some(format!("{cut}…"))
+}
 
 /// One settled call, as the transcript shows it.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,7 +85,8 @@ pub struct CallLine {
     /// Session-wide ordinal: what `/expand n` names.
     pub ordinal: u64,
     pub name: String,
-    /// `$ cargo test` / `edit src/lib.rs`.
+    /// The call's one-line identity: its `description` when it gave one,
+    /// otherwise `$ cargo test` / `edit src/lib.rs`.
     pub head: String,
     pub outcome: String,
     pub exit_code: Option<i32>,
@@ -307,6 +356,7 @@ fn group_rows(theme: Theme, width: usize, calls: &[CallLine]) -> Vec<Line<'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn call(head: &str, name: &str) -> CallLine {
         CallLine {
@@ -334,6 +384,69 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn a_description_supplied_by_the_call_is_the_head() {
+        let theme = Theme::plain();
+        let input = json!({
+            "command": "cat a && cat b && cat c",
+            "description": "read the three config files"
+        });
+        let head = crate::tui::call_head("bash", &input);
+        assert_eq!(head, "read the three config files");
+        let label = crate::tui::call_label("bash", &input);
+        assert_eq!(label, "read the three config files");
+        let mut call = call("$ cat a", "bash");
+        call.head = head;
+        let text: String = call
+            .line(theme, 60)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            text.starts_with("  read the three config files"),
+            "{text:?}"
+        );
+        assert!(!text.contains("cat a"), "{text:?}");
+        assert!(text.ends_with("ok · 29 B"), "{text:?}");
+    }
+
+    #[test]
+    fn a_missing_blank_or_wrong_description_falls_back_to_the_command() {
+        for input in [
+            json!({"command": "cargo test"}),
+            json!({"command": "cargo test", "description": "  "}),
+            json!({"command": "cargo test", "description": 42}),
+        ] {
+            assert_eq!(crate::tui::call_head("bash", &input), "$ cargo test");
+            assert_eq!(crate::tui::call_label("bash", &input), "bash: cargo test");
+            assert_eq!(description(&input), None);
+        }
+        // A description does not change an `edit` call or an unknown one.
+        assert_eq!(
+            crate::tui::call_head("edit", &json!({"path": "src/a.rs", "description": "x"})),
+            "edit src/a.rs"
+        );
+    }
+
+    #[test]
+    fn a_description_is_one_line_and_capped_at_120_characters() {
+        let input = json!({
+            "command": "x",
+            "description": format!("  first\nsecond\tthird {}  ", "x".repeat(200))
+        });
+        let label = description(&input).expect("a label");
+        assert_eq!(label.chars().count(), DESCRIPTION_MAX, "{label}");
+        assert!(label.ends_with('…'), "{label}");
+        assert!(label.starts_with("first second third"), "{label}");
+        assert!(!label.contains('\n'), "{label:?}");
+        assert_eq!(
+            crate::tui::call_head("bash", &input),
+            label,
+            "the settled head uses the label too"
+        );
     }
 
     #[test]

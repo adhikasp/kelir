@@ -329,3 +329,10 @@ Starting points (verify before designing):
 - Docs: `src/prompt.md` tool bullet, the closest `docs/reference/` tool topic, then `kelir docs --generate` and `cargo test --lib docs` (drift test must pass).
 
 - 2026-11-21: **M9 merged** (c73a11f, main gate 1349 green). M10 running (worktree m10, pane t18w; must merge main before its gate). steer9 (de-flake, worktree steer9) not yet started. Then M11, M12.
+
+## State (orchestrator handover, 2026-11-21 10:05 SGT)
+
+- **Landed on main** (d3d3c47): M9 (jobs, named sessions, single-flight, STATUS) with review and fix-review PASS; M10 (channel mode) after a FAIL review (7 blockers) was fixed and independently verified PASS; the queued `bash` `description` field, with a control-byte/OSC sanitizer added after review. Each has gates, review docs and a retro where the protocol requires one. M10's real Telegram bridge still needs the maintainer's credentials/infra — only the fake server is shipped.
+- **In flight:** steer9 (de-flake; worktree steer9, pane a Linux box/t19g, resuming 23 uncommitted edits after t18y was killed) and M11 (attach viewer + notifications; worktree m11, pane a Linux box/t19h). Next after those: fresh reviewer per milestone, merge, re-gate main, then M12 publish prep. **M12's push needs the maintainera's explicit yes.**
+- **Known environment issue:** four STEER-7 memory-scan / e2e_m7 registry tests fail intermittently on a Linux box under load; they passed in two gates earlier the same day on the same code lineage. Do not change product code for them; re-gate on a quiet box. Gate-lock can go stale when a worker is killed — check the recorded pid before waiting.
+- **Harness:** the maintainer t19n holds role=kelir-orchestrator; subagents report via kelir-scratch/report-to-orchestrator.sh (resolves the live role holder). The kelir-drive.timer that spawned a second Claude orchestrator is stopped and disabled; re-enable only on an explicit decision.

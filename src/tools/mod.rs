@@ -192,11 +192,12 @@ pub fn specs() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "bash",
-                "description": "Run a command in the session shell. The cwd is the session cwd and every call starts there; no shell state carries over between calls. Output goes to a file; a result over the spill limit comes back as a notice with a path and a head/tail. A command over 6000 characters is written to a file and run from there, so length is not a limit. Create big files with `edit` (empty `old`), not with a heredoc.",
+                "description": "Run a command in the session shell. The cwd is the session cwd and every call starts there; no shell state carries over between calls. Output goes to a file; a result over the spill limit comes back as a notice with a path and a head/tail. A command over 6000 characters is written to a file and run from there, so length is not a limit. Create big files with `edit` (empty `old`), not with a heredoc. Supply a short `description` of what the command does: it is what a human sees in the transcript instead of the command.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string", "description": "The command line to run."}
+                        "command": {"type": "string", "description": "The command line to run."},
+                        "description": {"type": "string", "description": "Optional short human-readable label for what the command does, at most 120 characters; the command itself stays in the log, never in this field."}
                     },
                     "required": ["command"],
                     "additionalProperties": false
@@ -317,6 +318,26 @@ mod tests {
             assert!(function["description"].is_string());
             assert_eq!(function["parameters"]["type"], "object");
         }
+    }
+
+    #[test]
+    fn bash_takes_an_optional_description_beside_the_command() {
+        let spec = specs()
+            .into_iter()
+            .find(|spec| spec["function"]["name"] == "bash")
+            .expect("a bash tool");
+        let parameters = &spec["function"]["parameters"];
+        assert_eq!(parameters["required"], json!(["command"]));
+        assert_eq!(parameters["additionalProperties"], json!(false));
+        let properties = parameters["properties"].as_object().expect("properties");
+        assert_eq!(properties.len(), 2, "{properties:?}");
+        assert_eq!(properties["command"]["type"], "string");
+        assert_eq!(properties["description"]["type"], "string");
+        assert!(
+            properties["description"]["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("120"))
+        );
     }
 
     #[test]

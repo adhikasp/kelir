@@ -370,9 +370,12 @@ pub fn fit(text: &str, width: usize) -> String {
 /// `$ cargo test` / `edit src/a.rs`: the compact one-line identity of a call.
 pub fn call_head(name: &str, input: &Value) -> String {
     match name {
-        "bash" => match input.get("command").and_then(Value::as_str) {
-            Some(command) => format!("$ {}", one_line(command)),
-            None => "$ bash".to_string(),
+        "bash" => match tools_view::description(input) {
+            Some(label) => label,
+            None => match input.get("command").and_then(Value::as_str) {
+                Some(command) => format!("$ {}", one_line(command)),
+                None => "$ bash".to_string(),
+            },
         },
         "edit" => match input.get("path").and_then(Value::as_str) {
             Some(path) => format!("edit {path}"),
@@ -405,9 +408,15 @@ fn one_line(text: &str) -> String {
 }
 
 /// The session's one-line label for a running call, which the state row shows:
-/// the tool's name and its own first line of input, never the raw JSON (a long
-/// argument blob in a status row is noise).
+/// a `bash` call's description when it has one, otherwise the tool's name and
+/// its own first line of input, never the raw JSON (a long argument blob in a
+/// status row is noise).
 pub fn call_label(name: &str, input: &Value) -> String {
+    if name == "bash"
+        && let Some(label) = tools_view::description(input)
+    {
+        return label;
+    }
     let detail = input
         .get("command")
         .and_then(Value::as_str)

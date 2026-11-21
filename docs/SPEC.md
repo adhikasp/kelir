@@ -311,6 +311,27 @@ pair, and gates see it as tool `mcp:<server>.<tool>`. Channel servers (`tg-bridg
 from the start because inbound messages arrive on that connection. Servers are configured in
 `mcp.toml`, each with an optional `description` for the hint.
 
+## Channel mode (M10)
+
+`kelir channel` is a headless driver for chat bridges. A bridge is an MCP server with
+`channel = true` in `mcp.toml`; the public repo ships the mechanism, not a concrete chat
+service or its credentials. At connect time kelir declares the bridge's configured
+capabilities (`declare_capabilities`, default `claude/channel`) but never a permission-relay
+capability. Inbound `notifications/claude/channel` messages (message id, conversation id,
+sender, text, optional attachments, reply-to) are fsync'd into
+`spool/<server>.jsonl` before anything else happens; replay after a crash dedupes by
+message id and resumes unfinished turns. Each conversation is a named M9 session
+(`chan-<server>-<conversation>`), single-flight and bounded by `channel_max_active`;
+per-conversation and global rate limits keep a flood bounded. A turn's reply goes once
+through the configured `reply_tool` (`reply` by default) with the message id as an
+idempotency key; errors, pauses and timeouts get one configurable fallback reply, and
+`turn_done` tells the bridge to stop its typing indicator. The text arrives as a `user`
+event with `from: channel` and an envelope naming server, conversation and sender; it is
+untrusted data, never a session verb, and M8 `prompt_submit` gates run on it. `/stop` maps
+to the `stop` verb. The process reports OSC 7501 status (working while any turn runs,
+idle otherwise), and the status snapshot carries conversation count, queue depth, spool
+backlog and reply/fallback counts. See `docs/reference/channels.md`.
+
 ## Sources, skills and memory
 
 - **Sources** come from two layers, machine then project (project wins on a name clash): the

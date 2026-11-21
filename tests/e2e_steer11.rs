@@ -310,7 +310,8 @@ async fn docs_size_is_reported_and_within_budget() {
     }
     eprintln!("the embedded reference is {total} bytes over {count} topics");
     assert!(count >= 12, "{count} topics");
-    // The same ceiling the unit test holds the embed to (128 KB): the whole
-    // reference is a rounding error next to the binary's budget.
-    assert!(total <= 128 * 1024, "the reference is {total} bytes");
+    // The same ceiling the unit test holds the embed to (140 KB since M10
+    // added the channel topic and five config keys): the whole reference is a
+    // rounding error next to the binary's budget.
+    assert!(total <= 140 * 1024, "the reference is {total} bytes");
 }

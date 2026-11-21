@@ -501,7 +501,7 @@ struct Session {
     turn_tool_calls: u32,
     /// The command-line task, held back until `session_start` gates ran and
     /// `prompt_submit` gates saw it: (text, delivery).
-    initial_task: Option<(String, &'static str)>,
+    initial_task: Option<(String, &'static str, &'static str)>,
     /// Problems found while reading gate declarations; logged once at start.
     gate_notes: Vec<String>,
 }
@@ -2251,8 +2251,8 @@ impl Session {
     /// The command-line task: written at once, or held back for the gates
     /// (`session_start`, then `prompt_submit`) when there are any.
     fn submit_task(&mut self, text: String, delivery: &'static str) -> Result<(), String> {
-        if self.task_from() == "cli" && self.gated(crate::gates::Event::PromptSubmit, None) {
-            self.initial_task = Some((text, delivery));
+        if self.gated(crate::gates::Event::PromptSubmit, None) {
+            self.initial_task = Some((text, delivery, self.task_from()));
             return Ok(());
         }
         self.record(EventBody::User {
@@ -2316,14 +2316,14 @@ impl Session {
         let _ = self
             .gate(crate::gates::Event::SessionStart, None, payload)
             .await;
-        let Some((text, delivery)) = self.initial_task.take() else {
+        let Some((text, delivery, from)) = self.initial_task.take() else {
             return true;
         };
-        match self.gate_prompt(text, "cli").await {
+        match self.gate_prompt(text, from).await {
             Ok(Some(text)) => {
                 let _ = self.record(EventBody::User {
                     text: text.into(),
-                    from: "cli".into(),
+                    from: from.into(),
                     delivery: delivery.to_string(),
                     attachments: Vec::new(),
                 });
@@ -6277,7 +6277,13 @@ fn print_result_event(
     let _ = lock.flush();
 }
 
+/// The head of a settled call in headless output: a `bash` call's
+/// human-readable `description` when it supplied one, otherwise the command
+/// (or an `edit` path). The full args stay in the log and in `/expand`.
 fn compact_input(args: &Value) -> String {
+    if let Some(label) = crate::tools_view::description(args) {
+        return label;
+    }
     let text = args
         .get("command")
         .and_then(|value| value.as_str())
@@ -6489,6 +6495,13 @@ mod tests {
                 gates: Vec::new(),
                 project_gates: Vec::new(),
                 trusted_projects: Vec::new(),
+                channel: crate::channel::Config {
+                    max_active: 4,
+                    per_conversation_rpm: 20,
+                    global_rpm: 120,
+                    fallback: String::new(),
+                    spool_limit: 1024,
+                },
             },
             provider_name: "openrouter".into(),
             model: model.into(),
@@ -6609,6 +6622,13 @@ mod tests {
             gates: Vec::new(),
             project_gates: Vec::new(),
             trusted_projects: Vec::new(),
+            channel: crate::channel::Config {
+                max_active: 4,
+                per_conversation_rpm: 20,
+                global_rpm: 120,
+                fallback: String::new(),
+                spool_limit: 1024,
+            },
         };
         let a = render_system(&cfg, Path::new("tmp"), None);
         let b = render_system(&cfg, Path::new("tmp"), None);
@@ -6620,6 +6640,19 @@ mod tests {
         assert_eq!(compact_input(&json!({"command": "ls -la"})), "ls -la");
         assert_eq!(compact_input(&json!({"path": "src/a.rs"})), "src/a.rs");
         assert_eq!(compact_input(&json!({"x": 1})), "{\"x\":1}");
+        // A supplied description is what the human reads; the full command
+        // still goes to the log and to `/expand`.
+        assert_eq!(
+            compact_input(&json!({
+                "command": "ls -la",
+                "description": "list the working directory"
+            })),
+            "list the working directory"
+        );
+        assert_eq!(
+            compact_input(&json!({"command": "ls -la", "description": ""})),
+            "ls -la"
+        );
     }
 
     #[test]

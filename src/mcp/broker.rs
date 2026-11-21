@@ -60,6 +60,9 @@ struct Inner {
     session_id: String,
     key: String,
     notify: Mutex<Option<mpsc::UnboundedSender<Notification>>>,
+    /// Channel mode: when set, inbound notifications go straight to the
+    /// headless driver instead of a session loop (which does not exist).
+    channel_sink: Mutex<Option<mpsc::UnboundedSender<Notification>>>,
     starts: AtomicU64,
 }
 
@@ -105,6 +108,7 @@ impl Broker {
             session_id,
             key: ulid::Ulid::new().to_string(),
             notify: Mutex::new(None),
+            channel_sink: Mutex::new(None),
             starts: AtomicU64::new(0),
         }))
     }
@@ -189,6 +193,15 @@ impl Broker {
         }
     }
 
+    /// Give the broker a direct sink for raw MCP notifications (`kelir
+    /// channel`). A session's `attach` is unaffected; when both exist the
+    /// direct sink wins for inbound messages.
+    pub fn set_channel_sink(&self, sink: mpsc::UnboundedSender<Notification>) {
+        if let Ok(mut slot) = self.0.channel_sink.lock() {
+            *slot = Some(sink);
+        }
+    }
+
     /// The state of every server, for `kelir mcp ls`. Never starts anything.
     pub fn servers(&self) -> Value {
         let list: Vec<Value> = self
@@ -221,6 +234,7 @@ impl Broker {
                     "state": state,
                     "tools": tools,
                     "channel": entry.config.channel,
+                    "reply_tool": entry.config.reply_tool,
                     "description": entry.config.description,
                 })
             })
@@ -250,8 +264,21 @@ impl Broker {
         slot.tools = None;
         let n = self.0.starts.fetch_add(1, Ordering::SeqCst);
         let label = format!("kelir-mcp-{}-{name}-{n}", self.0.session_id);
-        let notify = self.0.notify.lock().ok().and_then(|slot| slot.clone());
-        let started = Client::start(&entry.config, &self.0.cwd, &label, notify).await;
+        let notify = self
+            .0
+            .channel_sink
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .or_else(|| self.0.notify.lock().ok().and_then(|slot| slot.clone()));
+        // A channel server learns that kelir is ready to receive its messages
+        // from the capabilities of `initialize` (M10). Never a permission relay.
+        let capabilities = if entry.config.channel {
+            Some(crate::channel::capabilities(&entry.config))
+        } else {
+            None
+        };
+        let started = Client::start(&entry.config, &self.0.cwd, &label, notify, capabilities).await;
         let client = match started {
             Ok(client) => Arc::new(client),
             Err(error) => {
