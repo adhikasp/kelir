@@ -347,10 +347,12 @@ backlog and reply/fallback counts. See `docs/reference/channels.md`.
 - **Herdr awareness (source, M5)**: herdr-core sets `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET` and `HC_SCOPE` in every
   pane it creates (`TERM_PROGRAM` is `ghostty` there and unusable). If `HC_TERMINAL_ID` is set, kelir renders
   **one line** at `session_start` into the frozen system sources: the pane's address, space, tab and `where` label,
-  read once from `hc get $HC_TERMINAL_ID --json` (labels `herdr.space`/`herdr.tab`/`where`). It **fails open**:
-  `hc` missing, slow (short timeout) or erroring just omits the line. **No live count is ever frozen into the
-  prompt** (how many agents share the space is asked live, see the M8 `herdr` skill). Outside Herdr the line is
-  absent. No new tool.
+  read once from `hc get $HC_TERMINAL_ID --json` (labels `herdr.space`/`herdr.tab`/`where`), plus a
+  **start-of-session snapshot** of concurrent activity from one `hc ls --json`: agents sharing the pane's space
+  split by state (working/idle/done/blocked), the count of other spaces, and the count of connected machines.
+  This is initial awareness only — not a live feed; the M8 `herdr` skill still answers live count questions with
+  `hc ls`. It **fails open**: `hc` missing, slow (short timeout) or erroring just omits the affected part (a
+  failed `hc ls` keeps the pane line). Outside Herdr the line is absent. No new tool.
 - **Memory** is a source: the project's memory directory is loaded at session start; the model
   writes it with `edit`; changes made mid-session arrive as `source` messages.
 - **Attachments** (images, voice, video) enter as `source` events: voice transcribed at ingress,
@@ -587,7 +589,7 @@ fold). Deps: tokio, serde, one HTTP client (reqwest + rustls), ratatui/crossterm
 | M2 | inline ratatui TUI in the session process, plus the OSC 7501 writer | every TUI action is also a `ctl` verb; a kelir pane in the Herdr app shows working / idle / done |
 | M3 | durability (fsync, unsettled detection, `resume`) and compaction (tool, `/compact`, auto at 80 %) | `kill -9` at five random points, resume never re-runs a completed command; after a compaction the task and every human message are verbatim in the next request |
 | M4 | `bg` + shim + status files + 10-minute promotion + wake | a 15-minute command is promoted, kelir exits, `kelir bg out` still reads it, `resume` shows it settled |
-| M5 | sources (machine + project, incl. the Herdr line), skills, the pushed hint, memory, attachments, `observe` | with `HC_TERMINAL_ID` set the frozen system holds one Herdr line (pane, space, tab, where) and without it none, `hc` missing fails open; `observe` matches what the provider received byte for byte; the hint names the right skill for 10 held-out prompts; the cache hit ratio holds across a hint |
+| M5 | sources (machine + project, incl. the Herdr line), skills, the pushed hint, memory, attachments, `observe` | with `HC_TERMINAL_ID` set the frozen system holds one Herdr line (pane, space, tab, where, plus a start-of-session snapshot of agent counts by state / other spaces / connected machines from `hc ls`) and without it none, `hc` missing fails open; `observe` matches what the provider received byte for byte; the hint names the right skill for 10 held-out prompts; the cache hit ratio holds across a hint |
 | — | **dogfood 1:** kelir is the default for the maintainer's own terminal side tasks | a week of real use; the scorecard reads kelir's logs |
 | M6 | `kelir mcp` (`rmcp` client, socket broker, `mcp_started`/`mcp_settled`) | `kelir mcp <server> <tool> … \| jq` works in a bash call; the call shows in `observe`; a >10 KB result spills |
 | M7 | children as CLI (`kelir run --child`, `kelir brief`, root-registered via `KELIR_ROOT`/`KELIR_PARENT`/`KELIR_DEPTH`), caps, `kelir ls` and kill | a child of a child finishes; killing the parent leaves no orphan (Linux and Windows); the 17th live descendant is refused; `brief` hits the parent's cache |

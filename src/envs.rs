@@ -127,7 +127,7 @@ pub const VARS: &[Var] = &[
     ),
     read(
         "HC_TERMINAL_ID",
-        "set by herdr-core in every pane: its presence makes kelir ask `hc get` once for the pane/space/tab line in the frozen system prompt",
+        "set by herdr-core in every pane: its presence makes kelir ask `hc get` and `hc ls` once for the pane/space/tab line plus the start-of-session activity snapshot in the frozen system prompt",
     ),
     read("TERM", "`dumb` picks the ASCII glyph set"),
     read(

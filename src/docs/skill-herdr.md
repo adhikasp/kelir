@@ -35,7 +35,9 @@ come from `hc get`; `--label K=V` filters.
 
 ## "How many agents share my space?"
 
-Ask live, never from memory (the frozen prompt line is a snapshot):
+Ask live, never from the frozen system line: its activity counts are a
+**start-of-session snapshot** taken once by kelir, useful only for initial
+awareness; the live answer comes from `hc ls`:
 
 1. `hc get "$HC_TERMINAL_ID" --json` gives my `where`; my space is the text before ` / `.
 2. `hc ls --json`, keep terminals whose `where` starts with `<my space> / `, and whose
