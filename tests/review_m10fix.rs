@@ -200,51 +200,118 @@ async fn r15_two_new_conversations_get_distinct_sessions_and_both_answer() {
     assert!(shells().saturating_sub(before) <= 20, "leaked shells");
 }
 
-/// r16: replicate r14's two-conversation concurrency with a held mock, but
-/// capture driver stderr on failure. Distinguishes a product serialization
-/// bug from a fake-bridge polling/harness timing flake.
+/// B1 strong probe: a multi-byte character cut inside a spool record must lose
+/// nothing before the tear. The repaired file must contain exactly the good
+/// prefix (all complete records before the torn one), and `.torn` must hold
+/// exactly the dropped bytes for inspection.
+#[test]
+fn r17_torn_multibyte_tail_keeps_every_good_byte_and_the_exact_torn_suffix() {
+    use kelir::channel::{Message, Spool};
+    let dir = std::env::temp_dir().join(format!(
+        "kelir-m10fix-torn-{}",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let msg = |id: &str| Message {
+        id: id.into(),
+        server: "fake".into(),
+        conversation: "c".into(),
+        sender: "Ada".into(),
+        text: "hello".into(),
+        reply_to: None,
+        attachments: Vec::new(),
+    };
+    let mut spool = Spool::open(&dir, "fake").unwrap();
+    spool.inbound(msg("m1")).unwrap();
+    spool.inbound(msg("m2")).unwrap();
+    drop(spool);
+    let path = dir.join("spool").join("fake.jsonl");
+    let original = std::fs::read(&path).unwrap();
+    // Append a partial record that starts with a complete ASCII prefix and is
+    // cut in the middle of a 4-byte UTF-8 character.
+    let torn = b"{\"seq\":3,\"op\":\"inbound\",\"id\":\"m3\",\"message\":{\"text\":\"\xf0\x9f";
+    let mut bytes = original.clone();
+    bytes.extend_from_slice(torn);
+    std::fs::write(&path, &bytes).unwrap();
+    let reopened = Spool::open(&dir, "fake").unwrap();
+    let ids: Vec<&str> = reopened.replay().iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["m1", "m2"], "both complete records must survive");
+    let repaired = std::fs::read(&path).unwrap();
+    assert_eq!(
+        repaired, original,
+        "repaired file must be exactly the good prefix"
+    );
+    let kept = std::fs::read(path.with_extension("jsonl.torn")).unwrap();
+    assert_eq!(
+        kept, torn,
+        "the exact torn bytes must be preserved for inspection"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// B5 strong probe: a handled `/stop` is marked `done`, so restarting the
+/// driver on the same state must NOT send a second "stopped" reply. Also
+/// asserts the single reply's text is exactly "stopped".
 #[tokio::test(flavor = "multi_thread")]
-async fn r16_two_conversations_parallel_with_held_mock_diagnostic() {
+async fn r18_stop_is_done_and_not_replied_twice_across_restart() {
     let before = shells();
-    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
-    let mock = Mock::start(vec![
-        Reply::Gated(gate.clone(), sse(&text_turn("first", 0))),
-        Reply::Gated(gate.clone(), sse(&text_turn("second", 0))),
-    ])
-    .await;
+    let mock = Mock::start(vec![]).await;
     let test = ChannelTest::new();
     let mut driver = test
-        .spawn_driver(&mock.base_url(), &["--max-messages", "2"])
+        .spawn_driver(&mock.base_url(), &["--max-messages", "1", "--status-once"])
         .await;
     test.inject(json!({
-        "message_id": "m-fix-c", "conversation_id": "c-fix-c",
-        "sender": "C", "content": "hello"
+        "message_id": "m-stop-restart", "conversation_id": "c-stop-restart",
+        "sender": "Ada", "content": "/stop please"
     }))
     .await;
-    test.inject(json!({
-        "message_id": "m-fix-d", "conversation_id": "c-fix-d",
-        "sender": "D", "content": "hello"
-    }))
-    .await;
-    let start = std::time::Instant::now();
-    while mock.request_count() < 2 && start.elapsed() < Duration::from_secs(20) {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let count = mock.request_count();
-    gate.notify_waiters();
-    if count < 2 {
-        // Drain whatever the bridge/driver wrote before we kill it.
-        driver.kill().await.ok();
-        let _ = driver.wait().await;
-        let events = test.lines(&test.events);
-        let replies = test.lines(&test.replies);
-        panic!(
-            "only {count} provider requests arrived; bridge events={events:?}, replies={replies:?}"
-        );
-    }
-    test.wait_for(&test.replies, |lines| lines.len() == 2).await;
-    assert!(mock.max_concurrent() >= 2);
+    test.wait_for(&test.replies, |lines| !lines.is_empty())
+        .await;
+    let replies = test.lines(&test.replies);
+    assert_eq!(replies.len(), 1, "exactly one stopped reply");
+    assert_eq!(replies[0]["text"], "stopped");
     driver.kill().await.ok();
     let _ = driver.wait().await;
+    let spool = std::fs::read_to_string(test.sandbox.state.join("spool").join("fake.jsonl"))
+        .unwrap_or_default();
+    assert!(
+        spool.contains("\"op\":\"done\""),
+        "/stop must be done: {spool}"
+    );
+    let mut driver2 = test
+        .spawn_driver(&mock.base_url(), &["--max-messages", "1"])
+        .await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let replies = test.lines(&test.replies);
+    assert_eq!(
+        replies.len(),
+        1,
+        "restart must not re-answer a done /stop: {replies:?}"
+    );
+    driver2.kill().await.ok();
+    let _ = driver2.wait().await;
     assert!(shells().saturating_sub(before) <= 20, "leaked shells");
+}
+
+/// B3 strong probe: a config with both a forbidden capability and a secret in
+/// its `env` block must be refused, and the refusal must never echo the secret
+/// value from `env` (STEER-7). Applies to case/separator/substring variants.
+#[test]
+fn r20_config_rejects_forbidden_variants_without_echoing_env_secret() {
+    let secret = "super-secret-env-value-4f9a";
+    for cap in [
+        "claude/channel/permission_relay",
+        "Claude/Channel/APPROVAL/relay",
+        "x-permission-x",
+        "approval_relay",
+    ] {
+        let text = format!(
+            "[servers.fake]\ncommand = 'python'\ndeclare_capabilities = ['{cap}']\n\
+             [servers.fake.env]\nAPI_TOKEN = '{secret}'\n"
+        );
+        let err = kelir::mcp::config::parse_layer(&text, "review")
+            .err()
+            .unwrap_or_else(|| panic!("capability {cap} must be refused"));
+        assert!(!err.contains(secret), "error echoed the env secret: {err}");
+    }
 }
