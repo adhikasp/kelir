@@ -299,8 +299,23 @@ async fn resume_replaces_the_stale_socket_of_the_dead_process() {
         .await;
     assert_ne!(first.code, 0);
     let id = sandbox.only_session();
-    let sock = sandbox.session_dir(&id).join("sock");
-    assert!(sock.exists(), "the crashed session left no socket file");
+    // With a deep KELIR_STATE_DIR (CI runners), the socket is bound to a
+    // short path recorded in `sock.path` instead of the canonical `sock`.
+    // The contract is that one of them names the crashed session's socket.
+    let session_dir = sandbox.session_dir(&id);
+    let sock = session_dir.join("sock");
+    let recorded = std::fs::read_to_string(session_dir.join("sock.path")).unwrap_or_default();
+    let falls_back = !recorded.trim().is_empty();
+    assert!(
+        sock.exists() || falls_back,
+        "the crashed session left no socket file"
+    );
+    if falls_back {
+        assert!(
+            std::path::Path::new(recorded.trim()).exists(),
+            "the recorded fallback socket does not exist"
+        );
+    }
 
     let second = sandbox
         .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
