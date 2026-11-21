@@ -230,7 +230,7 @@ pub mod reap {
     /// Pure parser for the `ps` output: a line starts with the pid, the rest
     /// is the command and its `ps e` environment. Only whole entries count.
     #[cfg(target_os = "macos")]
-    fn parse_marked_pids(ps: &str, needle: &str) -> std::collections::BTreeSet<u32> {
+    pub(crate) fn parse_marked_pids(ps: &str, needle: &str) -> std::collections::BTreeSet<u32> {
         ps.lines()
             .filter_map(|line| {
                 let mut fields = line.split_whitespace();
