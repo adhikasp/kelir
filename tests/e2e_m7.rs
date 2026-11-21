@@ -969,7 +969,16 @@ fn command_line_of(pid: u32) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn command_line_of(pid: u32) -> String {
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn command_line_of(pid: u32) -> String {
     std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
