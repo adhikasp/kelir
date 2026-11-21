@@ -62,7 +62,7 @@ fn tool_lines_land_in_the_scrollback_before_the_prose_that_followed_them() {
     );
 }
 
-/// Same, with a three-call group (the fold) and multi-block prose.
+/// Four calls are four lines, and they all precede multi-block prose.
 #[test]
 fn a_folded_group_precedes_multi_block_prose() {
     let mut app = app(80);
@@ -73,10 +73,22 @@ fn a_folded_group_precedes_multi_block_prose() {
     app.apply(UiEvent::Delta(prose.into()));
     app.apply(UiEvent::Assistant { text: prose.into() });
     let scroll: Vec<String> = app.take_scroll().iter().map(line_text).collect();
-    let fold = scroll.iter().position(|l| l.contains("4 calls"));
+    let last_call = scroll
+        .iter()
+        .rposition(|l| l.contains("4 B"))
+        .expect("four call lines");
     let first = scroll.iter().position(|l| l.contains("First paragraph"));
-    assert!(fold.is_some() && first.is_some(), "{scroll:?}");
-    assert!(fold < first, "{scroll:?}");
+    assert!(first.is_some(), "{scroll:?}");
+    assert!(last_call < first.unwrap(), "{scroll:?}");
+    assert_eq!(
+        scroll.iter().filter(|l| l.contains("4 B")).count(),
+        4,
+        "{scroll:?}"
+    );
+    assert!(
+        !scroll.iter().any(|l| l.contains("calls")),
+        "no fold: {scroll:?}"
+    );
 }
 
 /// Every row of a rendered table (CJK included) has the same display width.

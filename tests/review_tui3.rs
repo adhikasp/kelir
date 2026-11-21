@@ -51,8 +51,8 @@ fn prose(app: &mut App, text: &str) {
     app.apply(UiEvent::Assistant { text: text.into() });
 }
 
-/// Every failed call of a fold keeps its own line AND its tail, wherever it
-/// sits in the run, and is not counted in the checked line.
+/// Every call keeps its own line AND its failed ones keep their tail, wherever
+/// they sit in the run. There is no fold to hide them in.
 #[test]
 fn every_failure_in_a_fold_keeps_its_line_and_tail() {
     let mut app = app(80);
@@ -68,13 +68,14 @@ fn every_failure_in_a_fold_keeps_its_line_and_tail() {
     }
     prose(&mut app, "done");
     let scroll = rows(&mut app);
-    let fold = scroll
-        .iter()
-        .find(|r| r.contains("calls"))
-        .expect("checked line");
     assert!(
-        fold.contains("4 calls"),
-        "only the clean calls are counted: {scroll:?}"
+        !scroll.iter().any(|r| r.contains("calls")),
+        "no fold: {scroll:?}"
+    );
+    assert_eq!(
+        scroll.iter().filter(|r| r.contains("4 B")).count(),
+        6,
+        "one line per call: {scroll:?}"
     );
     for (cmd, code) in [("first-fail", "exit 2"), ("second-fail", "exit 7")] {
         let at = scroll
@@ -109,9 +110,8 @@ fn an_all_failed_run_has_no_checkmark_line() {
     }
 }
 
-/// F-edit (fixed in `tui3fix`): an `edit` keeps its own line inside a fold, so
-/// the transcript names the file that was changed, and the checked count covers
-/// only the foldable read/exec calls it stands in for.
+/// An `edit` keeps its own line, so the transcript names the file that was
+/// changed. No fold groups the bash calls away.
 #[test]
 fn an_edit_inside_a_fold_keeps_its_own_line() {
     let mut app = app(80);
@@ -126,18 +126,22 @@ fn an_edit_inside_a_fold_keeps_its_own_line() {
     prose(&mut app, "patched");
     let scroll = rows(&mut app);
     assert!(
-        scroll.iter().any(|r| r.contains("2 calls")),
-        "only the two bash calls are folded: {scroll:?}"
+        !scroll.iter().any(|r| r.contains("calls")),
+        "no fold: {scroll:?}"
     );
     assert!(
         scroll.iter().any(|r| r.contains("edit src/lib.rs")),
         "the file change is named in the transcript (F-edit): {scroll:?}"
     );
+    assert_eq!(
+        scroll.iter().filter(|r| r.contains("4 B")).count(),
+        3,
+        "one line per call: {scroll:?}"
+    );
 }
 
-/// F-cancel (fixed in `tui3fix`): a call cancelled by Esc inside a fold must
-/// not be counted as a checked (successful) call; it keeps its own line, and
-/// the fold says how many stopped.
+/// A call cancelled by Esc keeps its own `cancelled` line. There is no fold
+/// to count it as a checked (successful) call.
 #[test]
 fn a_cancelled_call_is_not_counted_as_a_checked_call() {
     let mut app = app(80);
@@ -154,28 +158,23 @@ fn a_cancelled_call_is_not_counted_as_a_checked_call() {
         final_text: String::new(),
     });
     let scroll = rows(&mut app);
-    let line = scroll
-        .iter()
-        .find(|r| r.contains("calls"))
-        .cloned()
-        .unwrap_or_default();
     assert!(
-        !line.contains("3 calls"),
-        "a cancelled call was folded into a checked count: {scroll:?}"
-    );
-    assert!(
-        line.contains("2 calls"),
-        "the two that finished: {scroll:?}"
-    );
-    assert!(
-        line.contains("1 stopped"),
-        "the fold says one call was stopped: {scroll:?}"
+        !scroll.iter().any(|r| r.contains("calls")),
+        "no fold: {scroll:?}"
     );
     assert!(
         scroll
             .iter()
             .any(|r| r.contains("sleep 20") && r.contains("cancelled")),
         "the stopped call keeps its own line: {scroll:?}"
+    );
+    assert_eq!(
+        scroll
+            .iter()
+            .filter(|r| r.starts_with("  $ a") || r.starts_with("  $ b"))
+            .count(),
+        2,
+        "the two clean calls each keep a line: {scroll:?}"
     );
 }
 
@@ -198,14 +197,14 @@ fn prose_and_folds_keep_event_order() {
             .position(|r| r.contains(needle))
             .unwrap_or_else(|| panic!("{needle}: {scroll:?}"))
     };
-    assert!(at("Before the calls") < at("3 calls"), "{scroll:?}");
-    assert!(at("3 calls") < at("After the calls"), "{scroll:?}");
+    assert!(at("Before the calls") < at("$ a"), "{scroll:?}");
+    assert!(at("$ c") < at("After the calls"), "{scroll:?}");
     assert!(at("After the calls") < at("$ solo"), "{scroll:?}");
     assert!(at("$ solo") < at("After the solo call"), "{scroll:?}");
 }
 
-/// Streaming: a delta arriving while a group is open closes it first, so the
-/// fold lands before the first streamed row.
+/// Streaming: each settled call commits its line immediately, before the
+/// first streamed prose row.
 #[test]
 fn a_streaming_delta_commits_the_fold_before_its_own_rows() {
     let mut app = app(60);
@@ -218,15 +217,15 @@ fn a_streaming_delta_commits_the_fold_before_its_own_rows() {
     let mut scroll = rows(&mut app);
     let live: Vec<String> = app.live_lines().iter().map(line_text).collect();
     scroll.extend(live);
-    let fold = scroll
+    let last_call = scroll
         .iter()
-        .position(|r| r.contains("3 calls"))
-        .expect("fold");
+        .rposition(|r| r.contains("4 B"))
+        .expect("call lines");
     let first = scroll
         .iter()
         .position(|r| r.contains("First paragraph"))
         .expect("prose");
-    assert!(fold < first, "{scroll:?}");
+    assert!(last_call < first, "{scroll:?}");
 }
 
 /// The open group previews exactly what it will commit (no shape change).
