@@ -1471,7 +1471,7 @@ mod tests {
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "kelir-channel-{name}-{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir

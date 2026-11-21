@@ -349,7 +349,7 @@ pub fn promotion_due(after: Duration, elapsed: Duration) -> bool {
 
 /// `bg_<ulid>`: unique across processes, and the same shape as a session id.
 pub fn new_id() -> String {
-    format!("bg_{}", ulid::Ulid::new().to_string().to_lowercase())
+    format!("bg_{}", ulid::Ulid::generate().to_string().to_lowercase())
 }
 
 /// Where jobs live: this session's `bg/` inside a bash call, otherwise the
@@ -2275,7 +2275,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kelir-bg-{}-{name}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-bg-{}-{name}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

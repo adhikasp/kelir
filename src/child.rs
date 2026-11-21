@@ -1251,7 +1251,7 @@ mod tests {
     /// afterwards touches only that log.
     #[test]
     fn a_snapshot_folds_to_the_parents_prefix_and_is_a_copy() {
-        let base = std::env::temp_dir().join(format!("kelir-snap-{}", ulid::Ulid::new()));
+        let base = std::env::temp_dir().join(format!("kelir-snap-{}", ulid::Ulid::generate()));
         let (source, dest) = (base.join("parent"), base.join("child"));
         std::fs::create_dir_all(source.join("blobs")).unwrap();
         std::fs::write(source.join("blobs").join("1-x"), "\"blob\"").unwrap();

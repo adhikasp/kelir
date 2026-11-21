@@ -169,7 +169,7 @@ fn token() -> String {
     format!(
         "{}.{}.{}",
         std::process::id(),
-        ulid::Ulid::new().to_string().to_lowercase(),
+        ulid::Ulid::generate().to_string().to_lowercase(),
         std::time::SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())

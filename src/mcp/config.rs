@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn the_nearest_project_file_wins() {
-        let root = std::env::temp_dir().join(format!("kelir-mcp-cfg-{}", ulid::Ulid::new()));
+        let root = std::env::temp_dir().join(format!("kelir-mcp-cfg-{}", ulid::Ulid::generate()));
         let deep = root.join("a").join("b");
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::create_dir_all(root.join(".kelir")).unwrap();

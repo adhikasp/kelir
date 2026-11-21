@@ -103,7 +103,7 @@ async fn run_one(
             &format!(
                 "{}-{}",
                 std::process::id(),
-                ulid::Ulid::new().to_string().to_lowercase()
+                ulid::Ulid::generate().to_string().to_lowercase()
             ),
         );
         let job = crate::proc::win::Job::create_named(&name, true)

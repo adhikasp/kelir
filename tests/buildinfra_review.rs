@@ -68,10 +68,8 @@ fn text(out: &Output) -> String {
 /// reads the parsed values.
 #[test]
 fn release_is_pinned_by_value_not_by_substring() {
-    let manifest: toml::Value = std::fs::read_to_string(repo().join("Cargo.toml"))
-        .unwrap()
-        .parse()
-        .unwrap();
+    let manifest: toml::Value =
+        toml::from_str(&std::fs::read_to_string(repo().join("Cargo.toml")).unwrap()).unwrap();
     let release = &manifest["profile"]["release"];
     assert_eq!(
         release["lto"].as_bool(),

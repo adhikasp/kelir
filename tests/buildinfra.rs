@@ -54,9 +54,10 @@ fn the_dev_and_test_profiles_keep_only_line_tables_of_debug_info() {
     // The same file and the same parser a human reads; `cargo config get` is
     // nightly-only and `cargo metadata` does not report profiles, so the
     // checked value has to come from the TOML itself.
-    let config: toml::Value = read(".cargo/config.toml")
-        .parse()
-        .expect("the cargo config parses as TOML");
+    // toml 1.x: parse the document with `from_str`, not `str::parse::<Value>`
+    // (the latter parses a single value and rejects a whole document).
+    let config: toml::Value =
+        toml::from_str(&read(".cargo/config.toml")).expect("the cargo config parses as TOML");
     for profile in ["dev", "test"] {
         let debug = &config["profile"][profile]["debug"];
         assert_eq!(
@@ -81,7 +82,7 @@ fn the_dev_and_test_profiles_keep_only_line_tables_of_debug_info() {
 /// satisfy `lto = true`, so the pin could not fail (buildinfra-review S1).
 #[test]
 fn the_shipped_profile_stays_fat_lto_and_review_is_thin() {
-    let manifest: toml::Value = read("Cargo.toml").parse().expect("Cargo.toml is TOML");
+    let manifest: toml::Value = toml::from_str(&read("Cargo.toml")).expect("Cargo.toml is TOML");
     let release = &manifest["profile"]["release"];
     assert_eq!(
         release["lto"].as_bool(),

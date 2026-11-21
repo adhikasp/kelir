@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn a_group_readable_socket_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = std::env::temp_dir().join(format!("kelir-perm-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-perm-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("sock");
         std::fs::write(&socket, b"").unwrap();
@@ -483,7 +483,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_missing_socket_is_an_error_not_a_pass() {
-        let dir = std::env::temp_dir().join(format!("kelir-perm-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-perm-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(check_socket(&dir.join("nope")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -505,7 +505,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_token_file_gets_a_dacl_and_the_read_back_notices_a_wide_one() {
-        let dir = std::env::temp_dir().join(format!("kelir-perm-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-perm-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("token");
         std::fs::write(&file, b"secret").unwrap();

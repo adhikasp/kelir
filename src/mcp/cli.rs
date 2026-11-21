@@ -261,7 +261,7 @@ impl Backend {
             .ok_or_else(|| shot.unknown(server))?;
         let out_dir = crate::paths::state_dir()
             .join("mcp")
-            .join(ulid::Ulid::new().to_string());
+            .join(ulid::Ulid::generate().to_string());
         Ok(run_call(&client, &config, tool, arguments, envelope, &out_dir, false).await)
     }
 

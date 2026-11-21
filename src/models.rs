@@ -436,7 +436,7 @@ pub fn store_in(dir: &Path, cache: &Cache) -> Result<(), String> {
     let temp = dir.join(format!(
         "models-{}.{}.tmp",
         cache.endpoint,
-        ulid::Ulid::new()
+        ulid::Ulid::generate()
     ));
     std::fs::write(&temp, text)
         .map_err(|error| format!("models: cannot write {}: {error}", temp.display()))?;
@@ -767,7 +767,7 @@ mod tests {
 
     #[test]
     fn the_cache_round_trips_and_knows_its_age() {
-        let dir = std::env::temp_dir().join(format!("kelir-models-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-models-{}", ulid::Ulid::generate()));
         let models = parse(GO).unwrap();
         let base = "http://127.0.0.1:1234/v1";
         let endpoint = endpoint_id("opencode-go", base);
@@ -808,7 +808,7 @@ mod tests {
     /// from the server they replaced.
     #[test]
     fn the_cache_is_keyed_by_the_endpoint_not_the_provider_name() {
-        let dir = std::env::temp_dir().join(format!("kelir-models-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-models-{}", ulid::Ulid::generate()));
         let models = parse(OPENROUTER).unwrap();
         let gateway = endpoint_id("openrouter", "http://gateway.local/v1");
         let direct = endpoint_id("openrouter", "https://openrouter.ai/api/v1");
@@ -882,7 +882,7 @@ mod tests {
     /// truncated list.
     #[test]
     fn the_cache_is_written_atomically() {
-        let dir = std::env::temp_dir().join(format!("kelir-models-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-models-{}", ulid::Ulid::generate()));
         let endpoint = endpoint_id("openrouter", "http://h/v1");
         let older = Cache::new(
             "openrouter",

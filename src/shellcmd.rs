@@ -398,7 +398,8 @@ mod tests {
     }
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kelir-shellcmd-{}-{name}", ulid::Ulid::new()));
+        let dir =
+            std::env::temp_dir().join(format!("kelir-shellcmd-{}-{name}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

@@ -317,7 +317,7 @@ fn existing(name: &str, entry: Entry) -> Result<Target, String> {
 }
 
 pub fn new_session_id() -> String {
-    format!("ses_{}", ulid::Ulid::new().to_string().to_lowercase())
+    format!("ses_{}", ulid::Ulid::generate().to_string().to_lowercase())
 }
 
 // ------------------------------------------------------------- kelir sessions

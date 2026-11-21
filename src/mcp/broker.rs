@@ -106,7 +106,7 @@ impl Broker {
             cwd,
             session_dir,
             session_id,
-            key: ulid::Ulid::new().to_string(),
+            key: ulid::Ulid::generate().to_string(),
             notify: Mutex::new(None),
             channel_sink: Mutex::new(None),
             starts: AtomicU64::new(0),

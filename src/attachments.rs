@@ -1030,7 +1030,7 @@ mod media_tests {
 
     #[test]
     fn save_media_copies_under_a_sanitised_name() {
-        let dir = std::env::temp_dir().join(format!("kelir-media-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-media-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("my memo (1).wav");
         std::fs::write(&source, b"RIFF").unwrap();
