@@ -385,9 +385,10 @@ async fn r5_a_settled_bg_job_fires_its_notify_hook() {
     assert!(fired, "bg_settled produced no notify event");
 }
 
-/// Regression for B1's double-dispatch risk: a job settling while its parent
-/// turn also ends produces exactly one `bg_settled` notify and one `turn_done`
-/// notify. Repeated status reports for the same job are deduped by `BgSettled`.
+/// Regression for B1's double-dispatch risk: a settled job must fire exactly one
+/// `bg_settled` notify even when its wake message starts another turn. The script
+/// drives two turns, so there are two `turn_done` notifies (one per turn); the
+/// invariant is one `bg_settled` for the job and one `turn_done` per turn.
 #[tokio::test]
 async fn r9_a_settled_job_and_its_turn_notify_once_each() {
     init();
@@ -409,20 +410,36 @@ async fn r9_a_settled_job_and_its_turn_notify_once_each() {
     let settled = live.wait_for("bg_settled").await;
     assert_eq!(settled["state"], "exited", "{settled}");
     let started = Instant::now();
-    let counts = loop {
-        let events: Vec<_> = live
-            .log()
-            .into_iter()
-            .filter(|e| e["type"] == "notify")
-            .collect();
+    let (bg, turn, done_turns) = loop {
+        let log = live.log();
+        let events: Vec<_> = log.iter().filter(|e| e["type"] == "notify").collect();
         let bg = events.iter().filter(|e| e["event"] == "bg_settled").count();
         let turn = events.iter().filter(|e| e["event"] == "turn_done").count();
+        let done_turns = log
+            .iter()
+            .filter(|e| e["type"] == "turn_ended" && e["outcome"] == "done")
+            .count();
         if (bg >= 1 && turn >= 1) || started.elapsed() > Duration::from_secs(8) {
-            break (bg, turn);
+            break (bg, turn, done_turns);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    assert_eq!(counts, (1, 1), "one notify per kind, not double-dispatched");
+    // The core B1 claim: a settled job fires exactly one `bg_settled` notify,
+    // never a duplicate, even as its wake starts another turn. The script drives
+    // two turns (the tool turn and the bg-wake turn), so there can legitimately
+    // be more than one `turn_done`; assert one per completed turn rather than a
+    // fixed total, which raced with how far the second turn had advanced. A read
+    // can land between a `turn_ended` write and its `notify` write, so allow the
+    // notify count to be one behind but never ahead of the completed turns.
+    assert_eq!(
+        bg, 1,
+        "exactly one bg_settled notify, not double-dispatched"
+    );
+    assert!(done_turns >= 1 && turn >= 1, "a turn fired its notify");
+    assert!(
+        turn <= done_turns,
+        "no more turn_done notifies than completed turns (bg={bg}, turns={done_turns}, notify={turn})"
+    );
     let (code, _stderr) = live.end().await;
     assert_eq!(code, 0, "session exited badly");
 }
