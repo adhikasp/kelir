@@ -1,0 +1,48 @@
+---
+name: Bug report
+about: Report something that does not work as specified
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. Please keep this public — no hostnames, usernames, API keys,
+        private paths or session contents.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Exact command / steps, with the kelir version and OS.
+      placeholder: |
+        kelir --version:
+        OS:
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Before / after or evidence
+      description: |
+        Paste the relevant `events.jsonl` excerpt, stdout/stderr, or a screenshot if this
+        is a TUI / user-facing problem. For a regression, show what worked before and
+        what happens now.
+    validations:
+      required: false
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Which part is affected — CLI, TUI, gates, verbs, IPC, docs, build?
+    validations:
+      required: false
+---

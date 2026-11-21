@@ -1,0 +1,41 @@
+---
+name: Feature / change request
+about: Propose a new capability or a change to existing behaviour
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep this public — no hostnames, usernames, API keys, private paths or session contents.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or impossible today? Who is blocked?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change? Name the spec section or the user-facing surface.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: User-facing impact
+      description: |
+        Does this change a CLI flag, TUI row/key, config key, env var, verb, event or doc?
+        If yes, list it — `CONTRIBUTING.md` requires the matching `docs/reference/` update.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives / trade-offs
+      description: What else was considered, and why this way (footprint and simplicity matter here).
+    validations:
+      required: false
+---
