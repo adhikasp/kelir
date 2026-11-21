@@ -325,7 +325,32 @@ pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
     {
         linux_start_time(pid)
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        // macOS has no /proc. `ps -o lstart=` gives the process start as
+        // "Mon Jan  1 12:00:00 2026" in the local timezone; RFC 3339 records
+        // the same instant with an offset, so compare instants, not strings.
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        time::format_description::parse("[weekday] [month] [day] [hour]:[minute]:[second] [year]")
+            .ok()
+            .and_then(|f| {
+                let local = time::PrimitiveDateTime::parse(text.trim(), &f).ok()?;
+                // `ps lstart` is local time; the recorded RFC 3339 timestamp
+                // carries an offset. Anchor the local wall clock to UTC by
+                // asking the platform for the offset at this instant.
+                let offset = time::UtcOffset::current_local_offset().ok()?;
+                time::OffsetDateTime::from_local(local, offset).ok()
+            })
+            .map(|t| std::time::SystemTime::from(t))
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         None
