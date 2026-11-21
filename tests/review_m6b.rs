@@ -381,7 +381,13 @@ async fn the_servers_command_line_has_no_env_values() {
             .stdout,
     )
     .into_owned();
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    let cmdline = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default();
+    #[cfg(not(any(windows, target_os = "macos")))]
     let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|b| String::from_utf8_lossy(&b).replace('\0', " "))
         .unwrap_or_default();
