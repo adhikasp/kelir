@@ -440,6 +440,15 @@ async fn a_zero_max_steps_flag_lifts_a_jobs_cap() {
 
 #[tokio::test]
 async fn the_next_day_adds_the_date_source_and_nothing_else() {
+    // The session's start date comes from the real UTC clock; the hard-coded
+    // 2026-11-20/21 dates made this test a midnight bomb (it failed every run
+    // after 2026-11-21T00:00Z). Derive both days from the clock instead.
+    let today = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Iso8601::DATE)
+        .expect("today");
+    let tomorrow = (time::OffsetDateTime::now_utc() + time::Duration::days(1))
+        .format(&time::format_description::well_known::Iso8601::DATE)
+        .expect("tomorrow");
     let mock = Mock::start(vec![
         text("day one"),
         text("day two"),
@@ -448,23 +457,23 @@ async fn the_next_day_adds_the_date_source_and_nothing_else() {
     .await;
     let sb = Sandbox::new("");
     jobs_toml(&sb, NIGHTLY);
-    let run = |day: &'static str| {
-        let (sb, mock) = (&sb, &mock);
+    let run = |day: &str| {
+        let (sb, mock, day) = (&sb, &mock, day.to_string());
         async move {
             kelir(
                 sb,
                 mock,
                 &["job", "run", "nightly"],
-                &[("KELIR_TODAY", day)],
+                &[("KELIR_TODAY", &day)],
             )
             .await
         }
     };
-    assert_eq!(run("2026-11-20").await.code, 0);
+    assert_eq!(run(&today).await.code, 0);
     let id = sb.only_session();
     let before = sb.log(&id).len();
-    assert_eq!(run("2026-11-21").await.code, 0);
-    assert_eq!(run("2026-11-21").await.code, 0);
+    assert_eq!(run(&tomorrow).await.code, 0);
+    assert_eq!(run(&tomorrow).await.code, 0);
     let log = sb.log(&id);
 
     let clocks: Vec<&Value> = of_type(&log, "source")
@@ -476,12 +485,12 @@ async fn the_next_day_adds_the_date_source_and_nothing_else() {
         1,
         "announced once for the new day, not again the same day"
     );
-    assert_eq!(clocks[0]["name"], "2026-11-21");
+    assert_eq!(clocks[0]["name"], tomorrow);
     assert!(
         clocks[0]["text"]
             .as_str()
             .unwrap()
-            .contains("it is now 2026-11-21")
+            .contains(&format!("it is now {tomorrow}"))
     );
 
     // The frozen system prompt is untouched and carries the first day.
@@ -494,8 +503,8 @@ async fn the_next_day_adds_the_date_source_and_nothing_else() {
     };
     assert_eq!(system(&requests[0]), system(&requests[1]));
     assert_eq!(system(&requests[0]), system(&requests[2]));
-    assert!(system(&requests[0]).contains("2026-11-20"));
-    assert!(!system(&requests[1]).contains("2026-11-21"));
+    assert!(system(&requests[0]).contains(&today));
+    assert!(!system(&requests[1]).contains(&tomorrow));
     // The tail of the second day's request is: the date, the job line, the task.
     let second = requests[1].messages();
     let tail: Vec<String> = second[second.len() - 3..]
@@ -503,7 +512,7 @@ async fn the_next_day_adds_the_date_source_and_nothing_else() {
         .map(|message| message["content"].as_str().unwrap().to_string())
         .collect();
     assert!(
-        tail[0].starts_with("[source: clock 2026-11-21]"),
+        tail[0].starts_with(&format!("[source: clock {tomorrow}]")),
         "{tail:?}"
     );
     assert!(tail[1].starts_with("[source: job nightly]"), "{tail:?}");
