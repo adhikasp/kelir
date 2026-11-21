@@ -571,6 +571,7 @@ impl Session {
                 exit_code: note.exit_code,
                 result: Payload::text(note.result.clone()),
             })?;
+            self.notify("child_settled", &note.child_id);
         }
         if !note.background || note.parent != self.id {
             self.sync();

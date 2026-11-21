@@ -233,6 +233,14 @@ pub const VARS: &[Var] = &[
         "KELIR_JOB_STATUS",
         "set for a notify hook only: the path of the job's `STATUS.json`",
     ),
+    set(
+        "KELIR_NOTIFY_EVENT",
+        "set for an event hook only: the event that fired (`turn_done`, `error`, `paused`, `bg_settled`, `child_settled`)",
+    ),
+    set(
+        "KELIR_NOTIFY_MESSAGE",
+        "set for an event hook only: the terminal record's message (title and event kind)",
+    ),
     hook(
         "KELIR_NOTIFY_TIMEOUT_MS",
         "shorten the 30 s notify-hook timeout (the job tests)",

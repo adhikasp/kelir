@@ -2537,6 +2537,29 @@ impl Session {
         }
     }
 
+    /// Fire this session's configured notifications for one event kind.
+    /// Hooks start in the background and never block the session; the
+    /// `notify` event is the record of what was dispatched, like gate events.
+    fn notify(&mut self, kind: &str, detail: &str) {
+        let dispatch = crate::notify::fire(
+            &self.cfg.notify,
+            &std::collections::BTreeMap::new(),
+            &self.dir,
+            &self.ctx.shell,
+            kind,
+            detail,
+        );
+        if let Some(dispatch) = dispatch {
+            let outcome = dispatch.outcome().to_string();
+            let _ = self.record(EventBody::Notify {
+                event: dispatch.kind,
+                outcome,
+                error: dispatch.error,
+                hooks: dispatch.hooks as u32,
+            });
+        }
+    }
+
     /// One turn is over: the UI gets its outcome, Herdr gets its word.
     ///
     /// Herdr 0.1.21 takes no `msg` on the record (it drops the whole record),
@@ -2555,6 +2578,16 @@ impl Session {
             _ => HerdrState::Idle,
         };
         self.report(state);
+        // Notifications are last: the log already has the outcome, so a hook
+        // that reads it sees a complete turn. Clone the detail first: `notify`
+        // records an event, which needs `&mut self`.
+        let detail = self.final_text.clone();
+        match outcome {
+            "done" => self.notify("turn_done", &detail),
+            "error" => self.notify("error", &detail),
+            "paused" => self.notify("paused", &detail),
+            _ => {}
+        }
     }
 
     fn print_result(&self, exit_code: u8) {
@@ -4784,6 +4817,10 @@ impl Session {
             }
         }
         self.end_gates(&reason).await;
+        // Give detached notify hooks a short grace period before a one-shot
+        // process exits: otherwise the runtime is dropped with the hook task
+        // still queued and `turn_done` never fires (M11).
+        crate::notify::wait_outstanding(Duration::from_secs(5)).await;
         let _ = self.record(EventBody::SessionEnded { reason });
         self.sync();
         // The session is ending: the token it minted is no longer served by
@@ -6502,6 +6539,7 @@ mod tests {
                     fallback: String::new(),
                     spool_limit: 1024,
                 },
+                notify: crate::notify::Config::default(),
             },
             provider_name: "openrouter".into(),
             model: model.into(),
@@ -6629,6 +6667,7 @@ mod tests {
                 fallback: String::new(),
                 spool_limit: 1024,
             },
+            notify: crate::notify::Config::default(),
         };
         let a = render_system(&cfg, Path::new("tmp"), None);
         let b = render_system(&cfg, Path::new("tmp"), None);
