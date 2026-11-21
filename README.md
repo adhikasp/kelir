@@ -51,12 +51,12 @@ Every session listens on an owner-only socket. Anything that can run a command c
 talk to it:
 
 ```sh
-kelir ls                                   # every session: state, model, cache hit ratio, task
-kelir attach latest --follow               # watch a session from another terminal
-kelir ctl latest say "use the existing retry helper, don't write a new one"
-kelir ctl latest stop "wrong approach"     # kills the running process trees, keeps the session
+kelir ls                        # sessions: state, model, cache hits, task
+kelir attach latest --follow    # watch from another terminal
+kelir ctl latest say "use the existing retry helper"
+kelir ctl latest stop "wrong approach"   # kill running calls, keep the session
 kelir ctl latest compact "keep the failing test names"
-kelir observe latest                       # exactly what the model will see on its next request
+kelir observe latest            # the exact next request the model will see
 ```
 
 A verb is logged first and applied at a named boundary (now, before the next step,
