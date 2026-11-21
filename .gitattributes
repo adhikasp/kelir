@@ -1,0 +1,10 @@
+# Byte-exact text is compiled into the binary with `include_str!` and compared
+# against LF snapshots at test time. On a Windows checkout these must not turn
+# into CRLF: a single converted newline changes the prompt's size (1014 -> 1034
+# bytes) and breaks the byte-exact snapshot, the size budgets and the generated
+# reference blocks on every OS. Force LF in the worktree on all platforms for
+# the three embedded text families (docs, snapshots, source files). Other
+# file types (Windows scripts in particular) keep Git's default handling.
+*.md text eol=lf
+*.snapshot text eol=lf
+*.rs text eol=lf
