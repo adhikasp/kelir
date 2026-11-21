@@ -264,3 +264,9 @@ tests in `tests/review_m10.rs` now pass unchanged.
 - S4 partly: spool-state kill tests added (after write / mid-turn / after done); an
   automated kill -9 of the driver at each of the five points is still open (DEVIATIONS).
 - N1/N2: orchestrator items, unchanged.
+- Extra (m10fix): the driver reconnects a channel server that failed to start or died
+  (checked every 500 ms; a failure is logged once). Under parallel load the fake bridge
+  sometimes failed its first start ("cannot assign it to the job") and the driver never retried.
+- Extra (m10fix): `tests/e2e_m9.rs::the_next_day_adds_the_date_source_and_nothing_else` used
+  the real calendar date as "tomorrow" and began failing on 2026-11-21; its dates are now fixed
+  far-future values (unrelated to M10, needed for a green gate).

@@ -1258,14 +1258,17 @@ async fn drive(args: crate::cli::ChannelArgs) -> u8 {
     }
     // Connect each channel server now: capability negotiation is what makes a
     // bridge start sending. Failures are logged, never fatal for other servers.
+    let mut unavailable: BTreeSet<String> = BTreeSet::new();
     for server in &servers {
         if let Err(error) = broker.ensure(server).await {
             eprintln!(
                 "kelir channel: server `{server}` is unavailable: {}",
                 error.message()
             );
+            unavailable.insert(server.clone());
         }
     }
+    let mut last_retry = Instant::now();
     let shared = Rc::new(Shared {
         common: args.common.clone(),
         broker: broker.clone(),
@@ -1294,6 +1297,26 @@ async fn drive(args: crate::cli::ChannelArgs) -> u8 {
         println!("{}", serde_json::to_string(&status).unwrap_or_default());
     }
     loop {
+        // A bridge that failed to start (or died) is reconnected every few
+        // seconds; a failure is logged once until it comes back.
+        if last_retry.elapsed() >= Duration::from_millis(500) {
+            last_retry = Instant::now();
+            for server in &servers {
+                match broker.ensure(server).await {
+                    Ok(_) => {
+                        unavailable.remove(server);
+                    }
+                    Err(error) => {
+                        if unavailable.insert(server.clone()) {
+                            eprintln!(
+                                "kelir channel: server `{server}` is unavailable: {}",
+                                error.message()
+                            );
+                        }
+                    }
+                }
+            }
+        }
         tokio::select! {
             note = rx.recv() => {
                 let Some(note) = note else { break };
