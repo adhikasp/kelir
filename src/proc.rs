@@ -475,7 +475,35 @@ pub fn group_members(pgid: u32) -> Option<Vec<u32>> {
     Some(members)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub fn group_members(pgid: u32) -> Option<Vec<u32>> {
+    if pgid == 0 {
+        return None;
+    }
+    let output = std::process::Command::new("ps")
+        .args(["-ax", "-o", "pid=,pgid="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut members = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(pid), Some(group)) = (
+            fields.next().and_then(|p| p.parse::<u32>().ok()),
+            fields.next().and_then(|p| p.parse::<u32>().ok()),
+        ) else {
+            continue;
+        };
+        if group == pgid {
+            members.push(pid);
+        }
+    }
+    Some(members)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn group_members(_pgid: u32) -> Option<Vec<u32>> {
     None
 }
