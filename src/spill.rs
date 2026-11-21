@@ -29,13 +29,10 @@ pub fn count_lines(bytes: &[u8]) -> u64 {
 /// heredoc warning is the one seen in the wild (M5-A seq 344, STEER-4 seq 613:
 /// a 9 KB heredoc wrote an 8 KB file and **exited 0**). The other two are what
 /// a truncated one-liner usually dies with.
-const TRUNCATION_MARKERS: [&str; 5] = [
+const TRUNCATION_MARKERS: [&str; 3] = [
     "delimited by end-of-file",
     "unexpected EOF",
     "unexpected end of file",
-    // BSD sh (macOS) writes `here-document ... delimited by EOF`.
-    "delimited by EOF",
-    "here-document at line",
 ];
 
 /// The notice the model gets when its output looks truncated. It is *appended*

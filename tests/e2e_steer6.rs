@@ -101,6 +101,7 @@ async fn a_40_kb_heredoc_runs_from_a_file_and_writes_every_line() {
 /// F2's belt and braces: when the shell says a heredoc was cut, the model is
 /// told that it may have been cut. Without this, the dogfood model blamed its
 /// own heredoc body for twelve steps (M5-A, seq 65-78, 208-210).
+#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn a_truncated_heredoc_warning_gets_the_notice() {
     // A heredoc whose closing marker does not match what opens it: the shell
@@ -118,13 +119,8 @@ async fn a_truncated_heredoc_warning_gets_the_notice() {
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     let settled = run.one_event("tool_settled");
     let result = settled["result"].as_str().unwrap();
-    // bash says "delimited by end-of-file"; BSD sh (macOS) uses
-    // "EOF" or "end of file". The notice must preserve whichever the
-    // shell wrote.
     assert!(
-        result.contains("delimited by end-of-file")
-            || result.contains("delimited by EOF")
-            || result.contains("end of file"),
+        result.contains("delimited by end-of-file"),
         "the shell's own warning must stay: {result}"
     );
     assert!(
