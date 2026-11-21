@@ -6,6 +6,7 @@
 
 pub mod activity;
 pub mod atomic;
+pub mod attach;
 pub mod attachments;
 pub mod bg;
 pub mod channel;
@@ -55,6 +56,7 @@ pub mod spend;
 pub mod spill;
 pub mod sse;
 pub mod stream;
+pub mod tail;
 pub mod theme;
 pub mod tools;
 pub mod tools_view;
