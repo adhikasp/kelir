@@ -1812,7 +1812,7 @@ side). Where the code had to choose:
   Without it a `turn_done` hook spawned as a detached task is dropped when `kelir run`'s runtime
   shuts down; the hook's own 30 s tree-kill still bounds the wait. A long-lived session is
   never blocked on a hook: it runs while the loop is idle.
-- **No per-job event table yet.** `jobs.toml`'s legacy `notify` list still runs at run end
-  (`jobrun.rs`); M11's per-event table is in `[notify]` in config.toml. The docs say a job's
-  `notify` is "added to the global hook for that kind" — the jobrun path does that by
-  combining the lists at run end, not by firing M11's five kinds separately.
+- **No per-job event table yet.** M11's five per-event hooks live in `[notify]` in `config.toml`
+  and fire on `turn_done`, `error`, `paused`, `bg_settled` and `child_settled`. `jobs.toml`'s legacy
+  `notify` list still runs once at job run end (`jobrun.rs`); it is a separate mechanism, not an
+  addition to those five kinds. `docs/reference/notify.md` states this distinction directly.

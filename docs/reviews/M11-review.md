@@ -57,3 +57,30 @@ Release binary 12 MB. Model `deepseek/deepseek-v4.1-flash-1017` via the configur
 ## Process hygiene
 
 Real-process reviewer tests use `TreeGuard`, `MAX_LIVE=6`, a `Slot` Drop guard and a watchdog (`tests/review_m11.rs:1-64`). Only exact PIDs were killed; no group-0 signals, no image-name kills, no visible windows from tests. `tasklist /FI "PID eq 72024"` shows the earlier leftover process is gone. Scratch scripts under `scripts/live/` contain no keys or private paths; keys come from the environment.
+
+## Fix status (M11fix, job/m11fix)
+
+_The findings above are the original review and are left intact. This section records the fixes_
+_verified by the follow-up session._
+
+- **B1 (blocker) — fixed.** `src/session.rs` `note_bg` now calls `self.notify("bg_settled", ...)`
+  immediately after recording `BgSettled`, through the same `Session::notify`/`notify::fire` path as
+  `turn_done`/`error`/`paused`. The existing `BgSettled` dedupe means exactly one notify per settled
+  job, even with duplicate reports, and a turn ending alongside it fires its own kind separately.
+  The reviewer's proof `tests/review_m11.rs::r5_a_settled_bg_job_fires_its_notify_hook` is un-ignored
+  and now asserts one `notify` event of kind `bg_settled` plus the hook marker; a new regression
+  `r9_a_settled_job_and_its_turn_notify_once_each` checks no double dispatch (one `bg_settled` and
+  one `turn_done`).
+- **S1 — fixed.** `docs/reference/notify.md` now states plainly that `[notify]` in `config.toml`
+  owns the five per-event hooks and that a `jobs.toml` per-job `notify` is the older list that runs
+  once at job run end; the DEVIATIONS appendix was aligned with it.
+- **S2 — fixed.** `kelir attach --steer` without `--follow` now exits 2 with
+  `--steer requires --follow` instead of silently ignoring the flag (`src/attach.rs`); documented in
+  `docs/reference/attach.md` and covered by `r8_steer_without_follow_is_refused`.
+- **S3 — left as documented.** The Herdr/--json status limitation stays (DEVIATIONS ~609); no code
+  change, as decided.
+- **S4 — kept and cleaned.** The Windows and Linux footprint probes remain under `scripts/live/`
+  with paths parameterised by env vars; no personal paths or keys. Exact-PID kill via trap only.
+
+Gate and counts: recorded below in this section after the full `bash scripts/gate.sh --linux=the maintainer`
+run on the committed fix HEAD. Live-drive verdict: _pending reviewer sign-off on the fix_.

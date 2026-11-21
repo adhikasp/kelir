@@ -3782,6 +3782,11 @@ impl Session {
         }
         self.record(crate::bg::settled_body(status))?;
         let text = crate::bg::wake_text(status);
+        // M11: a settled background job is its own notification kind. It uses
+        // the same fire-and-record path as turn_done/error/paused. The
+        // `BgSettled` dedupe above means one notify per settled job, even when
+        // several reports (socket, watcher, resume) arrive for it.
+        self.notify("bg_settled", &text);
         self.record(EventBody::User {
             text: Payload::text(text.clone()),
             from: "job".into(),

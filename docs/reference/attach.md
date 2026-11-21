@@ -28,7 +28,9 @@ kelir attach <session|name> [--follow] [--since N] [--raw] [--plain] [--steer]
   keeps the working set under 10 MB even on a 100k-event log.
 - `--steer` accepts `say <text>` and `stop` on stdin. They are sent over the session socket with
   the session's own token (the `kelir ctl` path); every other verb is refused. Without `--steer`
-  no request is ever sent.
+  no request is ever sent. `--steer` **requires `--follow`**: a replay-only viewer has no live
+  stdin loop, so the combination is a usage error (exit 2) with a clear message, never a silent
+  no-op.
 
 ## Herdr
 

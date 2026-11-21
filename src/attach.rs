@@ -324,6 +324,14 @@ fn resolve(spec: &str) -> Result<(String, PathBuf), String> {
 }
 
 pub async fn run(args: AttachArgs) -> u8 {
+    // `--steer` only reads stdin inside the follow loop. Refuse the
+    // combination up front instead of silently ignoring the flag.
+    if args.steer && !args.follow {
+        eprintln!(
+            "kelir: attach: --steer requires --follow (a replay-only viewer cannot send commands)"
+        );
+        return 2;
+    }
     let (id, dir) = match resolve(&args.session) {
         Ok(found) => found,
         Err(error) => {

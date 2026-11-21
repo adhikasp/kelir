@@ -22,7 +22,10 @@ rate_limit = 5           # seconds between two records of the same kind; default
 title = "kelir"          # prefix of the terminal message
 ```
 
-A per-job `notify` in `jobs.toml` is added to the global hook for that kind. Hooks run through the
+A per-job `notify` list in `jobs.toml` is a **different, older mechanism**: those commands run once
+at job run end (`jobrun.rs`; see `docs/reference/jobs.md`), and are not fired by the five event kinds
+above. To get a hook on `bg_settled` or `child_settled`, put it in `[notify]` in `config.toml`.
+Hooks run through the
 configured shell with a **scrubbed environment** (the platform allow-list, plus `KELIR_NOTIFY_EVENT`
 and `KELIR_NOTIFY_MESSAGE`), at most 30 s (`KELIR_NOTIFY_TIMEOUT_MS` shortens it in tests), with
 the whole process tree killed on exit. They never hold the session: each runs in a detached task

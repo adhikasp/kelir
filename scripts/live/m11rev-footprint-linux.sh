@@ -3,12 +3,13 @@
 # Builds the release binary from the gate's committed HEAD, generates a
 # 100k-event log, samples VmRSS of `kelir attach --follow --plain`, and kills
 # only the PID it started. No process is killed by image name.
+# Usage: KELIR_BIN=/path/to/kelir M11_VERIFY_TREE=/work/tree bash scripts/live/m11rev-footprint-linux.sh
 set -uo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
-ROOT="${HOME}/m11rev-footprint-linux"
+ROOT="${HOME}/kelir-m11-footprint-linux"
 mkdir -p "$ROOT"
-TREE="${HOME}/kelir-verify-m11rev/src-tree"
-BIN="${TREE}/target/release/kelir"
+TREE="${M11_VERIFY_TREE:-$HOME/kelir-verify-m11fix/src-tree}"
+BIN="${KELIR_BIN:-$TREE/target/release/kelir}"
 if [ ! -x "$BIN" ]; then
   (cd "$TREE" && cargo build --release -j 4 > "$ROOT/build.log" 2>&1) || {
     echo "release build failed"; tail -20 "$ROOT/build.log" 2>/dev/null; exit 1; }

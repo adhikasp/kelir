@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# M11 reviewer footprint probe: `kelir attach --follow --plain` against a
+# M11 footprint probe (Windows): `kelir attach --follow --plain` against a
 # synthetic 100k-event log. Samples the viewer's WorkingSetSize (bytes) on
 # Windows. Kills only the PID it started, by exact PID, on exit.
+#
+# Usage: KELIR_BIN=/path/to/kelir.exe KELIR_FOOTPRINT_ROOT=/scratch/dir \
+#        bash scripts/live/m11rev-footprint.sh
+# Build the release binary first (`cargo build --release`).
 set -uo pipefail
-BIN="C:/Users/the maintainer/kelir-wt/m11rev/target/release/kelir.exe"
-ROOT="${KELIR_FOOTPRINT_ROOT:-C:/Users/the maintainer/kelir-scratch/m11rev-footprint}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+BIN="${KELIR_BIN:-$REPO/target/release/kelir.exe}"
+ROOT="${KELIR_FOOTPRINT_ROOT:-$HOME/kelir-m11-footprint}"
 rm -rf "$ROOT"; mkdir -p "$ROOT/state/sessions/ses_footprint" "$ROOT/work"
 python - "$ROOT/state/sessions/ses_footprint/events.jsonl" <<'PY'
 import json,sys

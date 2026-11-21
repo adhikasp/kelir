@@ -336,8 +336,9 @@ async fn r4_a_viewer_disconnect_never_stops_the_session() {
 }
 
 /// A real bg job settling must fire the `bg_settled` notification (M11 Build 4).
+/// This was the blocker proof for M11 B1: it failed deterministically before the
+/// `note_bg` dispatch was added, and is part of the normal suite again.
 #[tokio::test]
-#[ignore = "proves M11 B1 (bg_settled notify is not wired); run with --ignored"]
 async fn r5_a_settled_bg_job_fires_its_notify_hook() {
     init();
     let _slot = slot();
@@ -365,19 +366,87 @@ async fn r5_a_settled_bg_job_fires_its_notify_hook() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let fired = marker.exists();
-    // Confirm from the session's own log that no notify event was recorded.
     let notify_events: Vec<_> = live
         .log()
         .into_iter()
         .filter(|e| e["type"] == "notify")
         .collect();
-    assert!(
-        notify_events.is_empty(),
-        "a notify event was recorded: {notify_events:?}"
+    assert_eq!(
+        notify_events.len(),
+        1,
+        "exactly one notify event for the settled job: {notify_events:?}"
     );
+    assert_eq!(notify_events[0]["event"], "bg_settled", "{notify_events:?}");
     let (code, _stderr) = live.end().await;
     assert_eq!(code, 0, "session exited badly");
     assert!(fired, "bg_settled produced no notify event");
+}
+
+/// Regression for B1's double-dispatch risk: a job settling while its parent
+/// turn also ends produces exactly one `bg_settled` notify and one `turn_done`
+/// notify. Repeated status reports for the same job are deduped by `BgSettled`.
+#[tokio::test]
+async fn r9_a_settled_job_and_its_turn_notify_once_each() {
+    init();
+    let _slot = slot();
+    let config =
+        "shell = 'bash'\npromote_after = 1\n[notify]\nbg_settled = 'true'\nturn_done = 'true'\n";
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_dual",
+            "bash",
+            &json!({"command": "sleep 1; echo dual-job"}),
+        ))),
+        Reply::Sse(sse(&text_turn("carrying on", 0))),
+        Reply::Sse(sse(&text_turn("noted", 0))),
+    ])
+    .await;
+    let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], config).await;
+    let settled = live.wait_for("bg_settled").await;
+    assert_eq!(settled["state"], "exited", "{settled}");
+    let started = Instant::now();
+    let counts = loop {
+        let events: Vec<_> = live
+            .log()
+            .into_iter()
+            .filter(|e| e["type"] == "notify")
+            .collect();
+        let bg = events.iter().filter(|e| e["event"] == "bg_settled").count();
+        let turn = events.iter().filter(|e| e["event"] == "turn_done").count();
+        if (bg >= 1 && turn >= 1) || started.elapsed() > Duration::from_secs(8) {
+            break (bg, turn);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(counts, (1, 1), "one notify per kind, not double-dispatched");
+    let (code, _stderr) = live.end().await;
+    assert_eq!(code, 0, "session exited badly");
+}
+
+/// S2 (M11fix): `--steer` without `--follow` must be refused, not silently
+/// ignored. The refusal comes before any socket access and exits 2 (usage).
+#[tokio::test(flavor = "multi_thread")]
+async fn r8_steer_without_follow_is_refused() {
+    let (_temp, state, cwd) = temp_state();
+    let lines = vec![
+        event_line(1, "user", "hi"),
+        event_line(2, "session_ended", "done"),
+    ];
+    synthetic_session(&state, "ses_nosteer", &lines);
+    let attach = attach_in(
+        &state,
+        &cwd,
+        "ses_nosteer",
+        &["--steer", "--plain"],
+        Some("stop\n"),
+    )
+    .await;
+    assert_eq!(attach.code, 2, "usage error: {}", attach.stderr);
+    assert!(
+        attach.stderr.contains("--steer requires --follow"),
+        "a clear message is required: {}",
+        attach.stderr
+    );
 }
 
 /// A provider error that ends the turn must fire the `error` notification.
