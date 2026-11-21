@@ -44,7 +44,7 @@ pub enum Command {
     Mcp(McpArgs),
     /// Ask a side question on a snapshot of this session (`brief "<question>"`).
     Brief(BriefArgs),
-    /// List sessions as a tree: state, depth, model, cost, cache hits, task.
+    /// List sessions as a tree: state, depth, model, cache hits, task.
     Ls(LsArgs),
     /// Stop a child (and everything below it): `kill <session>` or `kill --tree`.
     Kill(KillArgs),
@@ -357,7 +357,7 @@ pub struct SessionsArgs {
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum SessionsCommand {
-    /// List sessions: name, state, last activity, cost.
+    /// List sessions: name, state, last activity, tokens.
     Ls(SessionsLsArgs),
     /// Give a session's name to another name.
     Rename(SessionsRenameArgs),

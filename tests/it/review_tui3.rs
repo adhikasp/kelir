@@ -249,7 +249,7 @@ fn the_open_group_preview_equals_what_commits() {
 }
 
 /// A `done` turn writes no outcome line; `paused`, `stopped`, `error` write one
-/// each, with no cost and no duration.
+/// each, with no duration.
 #[test]
 fn outcome_lines_exist_only_for_turns_that_need_a_human() {
     for (outcome, expect_line) in [
@@ -276,7 +276,6 @@ fn outcome_lines_exist_only_for_turns_that_need_a_human() {
             prompt: 900,
             completion: 100,
             cached: 800,
-            cost: 0.0123,
         });
         prose(&mut app, "answer");
         app.apply(UiEvent::TurnEnded {
@@ -297,7 +296,7 @@ fn outcome_lines_exist_only_for_turns_that_need_a_human() {
     }
 }
 
-/// The facts row never grows a step/cost/cache part and never exceeds its width.
+/// The facts row never grows a step/cache part and never exceeds its width.
 #[test]
 fn the_facts_row_is_phase_model_tokens_at_every_width() {
     let status = Status {
@@ -309,7 +308,6 @@ fn the_facts_row_is_phase_model_tokens_at_every_width() {
         prompt_tokens: 12_000,
         completion_tokens: 500,
         cached_tokens: 9_000,
-        cost: 0.5,
         phase: Phase::Working,
         ..Status::default()
     };

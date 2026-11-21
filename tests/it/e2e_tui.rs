@@ -1000,15 +1000,13 @@ async fn the_tui_renders_a_markdown_answer_and_commits_it() {
     let text = plain(&run.screen);
     assert!(text.contains("Some bold words"), "{text:?}");
     assert!(text.contains("cargo test"), "{text:?}");
-    // A done turn ends on its prose: no check mark, no dollar figure.
-    assert!(!text.contains('$'), "no cost in the pane: {text:?}");
+    // A done turn ends on its prose: no check mark line.
     // (the state row's idle text is checked by the snapshot tests; the pty's
     // repaint diff only rewrites what changed, so it need not appear here)
 }
 
-/// Idle costs no wakeups: after the turn ends, the TUI writes nothing for two
-/// seconds (no spinner, no elapsed tick). This is the "idle must cost zero
-/// wakeups" rule; a constant-rate repaint would fail it.
+/// Idle writes nothing: after the turn ends, the TUI writes nothing for two
+/// seconds (no spinner, no elapsed tick). A constant-rate repaint would fail it.
 #[tokio::test]
 async fn an_idle_tui_writes_nothing_for_two_seconds() {
     let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("DONE", 0)))]).await;

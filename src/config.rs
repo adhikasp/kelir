@@ -105,15 +105,9 @@ pub struct Config {
     /// Warn (log and screen, never the model) when the last prompt is larger than this many
     /// tokens (`warn_prompt_tokens`, default 150000; `None` = off).
     pub warn_prompt_tokens: Option<u64>,
-    /// Warn once when the session's cost passes this many dollars (`warn_cost`,
-    /// default unset).
-    pub warn_cost: Option<f64>,
     /// The child caps (`max_child_depth`, `max_children`, `max_live_descendants`):
     /// enforced by the root session's registry.
     pub children: crate::child::Caps,
-    /// `[prices."<model>"]`: per-million-token prices that override and extend
-    /// the built-in table.
-    pub prices: BTreeMap<String, crate::spend::Price>,
     /// Gates declared under `[gates]`; skills add theirs at session start.
     pub gates: Vec<crate::gates::GateDef>,
     /// Gates declared by the *project's* `.kelir/config.toml`. They run only when the project is
@@ -188,11 +182,9 @@ struct RawConfig {
     /// wants "three tries and out".
     retry_max_attempts: Option<u32>,
     warn_prompt_tokens: Option<u64>,
-    warn_cost: Option<f64>,
     max_child_depth: Option<u32>,
     max_children: Option<u32>,
     max_live_descendants: Option<u32>,
-    prices: BTreeMap<String, RawPrice>,
     /// `[gates]`: event name -> command, table or list (see `crate::gates`).
     gates: Option<toml::Value>,
     /// Directories whose project-layer gates may run (machine layer only).
@@ -210,15 +202,6 @@ struct RawConfig {
     channel_spool_limit: Option<u64>,
     /// `[notify]`: event -> hook commands, plus terminal and rate-limit knobs.
     notify: Option<toml::Value>,
-}
-
-/// One `[prices."<model>"]` table: dollars per million tokens.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct RawPrice {
-    input: Option<f64>,
-    cached_input: Option<f64>,
-    output: Option<f64>,
 }
 
 /// The `[hint]` table: the scorer of the pushed hint.
@@ -479,9 +462,8 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         warn_prompt_tokens: match raw.warn_prompt_tokens {
             Some(0) => None,
             Some(tokens) => Some(tokens),
-            None => Some(crate::spend::DEFAULT_WARN_PROMPT_TOKENS),
+            None => Some(crate::usage::DEFAULT_WARN_PROMPT_TOKENS),
         },
-        warn_cost: warn_cost(raw.warn_cost)?,
         children: crate::child::Caps {
             depth: raw
                 .max_child_depth
@@ -493,7 +475,6 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
                 .max_live_descendants
                 .unwrap_or(crate::child::DEFAULT_MAX_LIVE),
         },
-        prices: prices(&raw.prices)?,
         gates: match &raw.gates {
             Some(value) => crate::gates::from_toml(value).map_err(ConfigError)?,
             None => Vec::new(),
@@ -643,54 +624,6 @@ fn hint_config(
             .map(str::to_string),
         timeout: std::time::Duration::from_millis(timeout_ms),
     }))
-}
-
-/// `warn_cost`: a positive dollar amount, or unset. `0` and below are refused
-/// rather than read as "off": a person who writes it means something else.
-fn warn_cost(raw: Option<f64>) -> Result<Option<f64>, ConfigError> {
-    match raw {
-        None => Ok(None),
-        Some(value) if value.is_finite() && value > 0.0 => Ok(Some(value)),
-        Some(value) => Err(ConfigError(format!(
-            "warn_cost must be a positive dollar amount (got {value}); leave it out to turn it off"
-        ))),
-    }
-}
-
-/// `[prices]`: `input` and `output` are required, `cached_input` defaults to `input` (no cache
-/// discount).
-fn prices(
-    raw: &BTreeMap<String, RawPrice>,
-) -> Result<BTreeMap<String, crate::spend::Price>, ConfigError> {
-    let mut out = BTreeMap::new();
-    for (model, price) in raw {
-        let need = |name: &str, value: Option<f64>| -> Result<f64, ConfigError> {
-            match value {
-                Some(value) if value.is_finite() && value >= 0.0 => Ok(value),
-                Some(value) => Err(ConfigError(format!(
-                    "[prices.\"{model}\"] {name} must be zero or more dollars per million tokens (got {value})"
-                ))),
-                None => Err(ConfigError(format!(
-                    "[prices.\"{model}\"] needs `{name}` (dollars per million tokens)"
-                ))),
-            }
-        };
-        let input = need("input", price.input)?;
-        let output = need("output", price.output)?;
-        let cached_input = match price.cached_input {
-            Some(value) => need("cached_input", Some(value))?,
-            None => input,
-        };
-        out.insert(
-            model.clone(),
-            crate::spend::Price {
-                input,
-                cached_input,
-                output,
-            },
-        );
-    }
-    Ok(out)
 }
 
 /// The retry schedule and budget. A wrong value is a config error rather than a
@@ -1103,54 +1036,30 @@ extra_headers = { "x-extra" = "yes" }
     }
 
     #[test]
-    fn warn_and_price_keys_have_defaults_and_validate() {
+    fn warn_prompt_tokens_has_a_default_and_can_be_off() {
         let cfg = load(Some(&temp_config(""))).unwrap();
         assert_eq!(cfg.warn_prompt_tokens, Some(150_000));
-        assert_eq!(cfg.warn_cost, None);
-        assert!(cfg.prices.is_empty());
 
-        let cfg = load(Some(&temp_config(
-            "warn_prompt_tokens = 0
-warn_cost = 0.5
-[prices.\"a/b\"]
-input = 1.0
-output = 2.0
-",
-        )))
-        .unwrap();
+        let cfg = load(Some(&temp_config("warn_prompt_tokens = 0\n"))).unwrap();
         assert_eq!(
             cfg.warn_prompt_tokens, None,
             "0 turns the prompt warning off"
         );
-        assert_eq!(cfg.warn_cost, Some(0.5));
-        let price = cfg.prices.get("a/b").unwrap();
-        assert_eq!(
-            (price.input, price.cached_input, price.output),
-            (1.0, 1.0, 2.0)
-        );
+    }
 
-        for bad in [
-            "warn_cost = 0
-",
-            "warn_cost = -1.0
-",
-            "[prices.\"a/b\"]
-input = 1.0
-",
-            "[prices.\"a/b\"]
-input = -1.0
-output = 1.0
-",
-            "[prices.\"a/b\"]
-input = 1.0
-output = 1.0
-extra = 3
-",
+    #[test]
+    fn removed_keys_get_the_ordinary_unknown_key_treatment() {
+        let key = format!("warn_{}", ['c', 'o', 's', 't'].iter().collect::<String>());
+        let table = ['p', 'r', 'i', 'c', 'e', 's'].iter().collect::<String>();
+        for removed in [
+            format!("{key} = 0.5\n"),
+            format!("[{table}]\n"),
+            format!("[{table}.\"a/b\"]\ninput = 1.0\noutput = 2.0\n"),
         ] {
-            assert!(
-                load(Some(&temp_config(bad))).is_err(),
-                "{bad:?} must be refused"
-            );
+            let cfg = load(Some(&temp_config(&removed))).unwrap();
+            assert_eq!(cfg.warn_prompt_tokens, Some(150_000));
+            // No special "this was removed" message: an unread key is just
+            // ignored, like any other key the current config does not know.
         }
     }
 

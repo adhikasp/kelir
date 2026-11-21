@@ -484,8 +484,6 @@ mod tests {
                     completion_tokens: 1,
                     cached_tokens: 1,
                     cache_write_tokens: 0,
-                    cost: 0.0,
-                    cost_source: None,
                     allowance: None,
                     kind: None,
                 },

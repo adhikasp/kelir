@@ -745,14 +745,7 @@ async fn ls_shows_the_tree_and_kill_takes_a_subtree_but_only_from_above() {
         .find(|kid| kid["task"].as_str().unwrap().starts_with("NESTK"))
         .unwrap();
     assert_eq!(nest["children"][0]["depth"], 2);
-    for key in [
-        "state",
-        "model",
-        "cost_usd",
-        "cache_hit_ratio",
-        "task",
-        "tree_cost_usd",
-    ] {
+    for key in ["state", "model", "cache_hit_ratio", "task"] {
         assert!(tree[0].get(key).is_some(), "missing {key}");
     }
 

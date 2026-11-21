@@ -47,7 +47,6 @@ async fn plain_answer_streams_events_and_usage() {
     assert_eq!(usage["completion_tokens"], 8);
     assert_eq!(usage["cached_tokens"], 96);
     assert_eq!(usage["cache_write_tokens"], 40);
-    assert!(usage["cost"].as_f64().unwrap() > 0.0);
 
     assert_eq!(run.one_event("turn_ended")["outcome"], "done");
     assert_eq!(run.one_event("session_ended")["reason"], "done");

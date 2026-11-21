@@ -15,7 +15,6 @@ pub struct Usage {
     pub completion_tokens: u64,
     pub cached_tokens: u64,
     pub cache_write_tokens: u64,
-    pub cost: f64,
     pub allowance: Option<Value>,
 }
 
@@ -215,11 +214,6 @@ pub(crate) fn parse_usage(usage: &Value) -> Usage {
         .or_else(|| usage.get("cache_write_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let cost = usage
-        .get("cost")
-        .or_else(|| usage.get("total_cost"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
     Usage {
         prompt_tokens: usage
             .get("prompt_tokens")
@@ -231,7 +225,6 @@ pub(crate) fn parse_usage(usage: &Value) -> Usage {
             .unwrap_or(0),
         cached_tokens: cached,
         cache_write_tokens: cache_write,
-        cost,
         allowance: usage.get("allowance").filter(|v| !v.is_null()).cloned(),
     }
 }
@@ -332,8 +325,7 @@ mod tests {
             json!({"choices":[],"usage":{
                 "prompt_tokens": 120,
                 "completion_tokens": 8,
-                "prompt_tokens_details": {"cached_tokens": 96, "cache_write_tokens": 24},
-                "cost": 0.0042
+                "prompt_tokens_details": {"cached_tokens": 96, "cache_write_tokens": 24}
             }}),
         );
         let usage = asm.usage.expect("usage");
@@ -341,19 +333,18 @@ mod tests {
         assert_eq!(usage.completion_tokens, 8);
         assert_eq!(usage.cached_tokens, 96);
         assert_eq!(usage.cache_write_tokens, 24);
-        assert!((usage.cost - 0.0042).abs() < 1e-9);
         assert_eq!(asm.text, "");
     }
 
     #[test]
-    fn openrouter_total_cost_and_allowance_are_read() {
+    fn usage_allowance_is_read() {
         let mut asm = Assembler::new(None);
         feed(
             &mut asm,
-            json!({"usage":{"prompt_tokens":1,"completion_tokens":2,"total_cost":0.5,"allowance":{"left":3}}}),
+            json!({"usage":{"prompt_tokens":1,"completion_tokens":2,"allowance":{"left":3}}}),
         );
         let usage = asm.usage.unwrap();
-        assert!((usage.cost - 0.5).abs() < 1e-9);
+        assert_eq!(usage.prompt_tokens, 1);
         assert_eq!(usage.allowance, Some(json!({"left": 3})));
     }
 

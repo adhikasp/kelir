@@ -231,7 +231,7 @@ pub async fn run(args: JobRunArgs) -> u8 {
         Ok(Target::Resume(id)) => {
             let events = session_events(&id);
             let age = jobs::age_of(&events, time::OffsetDateTime::now_utc());
-            let tally = crate::spend::Tally::from_events(&events, crate::spend::Warn::default());
+            let tally = crate::usage::Tally::from_events(&events, crate::usage::Warn::default());
             let model = events.iter().rev().find_map(|event| match &event.body {
                 EventBody::StepStarted { model, .. } => Some(model.clone()),
                 EventBody::SessionStarted { model, .. } => Some(model.clone()),
@@ -363,8 +363,6 @@ fn base_status(run: &Run, outcome: &str) -> Status {
         exit_code: None,
         steps: 0,
         tokens: Tokens::default(),
-        cost_usd: None,
-        cost_source: None,
         cache_hit_ratio: None,
         answer: String::new(),
         error: None,
@@ -399,7 +397,7 @@ pub async fn finalize(drive_code: Option<u8>, early_error: Option<String>) -> u8
         .iter()
         .filter(|event| event.seq > run.start_seq)
         .collect();
-    let mut tally = crate::spend::Tally::default();
+    let mut tally = crate::usage::Tally::default();
     for event in &fresh {
         tally.observe(event.seq, &event.body);
     }
@@ -449,7 +447,6 @@ pub async fn finalize(drive_code: Option<u8>, early_error: Option<String>) -> u8
             .or_else(|| tally.last_error.as_ref().map(|e| e.message.clone()))
             .or_else(|| (outcome == "paused").then(|| "the turn paused".to_string())),
     };
-    let known_cost = tally.by_provider + tally.by_table > 0;
     let mut status = base_status(&run, outcome);
     status.finished = Some(crate::event::now_ts());
     status.exit_code = Some(i32::from(exit));
@@ -460,8 +457,6 @@ pub async fn finalize(drive_code: Option<u8>, early_error: Option<String>) -> u8
         cached: tally.cached,
         total: tally.prompt + tally.completion,
     };
-    status.cost_usd = known_cost.then_some(tally.cost);
-    status.cost_source = known_cost.then(|| tally.cost_source().to_string());
     status.cache_hit_ratio = (tally.prompt > 0).then(|| tally.cached as f64 / tally.prompt as f64);
     status.answer = last_turn
         .as_ref()
@@ -477,7 +472,7 @@ pub async fn finalize(drive_code: Option<u8>, early_error: Option<String>) -> u8
             "session_name": status.session_name, "started": status.started,
             "finished": status.finished, "outcome": status.outcome,
             "exit_code": status.exit_code, "steps": status.steps,
-            "tokens": status.tokens, "cost_usd": status.cost_usd,
+            "tokens": status.tokens,
             "cache_hit_ratio": status.cache_hit_ratio,
             "answer": crate::util::truncate_chars(status.answer.lines().next().unwrap_or(""), 200),
             "error": status.error,
@@ -616,14 +611,11 @@ pub fn status(args: JobStatusArgs) -> u8 {
         println!("no job has run yet");
         return 0;
     }
-    println!(
-        "{:<20} {:<9} {:<20} {:>9}",
-        "JOB", "OUTCOME", "FINISHED", "COST"
-    );
+    println!("{:<20} {:<9} {:<20}", "JOB", "OUTCOME", "FINISHED");
     for (name, status) in rows {
         match status {
             Ok(Some(status)) => println!(
-                "{:<20} {:<9} {:<20} {:>9}",
+                "{:<20} {:<9} {:<20}",
                 name,
                 if status.outcome == "running" && !live(&jobs::job_dir(&name)) {
                     "crashed".to_string()
@@ -636,10 +628,7 @@ pub fn status(args: JobStatusArgs) -> u8 {
                     .unwrap_or("-")
                     .chars()
                     .take(19)
-                    .collect::<String>(),
-                status
-                    .cost_usd
-                    .map_or("-".to_string(), |cost| format!("${cost:.4}"))
+                    .collect::<String>()
             ),
             Ok(None) => println!("{name:<20} {:<9}", "-"),
             Err(message) => println!("{name:<20} unreadable: {message}"),
@@ -663,12 +652,12 @@ pub fn history(args: JobHistoryArgs) -> u8 {
         return 0;
     }
     println!(
-        "{:<30} {:<9} {:<20} {:>5} {:>9}",
-        "RUN", "OUTCOME", "FINISHED", "STEPS", "COST"
+        "{:<30} {:<9} {:<20} {:>5}",
+        "RUN", "OUTCOME", "FINISHED", "STEPS"
     );
     for row in rows {
         println!(
-            "{:<30} {:<9} {:<20} {:>5} {:>9}",
+            "{:<30} {:<9} {:<20} {:>5}",
             row["run"].as_str().unwrap_or("-"),
             row["outcome"].as_str().unwrap_or("-"),
             row["finished"]
@@ -679,10 +668,7 @@ pub fn history(args: JobHistoryArgs) -> u8 {
                 .collect::<String>(),
             row["steps"]
                 .as_u64()
-                .map_or("-".to_string(), |steps| steps.to_string()),
-            row["cost_usd"]
-                .as_f64()
-                .map_or("-".to_string(), |cost| format!("${cost:.4}"))
+                .map_or("-".to_string(), |steps| steps.to_string())
         );
     }
     0

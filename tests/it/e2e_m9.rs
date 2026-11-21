@@ -188,7 +188,8 @@ async fn sessions_ls_shows_names_and_rename_and_forget_keep_the_session() {
     assert_eq!(rows[0]["session"], id.as_str());
     assert_eq!(rows[0]["state"], "done");
     assert!(rows[0]["last_activity"].as_str().unwrap().starts_with("20"));
-    assert!(rows[0].get("cost_usd").is_some());
+    assert!(rows[0].get("tokens").is_some());
+    assert!(rows[0].get("cache_hit_ratio").is_some());
     let table = kelir(&sb, &mock, &["sessions", "ls"], &[]).await;
     assert!(table.stdout.contains("alpha") && table.stdout.contains("NAME"));
 

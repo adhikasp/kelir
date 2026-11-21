@@ -195,7 +195,7 @@ are never inline: the event holds the path.
 | `source` | `kind` (`hint`, `skill`, `instruction`, `memory`, `attachment`, `channel`), `name`, `text` or `path` | context that arrived after the start; rendered as a message at the tail |
 | `step_started` | `step`, `provider`, `model`, `request_hash` | one per provider request |
 | `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]` (`id`, `name`, `args`), `finish_reason` | |
-| `usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `cost`, `allowance?` | from the final stream chunk |
+| `usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `allowance?` | from the final stream chunk |
 | `tool_started` | `call_id`, `name`, `input`, `pid?`, `dir?` | intent; written before the process starts. `dir` is the call's own `commands/<dir>` name (its job id), so a resume adopts it from the log rather than from a directory |
 | `tool_settled` | `call_id`, `outcome` (`ok`, `error`, `stopped`, `skipped`, `denied`, `disabled`, `promoted`, `unknown`), `exit_code?`, `bytes`, `lines`, `out_path`, `spilled`, `result` | commit; `result` is what the model sees (≤10 KB or the spill notice) |
 | `mcp_started` / `mcp_settled` | `mcp_id`, `server`, `tool`, `args`, `outcome`, `out_path`, `parent_call_id` | a `kelir mcp` call made from inside a bash call |
@@ -427,8 +427,8 @@ bash call's stdout; a background child's `child_settled` arrives at the next bou
 parent. Because a child is a session, `stop`, `resume`, `observe`, `attach` and `kelir ls`/kill work
 on it unchanged. **Limits** (`config.toml`), enforced by the CLI against the root's registry: depth 3
 (root is 0), 10 children per agent, 16 live descendants per root; a start past a cap exits non-zero
-with a message the model can read. **No spend cap**: cost per session and per child is shown in
-`kelir ls`, not enforced. Only the root reports Herdr status. `brief` is a child preset: a by-value
+with a message the model can read. There is no cap on tokens; `kelir ls` shows the cache-hit
+ratio per session and per child. Only the root reports Herdr status. `brief` is a child preset: a by-value
 snapshot of the parent's context, `edit`/`compact` refused, history untouched. Delegation guidance
 (when and how to start children) is a builtin skill injected at M8, not a tool.
 
@@ -467,7 +467,7 @@ systemd timer, Task Scheduler, any trigger) calls. Reference: `docs/reference/jo
   does not touch the holder's STATUS.
 - **STATUS.** `STATUS.json` + `STATUS.md` written atomically at run start (`running`) and end:
   job, session, run, started/finished, outcome (`done|error|stopped|timeout|skipped|paused`),
-  steps, tokens, cost (STEER-8), cache hit ratio, the first lines of the answer, the last error and the
+  steps, tokens, cache hit ratio, the first lines of the answer, the last error and the
   job's `schedule`. Exit codes: 0 done, 1 error/stopped, 2 usage, 75 skipped, 124 timeout.
 - **The next day.** The system prompt is frozen at session start and holds the date, never the
   time. A resume on a later UTC day appends a `clock` source ("it is now <date>") at the tail; the
@@ -499,7 +499,7 @@ provider names and no `kind = …`: the name *is* the provider. An optional
 (`base_url`, extra headers, key source, `reasoning_field`, `reasoning_effort`, `session_header`,
 `max_concurrent_requests`), and a table for any other name is the same usage error.
 
-Go needs `x-opencode-session` and a `kelir/<version>` User-Agent. Cost (and Go's `allowance`) come
+Go needs `x-opencode-session` and a `kelir/<version>` User-Agent. Go's `allowance` comes
 from the final usage chunk (`stream_options.include_usage`). The default model is
 `deepseek/deepseek-v4.1-flash-1017` on OpenRouter (the maintainer's call, 2026-11-19); the Go
 equivalent is `deepseek-v4.1-flash`.

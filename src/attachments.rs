@@ -374,7 +374,7 @@ pub fn sniff(path: &Path) -> Result<Option<Identity>, String> {
 }
 
 /// How much of a file [`sniff`] reads: enough for a JPEG's SOF segment, nowhere
-/// near enough to cost anything for a 10 MB image.
+/// near enough to matter for a 10 MB image.
 pub const SNIFF_BYTES: usize = 64 * 1024;
 
 /// The image's dimensions from its header, never decoding the pixels.

@@ -551,8 +551,7 @@ pub fn usage_chunk(prompt: u64, completion: u64, cached: u64, written: u64) -> V
             "prompt_tokens_details": {
                 "cached_tokens": cached,
                 "cache_write_tokens": written
-            },
-            "cost": 0.00042
+            }
         }
     })
 }

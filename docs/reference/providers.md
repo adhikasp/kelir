@@ -74,9 +74,8 @@ it lands).
 - **Parallel calls**: `parallel_tool_calls` is sent only to OpenRouter models
   that advertise it.
 
-There is no price table in this source: each request's spend arrives in the
-stream's `usage` chunk (`cost` included) and is recorded per step in the `usage`
-event, so a session's total is the sum of its log.
+Each request's token counts arrive in the stream's `usage` chunk and are
+recorded per step in the `usage` event, so a session's totals are the sum of its log.
 
 ## Adding a provider
 

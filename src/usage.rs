@@ -1,163 +1,21 @@
-//! Spend and status you can see.
-//! Three small things live here, none of them in the request path:
+//! Token tally and status you can see.
+//! Three small things live here, none of them in the request path: the tally a resumed
+//! session folds from the log, the prompt-size warning, and the `status` answer.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
 use crate::event::EventBody;
 
-/// The date the built-in prices were read from the providers' public model
-/// lists. Printed by `kelir ctl status`, so a stale table is visible.
-pub const PRICES_AS_OF: &str = "2026-11-20";
-
 /// The prompt size above which the session warns (`warn_prompt_tokens`).
 pub const DEFAULT_WARN_PROMPT_TOKENS: u64 = 150_000;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Price {
-    pub input: f64,
-    /// Cached input tokens; the plain input price when a provider has no
-    /// cache discount.
-    pub cached_input: f64,
-    pub output: f64,
-}
-
-struct Entry {
-    provider: &'static str,
-    model: &'static str,
-    price: Price,
-}
-
-const fn price(input: f64, cached_input: f64, output: f64) -> Price {
-    Price {
-        input,
-        cached_input,
-        output,
-    }
-}
-
-/// The built-in table. Data, not logic: add a row, never an `if`.
-const TABLE: &[Entry] = &[
-    Entry {
-        provider: "openrouter",
-        model: "deepseek/deepseek-v4.1-flash",
-        price: price(0.30, 0.006, 1.20),
-    },
-    Entry {
-        provider: "openrouter",
-        model: "deepseek/deepseek-v4-pro",
-        price: price(0.90, 0.20, 1.50),
-    },
-    Entry {
-        provider: "openrouter",
-        model: "deepseek/deepseek-v4-flash",
-        price: price(0.09, 0.018, 0.18),
-    },
-];
-
-/// Where a price came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PriceFrom {
-    Config,
-    Table,
-}
-
-/// The price of `model` on `provider`: the config's, then the built-in table's.
-pub fn lookup(
-    provider: &str,
-    model: &str,
-    overrides: &BTreeMap<String, Price>,
-) -> Option<(Price, PriceFrom)> {
-    if let Some((_, found)) = overrides
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(model))
-    {
-        return Some((*found, PriceFrom::Config));
-    }
-    TABLE
-        .iter()
-        .find(|entry| entry.provider == provider && entry.model.eq_ignore_ascii_case(model))
-        .map(|entry| (entry.price, PriceFrom::Table))
-}
-
-/// What a request cost at `price`. Cached tokens are part of `prompt_tokens` (that is how
-/// both providers report them), so the plain input rate applies to the rest.
-pub fn estimate(price: &Price, prompt: u64, cached: u64, completion: u64) -> f64 {
-    let cached = cached.min(prompt);
-    let plain = prompt - cached;
-    let micro = plain as f64 * price.input
-        + cached as f64 * price.cached_input
-        + completion as f64 * price.output;
-    round_usd(micro / 1_000_000.0)
-}
-
-fn round_usd(value: f64) -> f64 {
-    (value * 1e9).round() / 1e9
-}
-
-/// Where a recorded cost came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CostSource {
-    /// The provider's own number.
-    Provider,
-    /// Tokens times a known price.
-    Table,
-    /// No cost reported and no price known: the cost is 0.0 here only because
-    /// it is not known.
-    Unknown,
-}
-
-impl CostSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CostSource::Provider => "provider",
-            CostSource::Table => "table",
-            CostSource::Unknown => "unknown",
-        }
-    }
-}
-
-pub fn resolve(
-    reported: f64,
-    price: Option<&Price>,
-    prompt: u64,
-    cached: u64,
-    completion: u64,
-) -> (f64, CostSource) {
-    if reported.is_finite() && reported > 0.0 {
-        return (reported, CostSource::Provider);
-    }
-    match price {
-        Some(price) => (
-            estimate(price, prompt, cached, completion),
-            CostSource::Table,
-        ),
-        None => (0.0, CostSource::Unknown),
-    }
-}
-
-/// The source of a `usage` event, including one written before the field
-/// existed (a cost above zero was the provider's; zero was nothing).
-pub fn source_of(cost: f64, recorded: Option<&str>) -> CostSource {
-    match recorded {
-        Some("provider") => CostSource::Provider,
-        Some("table") => CostSource::Table,
-        Some(_) => CostSource::Unknown,
-        None if cost > 0.0 => CostSource::Provider,
-        None => CostSource::Unknown,
-    }
-}
-
-// ---------------------------------------------------------------- the tally
-
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LastUsage {
     pub prompt: u64,
     pub cached: u64,
     pub completion: u64,
-    pub cost: f64,
-    pub unknown_cost: bool,
 }
 
 /// The most recent `error` event.
@@ -171,7 +29,7 @@ pub struct LastError {
     pub attempt: Option<u32>,
 }
 
-/// What a session has spent and what it is doing, derived from the log.
+/// What a session used and what it is doing, derived from the log.
 #[derive(Debug, Clone, Default)]
 pub struct Tally {
     /// Model requests that reported usage (summaries not counted).
@@ -180,11 +38,6 @@ pub struct Tally {
     pub completion: u64,
     pub cached: u64,
     pub cache_write: u64,
-    pub cost: f64,
-    pub by_provider: u32,
-    pub by_table: u32,
-    /// Requests whose cost is not known (no provider cost, no price).
-    pub unpriced: u32,
     pub last: Option<LastUsage>,
     pub last_usage_seq: u64,
     pub last_error: Option<LastError>,
@@ -193,19 +46,17 @@ pub struct Tally {
     pub pause_reason: Option<String>,
     open_jobs: BTreeSet<String>,
     warned_prompt: bool,
-    warned_cost: bool,
 }
 
-/// The thresholds `warn_prompt_tokens` and `warn_cost` set.
+/// The threshold `warn_prompt_tokens` sets.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Warn {
     pub prompt_tokens: Option<u64>,
-    pub cost: Option<f64>,
 }
 
 impl Tally {
     /// Fold a whole log (what a resumed session starts from). No warning fires
-    /// for a state the log was already in: the thresholds are armed against it.
+    /// for a state the log was already in: the threshold is armed against it.
     pub fn from_events(events: &[crate::event::LogEvent], warn: Warn) -> Self {
         let own = crate::child::own_start(events);
         let mut tally = Tally {
@@ -214,9 +65,10 @@ impl Tally {
         };
         for (index, event) in events.iter().enumerate() {
             if index == own {
-                // A brief's log begins with a copy of its parent's: that spend is the parent's, already
-                // counted there. Keep the last request (the context the brief starts from), not the sums.
-                tally.reset_spend();
+                // A brief's log begins with a copy of its parent's: those tokens are
+                // the parent's, already counted there. Keep only the last request
+                // (the context the brief starts from), not the sums.
+                tally.reset_tokens();
             }
             tally.observe(event.seq, &event.body);
         }
@@ -224,16 +76,12 @@ impl Tally {
         tally
     }
 
-    fn reset_spend(&mut self) {
+    fn reset_tokens(&mut self) {
         self.requests = 0;
         self.prompt = 0;
         self.completion = 0;
         self.cached = 0;
         self.cache_write = 0;
-        self.cost = 0.0;
-        self.by_provider = 0;
-        self.by_table = 0;
-        self.unpriced = 0;
     }
 
     pub fn observe(&mut self, seq: u64, body: &EventBody) {
@@ -243,34 +91,20 @@ impl Tally {
                 completion_tokens,
                 cached_tokens,
                 cache_write_tokens,
-                cost,
-                cost_source,
                 kind,
                 ..
             } => {
-                let source = source_of(*cost, cost_source.as_deref());
                 self.prompt += prompt_tokens;
                 self.completion += completion_tokens;
                 self.cached += cached_tokens;
                 self.cache_write += cache_write_tokens;
-                match source {
-                    CostSource::Provider => self.by_provider += 1,
-                    CostSource::Table => self.by_table += 1,
-                    CostSource::Unknown => self.unpriced += 1,
-                }
-                if source != CostSource::Unknown {
-                    self.cost = round_usd(self.cost + cost);
-                }
-                // A summary is spend but not a step, and not the context the
-                // next request carries.
+                // A summary is not a step, and not the context the next request carries.
                 if kind.is_none() {
                     self.requests += 1;
                     self.last = Some(LastUsage {
                         prompt: *prompt_tokens,
                         cached: *cached_tokens,
                         completion: *completion_tokens,
-                        cost: *cost,
-                        unknown_cost: source == CostSource::Unknown,
                     });
                     self.last_usage_seq = seq;
                 }
@@ -336,41 +170,11 @@ impl Tally {
                 self.warned_prompt = false;
             }
         }
-        if let Some(limit) = warn.cost
-            && self.cost > limit
-            && !self.warned_cost
-        {
-            self.warned_cost = true;
-            out.push(Warning {
-                kind: "cost",
-                message: format!(
-                    "this session's cost is ${}, over warn_cost (${limit}){}",
-                    money(self.cost),
-                    if self.by_table > 0 {
-                        " (partly estimated)"
-                    } else {
-                        ""
-                    }
-                ),
-                value: self.cost,
-                threshold: limit,
-            });
-        }
         out
     }
 
     pub fn open_jobs(&self) -> usize {
         self.open_jobs.len()
-    }
-
-    /// `provider`, `table`, `mixed` or `unknown`.
-    pub fn cost_source(&self) -> &'static str {
-        match (self.by_provider > 0, self.by_table > 0) {
-            (true, true) => "mixed",
-            (true, false) => "provider",
-            (false, true) => "table",
-            (false, false) => "unknown",
-        }
     }
 }
 
@@ -474,16 +278,8 @@ pub fn status_json(tally: &Tally, live: &Live<'_>) -> Value {
             "cache_write": tally.cache_write,
             "total": tally.prompt + tally.completion,
         },
-        "cost": {
-            // `null` when no request has a known cost: unknown is not zero.
-            "usd": if tally.by_provider + tally.by_table > 0 { json!(tally.cost) } else { Value::Null },
-            "source": tally.cost_source(),
-            "unpriced_requests": tally.unpriced,
-            "prices_as_of": PRICES_AS_OF,
-        },
         "warn": {
             "prompt_tokens": live.warn.prompt_tokens,
-            "cost": live.warn.cost,
         },
         "last_error": error,
         "retry": retry,
@@ -505,10 +301,9 @@ fn compact(n: u64) -> String {
 fn percent(value: &Value) -> String {
     value
         .as_f64()
-        .map_or("-".into(), |ratio| format!("{:.0}%", ratio * 100.0))
+        .map_or("-".to_string(), |ratio| format!("{:.0}%", ratio * 100.0))
 }
 
-/// The status as a human reads it: one fact per line, nothing to decode.
 pub fn render_text(state: &Value) -> String {
     let get = |path: &[&str]| {
         path.iter()
@@ -564,18 +359,6 @@ pub fn render_text(state: &Value) -> String {
         compact(num(&["tokens", "cached"])),
         compact(num(&["tokens", "completion"])),
     ));
-    let unpriced = num(&["cost", "unpriced_requests"]);
-    let cost = match get(&["cost", "usd"]).as_f64() {
-        Some(usd) => {
-            let mut cost = format!("${usd:.4} ({})", text(&["cost", "source"]));
-            if unpriced > 0 {
-                cost.push_str(&format!(" + {unpriced} request(s) unpriced"));
-            }
-            cost
-        }
-        None => "unknown (the provider reports none and the model has no price)".to_string(),
-    };
-    lines.push(format!("cost      {cost}"));
     if let Some(retry) = get(&["retry"]).as_object() {
         let what = if retry.get("kind").and_then(Value::as_str) == Some("slot") {
             "waiting for a provider slot".to_string()
@@ -668,157 +451,48 @@ pub fn render_text(state: &Value) -> String {
             .collect();
         lines.push(format!("mcp       {}", parts.join(" · ")));
     }
-    let warn_prompt = get(&["warn", "prompt_tokens"]).as_u64();
-    let warn_cost = get(&["warn", "cost"]).as_f64();
-    if warn_prompt.is_some() || warn_cost.is_some() {
-        let mut parts = Vec::new();
-        if let Some(limit) = warn_prompt {
-            parts.push(format!("prompt > {}", compact(limit)));
-        }
-        if let Some(limit) = warn_cost {
-            parts.push(format!("cost > ${limit}"));
-        }
-        lines.push(format!("warns at  {}", parts.join(" · ")));
+    if let Some(warn_prompt) = get(&["warn", "prompt_tokens"]).as_u64() {
+        lines.push(format!("warns at  prompt > {}", compact(warn_prompt)));
     }
-    lines.push(format!(
-        "          (built-in prices as of {})",
-        text(&["cost", "prices_as_of"])
-    ));
     lines.join("\n")
-}
-
-/// A dollar figure with enough digits to tell it from the threshold it passed.
-fn money(value: f64) -> String {
-    let text = format!("{value:.6}");
-    let trimmed = text.trim_end_matches('0');
-    let trimmed = trimmed.strip_suffix('.').unwrap_or(trimmed);
-    if value >= 0.01 {
-        format!("{value:.4}")
-    } else {
-        trimmed.to_string()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const FLASH: Price = Price {
-        input: 0.30,
-        cached_input: 0.006,
-        output: 1.20,
-    };
-
-    fn usage(
-        prompt: u64,
-        cached: u64,
-        cost: f64,
-        source: Option<&str>,
-        kind: Option<&str>,
-    ) -> EventBody {
+    fn usage(prompt: u64, cached: u64, kind: Option<&str>) -> EventBody {
         EventBody::Usage {
             step: 1,
             prompt_tokens: prompt,
             completion_tokens: 10,
             cached_tokens: cached,
             cache_write_tokens: 0,
-            cost,
-            cost_source: source.map(str::to_string),
             allowance: None,
             kind: kind.map(str::to_string),
         }
     }
 
     #[test]
-    fn estimate_prices_cached_and_plain_input_apart() {
-        // 400 plain * 0.30 + 600 cached * 0.006 + 200 out * 1.20 = 363.6 µ$
-        let cost = estimate(&FLASH, 1000, 600, 200);
-        assert_eq!(cost, 0.0003636);
-    }
-
-    #[test]
-    fn estimate_never_goes_negative_when_cached_exceeds_prompt() {
-        let cost = estimate(&FLASH, 100, 500, 0);
-        assert_eq!(cost, estimate(&FLASH, 100, 100, 0));
-    }
-
-    #[test]
-    fn estimate_rounds_to_a_billionth_of_a_dollar() {
-        // 1 token at 0.30/M is 3e-7; the sum of float noise must not leak.
-        assert_eq!(estimate(&FLASH, 1, 0, 0), 0.0000003);
-        assert_eq!(estimate(&FLASH, 0, 0, 0), 0.0);
-        let big = estimate(&FLASH, 3_333_333, 1_111_111, 777_777);
-        assert_eq!(big, round_usd(big), "{big}");
-    }
-
-    #[test]
-    fn a_provider_cost_always_wins_over_the_table() {
-        let (cost, source) = resolve(0.5, Some(&FLASH), 1000, 0, 100);
-        assert_eq!((cost, source), (0.5, CostSource::Provider));
-    }
-
-    #[test]
-    fn a_reported_zero_falls_back_to_the_table_and_then_to_unknown() {
-        let (cost, source) = resolve(0.0, Some(&FLASH), 1000, 600, 200);
-        assert_eq!((cost, source), (0.0003636, CostSource::Table));
-        let (cost, source) = resolve(0.0, None, 1000, 600, 200);
-        assert_eq!((cost, source), (0.0, CostSource::Unknown));
-        // NaN and negative numbers are not costs either.
-        assert_eq!(resolve(f64::NAN, None, 1, 0, 1).1, CostSource::Unknown);
-        assert_eq!(resolve(-1.0, None, 1, 0, 1).1, CostSource::Unknown);
-    }
-
-    #[test]
-    fn lookup_is_exact_and_the_config_wins() {
-        let none = BTreeMap::new();
-        assert!(lookup("openrouter", "deepseek/deepseek-v4-flash", &none).is_some());
-        assert!(lookup("openrouter", "DeepSeek/DeepSeek-V4-Flash", &none).is_some());
-        // a variant is not its parent
-        assert!(lookup("openrouter", "deepseek/deepseek-v4.1-flash:batch", &none).is_none());
-        assert!(lookup("opencode-go", "deepseek-v4.1-flash", &none).is_none());
-        let mut over = BTreeMap::new();
-        over.insert(
-            "deepseek/deepseek-v4.1-flash-1017".to_string(),
-            price(1.0, 1.0, 1.0),
-        );
-        let (found, from) =
-            lookup("openrouter", "deepseek/deepseek-v4.1-flash-1017", &over).unwrap();
-        assert_eq!((found.input, from), (1.0, PriceFrom::Config));
-        // an override also adds a model the table does not know, on any provider
-        over.insert("glm-5.2".into(), price(2.0, 2.0, 4.0));
-        assert!(lookup("opencode-go", "glm-5.2", &over).is_some());
-    }
-
-    #[test]
-    fn an_old_usage_event_without_a_source_is_read_by_its_cost() {
-        assert_eq!(source_of(0.01, None), CostSource::Provider);
-        assert_eq!(source_of(0.0, None), CostSource::Unknown);
-        assert_eq!(source_of(0.0, Some("table")), CostSource::Table);
-    }
-
-    #[test]
-    fn the_tally_sums_known_costs_and_counts_unknown_ones_apart() {
+    fn the_tally_sums_tokens_of_all_requests() {
         let mut tally = Tally::default();
-        tally.observe(2, &usage(1000, 500, 0.001, Some("provider"), None));
-        tally.observe(4, &usage(2000, 1000, 0.002, Some("table"), None));
-        tally.observe(6, &usage(3000, 0, 0.0, Some("unknown"), None));
+        tally.observe(2, &usage(1000, 500, None));
+        tally.observe(4, &usage(2000, 1000, None));
+        tally.observe(6, &usage(3000, 0, None));
         assert_eq!(tally.requests, 3);
-        assert_eq!(tally.cost, 0.003);
-        assert_eq!(
-            (tally.by_provider, tally.by_table, tally.unpriced),
-            (1, 1, 1)
-        );
-        assert_eq!(tally.cost_source(), "mixed");
+        assert_eq!(tally.prompt, 6000);
+        assert_eq!(tally.completion, 30);
+        assert_eq!(tally.cached, 1500);
         assert_eq!(tally.last.as_ref().unwrap().prompt, 3000);
     }
 
     #[test]
-    fn a_summary_is_spend_but_not_a_step_or_the_context() {
+    fn a_summary_is_not_a_step_or_the_context() {
         let mut tally = Tally::default();
-        tally.observe(2, &usage(1000, 0, 0.001, Some("provider"), None));
-        tally.observe(4, &usage(9000, 0, 0.002, Some("provider"), Some("compact")));
+        tally.observe(2, &usage(1000, 0, None));
+        tally.observe(4, &usage(9000, 0, Some("compact")));
         assert_eq!(tally.requests, 1);
-        assert_eq!(tally.cost, 0.003);
+        assert_eq!(tally.prompt, 10_000);
         assert_eq!(tally.last.as_ref().unwrap().prompt, 1000);
     }
 
@@ -826,22 +500,21 @@ mod tests {
     fn the_prompt_warning_fires_once_per_crossing_and_rearms_below() {
         let warn = Warn {
             prompt_tokens: Some(150_000),
-            cost: None,
         };
         let mut tally = Tally::default();
-        tally.observe(2, &usage(100_000, 0, 0.0, None, None));
+        tally.observe(2, &usage(100_000, 0, None));
         assert!(tally.warnings(warn).is_empty());
-        tally.observe(4, &usage(150_001, 0, 0.0, None, None));
+        tally.observe(4, &usage(150_001, 0, None));
         let first = tally.warnings(warn);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].kind, "prompt_tokens");
         // still over: silent
-        tally.observe(6, &usage(160_000, 0, 0.0, None, None));
+        tally.observe(6, &usage(160_000, 0, None));
         assert!(tally.warnings(warn).is_empty());
         // a compaction brings it down, and the next climb speaks again
-        tally.observe(8, &usage(20_000, 0, 0.0, None, None));
+        tally.observe(8, &usage(20_000, 0, None));
         assert!(tally.warnings(warn).is_empty());
-        tally.observe(10, &usage(151_000, 0, 0.0, None, None));
+        tally.observe(10, &usage(151_000, 0, None));
         assert_eq!(tally.warnings(warn).len(), 1);
     }
 
@@ -849,32 +522,16 @@ mod tests {
     fn the_exact_threshold_is_not_over_it() {
         let warn = Warn {
             prompt_tokens: Some(150_000),
-            cost: None,
         };
         let mut tally = Tally::default();
-        tally.observe(2, &usage(150_000, 0, 0.0, None, None));
-        assert!(tally.warnings(warn).is_empty());
-    }
-
-    #[test]
-    fn the_cost_warning_fires_once() {
-        let warn = Warn {
-            prompt_tokens: None,
-            cost: Some(0.01),
-        };
-        let mut tally = Tally::default();
-        tally.observe(2, &usage(10, 0, 0.005, Some("provider"), None));
-        assert!(tally.warnings(warn).is_empty());
-        tally.observe(4, &usage(10, 0, 0.006, Some("provider"), None));
-        assert_eq!(tally.warnings(warn).len(), 1);
-        tally.observe(6, &usage(10, 0, 0.006, Some("provider"), None));
+        tally.observe(2, &usage(150_000, 0, None));
         assert!(tally.warnings(warn).is_empty());
     }
 
     #[test]
     fn no_threshold_means_no_warning() {
         let mut tally = Tally::default();
-        tally.observe(2, &usage(900_000, 0, 5.0, Some("provider"), None));
+        tally.observe(2, &usage(900_000, 0, None));
         assert!(tally.warnings(Warn::default()).is_empty());
     }
 
@@ -882,12 +539,8 @@ mod tests {
     fn a_resumed_log_does_not_repeat_a_warning_it_already_owed() {
         let warn = Warn {
             prompt_tokens: Some(1000),
-            cost: None,
         };
-        let events = vec![crate::event::LogEvent::new(
-            2,
-            usage(5000, 0, 0.0, None, None),
-        )];
+        let events = vec![crate::event::LogEvent::new(2, usage(5000, 0, None))];
         let mut tally = Tally::from_events(&events, warn);
         assert!(tally.warnings(warn).is_empty());
     }
@@ -907,16 +560,14 @@ mod tests {
             retry,
             warn: Warn {
                 prompt_tokens: Some(150_000),
-                cost: None,
             },
         }
     }
 
     #[test]
     fn status_window_is_null_until_known() {
-        // : a defaulted window is a guess, so it is null, with its source.
         let mut tally = Tally::default();
-        tally.observe(2, &usage(100_000, 0, 0.0, None, None));
+        tally.observe(2, &usage(100_000, 0, None));
         let mut l = live(None, &[]);
         l.window = None;
         l.window_source = "default";
@@ -929,37 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn time_priced_default_model_has_no_table_row() {
-        // : no wrong estimate for a model priced by time of day.
-        assert!(
-            lookup(
-                "openrouter",
-                "deepseek/deepseek-v4.1-flash-1017",
-                &BTreeMap::new()
-            )
-            .is_none()
-        );
-        assert!(lookup("openrouter", "deepseek/deepseek-v4-flash", &BTreeMap::new()).is_some());
-    }
-
-    #[test]
-    fn small_cost_warning_shows_distinct_figures() {
-        // : "$0.0003 over $0.0003" told nothing.
-        let warn = Warn {
-            prompt_tokens: None,
-            cost: Some(0.0003),
-        };
-        let mut tally = Tally {
-            cost: 0.000309,
-            by_provider: 1,
-            ..Tally::default()
-        };
-        let w = tally.warnings(warn);
-        assert!(w[0].message.contains("$0.000309"), "{}", w[0].message);
-        assert!(!w[0].message.contains("estimated"), "{}", w[0].message);
-    }
-
-    #[test]
     fn status_is_complete_before_any_request() {
         let tally = Tally::from_events(&[], Warn::default());
         let json = status_json(&tally, &live(None, &[]));
@@ -967,29 +587,25 @@ mod tests {
         assert_eq!(json["requests"], 0);
         assert!(json["context"]["last_prompt_tokens"].is_null());
         assert!(json["cache"]["last_hit_ratio"].is_null());
-        assert!(json["cost"]["usd"].is_null(), "unknown is not zero");
-        assert_eq!(json["cost"]["source"], "unknown");
+        assert_eq!(json["tokens"]["total"], 0);
         assert!(json["last_error"].is_null());
         assert!(json["retry"].is_null());
         let text = render_text(&json);
         assert!(text.contains("no request yet"), "{text}");
-        assert!(text.contains("cost      unknown"), "{text}");
     }
 
     #[test]
-    fn status_reports_context_percent_cache_and_cost_after_steps() {
+    fn status_reports_context_percent_cache_and_tokens_after_steps() {
         let mut tally = Tally::default();
-        tally.observe(2, &usage(100_000, 75_000, 0.0, Some("table"), None));
-        tally.cost = 0.0123;
+        tally.observe(2, &usage(100_000, 75_000, None));
         let json = status_json(&tally, &live(None, &[]));
         assert_eq!(json["context"]["last_prompt_tokens"], 100_000);
         assert_eq!(json["context"]["percent"], 50.0);
         assert_eq!(json["cache"]["last_hit_ratio"], 0.75);
-        assert_eq!(json["cost"]["source"], "table");
+        assert_eq!(json["tokens"]["cached"], 75_000);
         let text = render_text(&json);
         assert!(text.contains("50.0% of 200.0k"), "{text}");
         assert!(text.contains("75% last"), "{text}");
-        assert!(text.contains("$0.0123 (table)"), "{text}");
         assert!(text.contains("limit 5"), "{text}");
     }
 
@@ -1029,7 +645,7 @@ mod tests {
         );
         let before = status_json(&tally, &live(None, &[]));
         assert_eq!(before["last_error"]["recovered"], false);
-        tally.observe(4, &usage(10, 0, 0.0, None, None));
+        tally.observe(4, &usage(10, 0, None));
         let after = status_json(&tally, &live(None, &[]));
         assert_eq!(after["last_error"]["recovered"], true);
         assert!(render_text(&after).contains("(since recovered)"));

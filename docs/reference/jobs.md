@@ -39,7 +39,7 @@ kelir sessions forget <name>        # drops the name; the session and its log st
   the session directory's `owner` file (pid + start time, so a reused pid is not a holder).
 - `sessions ls` shows the named sessions and the newest unnamed roots: name, id, state
   (`running`, `done`, `stopped`, `paused`, `error`, `crashed`, `new`), last activity and
-  cost. `--json` is an array of objects with the same fields plus `model`, `steps`, `pid`.
+  tokens and cache-hit ratio. `--json` is an array of objects with the same fields plus `model`, `steps`, `pid`.
 
 ## `jobs.toml`
 
@@ -138,7 +138,7 @@ notify/          # the scripts of notify hooks
 | `started`, `finished` | RFC 3339; `finished` is `null` while running |
 | `outcome` | `running`, then `done`, `error`, `stopped`, `timeout`, `skipped` or `paused` |
 | `exit_code` | what `job run` exited with |
-| `steps`, `tokens`, `cost_usd`, `cost_source`, `cache_hit_ratio` | **this run's** numbers (STEER-8's: `cost_usd` is `null` when no request had a known cost) |
+| `steps`, `tokens`, `cache_hit_ratio` | **this run's** numbers |
 | `answer` | the first lines of the final answer |
 | `error` | the last error, or the timeout, or why it paused |
 | `schedule` | the job's `schedule` string |

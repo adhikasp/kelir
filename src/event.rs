@@ -584,11 +584,6 @@ pub enum EventBody {
         completion_tokens: u64,
         cached_tokens: u64,
         cache_write_tokens: u64,
-        cost: f64,
-        /// Where `cost` came from: `provider` (its own number), `table` (tokens times a known price) or
-        /// `unknown` (no cost reported, no price known: the 0.0 is "not known", not "free").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cost_source: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allowance: Option<Value>,
         /// `None` for a model step.
@@ -777,9 +772,9 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    /// A threshold the human or the driver set was crossed (`warn_prompt_tokens`, `warn_cost`).
+    /// A threshold the human or the driver set was crossed (`warn_prompt_tokens`).
     Warning {
-        /// `prompt_tokens` or `cost`.
+        /// `prompt_tokens`.
         kind: String,
         message: String,
         value: f64,
@@ -1050,8 +1045,6 @@ mod tests {
                 completion_tokens: 5,
                 cached_tokens: 4,
                 cache_write_tokens: 2,
-                cost: 0.001,
-                cost_source: Some("provider".into()),
                 allowance: Some(json!({"remaining": 1})),
                 kind: None,
             },
@@ -1061,8 +1054,6 @@ mod tests {
                 completion_tokens: 60,
                 cached_tokens: 0,
                 cache_write_tokens: 0,
-                cost: 0.002,
-                cost_source: None,
                 allowance: None,
                 kind: Some("compact".into()),
             },

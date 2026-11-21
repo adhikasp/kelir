@@ -6,15 +6,13 @@
 use crate::support::*;
 use serde_json::{Value, json};
 
-fn sized_turn(text: &str, prompt: u64, cost: Option<f64>) -> Vec<Value> {
-    let mut usage = json!({"prompt_tokens": prompt, "completion_tokens": 5});
-    if let Some(cost) = cost {
-        usage["cost"] = json!(cost);
-    }
+fn sized_turn(text: &str, prompt: u64) -> Vec<Value> {
     vec![
         delta(text),
         finish("stop"),
-        json!({"choices": [], "usage": usage}),
+        json!({"choices": [], "usage": {
+            "prompt_tokens": prompt, "completion_tokens": 5
+        }}),
     ]
 }
 
@@ -34,8 +32,8 @@ async fn status(session: &LiveSession) -> Value {
 #[tokio::test]
 async fn a_resume_does_not_repeat_a_warning_the_log_already_owes() {
     let mock = Mock::start(vec![
-        Reply::Sse(sse(&sized_turn("a", 500, Some(0.001)))),
-        Reply::Sse(sse(&sized_turn("b", 600, Some(0.001)))),
+        Reply::Sse(sse(&sized_turn("a", 500))),
+        Reply::Sse(sse(&sized_turn("b", 600))),
     ])
     .await;
     let sandbox = Sandbox::new("warn_prompt_tokens = 400\n");
@@ -58,56 +56,6 @@ async fn a_resume_does_not_repeat_a_warning_the_log_already_owes() {
         1,
         "a resume repeated the warning"
     );
-}
-
-/// A table estimate (config price, provider silent) counts toward `warn_cost`;
-/// an unknown model never trips the cost warning, however many tokens it uses.
-#[tokio::test]
-async fn warn_cost_counts_table_estimates_and_ignores_unknown() {
-    let mock = Mock::start(vec![Reply::Sse(sse(&sized_turn("a", 1_000_000, None)))]).await;
-    let priced = Sandbox::new(
-        "warn_cost = 0.5\nwarn_prompt_tokens = 0\n[prices.\"test/model\"]\ninput = 1.0\noutput = 1.0\n",
-    );
-    let out = priced
-        .kelir(&mock.base_url(), &["run", "--json", "go"], &[])
-        .await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    let log = priced.log(&priced.only_session());
-    assert_eq!(warnings(&log).len(), 1, "{log:#?}");
-    assert_eq!(warnings(&log)[0]["kind"], "cost");
-
-    let mock = Mock::start(vec![Reply::Sse(sse(&sized_turn("a", 1_000_000, None)))]).await;
-    let unknown = Sandbox::new("warn_cost = 0.0001\nwarn_prompt_tokens = 0\n");
-    let out = unknown
-        .kelir(&mock.base_url(), &["run", "--json", "go"], &[])
-        .await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(warnings(&unknown.log(&unknown.only_session())).is_empty());
-}
-
-/// Provider cost of exactly 0.0 on a priced model falls back to the table, but
-/// a provider cost > 0 never does: a mixed session is `mixed`.
-#[tokio::test]
-async fn mixed_sources_are_labelled_mixed() {
-    let mock = Mock::start(vec![
-        Reply::Sse(sse(&sized_turn("a", 1000, Some(0.002)))),
-        Reply::Sse(sse(&sized_turn("b", 1000, None))),
-    ])
-    .await;
-    let mut s = LiveSession::start(
-        &mock,
-        &["run", "--keep", "--json", "go"],
-        "[prices.\"test/model\"]\ninput = 1.0\noutput = 1.0\n",
-    )
-    .await;
-    s.wait_for("turn_ended").await;
-    s.ctl(&["say", "two"]).await;
-    s.wait_for("turn_ended").await;
-    let st = status(&s).await;
-    assert_eq!(st["cost"]["source"], "mixed", "{st}");
-    let usd = st["cost"]["usd"].as_f64().unwrap();
-    assert!((usd - (0.002 + 1005.0 / 1e6)).abs() < 1e-9, "{st}");
-    s.end().await;
 }
 
 /// A running (not promoted) tool shows in running_calls; a promoted job counts
@@ -152,7 +100,7 @@ async fn status_sees_running_calls_and_bg_jobs() {
 /// the refusal is not logged as a status read.
 #[tokio::test]
 async fn status_needs_the_token_and_leaks_nothing_without_it() {
-    let mock = Mock::start(vec![Reply::Sse(sse(&sized_turn("a", 10, Some(0.001))))]).await;
+    let mock = Mock::start(vec![Reply::Sse(sse(&sized_turn("a", 10)))]).await;
     let mut s = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     s.wait_for("turn_ended").await;
     let tok = s.session_dir.join("token");

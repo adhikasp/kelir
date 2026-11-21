@@ -179,7 +179,7 @@ with an `endpoint` on a different scheme, host or port the call is made without 
 key (fine for a local server). The failure note is an `error` event, so the hint
 text never enters the context. The scorer is given 600 completion tokens, room for
 a reasoning model. Its spend is logged as a `usage` event of `kind: "hint"` (it
-counts in `ctl status` and the cost warnings; `observe`'s cache ratio reads only
+counts in `ctl status`; `observe`'s cache ratio reads only
 the main steps). The call runs before the turn's first step, so a slow scorer
 delays each human prompt by up to `timeout_ms`.
 

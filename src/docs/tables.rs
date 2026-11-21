@@ -99,7 +99,7 @@ pub const VERBS: &[VerbDoc] = &[
         name: "status",
         args: "none; `--json` prints the answer as one JSON line",
         applies: "`now`",
-        effect: "read-only and never logged: answers at once, even mid-request or in a retry wait,                  with steps used/limit, turn, last prompt size and context %, cache hit ratio,                  tokens, cost and its source, last error, retry in progress, running calls,                  background jobs, children, and `mcp` (one `{name,state,tools,channel}` per configured MCP server; the state word only, never config or server output). `context.window` is `null` (with `context.window_source` `default`) until the model list answers or a window is configured, and `percent` stays `null` with it. A provider-reported cost of exactly 0 on a priced model is replaced by a table estimate (`cost.source` `table`). Needs the session token like every verb",
+        effect: "read-only and never logged: answers at once, even mid-request or in a retry wait,                  with steps used/limit, turn, last prompt size and context %, cache hit ratio,                  tokens, last error, retry in progress, running calls,                  background jobs, children, and `mcp` (one `{name,state,tools,channel}` per configured MCP server; the state word only, never config or server output). `context.window` is `null` (with `context.window_source` `default`) until the model list answers or a window is configured, and `percent` stays `null` with it. Needs the session token like every verb",
     },
     VerbDoc {
         name: "end",
@@ -199,7 +199,7 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
         default: "unset: the provider's own default",
         overrides: "—",
         effect: "the `cache_control.ttl` sent with the request (`5m`, `1h`), for providers that \
-                 price a longer break-even separately",
+                 charge separately for a longer break-even",
         field_fn: "load",
     },
     KeyDoc {
@@ -401,15 +401,6 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
     },
     KeyDoc {
         scope: KeyScope::Top,
-        name: "warn_cost",
-        kind: "number (US dollars)",
-        default: "unset: no cost warning",
-        overrides: "—",
-        effect: "when the session's cost passes this, one `warning` event and one dim line; never                  sent to the model. Only costs that are known count",
-        field_fn: "warn_cost",
-    },
-    KeyDoc {
-        scope: KeyScope::Top,
         name: "max_child_depth",
         kind: "integer",
         default: "`3`",
@@ -434,15 +425,6 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
         overrides: "—",
         effect: "live descendants one root may have at once, however deep; a child whose process is gone is reaped and frees its slot",
         field_fn: "load",
-    },
-    KeyDoc {
-        scope: KeyScope::Top,
-        name: "prices",
-        kind: "table of tables `[prices.\"<model>\"]` with `input`, `output`, `cached_input`                (dollars per million tokens)",
-        default: "empty: the built-in table (`src/spend.rs`, stamped with its date) applies",
-        overrides: "—",
-        effect: "overrides and extends the built-in price table. Used only when the provider                  reports no cost; a model with no price anywhere gets no estimate                  (`cost_source: \"unknown\"`). `cached_input` defaults to `input`",
-        field_fn: "prices",
     },
     KeyDoc {
         scope: KeyScope::Provider,
@@ -625,17 +607,15 @@ pub const EVENTS: &[EventDoc] = &[
     EventDoc {
         name: "usage",
         fields: "`step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, \
-                 `cache_write_tokens`, `cost`, `cost_source?`, `allowance?`, `kind?`",
-        written_by: "the final stream chunk; `cost_source` says whether `cost` is the provider's \
-                    own (`provider`), tokens times a known price (`table`) or not known \
-                    (`unknown`, cost 0.0); `kind: \"compact\"` marks the summarising request and `kind: \"hint\"` the \
+                 `cache_write_tokens`, `allowance?`, `kind?`",
+        written_by: "the final stream chunk; `kind: \"compact\"` marks the summarising request and `kind: \"hint\"` the \
                     hint scorer's own call",
     },
     EventDoc {
         name: "warning",
         fields: "`kind`, `message`, `value`, `threshold`",
-        written_by: "the session when the last prompt passes `warn_prompt_tokens` or the cost \
-                    passes `warn_cost`, once per crossing; never rendered into the conversation",
+        written_by: "the session when the last prompt passes `warn_prompt_tokens`, once per \
+                    crossing; never rendered into the conversation",
     },
     EventDoc {
         name: "verb",

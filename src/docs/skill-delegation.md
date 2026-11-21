@@ -33,7 +33,7 @@ you do next) or slow (a long build you do not have to watch).
 ```sh
 kelir run --child "list every caller of parse_config and say which ignore errors"
 kelir run --child --background "run the full test suite, report failures"   # handle now
-kelir ls                      # the tree: state, cost, cache hits, task
+kelir ls                      # the tree: state, cache hits, task
 kelir kill <session>          # stop one child and everything below it
 ```
 
@@ -53,8 +53,8 @@ the same file.
 
 A start can be refused with exit code 3 and a line naming the cap: depth (3 by default),
 live children per agent (10) and live descendants of the whole tree (16). Wait for one to
-finish or stop one with `kelir kill`. Each child spends tokens of its own and there is no
-spend cap: `kelir ls` shows cost per session and per tree.
+finish or stop one with `kelir kill`. Each child uses tokens of its own and there is no
+spend cap: `kelir ls` shows the cache-hit ratio per session and per tree.
 
 ## Reading results
 

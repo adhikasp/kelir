@@ -49,8 +49,8 @@ The **root session** holds the registry and decides, in one step, so two starts 
 for the last slot cannot both win. A settled child frees its slot at once; a child whose
 process is gone (crashed, killed from outside) is settled at once by the process that started it (`error`, or `killed` when it was
 signalled); only a child nobody reports on is reaped by liveness, after a 5 s grace and the
-root's once-a-second tick. Either way it frees its slot. A `brief` takes a slot while it runs. There is no spend cap:
-`kelir ls` shows cost per session and per tree.
+root's once-a-second tick. Either way it frees its slot. A `brief` takes a slot while it runs.
+`kelir ls` shows the cache-hit ratio per session.
 
 ## The tree
 
@@ -62,14 +62,13 @@ Every session exports to its tool calls `KELIR_ROOT` (the tree's root session),
 what is below them; `--all` for everything), one line per session:
 
 ```text
-ses_…  running  d0 session m  $0.0123  cache 61%  fix the failing tests
-  ses_…  done     d1 child   m  $0.0031  cache 40%  read the logs and say why it fails
-  ses_…  running  d1 brief   m  $0.0007  cache 98%  does the config reload on SIGHUP?
-  tree cost $0.0161
+ses_…  running  d0 session m  cache 61%  fix the failing tests
+  ses_…  done     d1 child   m  cache 40%  read the logs and say why it fails
+  ses_…  running  d1 brief   m  cache 98%  does the config reload on SIGHUP?
 ```
 
 `--json` prints the same as a nested array (`id`, `parent`, `depth`, `kind`, `state`,
-`provider`, `model`, `cost_usd`, `tree_cost_usd`, `cache_hit_ratio`, `task`, `children`).
+`provider`, `model`, `cache_hit_ratio`, `task`, `children`).
 `state` is the session's own while it runs and the registry's word (`done`, `killed`,
 `lost`, …) afterwards. `kelir ctl <root> status` lists the live registry
 (`child_list`: session, depth, kind, state, pid).
@@ -90,7 +89,7 @@ tool list, same messages, and the **parent's session id as the provider cache ke
 the prefix hits the parent's cache. `edit` and `compact` are refused by result
 (`refused: this is a brief…`), and so are `kelir run --child` and `kelir brief` (a side question
 starts no work; exit 3); `bash` works. In `kelir ls` it is kind `brief` with its own question
-as the task, and its cost counts only what it spent after the snapshot (the copied prefix is
+as the task, and its tokens count only what it added after the snapshot (the copied prefix is
 the parent's, counted there). The parent's history is untouched: its log
 gains only the `child_started`/`child_settled` pair, and the answer is the command's
 stdout. The tool call that runs `kelir brief` is itself not in the snapshot (its result

@@ -34,6 +34,15 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 - **STEER-9** — de-flaked the e2e suite; three consecutive loaded gates with
   zero retries.
 
+### Breaking
+
+- Cost tracking is gone: the `[prices]` table, `warn_cost`, the `cost` and
+  `cost_source` fields of `usage` events, the cost column of `kelir ls` and
+  `sessions ls`, cost in `status` and job STATUS, and the TUI's cost state.
+  Token counts, `warn_prompt_tokens` and the cache-hit ratio stay. A config
+  with `prices` or `warn_cost` gets the ordinary unread-key treatment (no
+  special "removed" message); old logs are not read by the rewritten binary.
+
 ### Changed
 
 - The gate now caps itself at four build jobs and four test threads, takes a

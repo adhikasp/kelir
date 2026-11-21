@@ -316,7 +316,8 @@ pub struct Summary {
     pub started: String,
     pub last_activity: String,
     pub steps: usize,
-    pub cost_usd: Option<f64>,
+    pub tokens: u64,
+    pub cache_hit_ratio: Option<f64>,
     pub pid: Option<u32>,
     pub parent: Option<String>,
 }
@@ -342,7 +343,7 @@ pub fn summarize(id: &str, names: &std::collections::HashMap<String, String>) ->
             _ => {}
         }
     }
-    let tally = crate::spend::Tally::from_events(&events, crate::spend::Warn::default());
+    let tally = crate::usage::Tally::from_events(&events, crate::usage::Warn::default());
     let pid = holder(&dir);
     let state = if pid.is_some() {
         "running".to_string()
@@ -369,7 +370,8 @@ pub fn summarize(id: &str, names: &std::collections::HashMap<String, String>) ->
             .iter()
             .filter(|e| matches!(e.body, crate::event::EventBody::StepStarted { .. }))
             .count(),
-        cost_usd: (tally.by_provider + tally.by_table > 0).then_some(tally.cost),
+        tokens: tally.prompt + tally.completion,
+        cache_hit_ratio: (tally.prompt > 0).then(|| tally.cached as f64 / tally.prompt as f64),
         pid,
         parent,
     })
@@ -427,7 +429,8 @@ pub fn sessions_ls(args: &crate::cli::SessionsLsArgs) -> u8 {
                         started: entry.created.clone(),
                         last_activity: entry.updated,
                         steps: 0,
-                        cost_usd: None,
+                        tokens: 0,
+                        cache_hit_ratio: None,
                         pid: None,
                         parent: None,
                     });
@@ -450,18 +453,19 @@ pub fn sessions_ls(args: &crate::cli::SessionsLsArgs) -> u8 {
         return 0;
     }
     println!(
-        "{:<20} {:<30} {:<9} {:<20} {:>9}",
-        "NAME", "SESSION", "STATE", "LAST ACTIVITY", "COST"
+        "{:<20} {:<30} {:<9} {:<20} {:>9} {:>6}",
+        "NAME", "SESSION", "STATE", "LAST ACTIVITY", "TOKENS", "CACHE"
     );
     for row in &rows {
         println!(
-            "{:<20} {:<30} {:<9} {:<20} {:>9}",
+            "{:<20} {:<30} {:<9} {:<20} {:>9} {:>6}",
             row.name.as_deref().unwrap_or("-"),
             row.session,
             row.state,
             row.last_activity.chars().take(19).collect::<String>(),
-            row.cost_usd
-                .map_or("-".to_string(), |cost| format!("${cost:.4}"))
+            row.tokens,
+            row.cache_hit_ratio
+                .map_or("-".to_string(), |ratio| format!("{:.0}%", ratio * 100.0))
         );
     }
     0

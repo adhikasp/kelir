@@ -1294,7 +1294,7 @@ mod tests {
         assert!(succeeded("done") && succeeded("paused") && !succeeded("error"));
     }
 
-    fn usage_event(seq: u64, cost: f64) -> LogEvent {
+    fn usage_event(seq: u64) -> LogEvent {
         LogEvent::new(
             seq,
             EventBody::Usage {
@@ -1303,8 +1303,6 @@ mod tests {
                 completion_tokens: 10,
                 cached_tokens: 500,
                 cache_write_tokens: 0,
-                cost,
-                cost_source: Some("provider".into()),
                 allowance: None,
                 kind: None,
             },
@@ -1312,14 +1310,13 @@ mod tests {
     }
 
     /// A brief's log starts with its parent's. `ls` names it a
-    /// brief with its own question, and its spend is only what it added.
+    /// brief with its own question, and its tokens are only what it added.
     #[test]
-    fn a_brief_is_listed_as_a_brief_and_counts_only_its_own_spend() {
-        let mut events = vec![session_started("ses_brief"), user(2), usage_event(3, 0.5)];
+    fn a_brief_is_listed_as_a_brief_and_counts_only_its_own_tokens() {
+        let mut events = vec![session_started("ses_brief"), user(2), usage_event(3)];
         let plain = crate::childcli::node_from("ses_brief", &events, false).unwrap();
         assert_eq!(plain.kind, "session");
         assert_eq!(own_start(&events), usize::MAX);
-        assert_eq!(plain.cost, Some(0.5));
 
         events.push(LogEvent::new(
             4,
@@ -1330,13 +1327,12 @@ mod tests {
                 attachments: Vec::new(),
             },
         ));
-        events.push(usage_event(5, 0.25));
+        events.push(usage_event(5));
         assert_eq!(own_start(&events), 3);
         let node = crate::childcli::node_from("ses_brief", &events, false).unwrap();
         assert_eq!(node.kind, KIND_BRIEF);
         assert_eq!(node.task, "BRIEFQ why?");
-        assert_eq!(node.cost, Some(0.25), "the parent's 0.5 is not the brief's");
-        let tally = crate::spend::Tally::from_events(&events, Default::default());
+        let tally = crate::usage::Tally::from_events(&events, Default::default());
         assert_eq!(tally.requests, 1);
         assert_eq!(tally.last.as_ref().map(|last| last.prompt), Some(1000));
     }

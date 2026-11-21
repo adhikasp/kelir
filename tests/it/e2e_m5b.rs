@@ -519,14 +519,14 @@ async fn memory_is_frozen_into_the_system_and_changes_arrive_at_the_tail() {
     assert_eq!(code, 0, "{stderr}");
 }
 
-/// m5bfix F2: the scoring call's spend is a `usage` event of kind `hint`.
+/// The scoring call's tokens are a `usage` event of kind `hint`.
 #[tokio::test]
 async fn the_scoring_calls_usage_is_recorded_as_kind_hint() {
     let project = Project::new();
     let scorer = Reply::Sse(
         json!({
             "choices": [{"message": {"role": "assistant", "content": "[\"sift\"]"}}],
-            "usage": {"prompt_tokens": 50, "completion_tokens": 70, "cost": 0.0001}
+            "usage": {"prompt_tokens": 50, "completion_tokens": 70}
         })
         .to_string(),
     );
@@ -555,7 +555,7 @@ async fn the_scoring_calls_usage_is_recorded_as_kind_hint() {
     assert_eq!(hints.len(), 1, "{usage:?}");
     assert_eq!(hints[0]["prompt_tokens"], 50);
     assert_eq!(hints[0]["completion_tokens"], 70);
-    assert_eq!(hints[0]["cost_source"], "provider");
+    assert!(hints[0].get("cost_source").is_none(), "removed event field");
     assert!(
         usage
             .iter()

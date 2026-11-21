@@ -791,7 +791,7 @@ async fn a_queued_compaction_survives_a_crash_and_is_applied_on_resume() {
         "the queued compaction was lost: {log:?}"
     );
     assert_eq!(compacted[0]["by"], "agent");
-    // N4: the summarising request's own spend is in the log, marked so a
+    // N4: the summarising request's own tokens are in the log, marked so a
     // reader can tell it is not a step of the turn.
     let summary_usage = events_of(&log, "usage")
         .into_iter()

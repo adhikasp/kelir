@@ -63,7 +63,7 @@ pub async fn ctl(args: CtlArgs) -> u8 {
                         println!("{}", state["result"].as_str().unwrap_or(""));
                     }
                     ("status", Some(state), false) if response.ok => {
-                        println!("{}", crate::spend::render_text(state));
+                        println!("{}", crate::usage::render_text(state));
                     }
                     _ => println!("{}", response.line()),
                 }

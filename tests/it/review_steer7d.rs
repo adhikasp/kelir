@@ -152,7 +152,7 @@ async fn a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose(
         // hang ceiling: no one should ever connect, and waiting 90 s only
         // makes a loaded gate slower. The caller's endpoint would be contacted
         // at job start; 5 s after the job is confirmed started is far beyond a
-        // legitimate local connect (the old 20 s window paid its full cost on
+        // legitimate local connect (the old 20 s window waited in full on
         // every run without catching anything extra).
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut lines_seen = Vec::new();

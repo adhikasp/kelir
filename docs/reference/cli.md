@@ -233,7 +233,7 @@ Ask a side question on a snapshot of this session (`brief "<question>"`)
 
 ### `kelir ls`
 
-List sessions as a tree: state, depth, model, cost, cache hits, task
+List sessions as a tree: state, depth, model, cache hits, task
 
 | flag | takes | what it does |
 |---|---|---|

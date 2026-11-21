@@ -224,7 +224,6 @@ pub struct Node {
     pub state: String,
     pub provider: String,
     pub model: String,
-    pub cost: Option<f64>,
     pub hit_ratio: Option<f64>,
     pub task: String,
     pub children: Vec<Node>,
@@ -288,7 +287,7 @@ pub fn node_from(id: &str, events: &[LogEvent], alive: bool) -> Option<Node> {
         .and_then(first_user)
         .or_else(|| events.iter().find_map(first_user))
         .unwrap_or_else(|| ("session".into(), String::new()));
-    let tally = crate::spend::Tally::from_events(events, Default::default());
+    let tally = crate::usage::Tally::from_events(events, Default::default());
     let ended = matches!(
         events.last().map(|event| &event.body),
         Some(EventBody::SessionEnded { .. })
@@ -312,7 +311,6 @@ pub fn node_from(id: &str, events: &[LogEvent], alive: bool) -> Option<Node> {
         state,
         provider,
         model,
-        cost: (tally.by_provider + tally.by_table > 0).then_some(tally.cost),
         hit_ratio,
         task: crate::util::one_line(&task, 80),
         children: Vec::new(),
@@ -345,23 +343,6 @@ pub fn build_tree(nodes: Vec<Node>) -> Vec<Node> {
     roots
 }
 
-fn subtree_cost(node: &Node) -> Option<f64> {
-    let mut total = node.cost;
-    for child in &node.children {
-        if let Some(cost) = subtree_cost(child) {
-            total = Some(total.unwrap_or(0.0) + cost);
-        }
-    }
-    total
-}
-
-fn money(cost: Option<f64>) -> String {
-    match cost {
-        Some(value) => format!("${value:.4}"),
-        None => "-".into(),
-    }
-}
-
 /// The tree as text: one line per session, children indented.
 pub fn render(roots: &[Node]) -> String {
     let mut out = String::new();
@@ -370,14 +351,13 @@ pub fn render(roots: &[Node]) -> String {
             .hit_ratio
             .map_or("-".to_string(), |ratio| format!("{:.0}%", ratio * 100.0));
         out.push_str(&format!(
-            "{indent}{id}  {state:<8} d{depth} {kind:<7} {model}  {cost} cache {hit}  {task}\n",
+            "{indent}{id}  {state:<8} d{depth} {kind:<7} {model}  cache {hit}  {task}\n",
             indent = "  ".repeat(level),
             id = node.id,
             state = node.state,
             depth = node.depth,
             kind = node.kind,
             model = node.model,
-            cost = money(node.cost),
             task = node.task,
         ));
         for child in &node.children {
@@ -386,13 +366,6 @@ pub fn render(roots: &[Node]) -> String {
     }
     for root in roots {
         walk(root, 0, &mut out);
-        if !root.children.is_empty() {
-            out.push_str(&format!(
-                "{}  tree cost {}\n",
-                " ".repeat(2),
-                money(subtree_cost(root))
-            ));
-        }
     }
     if out.is_empty() {
         out.push_str("no sessions\n");
@@ -410,8 +383,6 @@ pub fn to_json(nodes: &[Node]) -> Value {
             "state": node.state,
             "provider": node.provider,
             "model": node.model,
-            "cost_usd": node.cost,
-            "tree_cost_usd": subtree_cost(node),
             "cache_hit_ratio": node.hit_ratio,
             "task": node.task,
             "children": node.children.iter().map(one).collect::<Vec<_>>(),
@@ -534,7 +505,6 @@ mod tests {
             state: "running".into(),
             provider: "p".into(),
             model: "m".into(),
-            cost: Some(0.01),
             hit_ratio: Some(0.5),
             task: "t".into(),
             children: Vec::new(),
@@ -558,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn rendering_indents_children_and_totals_the_tree() {
+    fn rendering_indents_children() {
         let text = render(&build_tree(vec![
             node("a", None, 0),
             node("b", Some("a"), 1),
@@ -567,7 +537,7 @@ mod tests {
         assert!(lines[0].starts_with("a  running  d0"), "{text}");
         assert!(lines[1].starts_with("  b  running  d1"), "{text}");
         assert!(lines[1].contains("cache 50%"), "{text}");
-        assert!(lines[2].contains("tree cost $0.0200"), "{text}");
+        assert_eq!(lines.len(), 2, "{text}");
         assert_eq!(render(&[]), "no sessions\n");
     }
 
@@ -585,15 +555,12 @@ mod tests {
             "kind",
             "state",
             "model",
-            "cost_usd",
-            "tree_cost_usd",
             "cache_hit_ratio",
             "task",
             "children",
         ] {
             assert!(json[0].get(key).is_some(), "missing {key}");
         }
-        assert_eq!(json[0]["tree_cost_usd"], json!(0.02));
     }
 
     #[test]

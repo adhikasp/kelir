@@ -63,7 +63,7 @@ fn log_with(commands: &[&str]) -> String {
         push(
             serde_json::json!({"seq": seq, "ts": format!("2026-11-20T00:00:{second:02}.5Z"),
             "type": "usage", "step": step, "prompt_tokens": 100, "completion_tokens": 10,
-            "cached_tokens": 0, "cache_write_tokens": 0, "cost": 0.0}),
+            "cached_tokens": 0, "cache_write_tokens": 0}),
         );
         seq += 1;
         push(

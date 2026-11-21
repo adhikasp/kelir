@@ -45,7 +45,7 @@ fn scorer_reply(names: &[&str]) -> Reply {
     let content = serde_json::to_string(names).unwrap();
     Reply::Sse(
         json!({"choices": [{"message": {"role": "assistant", "content": content}}],
-               "usage": {"prompt_tokens": 50, "completion_tokens": 7, "cost": 0.0001}})
+               "usage": {"prompt_tokens": 50, "completion_tokens": 7}})
         .to_string(),
     )
 }

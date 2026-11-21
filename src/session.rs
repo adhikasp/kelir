@@ -447,7 +447,7 @@ struct Session {
     seen_seq: std::collections::HashMap<String, u64>,
     /// What this session has spent and what state it is in, folded from the log as it is written:
     /// the `status` verb's answer, and what the warnings are decided from.
-    tally: crate::spend::Tally,
+    tally: crate::usage::Tally,
     /// This session's place in the family of sessions and its registry of
     kids: children::Kids,
     /// The retry or slot wait in progress, for `status`: when it ends, the status and attempt, and whether
@@ -1702,7 +1702,7 @@ impl Session {
             trust,
             refused_status: std::collections::HashSet::new(),
             seen_seq: std::collections::HashMap::new(),
-            tally: crate::spend::Tally::default(),
+            tally: crate::usage::Tally::default(),
             kids: children::Kids::new(&prepared.id, prepared.cfg.children, prepared.child.as_ref()),
             retry_wait: std::cell::Cell::new(None),
             gates: None,
@@ -1716,7 +1716,7 @@ impl Session {
         }
         session.gates = session.build_gates();
         crate::child::set_lineage(session.kids.lineage.clone());
-        session.tally = crate::spend::Tally::from_events(&session.events, session.warn());
+        session.tally = crate::usage::Tally::from_events(&session.events, session.warn());
         // The watcher re-checks the sources the frozen system was rendered from; on a resume it is rebuilt
         // from the log's `sources[]` *and* the `source` events it already carries, so a source the verb added
         if let Some(read) = prepared.resume {
@@ -2240,28 +2240,14 @@ impl Session {
         Ok(event)
     }
 
-    fn warn(&self) -> crate::spend::Warn {
-        crate::spend::Warn {
+    fn warn(&self) -> crate::usage::Warn {
+        crate::usage::Warn {
             prompt_tokens: self.cfg.warn_prompt_tokens,
-            cost: self.cfg.warn_cost,
         }
     }
 
-    /// What a request cost: the provider's number when it gave one, else the
-    /// price table's estimate, else nothing known.
-    fn resolve_cost(&self, usage: &crate::stream::Usage) -> (f64, crate::spend::CostSource) {
-        let price = crate::spend::lookup(&self.provider_name, &self.model, &self.cfg.prices);
-        crate::spend::resolve(
-            usage.cost,
-            price.as_ref().map(|(price, _)| price),
-            usage.prompt_tokens,
-            usage.cached_tokens,
-            usage.completion_tokens,
-        )
-    }
-
     /// After a `usage` event: say so, once, when a threshold was crossed.
-    fn note_spend(&mut self) {
+    fn note_warnings(&mut self) {
         let warn = self.warn();
         for warning in self.tally.warnings(warn) {
             let _ = self.record(EventBody::Warning {
@@ -2313,14 +2299,14 @@ impl Session {
         let retry =
             self.retry_wait
                 .get()
-                .map(|(until, status, attempt, slot)| crate::spend::RetryNote {
+                .map(|(until, status, attempt, slot)| crate::usage::RetryNote {
                     status,
                     attempt,
                     remaining_ms: until.saturating_duration_since(Instant::now()).as_millis()
                         as u64,
                     slot,
                 });
-        let live = crate::spend::Live {
+        let live = crate::usage::Live {
             id: &self.id,
             provider: &self.provider_name,
             model: &self.model,
@@ -2336,7 +2322,7 @@ impl Session {
             retry,
             warn: self.warn(),
         };
-        let mut state = crate::spend::status_json(&self.tally, &live);
+        let mut state = crate::usage::status_json(&self.tally, &live);
         // MCP servers: name, state, tool count and channel flag only. Never
         // config, env, descriptions or server stderr (those can hold secrets).
         let servers = self.mcp.servers();
@@ -2949,7 +2935,7 @@ impl Session {
     }
 
     /// `bg-claim`, retired: nothing sends it, so it answers an id and nothing else, from a small
-    /// budget of its own (it must not spend the one `bg-spawn` mints from).
+    /// budget of its own (it must not use the one `bg-spawn` mints from).
     fn bg_claim_answer(&mut self) -> Response {
         match self.trust.claim_ack() {
             Ok(id) => Response::ok("bg-claim", 0, "now", json!({"id": id})),
@@ -3316,7 +3302,7 @@ impl Session {
         let model = model.to_string();
         let provider_cfg = if provider == self.provider_name {
             // The same provider: the key already in memory is the live one, and
-            // a re-read here could only cost a process start.
+            // a re-read here could only start another process.
             self.active_provider.clone()
         } else {
             // A swap to another provider needs *that* provider's key, resolved the same way the start
@@ -3919,35 +3905,22 @@ impl Session {
         }
     }
 
-    /// The scoring call's own spend, as a `usage` event of kind `hint`: it counts in `ctl
-    /// status` and the cost warnings, and the cache ratio (which reads `kind: None`) stays about the main
+    /// The scoring call's own tokens, as a `usage` event of kind `hint`: it counts in `ctl
+    /// status`, and the cache ratio (which reads `kind: None`) stays about the main request.
     fn record_hint_usage(&mut self, scorer: &dyn crate::hint::Scorer) {
         let Some(usage) = scorer.take_usage() else {
             return;
         };
-        let Some(config) = self.cfg.hint.clone() else {
-            return;
-        };
-        let price = crate::spend::lookup(&config.provider, &config.model, &self.cfg.prices);
-        let (cost, source) = crate::spend::resolve(
-            usage.cost,
-            price.as_ref().map(|(price, _)| price),
-            usage.prompt_tokens,
-            usage.cached_tokens,
-            usage.completion_tokens,
-        );
         let _ = self.record(EventBody::Usage {
             step: 0,
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             cached_tokens: usage.cached_tokens,
             cache_write_tokens: usage.cache_write_tokens,
-            cost,
-            cost_source: Some(source.as_str().into()),
             allowance: None,
             kind: Some("hint".into()),
         });
-        self.note_spend();
+        self.note_warnings();
     }
 
     fn hint_note(&mut self, message: &str) {
@@ -4286,22 +4259,19 @@ impl Session {
             StreamEnd::Assembled(assembler) => assembler,
             StreamEnd::Stopped(reason) => return Ok(CompactRun::Stopped(reason)),
             StreamEnd::End => return Ok(CompactRun::End),
-            // A summary is tried once and has no budget to spend, so it can never pause; if that ever
+            // A summary is tried once and has no budget to use, so it can never pause; if that ever
             // changes, a paused summary is a summary that did not happen.
             StreamEnd::Paused(_) => return Ok(CompactRun::End),
         };
-        // The summary's spend belongs in the log like any step's, marked so a
+        // The summary's tokens belong in the log like any step's, marked so a
         // reader (and `kelir ls`) can tell it is not a step of the turn
         if let Some(usage) = &assembler.usage {
-            let (cost, source) = self.resolve_cost(usage);
             self.record(EventBody::Usage {
                 step: self.step,
                 prompt_tokens: usage.prompt_tokens,
                 completion_tokens: usage.completion_tokens,
                 cached_tokens: usage.cached_tokens,
                 cache_write_tokens: usage.cache_write_tokens,
-                cost,
-                cost_source: Some(source.as_str().into()),
                 allowance: usage.allowance.clone(),
                 kind: Some("compact".into()),
             })?;
@@ -4309,9 +4279,8 @@ impl Session {
                 prompt: usage.prompt_tokens,
                 completion: usage.completion_tokens,
                 cached: usage.cached_tokens,
-                cost,
             });
-            self.note_spend();
+            self.note_warnings();
             self.sync();
         }
         let summary = assembler.text.trim().to_string();
@@ -4724,15 +4693,12 @@ impl Session {
             })?;
             self.emit(UiEvent::Assistant { text: text.clone() });
             if let Some(usage) = &assembler.usage {
-                let (cost, source) = self.resolve_cost(usage);
                 self.record(EventBody::Usage {
                     step,
                     prompt_tokens: usage.prompt_tokens,
                     completion_tokens: usage.completion_tokens,
                     cached_tokens: usage.cached_tokens,
                     cache_write_tokens: usage.cache_write_tokens,
-                    cost,
-                    cost_source: Some(source.as_str().into()),
                     allowance: usage.allowance.clone(),
                     kind: None,
                 })?;
@@ -4743,9 +4709,8 @@ impl Session {
                     prompt: usage.prompt_tokens,
                     completion: usage.completion_tokens,
                     cached: usage.cached_tokens,
-                    cost,
                 });
-                self.note_spend();
+                self.note_warnings();
             }
             // Even a turn that ends up stopped keeps the last thing the model
             // said in `turn_ended.final_text`.
@@ -6120,10 +6085,8 @@ mod tests {
                 hint: None,
                 promote_after: std::time::Duration::from_secs(0),
                 retry: crate::retry::Policy::default(),
-                warn_prompt_tokens: Some(crate::spend::DEFAULT_WARN_PROMPT_TOKENS),
-                warn_cost: None,
+                warn_prompt_tokens: Some(crate::usage::DEFAULT_WARN_PROMPT_TOKENS),
                 children: Default::default(),
-                prices: Default::default(),
                 gates: Vec::new(),
                 project_gates: Vec::new(),
                 trusted_projects: Vec::new(),
@@ -6250,10 +6213,8 @@ mod tests {
             hint: None,
             promote_after: std::time::Duration::from_secs(0),
             retry: crate::retry::Policy::default(),
-            warn_prompt_tokens: Some(crate::spend::DEFAULT_WARN_PROMPT_TOKENS),
-            warn_cost: None,
+            warn_prompt_tokens: Some(crate::usage::DEFAULT_WARN_PROMPT_TOKENS),
             children: Default::default(),
-            prices: Default::default(),
             gates: Vec::new(),
             project_gates: Vec::new(),
             trusted_projects: Vec::new(),

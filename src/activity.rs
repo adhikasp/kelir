@@ -563,10 +563,6 @@ mod tests {
         let stopped = text(summary_line(theme, "stopped", 1, 10));
         assert!(stopped.starts_with('⏹'), "{stopped}");
         assert!(stopped.contains("1 step · 10 tok"), "{stopped}");
-        assert!(
-            !stopped.contains('$'),
-            "no cost in the outcome line: {stopped}"
-        );
         let failed = text(summary_line(theme, "error", 2, 3000));
         assert!(failed.starts_with('✗'), "{failed}");
         assert!(failed.contains("2 steps · 3.0k tok"), "{failed}");

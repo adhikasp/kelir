@@ -528,9 +528,6 @@ pub struct Status {
     pub exit_code: Option<i32>,
     pub steps: u64,
     pub tokens: Tokens,
-    /// `null` when no request had a known cost: unknown is not zero.
-    pub cost_usd: Option<f64>,
-    pub cost_source: Option<String>,
     pub cache_hit_ratio: Option<f64>,
     pub answer: String,
     pub error: Option<String>,
@@ -609,15 +606,12 @@ pub fn render_md(status: &Status) -> String {
         status.finished.as_deref().unwrap_or("-")
     ));
     out.push_str(&format!(
-        "- steps: {} · tokens: {} (cached {}) · cost: {}\n",
+        "- steps: {} · tokens: {} · cache {}\n",
         status.steps,
         compact_number(status.tokens.total),
         status
             .cache_hit_ratio
-            .map_or("-".to_string(), |ratio| format!("{:.0}%", ratio * 100.0)),
-        status
-            .cost_usd
-            .map_or("unknown".to_string(), |cost| format!("${cost:.4}"))
+            .map_or("-".to_string(), |ratio| format!("{:.0}%", ratio * 100.0))
     ));
     if let Some(schedule) = &status.schedule {
         out.push_str(&format!("- schedule: {schedule}\n"));
@@ -921,8 +915,6 @@ mod tests {
                 cached: 800,
                 total: 1200,
             },
-            cost_usd: Some(0.0123),
-            cost_source: Some("provider".into()),
             cache_hit_ratio: Some(0.8),
             answer: "all good".into(),
             error: None,
@@ -939,7 +931,7 @@ mod tests {
         write_status(temp.path(), &status).unwrap();
         assert_eq!(read_status(temp.path()).unwrap().unwrap(), status);
         let md = std::fs::read_to_string(temp.path().join(STATUS_MD)).unwrap();
-        assert!(md.contains("**done**") && md.contains("$0.0123") && md.contains("80%"));
+        assert!(md.contains("**done**") && md.contains("80%"));
         assert!(md.contains("all good") && md.contains("0 3 * * *"), "{md}");
         assert!(md.lines().count() < 20, "{md}");
         // No temp files linger.
@@ -960,15 +952,6 @@ mod tests {
         assert!(error.contains("unreadable"), "{error}");
         std::fs::write(temp.path().join(STATUS_JSON), "").unwrap();
         assert!(read_status(temp.path()).is_err());
-    }
-
-    #[test]
-    fn unknown_cost_is_null_not_zero() {
-        let mut status = sample();
-        status.cost_usd = None;
-        let text = serde_json::to_string(&status).unwrap();
-        assert!(text.contains("\"cost_usd\":null"), "{text}");
-        assert!(render_md(&status).contains("cost: unknown"));
     }
 
     #[test]

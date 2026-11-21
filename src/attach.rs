@@ -143,13 +143,11 @@ pub fn from_event(event: &LogEvent) -> Vec<UiEvent> {
             prompt_tokens,
             completion_tokens,
             cached_tokens,
-            cost,
             ..
         } => out.push(UiEvent::Usage {
             prompt: *prompt_tokens,
             completion: *completion_tokens,
             cached: *cached_tokens,
-            cost: *cost,
         }),
         EventBody::ToolStarted { name, input, .. } => out.push(UiEvent::ToolStarted {
             name: name.clone(),
@@ -620,8 +618,6 @@ mod tests {
                 completion_tokens: 2,
                 cached_tokens: 1,
                 cache_write_tokens: 0,
-                cost: 0.0,
-                cost_source: None,
                 allowance: None,
                 kind: None,
             },

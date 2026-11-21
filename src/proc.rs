@@ -606,7 +606,7 @@ pub mod win {
     pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
     pub const DETACHED_PROCESS: u32 = 0x0000_0008;
     /// A console of its own, with no window: a console-subsystem child gets a console it can use,
-    /// without the cost (and the visible window) of a detached process allocating one per job.
+    /// without the overhead (and the visible window) of a detached process allocating one per job.
     pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 

@@ -92,7 +92,6 @@ pub enum UiEvent {
         prompt: u64,
         completion: u64,
         cached: u64,
-        cost: f64,
     },
     /// One assistant message is complete: commit the streamed text.
     Assistant {
@@ -194,7 +193,7 @@ impl Phase {
     }
 }
 
-/// The facts row's data: model and tokens; steps, cache and cost are
+/// The facts row's data: model and tokens; steps and cache are
 /// tracked for the summary and the log, not shown in the ambient row.
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -208,7 +207,6 @@ pub struct Status {
     pub last_prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: u64,
-    pub cost: f64,
     pub running: usize,
     /// Steps taken in the turn now running, and the turn's cap when one is set (`None` = no
     /// limit, the default). Shown only when a cap exists: a counter with no limit is noise.
@@ -233,7 +231,6 @@ impl Default for Status {
             last_prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: 0,
-            cost: 0.0,
             running: 0,
             turn_steps: 0,
             limit: None,
@@ -988,7 +985,7 @@ impl App {
     }
 
     /// The outcome line, for the turns that need a human: `paused`, `stopped` and `error`. A
-    /// `done` turn ends on its prose, so it gets no checkmark line and no cost or timing noise.
+    /// `done` turn ends on its prose, so it gets no checkmark line and no timing noise.
     fn turn_summary(&mut self, outcome: &str) {
         let steps = self.turn_steps.max(self.status.turn_steps);
         if outcome != "done" {
@@ -1081,13 +1078,11 @@ impl App {
                 prompt,
                 completion,
                 cached,
-                cost,
             } => {
                 self.status.prompt_tokens += prompt;
                 self.status.last_prompt_tokens = prompt;
                 self.status.completion_tokens += completion;
                 self.status.cached_tokens += cached;
-                self.status.cost += cost;
                 self.turn_tokens += prompt + completion;
             }
             UiEvent::Assistant { text } => {
@@ -2406,8 +2401,7 @@ mod tests {
             .collect::<String>()
     }
 
-    /// The facts row is the calm one: phase, model, tokens. Steps, cache and
-    /// cost are not ambient; the state row carries the running count.
+    /// The facts row is the calm one: phase, model, tokens. Steps and cache
     #[test]
     fn the_facts_row_names_only_the_phase_model_and_tokens() {
         let status = Status {
@@ -2419,7 +2413,6 @@ mod tests {
             last_prompt_tokens: 1200,
             completion_tokens: 340,
             cached_tokens: 900,
-            cost: 0.00042,
             running: 2,
             turn_steps: 3,
             limit: None,
@@ -2603,7 +2596,6 @@ mod tests {
             last_prompt_tokens: 1200,
             completion_tokens: 340,
             cached_tokens: 900,
-            cost: 0.00042,
             running: 2,
             turn_steps: 3,
             limit: None,
@@ -2647,7 +2639,6 @@ mod tests {
             last_prompt_tokens: 12_000,
             completion_tokens: 100,
             cached_tokens: 10_000,
-            cost: 0.0028,
             phase: Phase::Working,
             ..Status::default()
         };
@@ -3235,7 +3226,6 @@ mod tests {
             prompt: 1000,
             completion: 200,
             cached: 900,
-            cost: 0.001,
         });
         app.apply(UiEvent::Assistant { text: "hi".into() });
         app.apply(UiEvent::TurnEnded {
@@ -3253,7 +3243,7 @@ mod tests {
             !texts
                 .iter()
                 .any(|row| row.contains("steps") || row.contains('$')),
-            "no checkmark line, no cost: {texts:?}"
+            "no checkmark line: {texts:?}"
         );
     }
 
@@ -3277,7 +3267,6 @@ mod tests {
             prompt: 1000,
             completion: 200,
             cached: 900,
-            cost: 0.001,
         });
         app.apply(UiEvent::TurnEnded {
             outcome: "paused".into(),

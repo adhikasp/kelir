@@ -134,7 +134,6 @@ pub mod session;
 pub mod shellcmd;
 pub mod signals;
 pub mod sources;
-pub mod spend;
 pub mod spill;
 pub mod sse;
 pub mod stream;
@@ -144,6 +143,7 @@ pub mod tools;
 pub mod tools_view;
 pub mod trust;
 pub mod tui;
+pub mod usage;
 pub mod util;
 pub mod verbs;
 

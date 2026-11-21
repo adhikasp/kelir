@@ -1845,3 +1845,21 @@ original commits and reviews remain in git history.
 - A connection close on Unix must not unlink a socket another process still uses; the listener owns its path (9bff9d4).
 - A SIGKILL can still leave a grandchild running; a shim's whole tree is in one process group (Unix) or Job Object (Windows) and dies with it (1f16d55).
 - A job's liveness and its recorded start time are both checked: a recycled pid or a zombie is not the shim that wrote a status file (774038f).
+
+## Cost removed (P2C, 2026-11-21)
+
+The rewrite drops cost tracking rather than carrying it across (#9 decision 3).
+The maintainer's 35 sessions hold 1,925 `usage` events and every one has no
+usable cost, so the price table, its estimates and the `warn_cost` warning were
+display-only. The deviation from the old SPEC is deliberate:
+
+- `usage` events keep `prompt_tokens`, `completion_tokens`, `cached_tokens`,
+  `cache_write_tokens` and `allowance?`; `cost` and `cost_source` are gone with
+  no reader for logs that still have them.
+- The token tally a resumed session folds from `events.jsonl` drives compaction
+  and `warn_prompt_tokens`. The cache-hit ratio stays in `ls`, `status` and job
+  STATUS; no display now claims a dollar amount.
+- `[prices]` and `warn_cost` are ordinary unknown config keys. `src/spend.rs`
+  became `src/usage.rs` with tokens and status only.
+- The built-in delegation skill says children use tokens and shows the
+  cache-hit ratio, not a spend figure.
