@@ -17,7 +17,7 @@ use crate::tui::{App, UiEvent};
 
 /// How many rendered rows the viewer keeps. A 100k-event log still costs this
 /// much memory, not a row per event.
-pub const BACKLOG_ROWS: usize = 4000;
+pub const BACKLOG_ROWS: usize = 2000;
 
 /// A viewer's state: one App, one bounded scrollback.
 pub struct Viewer {
@@ -292,6 +292,9 @@ use crate::cli::AttachArgs;
 
 /// How often the viewer polls for new log lines and socket liveness.
 const POLL: Duration = Duration::from_millis(150);
+/// Lines rendered per poll. Bounded so a 100k-event log is streamed, not
+/// loaded into one `Vec<String>`.
+const DRAIN_LINES: usize = 2048;
 
 /// Resolve a session id, prefix, `latest` or an M9 name into a session dir.
 fn resolve(spec: &str) -> Result<(String, PathBuf), String> {
@@ -349,14 +352,9 @@ pub async fn run(args: AttachArgs) -> u8 {
 
     // Replay what is there now. `--raw` prints the original NDJSON (no row
     // model at all); the other modes feed the same App the TUI uses.
-    let first = match tail.poll(&log_path) {
-        Ok(lines) => lines,
-        Err(error) => {
-            eprintln!("kelir: attach: cannot read the log: {error}");
-            return 2;
-        }
-    };
-    if !render_lines(&mut viewer, &first, args.raw, args.plain) {
+    // Replay what is there now, a page at a time: a 100k-event log must never
+    // become a 100k-element `Vec<String>` in memory.
+    if drain(&mut tail, &log_path, &mut viewer, args.raw, args.plain).is_none() {
         return 1;
     }
     if !args.follow {
@@ -388,22 +386,10 @@ pub async fn run(args: AttachArgs) -> u8 {
             }
             _ = tokio::time::sleep(POLL) => {}
         }
-        let lines = match tail.poll(&log_path) {
-            Ok(lines) => lines,
-            Err(error) => {
-                eprintln!("kelir: attach: cannot read the log: {error}");
-                return 1;
-            }
-        };
-        if !render_lines(&mut viewer, &lines, args.raw, args.plain) {
+        if let Some(found) = drain(&mut tail, &log_path, &mut viewer, args.raw, args.plain) {
+            ended |= found;
+        } else {
             return 1;
-        }
-        for line in &lines {
-            if let Some(event) = crate::attach::parse_line(line)
-                && matches!(event.body, crate::event::EventBody::SessionEnded { .. })
-            {
-                ended = true;
-            }
         }
         // Liveness: an `owner` file with a dead pid means the session exited
         // without writing `session_ended` (a crash). Stop following then: the
@@ -412,9 +398,7 @@ pub async fn run(args: AttachArgs) -> u8 {
         if ended || !live {
             // One last read: events can land between the poll and the liveness
             // check.
-            if let Ok(rest) = tail.poll(&log_path)
-                && !render_lines(&mut viewer, &rest, args.raw, args.plain)
-            {
+            if drain(&mut tail, &log_path, &mut viewer, args.raw, args.plain).is_none() {
                 return 1;
             }
             break;
@@ -422,6 +406,42 @@ pub async fn run(args: AttachArgs) -> u8 {
     }
     print_final(&viewer, args.raw, args.plain);
     0
+}
+
+/// Read and render every line currently in the log, in bounded pages. The
+/// tail cursor advances per page, so memory stays at one page plus the
+/// viewer's bounded backlog. Returns `None` on a read/print error, or the
+/// `session_ended` flag collected from the pages read.
+fn drain(
+    tail: &mut crate::tail::Tail,
+    path: &std::path::Path,
+    viewer: &mut Viewer,
+    raw: bool,
+    plain: bool,
+) -> Option<bool> {
+    let mut ended = false;
+    loop {
+        let lines = match tail.poll_capped(path, DRAIN_LINES) {
+            Ok(lines) => lines,
+            Err(error) => {
+                eprintln!("kelir: attach: cannot read the log: {error}");
+                return None;
+            }
+        };
+        if lines.is_empty() {
+            return Some(ended);
+        }
+        if !render_lines(viewer, &lines, raw, plain) {
+            return None;
+        }
+        for line in &lines {
+            if let Some(event) = crate::attach::parse_line(line)
+                && matches!(event.body, crate::event::EventBody::SessionEnded { .. })
+            {
+                ended = true;
+            }
+        }
+    }
 }
 
 fn render_lines(viewer: &mut Viewer, lines: &[String], raw: bool, plain: bool) -> bool {

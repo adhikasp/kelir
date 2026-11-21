@@ -91,6 +91,14 @@ impl Tail {
     /// back (torn-line tolerance): the next call completes it when the writer
     /// appends the rest. Invalid UTF-8 is skipped as a bad line, not fatal.
     pub fn poll(&mut self, path: &Path) -> io::Result<Vec<String>> {
+        self.poll_capped(path, usize::MAX)
+    }
+
+    /// The same, but return at most `max` lines per call. The cursor stops at
+    /// the last line returned, so the next call resumes there: a viewer can
+    /// consume a huge log a page at a time without ever holding the whole thing
+    /// as a `Vec<String>`.
+    pub fn poll_capped(&mut self, path: &Path, max: usize) -> io::Result<Vec<String>> {
         let mut file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -104,37 +112,42 @@ impl Tail {
             self.pending.clear();
         }
         file.seek(SeekFrom::Start(self.offset))?;
-        let mut bytes = Vec::new();
+        let mut out = Vec::new();
         let mut buf = [0u8; CHUNK];
         loop {
+            if out.len() >= max {
+                break;
+            }
             let read = file.read(&mut buf)?;
             if read == 0 {
                 break;
             }
-            bytes.extend_from_slice(&buf[..read]);
-        }
-        self.offset += bytes.len() as u64;
-        self.pending.extend_from_slice(&bytes);
-        let mut out = Vec::new();
-        while let Some(index) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let line: Vec<u8> = self.pending.drain(..=index).collect();
-            let line = &line[..line.len() - 1]; // the newline
-            let line = line.strip_suffix(b"\r").unwrap_or(line); // CRLF logs
-            if line.len() > MAX_LINE {
+            self.offset += read as u64;
+            self.pending.extend_from_slice(&buf[..read]);
+            while let Some(index) = self.pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = self.pending.drain(..=index).collect();
+                let line = &line[..line.len() - 1]; // the newline
+                let line = line.strip_suffix(b"\r").unwrap_or(line); // CRLF logs
+                if line.len() > MAX_LINE {
+                    self.skipped += 1;
+                    continue;
+                }
+                if let Ok(text) = std::str::from_utf8(line)
+                    && !text.trim().is_empty()
+                {
+                    out.push(text.to_string());
+                    if out.len() >= max {
+                        break;
+                    }
+                }
+            }
+            if self.pending.len() > MAX_LINE {
+                // A line that grows without a newline (a runaway writer): drop
+                // up to the last newline, or all of it, and keep the cursor
+                // bounded.
                 self.skipped += 1;
-                continue;
+                self.pending.clear();
             }
-            if let Ok(text) = std::str::from_utf8(line)
-                && !text.trim().is_empty()
-            {
-                out.push(text.to_string());
-            }
-        }
-        if self.pending.len() > MAX_LINE {
-            // A line that grows without a newline (a runaway writer): drop up
-            // to the last newline, or all of it, and keep the cursor bounded.
-            self.skipped += 1;
-            self.pending.clear();
         }
         Ok(out)
     }
