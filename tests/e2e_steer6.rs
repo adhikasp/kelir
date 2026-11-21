@@ -118,8 +118,13 @@ async fn a_truncated_heredoc_warning_gets_the_notice() {
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     let settled = run.one_event("tool_settled");
     let result = settled["result"].as_str().unwrap();
+    // bash says "delimited by end-of-file"; BSD sh (macOS) uses
+    // "EOF" or "end of file". The notice must preserve whichever the
+    // shell wrote.
     assert!(
-        result.contains("delimited by end-of-file"),
+        result.contains("delimited by end-of-file")
+            || result.contains("delimited by EOF")
+            || result.contains("end of file"),
         "the shell's own warning must stay: {result}"
     );
     assert!(
