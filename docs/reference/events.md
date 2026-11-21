@@ -35,6 +35,7 @@ resume: `src/fold.rs` renders the frozen system message, then `user`,
 | `bg_started` | `bg_id`, `call_id?`, `cmd`, `pid?`, `out_path`, `pubkey?` | a promoted bash call or an explicit `kelir bg run` |
 | `bg_settled` | `bg_id`, `call_id?`, `cmd`, `exit_code?`, `state`, `out_path` | a job that settled while this session owned its log (`state`: `exited` or `cancelled`) |
 | `gate` | `gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?` | every gate run, including the ones that failed open (`error` says why: crash, timeout, garbage) |
+| `notify` | `event`, `outcome`, `error?`, `hooks` | a notification hook ran (`outcome`: `ok`, `rate_limited`, `failed` or `no_hooks`); never part of the conversation the model reads |
 | `child_started` | `child_id`, `session`, `parent`, `depth`, `kind`, `task`, `background`, `model` | a child was admitted to the root's registry (`kelir run --child`, `kelir brief`); the root writes one for every descendant, a parent that is not the root writes its own children's too. `kind` is `child` or `brief` |
 | `child_settled` | `child_id`, `session`, `parent`, `depth`, `outcome`, `exit_code?`, `result` | a child ended (`outcome`: `done`, `paused`, `error`, `stopped`, `killed` or `lost`); `result` is its final text. A background child's settlement is followed by the `user` message (from `child`) that wakes the parent |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by`, `tokens_before`, `tokens_after`, `cache_restart` | a compaction; the fold replaces everything up to `through_seq` except the pins |

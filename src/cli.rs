@@ -30,6 +30,8 @@ pub enum Command {
     Tui(TuiArgs),
     /// Continue a session from its log (never re-runs a tool call).
     Resume(ResumeArgs),
+    /// Watch a running or finished session (read-only by default).
+    Attach(AttachArgs),
     /// Send a verb to a running session and print its answer.
     Ctl(CtlArgs),
     /// Queue an image for the model's next message (`view <path>`).
@@ -170,6 +172,32 @@ impl TuiArgs {
             resume: self.resume.or(outer.resume),
         }
     }
+}
+
+/// `kelir attach <session|name>`: a read-only viewer of a session's log.
+#[derive(Debug, Args, Clone)]
+pub struct AttachArgs {
+    /// Session id, a unique prefix, a name, or `latest`.
+    #[arg(value_name = "SESSION")]
+    pub session: String,
+    /// Keep reading as the session writes new events.
+    #[arg(long)]
+    pub follow: bool,
+    /// Replay only the last N events (0 = all).
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub since: usize,
+    /// Print raw NDJSON instead of the TUI's row model.
+    #[arg(long, conflicts_with = "plain")]
+    pub raw: bool,
+    /// Print unstyled text for pipes.
+    #[arg(long, conflicts_with = "raw")]
+    pub plain: bool,
+    /// Allow `say <text>` and `stop` from the viewer (sent with the session's token).
+    #[arg(long)]
+    pub steer: bool,
+    /// Config file to use instead of the machine/project search.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]

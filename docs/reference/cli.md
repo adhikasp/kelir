@@ -156,6 +156,20 @@ Continue a session from its log (never re-runs a tool call)
 | `--json` | nothing | Stream the event log as NDJSON on stdout |
 | `--keep` | nothing | Stay alive after the turn ends |
 
+### `kelir attach`
+
+Watch a running or finished session (read-only by default)
+
+| flag | takes | what it does |
+|---|---|---|
+| `<SESSION>` | `<SESSION>` | Session id, a unique prefix, a name, or `latest` |
+| `--follow` | nothing | Keep reading as the session writes new events |
+| `--since` | `<N>` | Replay only the last N events (0 = all) |
+| `--raw` | nothing | Print raw NDJSON instead of the TUI's row model |
+| `--plain` | nothing | Print unstyled text for pipes |
+| `--steer` | nothing | Allow `say <text>` and `stop` from the viewer (sent with the session's token) |
+| `--config` | `<CONFIG>` | Config file to use instead of the machine/project search |
+
 ### `kelir ctl`
 
 Send a verb to a running session and print its answer

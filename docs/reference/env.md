@@ -67,6 +67,8 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_JOB_RUN` | set for a notify hook only: the run's id (`run_…`) |
 | `KELIR_JOB_SESSION` | set for a notify hook only: the id of the session the run used |
 | `KELIR_JOB_STATUS` | set for a notify hook only: the path of the job's `STATUS.json` |
+| `KELIR_NOTIFY_EVENT` | set for an event hook only: the event that fired (`turn_done`, `error`, `paused`, `bg_settled`, `child_settled`) |
+| `KELIR_NOTIFY_MESSAGE` | set for an event hook only: the terminal record's message (title and event kind) |
 
 ### Set by the test suite only
 

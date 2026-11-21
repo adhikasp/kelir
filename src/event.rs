@@ -772,6 +772,19 @@ pub enum EventBody {
     SessionEnded {
         reason: String,
     },
+    /// A notification hook ran (M11): one event per event kind, with its
+    /// outcome. Never part of the conversation the model reads.
+    Notify {
+        /// `turn_done`, `error`, `paused`, `bg_settled`, `child_settled`.
+        event: String,
+        /// `ok`, `failed`, `rate_limited`, `no_hooks`.
+        outcome: String,
+        /// A hook's failure, when there was one (no key, no secret).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// How many hooks ran.
+        hooks: u32,
+    },
     /// One gate run (M8): every run, including the ones that failed open
     /// (`error` says why). `rewritten` is only present when the gate rewrote.
     Gate {
@@ -839,6 +852,7 @@ impl LogEvent {
             EventBody::SessionEnded { .. } => "session_ended",
             EventBody::Warning { .. } => "warning",
             EventBody::Gate { .. } => "gate",
+            EventBody::Notify { .. } => "notify",
         }
     }
 }

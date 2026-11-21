@@ -1799,3 +1799,20 @@ side). Where the code had to choose:
 - **The `delegation` skill is rewritten** for `kelir run --child`, `kelir brief`, `kelir ls`,
   `kelir kill` and the real caps; the scanner test checks every `kelir ...` command and flag in
   the builtin skills against the clap tree.
+
+## M11 attach viewer and notifications (2026-11-21)
+
+- **`--since N` is the last N events**, not a timestamp or an event seq. The brief left the
+  unit open; "the last N events" is what a person watching a log means and it is bounded by
+  a backward chunk scan, so a 100k-event log is never loaded whole.
+- **The viewer is read-only by default.** Steering (`say`/`stop`) is opt-in via `--steer` and
+  uses the session's own token file, the same path a human's `kelir ctl` takes. A viewer that
+  only reads cannot change the fold, so a disconnect never affects the session.
+- **Notify hooks run on the session's runtime but get a short grace wait at one-shot exit.**
+  Without it a `turn_done` hook spawned as a detached task is dropped when `kelir run`'s runtime
+  shuts down; the hook's own 30 s tree-kill still bounds the wait. A long-lived session is
+  never blocked on a hook: it runs while the loop is idle.
+- **No per-job event table yet.** M11's five per-event hooks live in `[notify]` in `config.toml`
+  and fire on `turn_done`, `error`, `paused`, `bg_settled` and `child_settled`. `jobs.toml`'s legacy
+  `notify` list still runs once at job run end (`jobrun.rs`); it is a separate mechanism, not an
+  addition to those five kinds. `docs/reference/notify.md` states this distinction directly.

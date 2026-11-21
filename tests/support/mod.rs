@@ -1387,7 +1387,7 @@ fn scrubbed_keys() -> Vec<String> {
     keys
 }
 
-fn scrub_session_env(command: &mut tokio::process::Command) {
+pub fn scrub_session_env(command: &mut tokio::process::Command) {
     for key in scrubbed_keys() {
         command.env_remove(key);
     }

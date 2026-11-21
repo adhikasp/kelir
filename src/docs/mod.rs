@@ -106,6 +106,16 @@ pub const TOPICS: &[Topic] = &[
         body: include_str!("../../docs/reference/events.md"),
     },
     Topic {
+        name: "attach",
+        summary: "`kelir attach`: a read-only viewer of a session's log, replayed through the TUI's row model, with bounded memory and optional token-gated steering",
+        body: include_str!("../../docs/reference/attach.md"),
+    },
+    Topic {
+        name: "notify",
+        summary: "`[notify]` hooks and terminal records: turn_done, error, paused, bg_settled, child_settled, OSC 9/777, rate limits and examples",
+        body: include_str!("../../docs/reference/notify.md"),
+    },
+    Topic {
         name: "tui",
         summary: "the interactive session: rows, keys, `/` commands, status states",
         body: include_str!("../../docs/reference/tui.md"),

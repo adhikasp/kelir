@@ -141,6 +141,9 @@ pub struct Config {
     /// Channel mode (M10): the conversation concurrency, rate limits, fallback
     /// text and spool bound. Every field has a safe default.
     pub channel: crate::channel::Config,
+    /// Notification hooks and terminal records (M11). Nothing is enabled by
+    /// default.
+    pub notify: crate::notify::Config,
 }
 
 /// The pushed hint, configured: which model scores, and where.
@@ -224,6 +227,8 @@ struct RawConfig {
     channel_fallback: Option<String>,
     /// Channel mode: spool bytes before done records are compacted.
     channel_spool_limit: Option<u64>,
+    /// `[notify]`: event -> hook commands, plus terminal and rate-limit knobs.
+    notify: Option<toml::Value>,
 }
 
 /// One `[prices."<model>"]` table: dollars per million tokens.
@@ -557,7 +562,76 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
                 .channel_spool_limit
                 .unwrap_or(crate::channel::DEFAULT_SPOOL_LIMIT),
         },
+        notify: notify(raw.notify.as_ref())?,
     })
+}
+
+/// The `[notify]` table: event -> command list, plus terminal and rate limit.
+/// Nothing is enabled by default. A wrong event name is a config error (a
+/// person who wrote one meant a notification).
+fn notify(raw: Option<&toml::Value>) -> Result<crate::notify::Config, ConfigError> {
+    let Some(value) = raw else {
+        return Ok(crate::notify::Config::default());
+    };
+    let table = value.as_table().ok_or_else(|| {
+        ConfigError("`[notify]` must be a table of event names and commands".into())
+    })?;
+    let mut cfg = crate::notify::Config::default();
+    for (key, entry) in table {
+        match key.as_str() {
+            "terminal" => {
+                cfg.terminal = entry
+                    .as_bool()
+                    .ok_or_else(|| ConfigError("`notify.terminal` must be a boolean".into()))?;
+            }
+            "terminal_kind" => {
+                let kind = entry.as_str().unwrap_or("").to_string();
+                if !kind.is_empty() && kind != "osc9" && kind != "osc777" {
+                    return Err(ConfigError(
+                        "`notify.terminal_kind` must be `osc9` or `osc777`".into(),
+                    ));
+                }
+                cfg.terminal_kind = kind;
+            }
+            "rate_limit" | "rate_limit_secs" => {
+                cfg.rate_limit_secs = entry
+                    .as_integer()
+                    .and_then(|n| u64::try_from(n).ok())
+                    .ok_or_else(|| {
+                        ConfigError("`notify.rate_limit` must be a non-negative integer".into())
+                    })?;
+            }
+            "title" => {
+                cfg.title = entry.as_str().unwrap_or("").to_string();
+            }
+            kind if crate::notify::KINDS.contains(&kind) => {
+                let commands: Vec<String> = match entry {
+                    toml::Value::String(one) => vec![one.clone()],
+                    toml::Value::Array(list) => list
+                        .iter()
+                        .map(|item| {
+                            item.as_str().map(str::to_string).ok_or_else(|| {
+                                ConfigError(format!("`notify.{kind}` holds a non-string command"))
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    _ => {
+                        return Err(ConfigError(format!(
+                            "`notify.{kind}` must be a command string or a list of them"
+                        )));
+                    }
+                };
+                cfg.hooks.insert(kind.to_string(), commands);
+            }
+            other => {
+                return Err(ConfigError(format!(
+                    "unknown notification event `{other}` in `[notify]`: expected one of {}",
+                    crate::notify::KINDS.join(", ")
+                )));
+            }
+        }
+    }
+    Ok(cfg)
 }
 
 /// The pushed hint: off unless a `[hint]` table names a model. A wrong provider
