@@ -1758,6 +1758,31 @@ side). Where the code had to choose:
   (`prepare` applies it to the config the loop reads); the Plan only adds the job-specific pause
   rule. `--max-steps 0` lifts the cap and leaves the run `done`.
 
+## M10: channel mode
+
+- **A bridge is configuration, not a bundled client.** The milestone names Telegram, but no
+  credential or bridge exists here. The public repo ships the generic MCP channel mechanism and
+  a fake bridge under `tests/support/channel_server.py`; a real bridge needs the maintainer's
+  credentials and infrastructure. This is a report, not a hidden dependency.
+- **The declare capability is configurable.** The bridge's MCP spec decides which capability
+  starts inbound delivery; `declare_capabilities` defaults to `claude/channel`. Kelir refuses
+  every `claude/channel/permission*` capability because it has no approval relay.
+- **At-most-once reply with a server-side idempotency key.** The driver sends `message_id` on
+  every reply so a bridge can dedupe a replay after a crash. A bridge that ignores it can still
+  get a second reply after a crash between the send and the `done` record; this is an at-least-once
+  spool with an idempotency hint, not a transaction across the process boundary.
+- **Fix round (m10fix).** Turns of different conversations now run concurrently up to
+  `channel_max_active` (one `LocalSet` thread with its own large-stack runtime; whole sessions are
+  polled inline there). A channel turn no longer installs the process-wide run plan (only one run
+  per process may), so a second new conversation works; its session id travels in a task-local
+  slot (`jobs::with_next_id`) and `from: channel` comes from `jobs::channel_mode()`. A handled
+  `/stop` is marked `done`. The default fallback text is refined per cause (policy block, paused,
+  timeout); a configured `channel_fallback` is used for all. The kill-point tests remain
+  spool-level (inbound/claimed/done states survive a restart) plus the reviewer's restart tests;
+  a controlled kill of the driver at each of the five points is still not automated.
+- **The embedded reference budget is 140 KB** (was 128 KB): M10 adds a channel topic and five
+  config keys. The binary footprint budget is unchanged (20 MB).
+
 ## m8m: merging main (M7 children, M6 mcp, M5-B, STEER-8) into the gates branch
 
 - **Gates in child sessions.** A child (`kelir run --child`, `kelir brief`) runs the same gates as

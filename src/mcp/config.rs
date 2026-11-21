@@ -15,7 +15,12 @@
 //! description = "my notes"              # one line, shown in `kelir mcp ls`
 //! channel = false                       # true: connected at session start
 //! timeout = 60                          # seconds per call; 0 is not allowed
+//! reply_tool = "reply"                  # channel: tool used to answer (channel mode)
+//! declare_capabilities = ["claude/channel"] # channel: capabilities sent at initialize
 //! ```
+//!
+//! A permission-relay capability (`claude/channel/permission`) is refused: kelir
+//! has no approvals to offer (M10).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +40,11 @@ pub struct ServerConfig {
     pub description: String,
     pub channel: bool,
     pub timeout: Duration,
+    /// Channel mode: the tool on this server used to send an answer.
+    pub reply_tool: String,
+    /// Channel mode: capabilities declared at `initialize` so the bridge knows
+    /// to send inbound messages. Never a permission relay.
+    pub declare_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +60,10 @@ struct RawServer {
     #[serde(default)]
     channel: bool,
     timeout: Option<u64>,
+    #[serde(default)]
+    reply_tool: Option<String>,
+    #[serde(default)]
+    declare_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +137,14 @@ pub fn parse_layer(text: &str, origin: &str) -> Result<BTreeMap<String, ServerCo
         if server.timeout == Some(0) {
             return Err(format!("invalid {origin}: server `{name}` has timeout = 0"));
         }
+        for capability in &server.declare_capabilities {
+            if crate::channel::forbidden_capability(capability) {
+                return Err(format!(
+                    "invalid {origin}: server `{name}` declares `{capability}`: \
+                     kelir has no permission relay"
+                ));
+            }
+        }
         out.insert(
             name.clone(),
             ServerConfig {
@@ -139,6 +161,10 @@ pub fn parse_layer(text: &str, origin: &str) -> Result<BTreeMap<String, ServerCo
                     .to_string(),
                 channel: server.channel,
                 timeout: Duration::from_secs(server.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS)),
+                reply_tool: server
+                    .reply_tool
+                    .unwrap_or_else(|| crate::channel::DEFAULT_REPLY_TOOL.to_string()),
+                declare_capabilities: server.declare_capabilities,
             },
         );
     }

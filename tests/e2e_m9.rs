@@ -460,11 +460,11 @@ async fn the_next_day_adds_the_date_source_and_nothing_else() {
             .await
         }
     };
-    assert_eq!(run("2026-11-20").await.code, 0);
+    assert_eq!(run("2099-01-01").await.code, 0);
     let id = sb.only_session();
     let before = sb.log(&id).len();
-    assert_eq!(run("2026-11-21").await.code, 0);
-    assert_eq!(run("2026-11-21").await.code, 0);
+    assert_eq!(run("2099-01-02").await.code, 0);
+    assert_eq!(run("2099-01-02").await.code, 0);
     let log = sb.log(&id);
 
     let clocks: Vec<&Value> = of_type(&log, "source")
@@ -476,12 +476,12 @@ async fn the_next_day_adds_the_date_source_and_nothing_else() {
         1,
         "announced once for the new day, not again the same day"
     );
-    assert_eq!(clocks[0]["name"], "2026-11-21");
+    assert_eq!(clocks[0]["name"], "2099-01-02");
     assert!(
         clocks[0]["text"]
             .as_str()
             .unwrap()
-            .contains("it is now 2026-11-21")
+            .contains("it is now 2099-01-02")
     );
 
     // The frozen system prompt is untouched and carries the first day.
@@ -494,8 +494,8 @@ async fn the_next_day_adds_the_date_source_and_nothing_else() {
     };
     assert_eq!(system(&requests[0]), system(&requests[1]));
     assert_eq!(system(&requests[0]), system(&requests[2]));
-    assert!(system(&requests[0]).contains("2026-11-20"));
-    assert!(!system(&requests[1]).contains("2026-11-21"));
+    assert!(system(&requests[0]).contains("2099-01-01"));
+    assert!(!system(&requests[1]).contains("2099-01-02"));
     // The tail of the second day's request is: the date, the job line, the task.
     let second = requests[1].messages();
     let tail: Vec<String> = second[second.len() - 3..]
@@ -503,7 +503,7 @@ async fn the_next_day_adds_the_date_source_and_nothing_else() {
         .map(|message| message["content"].as_str().unwrap().to_string())
         .collect();
     assert!(
-        tail[0].starts_with("[source: clock 2026-11-21]"),
+        tail[0].starts_with("[source: clock 2099-01-02]"),
         "{tail:?}"
     );
     assert!(tail[1].starts_with("[source: job nightly]"), "{tail:?}");

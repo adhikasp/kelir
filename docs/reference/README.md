@@ -25,6 +25,7 @@ else has to move with it.
 | `env` | every environment variable kelir reads or sets |
 | `verbs` | every `kelir ctl` verb: arguments, when it applies, what it writes |
 | `mcp` | `mcp.toml`, `kelir mcp`, exit codes, the session broker, channel servers |
+| `channels` | `kelir channel`, the bridge protocol, spool, fallback replies, `/stop` |
 | `gates` | `[gates]`, skill-bound gates, the six events, allow/deny/rewrite, fail-open, the example gates |
 | `jobs` | named sessions, `kelir job run`, `jobs.toml`, single-flight, STATUS, scheduler recipes |
 | `children` | `kelir run --child`, `brief`, `ls`, `kill`: children, caps, the tree, the trust model |

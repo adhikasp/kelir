@@ -66,6 +66,11 @@ pub const TOPICS: &[Topic] = &[
         body: include_str!("../../docs/reference/mcp.md"),
     },
     Topic {
+        name: "channels",
+        summary: "channel mode: `kelir channel`, MCP bridge protocol, durable spool, fallback replies and trust",
+        body: include_str!("../../docs/reference/channels.md"),
+    },
+    Topic {
         name: "gates",
         summary: "gates: allow/deny/rewrite executables at six events, declaring them, fail-open, the example gates",
         body: include_str!("../../docs/reference/gates.md"),
