@@ -175,7 +175,7 @@ failure that cannot be reproduced locally.
   neutral copyright holder "kelir contributors". **No choice was made.**
 - `Cargo.toml` — added neutral `authors`, `readme`, `repository`, `homepage`,
   `documentation`, `keywords` and `categories`. The repository/homepage URL
-  uses a `adhikasp` placeholder deliberately, so the drafted files contain no
+  used an `<owner>` placeholder deliberately, so the drafted files contained no
   personal account name; the maintainer must substitute the real public owner
   before publishing. `license = "MIT"` was already present and was **left as
   found** because choosing a license is the maintainer's decision (see open

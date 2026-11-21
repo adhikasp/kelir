@@ -927,7 +927,13 @@ fn the_delegation_and_herdr_skills_are_valid_short_and_say_what_they_must() {
             text.len()
         );
         // No private names, hosts or paths in a public repo's embedded text.
-        for banned in ["the maintainer", "the maintainer", "a Linux box", "a build box", "users/"] {
+        for banned in [
+            "the maintainer",
+            "the maintainer",
+            "a Linux box",
+            "a build box",
+            "users/",
+        ] {
             assert!(
                 !text
                     .to_ascii_lowercase()
