@@ -407,14 +407,15 @@ pub fn fit(text: &str, width: usize) -> String {
 // ------------------------------------------------------------------ blocks
 
 /// `$ cargo test` / `edit src/a.rs`: the compact one-line identity of a call.
+/// Every native tool's human-readable `description` wins when it supplied one.
 pub fn call_head(name: &str, input: &Value) -> String {
+    if let Some(label) = tools_view::description(input) {
+        return label;
+    }
     match name {
-        "bash" => match tools_view::description(input) {
-            Some(label) => label,
-            None => match input.get("command").and_then(Value::as_str) {
-                Some(command) => format!("$ {}", one_line(command)),
-                None => "$ bash".to_string(),
-            },
+        "bash" => match input.get("command").and_then(Value::as_str) {
+            Some(command) => format!("$ {}", one_line(command)),
+            None => "$ bash".to_string(),
         },
         "edit" => match input.get("path").and_then(Value::as_str) {
             Some(path) => format!("edit {path}"),
@@ -447,19 +448,18 @@ fn one_line(text: &str) -> String {
 }
 
 /// The session's one-line label for a running call, which the state row shows:
-/// a `bash` call's description when it has one, otherwise the tool's name and
-/// its own first line of input, never the raw JSON (a long argument blob in a
-/// status row is noise).
+/// a call's human-readable `description` when it has one, otherwise the tool's
+/// name and its own first line of input, never the raw JSON (a long argument
+/// blob in a status row is noise).
 pub fn call_label(name: &str, input: &Value) -> String {
-    if name == "bash"
-        && let Some(label) = tools_view::description(input)
-    {
+    if let Some(label) = tools_view::description(input) {
         return label;
     }
     let detail = input
         .get("command")
         .and_then(Value::as_str)
         .or_else(|| input.get("path").and_then(Value::as_str))
+        .or_else(|| input.get("focus").and_then(Value::as_str))
         .map(|text| text.lines().next().unwrap_or("").trim().to_string())
         .unwrap_or_default();
     if detail.is_empty() {

@@ -29,11 +29,12 @@ use serde_json::Value;
 
 use crate::theme::Theme;
 
-/// The maximum length of a `bash` call's human-readable `description`.
+/// The maximum length of a tool call's human-readable `description`.
 /// A label is a glance, never a second copy of the command.
 pub const DESCRIPTION_MAX: usize = 120;
 
-/// The `description` a call supplied, cleaned for one-line display: folded
+/// The `description` every native tool call supplies, cleaned for one-line
+/// display: folded
 /// whitespace, capped at [`DESCRIPTION_MAX`] characters. `None` for anything
 /// else (a missing field, a wrong type, an empty label), so callers fall back
 /// to today's truncated command. The full command stays in the log and in
@@ -310,9 +311,24 @@ mod tests {
             assert_eq!(crate::tui::call_label("bash", &input), "bash: cargo test");
             assert_eq!(description(&input), None);
         }
-        // A description does not change an `edit` call or an unknown one.
+        // Every native tool's description is its head, not just bash's.
         assert_eq!(
-            crate::tui::call_head("edit", &json!({"path": "src/a.rs", "description": "x"})),
+            crate::tui::call_head(
+                "edit",
+                &json!({"path": "src/a.rs", "description": "patch the parser"})
+            ),
+            "patch the parser"
+        );
+        assert_eq!(
+            crate::tui::call_label(
+                "compact",
+                &json!({"focus": "old history", "description": "trim the transcript"})
+            ),
+            "trim the transcript"
+        );
+        // Without one, the old fallback still names the path / focus.
+        assert_eq!(
+            crate::tui::call_head("edit", &json!({"path": "src/a.rs"})),
             "edit src/a.rs"
         );
     }

@@ -149,9 +149,11 @@ already say it ran. Every call keeps its own line; there is no folding.
   edit src/lib.rs                   1.2 KB
 ```
 
-A `bash` call's optional `description` (one line, <= 120 chars) is its head in
-every view; otherwise `$ <command>`. The command stays in the log. Prose is
-the only default-weight text.
+Every native tool call (`bash`, `edit`, `compact`) requires a short
+`description` (one line, <= 120 chars): it is the head in every view — the
+settled line, the live `⠹ …` row and headless output — instead of raw
+arguments. The full arguments stay in the log. Otherwise `$ <command>`,
+`edit <path>` or `compact <focus>`. Prose is the only default-weight text.
 
 ## Markdown
 

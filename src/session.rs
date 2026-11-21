@@ -6416,9 +6416,9 @@ fn print_result_event(
     let _ = lock.flush();
 }
 
-/// The head of a settled call in headless output: a `bash` call's
-/// human-readable `description` when it supplied one, otherwise the command
-/// (or an `edit` path). The full args stay in the log and in `/expand`.
+/// The head of a settled call in headless output: every native tool's
+/// human-readable `description` when it supplied one, otherwise the command,
+/// path or focus. The full args stay in the log and in `/expand`.
 fn compact_input(args: &Value) -> String {
     if let Some(label) = crate::tools_view::description(args) {
         return label;
@@ -6427,6 +6427,7 @@ fn compact_input(args: &Value) -> String {
         .get("command")
         .and_then(|value| value.as_str())
         .or_else(|| args.get("path").and_then(|value| value.as_str()))
+        .or_else(|| args.get("focus").and_then(|value| value.as_str()))
         .map(str::to_string)
         .unwrap_or_else(|| args.to_string());
     crate::util::truncate_chars(&text.replace('\n', " ↵ "), 60)

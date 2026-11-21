@@ -197,9 +197,9 @@ pub fn specs() -> Vec<Value> {
                     "type": "object",
                     "properties": {
                         "command": {"type": "string", "description": "The command line to run."},
-                        "description": {"type": "string", "description": "Optional short human-readable label for what the command does, at most 120 characters; the command itself stays in the log, never in this field."}
+                        "description": {"type": "string", "description": "Short human-readable label for what the command does, at most 120 characters; it is what a human sees in the transcript instead of the command. The command itself stays in the log, never in this field."}
                     },
-                    "required": ["command"],
+                    "required": ["command", "description"],
                     "additionalProperties": false
                 }
             }
@@ -213,6 +213,7 @@ pub fn specs() -> Vec<Value> {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "File, relative to the cwd or absolute."},
+                        "description": {"type": "string", "description": "Short human-readable label for what the edit does, at most 120 characters; it is what a human sees in the transcript instead of the path. The path stays in the log, never in this field."},
                         "old": {"type": "string", "description": "Exact text to replace; empty creates a missing file."},
                         "new": {"type": "string", "description": "Replacement text."},
                         "replace_all": {"type": "boolean", "description": "Replace every occurrence."},
@@ -231,7 +232,7 @@ pub fn specs() -> Vec<Value> {
                             }
                         }
                     },
-                    "required": ["path"],
+                    "required": ["path", "description"],
                     "additionalProperties": false
                 }
             }
@@ -244,9 +245,10 @@ pub fn specs() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "focus": {"type": "string", "description": "What the summary must not lose (optional)."}
+                        "focus": {"type": "string", "description": "What the summary must not lose (optional)."},
+                        "description": {"type": "string", "description": "Short human-readable label for why the context is being compacted, at most 120 characters; it is what a human sees in the transcript instead of the raw arguments. The full arguments stay in the log, never in this field."}
                     },
-                    "required": [],
+                    "required": ["description"],
                     "additionalProperties": false
                 }
             }
@@ -321,23 +323,52 @@ mod tests {
     }
 
     #[test]
-    fn bash_takes_an_optional_description_beside_the_command() {
+    fn every_tool_requires_a_description() {
+        for spec in specs() {
+            let name = spec["function"]["name"].as_str().unwrap().to_string();
+            let parameters = &spec["function"]["parameters"];
+            let required = parameters["required"].as_array().expect("required");
+            assert!(
+                required.iter().any(|field| field == "description"),
+                "{name} must require description: {required:?}"
+            );
+            let properties = parameters["properties"].as_object().expect("properties");
+            let field = properties
+                .get("description")
+                .unwrap_or_else(|| panic!("{name} has no description property: {properties:?}"));
+            assert_eq!(field["type"], "string", "{name}");
+            assert!(
+                field["description"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("120")),
+                "{name} must cap the label at 120 chars"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_takes_a_description_beside_the_command() {
         let spec = specs()
             .into_iter()
             .find(|spec| spec["function"]["name"] == "bash")
             .expect("a bash tool");
         let parameters = &spec["function"]["parameters"];
-        assert_eq!(parameters["required"], json!(["command"]));
+        assert_eq!(parameters["required"], json!(["command", "description"]));
         assert_eq!(parameters["additionalProperties"], json!(false));
         let properties = parameters["properties"].as_object().expect("properties");
         assert_eq!(properties.len(), 2, "{properties:?}");
         assert_eq!(properties["command"]["type"], "string");
-        assert_eq!(properties["description"]["type"], "string");
-        assert!(
-            properties["description"]["description"]
-                .as_str()
-                .is_some_and(|text| text.contains("120"))
-        );
+    }
+
+    #[test]
+    fn edit_takes_a_description_beside_the_path() {
+        let spec = specs()
+            .into_iter()
+            .find(|spec| spec["function"]["name"] == "edit")
+            .expect("an edit tool");
+        let parameters = &spec["function"]["parameters"];
+        assert_eq!(parameters["required"], json!(["path", "description"]));
+        assert_eq!(parameters["additionalProperties"], json!(false));
     }
 
     #[test]
@@ -353,12 +384,15 @@ mod tests {
     }
 
     #[test]
-    fn compact_takes_an_optional_focus_and_nothing_else() {
+    fn compact_takes_an_optional_focus_and_requires_a_description() {
         let spec = specs()
             .into_iter()
             .find(|spec| spec["function"]["name"] == "compact")
             .expect("a compact tool");
-        assert_eq!(spec["function"]["parameters"]["required"], json!([]));
+        assert_eq!(
+            spec["function"]["parameters"]["required"],
+            json!(["description"])
+        );
         assert_eq!(
             spec["function"]["parameters"]["properties"]["focus"]["type"],
             "string"

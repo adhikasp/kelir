@@ -62,24 +62,21 @@ async fn a_description_reaches_headless_output_but_the_command_stays_in_the_log(
         "/expand reads the full output, not the label"
     );
 
-    // The tool schema offers description beside command, without making it
-    // required; the request prefix is the same on both steps.
+    // The tool schema offers description beside command, and requires it; the
+    // request prefix is the same on both steps.
     let requests = mock.requests();
     assert_eq!(requests.len(), 2);
     let tools = requests[0].body["tools"].as_array().expect("tools");
-    let bash = tools
-        .iter()
-        .find(|tool| tool["function"]["name"] == "bash")
-        .expect("bash tool");
-    assert_eq!(
-        bash["function"]["parameters"]["required"],
-        json!(["command"])
-    );
-    let properties = bash["function"]["parameters"]["properties"]
-        .as_object()
-        .expect("properties");
-    assert!(properties.contains_key("command"));
-    assert!(properties.contains_key("description"));
+    for tool in tools {
+        let required = tool["function"]["parameters"]["required"]
+            .as_array()
+            .expect("required");
+        assert!(
+            required.iter().any(|field| field == "description"),
+            "{} must require a description",
+            tool["function"]["name"]
+        );
+    }
     assert_eq!(requests[0].body["tools"], requests[1].body["tools"]);
     let first = requests[0].body["messages"].as_array().unwrap();
     let second = requests[1].body["messages"].as_array().unwrap();
@@ -99,6 +96,52 @@ async fn a_description_reaches_the_ndjson_tool_started_event() {
     assert_eq!(started["name"], "bash");
     assert_eq!(started["input"]["description"], DESC);
     assert_eq!(started["input"]["command"], COMMAND);
+}
+
+#[test]
+fn edit_and_compact_descriptions_are_the_head_in_every_view() {
+    let theme = kelir::theme::Theme::plain();
+    for (name, args, desc) in [
+        (
+            "edit",
+            json!({"path": "src/a.rs", "description": "patch the parser"}),
+            "patch the parser",
+        ),
+        (
+            "compact",
+            json!({"focus": "old history", "description": "trim the transcript"}),
+            "trim the transcript",
+        ),
+    ] {
+        let head = kelir::tui::call_head(name, &args);
+        assert_eq!(head, desc, "{name} settled head");
+        assert_eq!(kelir::tui::call_label(name, &args), desc, "{name} live row");
+        // The headless renderer prefers the same description.
+        assert_eq!(kelir::tools_view::description(&args).as_deref(), Some(desc));
+
+        let call = CallLine {
+            ordinal: 1,
+            name: name.into(),
+            head,
+            outcome: "ok".into(),
+            exit_code: Some(0),
+            bytes: 0,
+            lines: 0,
+            spilled: false,
+            out_path: String::new(),
+            tail: String::new(),
+            elapsed: None,
+        };
+        let rendered: String = call
+            .line(theme, 60)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(rendered.starts_with(&format!("  {desc}")), "{rendered:?}");
+        assert!(!rendered.contains("src/a.rs"), "{rendered:?}");
+        assert!(!rendered.contains("old history"), "{rendered:?}");
+    }
 }
 
 #[test]
