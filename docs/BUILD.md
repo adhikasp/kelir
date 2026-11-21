@@ -227,9 +227,16 @@ everyone to ignore failures, which hides real ones".
 
 ## Rejected or not taken
 
-- **sccache** (cross-worktree dependency caching): not taken up here. It would help cold builds across
-  worktrees, but each worker already keeps its own warm `target/`, the cold build is 45 s, and a compiler
-  cache adds a server process and a config knob to every build. Revisit only if cold builds dominate again.
+- **sccache** (compiler cache): available as an opt-in, not a default. It cannot cache incremental
+  builds, so it only pays when `CARGO_INCREMENTAL=0`; with a warm `target/` that trade is a loss,
+  but across fresh worktrees it avoids recompiling unchanged dependencies. Measured on this box
+  (Linux, 12 threads): a cold test build with the wrapper took 43 s; touching `src/lib.rs` and
+  rebuilding took 41 s without sccache and 16-37 s with it (one cache hit for the crate that
+  changed, its dependents rebuilt). The wrapper is `scripts/rustc-wrapper.sh`:
+  `export RUSTC_WRAPPER="$(pwd)/scripts/rustc-wrapper.sh" CARGO_INCREMENTAL=0` before a build.
+  It forwards to rustc when sccache is not installed, so enabling it by accident is harmless.
+  Not wired into `.cargo/config.toml` on purpose: a relative path there breaks clones whose
+  absolute path differs, and CI installs sccache separately if it wants it.
 - **`.cargo/config.toml` `target-dir` shared across worktrees**: rejected. Two workers building into one
   directory contend on the same lock and invalidate each other's fingerprints; separate target dirs are
   faster in the parallel case and the only cost is disk.

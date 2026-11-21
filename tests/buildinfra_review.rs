@@ -201,7 +201,7 @@ fn prune_rejects_a_keep_that_is_not_a_number() {
 
 // ------------------------------------------------------------------- lock
 
-/// A waiter that has already waited 10 s treats *any* ownerless lock as stale,
+/// A waiter that finds an ownerless lock treats *any* such lock as stale,
 /// including one a new holder created a moment ago and has not yet written its
 /// owner file into (`mkdir` and the `owner` write are two steps, and the write
 /// forks `date`). The new holder's lock is taken from under it: two gates run.
@@ -217,12 +217,17 @@ sleep 60 & LIVE=$!
 mkdir "$L"; printf 'pid %s\nstarted x\ncmd y\n' "$LIVE" > "$L/owner"
 KELIR_GATE_LOCK="$L" setsid bash '{gate_lock}' --timeout 40 -- echo WAITER-RAN > "$OUT" 2>&1 &
 W=$!
-sleep 30                              # the waiter has now waited >= 10 s (a generous ceiling under load)
+# Wait for the gate to announce that it is waiting, not for a clock: under load
+# the old fixed 30 s both wasted time and could still be too short. The message
+# is the gate's own first "waiting ... for the gate" line (it waits every 2 s).
+for _ in $(seq 1 100); do grep -q 'waiting .* for the gate' "$OUT" 2>/dev/null && break; sleep 0.1; done
+grep -q 'waiting .* for the gate' "$OUT" || {{ echo NO-WAIT; cat "$OUT"; exit 1; }}
 # A new holder takes the lock ... (the old owner record goes and the directory
 # is made fresh in place: removing and re-creating it left a window in which the
 # waiter, polling, legitimately took the free lock and the test mistook that for
 # a steal on a loaded box, STEER-9)
 rm -f "$L/owner"; touch "$L"
+# Give the waiter one full poll (the script naps 2 s between looks) plus slack.
 sleep 5                               # ... and has not written its owner file yet
 if grep -q WAITER-RAN "$OUT"; then echo STOLEN; else echo KEPT; fi
 kill "$LIVE" 2>/dev/null; kill -- -$W 2>/dev/null

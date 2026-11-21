@@ -141,12 +141,19 @@ async fn a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose(
     std::fs::create_dir_all(&evil_dir).unwrap();
     let evil_id = format!("evil{}", std::process::id());
     let listener = kelir::ipc::bind(&evil_dir, &evil_id).expect("bind the caller's own endpoint");
+    // The observation window starts only once the spawned job has written its
+    // status file, so a slow start cannot eat the window and hide a real leak.
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
     let heard = tokio::spawn(async move {
         use interprocess::local_socket::tokio::prelude::*;
+        let _ = start_rx.await;
         // A negative assertion needs a bounded observation window, not the
         // hang ceiling: no one should ever connect, and waiting 90 s only
-        // makes a loaded gate slower. 20 s is far beyond a legitimate connect.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        // makes a loaded gate slower. The caller's endpoint would be contacted
+        // at job start; 5 s after the job is confirmed started is far beyond a
+        // legitimate local connect (the old 20 s window paid its full cost on
+        // every run without catching anything extra).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut lines_seen = Vec::new();
         while let Ok(Ok(accepted)) = tokio::time::timeout_at(deadline, listener.accept()).await {
             let mut lines = BufReader::new(accepted);
@@ -186,6 +193,7 @@ async fn a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose(
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
     }
+    let _ = start_tx.send(());
     let heard = heard.await.unwrap();
     eprintln!(
         "sock-redirect: spawn answer ok={} heard={}",
