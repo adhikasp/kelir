@@ -241,6 +241,15 @@ pub fn write_owner(dir: &Path) {
     let _ = write_atomic(&dir.join(OWNER_FILE), body.to_string().as_bytes());
 }
 
+/// Stop advertising this process as the session's owner. Called by a job's
+/// `finalize` before it releases the job lock: a waiter on that lock would
+/// otherwise resolve the name while the holder process is still winding down
+/// and be refused as "session is running" (STEER-9, red e2e test
+/// `wait_queues_behind_the_holder_instead_of_skipping`).
+pub fn release_owner(dir: &Path) {
+    let _ = std::fs::remove_file(dir.join(OWNER_FILE));
+}
+
 /// The pid of the live process that owns the session in `dir`, if any. A pid
 /// whose start time no longer matches (reuse) is not an owner.
 pub fn holder(dir: &Path) -> Option<u32> {
@@ -507,6 +516,26 @@ pub fn sessions_forget(args: &crate::cli::SessionsForgetArgs) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A job releases its session owner before its lock, so a waiter on that
+    /// lock never sees a still-alive owner marker (STEER-9).
+    #[test]
+    fn releasing_the_owner_makes_the_session_resumable() {
+        let dir = std::env::temp_dir().join(format!(
+            "kelir-owner-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_owner(&dir);
+        assert_eq!(holder(&dir), Some(std::process::id()));
+        release_owner(&dir);
+        assert_eq!(holder(&dir), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn names_are_lowercase_words_of_at_most_64() {

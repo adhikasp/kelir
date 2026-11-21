@@ -443,7 +443,7 @@ max_concurrent_requests = 1
     first.wait_for("step_started").await;
     // The first request is in the mock's hands now (the gate holds it), so the
     // first session certainly holds the slot.
-    wait_until(Duration::from_secs(10), || mock.request_count() >= 1).await;
+    wait_until(CEILING, || mock.request_count() >= 1).await;
 
     let mut second = LiveSession::start_reusing(
         first.state.clone(),
@@ -518,7 +518,7 @@ async fn without_the_knob_requests_are_not_serialised() {
     second.wait_for("step_started").await;
     // With no governor the second request goes out while the first is still
     // held: two in flight, which is the default.
-    wait_until(Duration::from_secs(10), || mock.request_count() >= 2).await;
+    wait_until(CEILING, || mock.request_count() >= 2).await;
     assert_eq!(
         mock.max_concurrent(),
         2,
@@ -761,7 +761,7 @@ async fn an_interrupt_before_the_wait_begins_is_not_lost() {
         // old code half the time; with it, the old code never sees the signal.
         tokio::time::sleep(Duration::from_millis(150)).await;
         gate.notify_one();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let deadline = tokio::time::Instant::now() + CEILING;
         let ended = tokio::time::timeout_at(deadline, session.wait_for("turn_ended")).await;
         let elapsed = started.elapsed();
         match ended {

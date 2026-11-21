@@ -113,7 +113,7 @@ fn drive(
         out.write_all(bytes).unwrap();
         out.flush().unwrap();
     };
-    assert!(has("kelir", Duration::from_secs(20)), "the TUI never drew");
+    assert!(has("kelir", support::CEILING), "the TUI never drew");
     std::thread::sleep(Duration::from_millis(300));
     for i in 0..turns {
         if resize && i == 1 {
@@ -134,14 +134,14 @@ fn drive(
         send(b"\r");
         // The answer is the unique token ANS<i>; the done record follows it.
         assert!(
-            has(&format!("ANS{i}"), Duration::from_secs(20)),
+            has(&format!("ANS{i}"), support::CEILING),
             "turn {i} never answered"
         );
     }
     send(b"/quit");
     std::thread::sleep(Duration::from_millis(100));
     send(b"\r");
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + support::CEILING;
     let mut code = None;
     while Instant::now() < deadline {
         if let Ok(Some(status)) = child.try_wait() {

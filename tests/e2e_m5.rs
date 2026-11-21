@@ -143,7 +143,7 @@ async fn an_edited_instruction_file_is_a_tail_message_and_the_prefix_is_unchange
         Reply::Sse(sse(&tool_turn(
             "call_wait",
             "bash",
-            &json!({"command": "sleep 1"}),
+            &json!({"command": HOLD}),
         ))),
         Reply::Sse(sse(&text_turn("carrying on", 0))),
         Reply::Sse(sse(&text_turn("still here", 0))),
@@ -164,6 +164,7 @@ async fn an_edited_instruction_file_is_a_tail_message_and_the_prefix_is_unchange
     let started = live.wait_for("tool_started").await;
     assert_eq!(started["call_id"], "call_wait");
     std::fs::write(project.agents(), "EDITED INSTRUCTIONS").unwrap();
+    std::fs::write(project.cwd.join("kelir-release"), "go").unwrap();
 
     // The edit arrives as a `source` event at the tail, at the boundary
     // before the next request (not after the turn).
@@ -235,7 +236,7 @@ async fn a_skill_edited_mid_session_is_a_source_too() {
         Reply::Sse(sse(&tool_turn(
             "call_wait",
             "bash",
-            &json!({"command": "sleep 1"}),
+            &json!({"command": HOLD}),
         ))),
         Reply::Sse(sse(&text_turn("ok", 0))),
     ])
@@ -256,6 +257,7 @@ async fn a_skill_edited_mid_session_is_a_source_too() {
         .join("sift")
         .join("SKILL.md");
     std::fs::write(&skill, "---\nname: sift\ndescription: d\n---\n\nNEW BODY\n").unwrap();
+    std::fs::write(project.cwd.join("kelir-release"), "go").unwrap();
     let source = live.wait_for("source").await;
     assert_eq!(source["kind"], "skill", "{source}");
     assert_eq!(source["name"], "sift", "{source}");
@@ -498,7 +500,7 @@ async fn a_compaction_that_folds_a_source_away_says_the_file_again() {
         Reply::Sse(sse(&tool_turn(
             "call_wait",
             "bash",
-            &json!({"command": "sleep 1"}),
+            &json!({"command": HOLD}),
         ))),
         Reply::Sse(sse(&text_turn("carrying on", 0))),
         Reply::Sse(sse(&text_turn("SUMMARY: instructions were edited", 0))),
@@ -513,6 +515,7 @@ async fn a_compaction_that_folds_a_source_away_says_the_file_again() {
     .await;
     live.wait_for("tool_started").await;
     std::fs::write(project.agents(), "EDITED INSTRUCTIONS").unwrap();
+    std::fs::write(project.cwd.join("kelir-release"), "go").unwrap();
     live.wait_for("source").await;
     live.wait_for("turn_ended").await;
 
@@ -682,7 +685,7 @@ async fn a_resume_after_a_compaction_says_the_source_the_summary_folded_away() {
         Reply::Sse(sse(&tool_turn(
             "call_wait",
             "bash",
-            &json!({"command": "sleep 1"}),
+            &json!({"command": HOLD}),
         ))),
         Reply::Sse(sse(&text_turn("carrying on", 0))),
         Reply::Sse(sse(&text_turn("SUMMARY: the instructions changed", 0))),
@@ -697,6 +700,7 @@ async fn a_resume_after_a_compaction_says_the_source_the_summary_folded_away() {
     .await;
     live.wait_for("tool_started").await;
     std::fs::write(project.agents(), "EDITED").unwrap();
+    std::fs::write(project.cwd.join("kelir-release"), "go").unwrap();
     live.wait_for("source").await;
     live.wait_for("turn_ended").await;
     let answer = live.ctl(&["compact", "instructions"]).await;

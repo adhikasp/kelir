@@ -110,10 +110,7 @@ async fn read_pid(path: &Path) -> u32 {
         {
             return pid;
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "no pid in {path:?}"
-        );
+        assert!(started.elapsed() < CEILING, "no pid in {path:?}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -511,8 +508,8 @@ async fn a_killed_session_leaves_no_server_and_no_grandchild() {
     let kid = read_pid(Path::new(&kidfile)).await;
     assert!(pid_alive(server) && pid_alive(kid));
     kill_pid(live.pid());
-    let server_gone = gone_within(server, Duration::from_secs(15)).await;
-    let kid_gone = gone_within(kid, Duration::from_secs(15)).await;
+    let server_gone = gone_within(server, CEILING).await;
+    let kid_gone = gone_within(kid, CEILING).await;
     // Clean up whatever is left, by exact pid, before asserting.
     kill_pid(server);
     kill_pid(kid);
@@ -546,8 +543,8 @@ async fn a_finished_session_leaves_no_server_and_no_grandchild() {
     let server = read_pid(Path::new(&pidfile)).await;
     let kid = read_pid(Path::new(&kidfile)).await;
     let (a, b) = (
-        gone_within(server, Duration::from_secs(15)).await,
-        gone_within(kid, Duration::from_secs(15)).await,
+        gone_within(server, CEILING).await,
+        gone_within(kid, CEILING).await,
     );
     kill_pid(server);
     kill_pid(kid);

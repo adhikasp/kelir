@@ -106,7 +106,7 @@ async fn stop_during_the_stream_leaves_a_clean_log_and_next_request() {
     // `step_started` is logged before the request goes out, so wait until the
     // mock really has it: a `stop` that wins the race leaves the first request
     // unsent, and the assertion on two requests would be about the race.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + CEILING;
     while mock.request_count() == 0 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }

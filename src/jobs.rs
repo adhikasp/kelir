@@ -467,15 +467,29 @@ pub fn carry_text(events: &[LogEvent], dir: &Path) -> Option<String> {
 /// The date the context last heard: the newest `clock` source, else the day the
 /// session started.
 pub fn last_announced_date(events: &[LogEvent]) -> Option<String> {
+    last_announced_date_from(events, None)
+}
+
+/// [`last_announced_date`], with the date the session's frozen system prompt
+/// was rendered with when it is known. The prompt is what the context actually
+/// saw; the event's `ts` is wall-clock time and can disagree when `KELIR_TODAY`
+/// overrode the prompt (STEER-9). Old logs with no resolvable prompt keep the
+/// timestamp fallback.
+pub fn last_announced_date_from(
+    events: &[LogEvent],
+    rendered_date: Option<&str>,
+) -> Option<String> {
     let clock = events.iter().rev().find_map(|event| match &event.body {
         EventBody::Source { kind, name, .. } if kind == "clock" => Some(name.clone()),
         _ => None,
     });
     clock.or_else(|| {
-        events
-            .iter()
-            .find(|event| matches!(event.body, EventBody::SessionStarted { .. }))
-            .map(|event| event.ts.chars().take(10).collect())
+        rendered_date.map(str::to_string).or_else(|| {
+            events
+                .iter()
+                .find(|event| matches!(event.body, EventBody::SessionStarted { .. }))
+                .map(|event| event.ts.chars().take(10).collect())
+        })
     })
 }
 
@@ -484,7 +498,16 @@ pub fn last_announced_date(events: &[LogEvent]) -> Option<String> {
 /// rendered on and never changes (the provider's cache lives there), so the
 /// model learns a new day from the tail instead.
 pub fn clock_source(events: &[LogEvent], today: &str) -> Option<PlanSource> {
-    let last = last_announced_date(events)?;
+    clock_source_from(events, today, None)
+}
+
+/// [`clock_source`], with the session's rendered date supplied by the caller.
+pub fn clock_source_from(
+    events: &[LogEvent],
+    today: &str,
+    rendered_date: Option<&str>,
+) -> Option<PlanSource> {
+    let last = last_announced_date_from(events, rendered_date)?;
     if last.as_str() >= today {
         return None;
     }
@@ -783,6 +806,24 @@ mod tests {
                 key_origin: None,
             },
         )
+    }
+
+    /// A `KELIR_TODAY` override freezes the date in the system prompt; the
+    /// event's wall-clock `ts` can be a different day (STEER-9 red test). The
+    /// context knows the prompt's date, not the timestamp's.
+    #[test]
+    fn a_clock_source_uses_the_date_the_session_was_rendered_with() {
+        let log = vec![started("2026-11-21T09:00:00Z")];
+        let next = super::clock_source_from(&log, "2026-11-21", Some("2026-11-20"))
+            .expect("the prompt's day is older than today");
+        assert_eq!(next.name, "2026-11-21");
+        assert!(
+            next.text.contains("last knew was 2026-11-20"),
+            "{}",
+            next.text
+        );
+        // The same frozen day as today announces nothing.
+        assert!(super::clock_source_from(&log, "2026-11-20", Some("2026-11-20")).is_none());
     }
 
     #[test]

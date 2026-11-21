@@ -36,7 +36,7 @@ async fn raw(session: &LiveSession, request: Value) -> Value {
     let mut line = request.to_string();
     line.push('\n');
     let mut answer = String::new();
-    let read = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    let read = tokio::time::timeout(CEILING, async {
         write.write_all(line.as_bytes()).await.expect("write");
         write.flush().await.expect("flush");
         lines.read_line(&mut answer).await.expect("read the answer")

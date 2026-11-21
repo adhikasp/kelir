@@ -215,13 +215,18 @@ fn a_waiter_does_not_steal_a_lock_that_was_just_created() {
 L='{base}/t.lock'; OUT='{base}/out.txt'; : > "$OUT"
 sleep 60 & LIVE=$!
 mkdir "$L"; printf 'pid %s\nstarted x\ncmd y\n' "$LIVE" > "$L/owner"
-KELIR_GATE_LOCK="$L" bash '{gate_lock}' --timeout 40 -- echo WAITER-RAN > "$OUT" 2>&1 &
+KELIR_GATE_LOCK="$L" setsid bash '{gate_lock}' --timeout 40 -- echo WAITER-RAN > "$OUT" 2>&1 &
 W=$!
-sleep 12                               # the waiter has now waited >= 10 s
-rm -rf "$L"; mkdir "$L"                # a new holder takes the lock ...
-sleep 3                                # ... and has not written its owner file yet
+sleep 30                              # the waiter has now waited >= 10 s (a generous ceiling under load)
+# A new holder takes the lock ... (the old owner record goes and the directory
+# is made fresh in place: removing and re-creating it left a window in which the
+# waiter, polling, legitimately took the free lock and the test mistook that for
+# a steal on a loaded box, STEER-9)
+rm -f "$L/owner"; touch "$L"
+sleep 5                               # ... and has not written its owner file yet
 if grep -q WAITER-RAN "$OUT"; then echo STOLEN; else echo KEPT; fi
-kill "$LIVE" "$W" 2>/dev/null; wait 2>/dev/null; true
+kill "$LIVE" 2>/dev/null; kill -- -$W 2>/dev/null
+wait "$LIVE" 2>/dev/null; wait "$W" 2>/dev/null; true
 "#
     );
     let out = run_bash(&script, &[]);

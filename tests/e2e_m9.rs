@@ -678,15 +678,25 @@ async fn wait_queues_behind_the_holder_instead_of_skipping() {
     let holder = start(&sb, &mock, &["job", "run", "nightly"], &[]).await;
     until("the holder's request", || mock.request_count() >= 1).await;
     let waiter = start(&sb, &mock, &["job", "run", "nightly", "--wait", "40"], &[]).await;
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // The old 800 ms sleep only guessed that the waiter had reached the lock.
+    // Poll its exit status instead: while it is alive it is either starting or
+    // queued on the lock, and in both cases it cannot send a request before the
+    // gate opens. With `--wait 40` it cannot time out inside this window, so
+    // no scheduling luck decides the assertion (STEER-9).
+    let mut waiter = waiter;
+    until("the waiter to start", || {
+        matches!(waiter.try_wait(), Ok(None))
+    })
+    .await;
     assert_eq!(
         completions(&mock).len(),
         1,
         "the waiter has not started a turn"
     );
     gate.notify_one();
-    assert_eq!(finish(holder).await.code, 0);
-    assert_eq!(finish(waiter).await.code, 0);
+    let (held, waited) = (finish(holder).await, finish(waiter).await);
+    assert_eq!(held.code, 0, "holder: {}{}", held.stdout, held.stderr);
+    assert_eq!(waited.code, 0, "waiter: {}{}", waited.stdout, waited.stderr);
     assert_eq!(completions(&mock).len(), 2);
     assert_eq!(mock.max_concurrent(), 1, "never two turns at once");
     let outcomes: Vec<String> = runs(&sb, "nightly")

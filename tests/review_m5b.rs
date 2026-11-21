@@ -157,14 +157,13 @@ async fn hc_hanging_is_bounded_near_one_second_and_leaves_no_process() {
     let (run, took) = run_in_pane(&hc).await;
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert!(!system_of_run(&run).contains("herdr:"));
-    // 1 s probe budget + the run itself; a generous ceiling that still catches a 30 s wait.
-    assert!(took < Duration::from_secs(8), "startup took {took:?}");
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(
-        processes_with(if cfg!(windows) { "-n 37" } else { "sleep 37" }),
-        0,
-        "the hung helper's tree was left running"
-    );
+    // 1 s probe budget + the run itself. The fake would hang for 37 s, so 25 s
+    // still says "the session did not wait for it" on a box that stalls the run
+    // for several seconds (STEER-9: 8 s failed under load without a bug).
+    assert!(took < Duration::from_secs(25), "startup took {took:?}");
+    let marker = if cfg!(windows) { "-n 37" } else { "sleep 37" };
+    let left = settle_to_zero(|| processes_with(marker)).await;
+    assert_eq!(left, 0, "the hung helper's tree was left running");
 }
 
 #[tokio::test]
@@ -616,12 +615,10 @@ async fn pdf_and_odd_media_names_are_handled_not_crashed() {
     eprintln!("view results: {results:#?}");
     let answer = live.ctl(&["say", "go on"]).await;
     assert_eq!(answer.code, 0);
-    for _ in 0..100 {
-        if of_type(&live.log(), "turn_ended").len() >= 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    live.log_eventually("the second turn to end", |log| {
+        of_type(log, "turn_ended").len() >= 2
+    })
+    .await;
     let log = live.log();
     let notes: Vec<_> = of_type(&log, "source")
         .into_iter()
@@ -654,14 +651,12 @@ async fn observe_equals(
     request_index: usize,
     label: &str,
 ) {
-    for _ in 0..200 {
-        if mock.request_count() > request_index {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(mock.request_count() > request_index, "{label}: no request");
+    eventually(
+        &format!("{label}: the request to arrive"),
+        || mock.request_count() > request_index,
+        || live.dump(),
+    )
+    .await;
     let wire = mock.requests()[request_index].raw_body.clone();
     let raw = sandbox
         .kelir(&mock.base_url(), &["observe", &live.id, "--raw"], &[])

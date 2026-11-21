@@ -223,7 +223,7 @@ async fn r4_a_crash_during_a_resume_resumes_again_without_double_results() {
     // command's first write (a loaded box): 0 and 1 runs are both honest for a
     // call whose outcome is unknown. The counts are taken once the trees are
     // gone, and what must hold is that nothing ever raises them afterwards.
-    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+    sandbox.trees_gone(&id).await;
     let one_at_first_crash = sandbox.lines_in("one.log");
     assert!(
         one_at_first_crash <= 1,
@@ -241,7 +241,7 @@ async fn r4_a_crash_during_a_resume_resumes_again_without_double_results() {
         "the resume should have crashed: {}",
         second.stderr
     );
-    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+    sandbox.trees_gone(&id).await;
     let (one_at_second_crash, two_at_second_crash) =
         (sandbox.lines_in("one.log"), sandbox.lines_in("two.log"));
     assert_eq!(

@@ -390,7 +390,7 @@ async fn no_leftovers(family: &Family) {
             return;
         }
         assert!(
-            started.elapsed() < Duration::from_secs(15),
+            started.elapsed() < CEILING,
             "processes left after the root ended: {left:?}"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -804,7 +804,7 @@ async fn wait_for_children(live: &LiveSession, count: usize) -> Vec<Value> {
             return list;
         }
         assert!(
-            started.elapsed() < Duration::from_secs(30),
+            started.elapsed() < CEILING,
             "wanted {count} children with pids, have {list:?}"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -880,7 +880,7 @@ async fn killing_the_root_hard_leaves_no_orphans() {
     let state = root.state.clone();
     root.kill().await;
 
-    wait_gone(&pids, Duration::from_secs(30)).await;
+    wait_gone(&pids, CEILING).await;
     let started = Instant::now();
     loop {
         let left = leftovers_in(&state, &root.guard);
@@ -888,7 +888,7 @@ async fn killing_the_root_hard_leaves_no_orphans() {
             break;
         }
         assert!(
-            started.elapsed() < Duration::from_secs(30),
+            started.elapsed() < CEILING,
             "processes left after the root was killed: {left:?}"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -916,7 +916,7 @@ async fn stopping_the_call_stops_its_foreground_child() {
     let pids = pids_of(&list);
     let stopped = root.ctl(&["stop", "--call", "call_fg"]).await;
     assert_eq!(stopped.code, 0, "{} {}", stopped.stdout, stopped.stderr);
-    wait_gone(&pids, Duration::from_secs(30)).await;
+    wait_gone(&pids, CEILING).await;
     // The registry records how it ended, and the slot is free again.
     let settled = loop {
         let log = root.log();
@@ -1099,7 +1099,7 @@ async fn registry_operations_need_the_childs_link_and_no_secret_travels() {
     let waiting = Instant::now();
     let envdump = loop {
         assert!(
-            waiting.elapsed() < Duration::from_secs(30),
+            waiting.elapsed() < CEILING,
             "the env dump child never finished"
         );
         let list = child_list(&root).await;
@@ -1199,7 +1199,7 @@ async fn a_resumed_root_settles_the_children_it_cannot_reach_as_lost() {
     let list = wait_for_children(&root, 1).await;
     let pids = pids_of(&list);
     root.kill().await;
-    wait_gone(&pids, Duration::from_secs(30)).await;
+    wait_gone(&pids, CEILING).await;
 
     let sandbox = Sandbox::from_live(&root);
     let out = sandbox
@@ -1258,7 +1258,7 @@ async fn an_idle_keep_session_wakes_on_a_background_child() {
             break;
         }
         assert!(
-            started.elapsed() < Duration::from_secs(30),
+            started.elapsed() < CEILING,
             "the idle session never woke: {assistants:?}"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1280,7 +1280,7 @@ async fn ctl_brief_prints_the_answer_and_leaves_the_history_alone() {
     // Wait for the first turn to end so the snapshot has an answer in it.
     let started = Instant::now();
     while !root.log().iter().any(|event| event["type"] == "turn_ended") {
-        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(started.elapsed() < CEILING);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let answer = root.ctl(&["brief", "BRIEFQ what did you say?"]).await;
@@ -1342,8 +1342,12 @@ async fn only_the_root_writes_the_herdr_status_and_a_long_answer_settles() {
         if task.starts_with("CHILD") {
             for event in &log {
                 let text = event.to_string();
+                // The record is the OSC sequence `ESC ] 7501 ;`. Matching the bare
+                // digits "7501" was a flake: a pid, a byte count or a temp-dir
+                // name in a child's log contains them now and then (STEER-9,
+                // seen once in five loaded runs).
                 assert!(
-                    !text.contains("7501"),
+                    !text.contains("\u{1b}]7501") && !text.contains("\\u001b]7501"),
                     "a child wrote a status record: {id}"
                 );
             }

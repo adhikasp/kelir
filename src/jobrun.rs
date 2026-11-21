@@ -519,6 +519,12 @@ pub async fn finalize(drive_code: Option<u8>, early_error: Option<String>) -> u8
         status.notify_errors = errors;
         let _ = jobs::write_status(&run.dir, &status);
     }
+    // The waiter on the job lock can resolve the name the instant that lock
+    // is released. Clear the session owner first: `holder()` keys it on this
+    // process's pid, which is still alive until `run()` returns (STEER-9).
+    if !run.session_id.is_empty() {
+        crate::names::release_owner(&crate::paths::session_dir(&run.session_id));
+    }
     run.guard.release();
     exit
 }

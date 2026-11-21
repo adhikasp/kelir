@@ -295,7 +295,7 @@ async fn an_unreachable_endpoint_does_not_use_another_endpoints_cache() {
     .await;
     // The fetch fails on its own (nothing listens there); give the session a
     // moment to record it, then read the state.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + CEILING;
     let state = loop {
         let state = state_of(&second.ctl(&["stop"]).await);
         let note = state["window_note"].as_str().unwrap_or("").to_string();
@@ -326,11 +326,16 @@ async fn an_unreachable_endpoint_does_not_use_another_endpoints_cache() {
 /// list that never arrives at all is a session that still works and says why.
 #[tokio::test]
 async fn a_slow_list_does_not_hold_the_first_request() {
+    // The held lists are held by a gate the test owns, not by a number of
+    // seconds: "slower than the turn" must not depend on how fast the turn ran
+    // (STEER-9). Only the first is ever released, after the assertions.
+    let late = std::sync::Arc::new(tokio::sync::Notify::new());
+    let never = std::sync::Arc::new(tokio::sync::Notify::new());
     for (label, models, expected) in [
         (
             "a list slower than the start grace",
-            ModelsAnswer::ok(MODELS_JSON).slow(std::time::Duration::from_secs(3)),
-            "the list arrives while the turn runs",
+            ModelsAnswer::ok(MODELS_JSON).gated(late.clone()),
+            "the list arrives after the turn",
         ),
         (
             "a list endpoint that is down",
@@ -340,7 +345,7 @@ async fn a_slow_list_does_not_hold_the_first_request() {
         (
             // The review's worst case: the body never comes at all.
             "a list endpoint that never answers",
-            ModelsAnswer::ok(MODELS_JSON).slow(std::time::Duration::from_secs(120)),
+            ModelsAnswer::ok(MODELS_JSON).gated(never.clone()),
             "a hang is bounded by the background fetch, not by the turn",
         ),
     ] {
@@ -356,18 +361,15 @@ async fn a_slow_list_does_not_hold_the_first_request() {
             models,
         )
         .await;
-        let started = std::time::Instant::now();
         let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-        let first_step = started.elapsed();
+        // The first step ran and its call settled while the list was still
+        // held (or failed): the step did not wait for the metadata. That is an
+        // ordering the gate guarantees, so no stopwatch is involved.
         session.wait_for("tool_settled").await;
         assert_eq!(
             mock.models_requests(),
             1,
             "{label}: one ask, and the session did not wait for it to start"
-        );
-        assert!(
-            first_step < std::time::Duration::from_secs(2),
-            "{label}: the first step waited {first_step:?} for the metadata"
         );
         session.wait_for("turn_ended").await;
         let state = state_of(&session.ctl(&["stop"]).await);
@@ -379,6 +381,7 @@ async fn a_slow_list_does_not_hold_the_first_request() {
             state["window_note"].is_string(),
             "{label}: {expected}; the fallback records why: {state}"
         );
+        late.notify_one();
         session.end().await;
     }
 }
@@ -404,7 +407,7 @@ async fn a_list_that_lands_after_the_grace_is_applied_at_the_next_step() {
     // The tool result settles, the loop reaches `before_step`, and the list is
     // there by then.
     session.wait_for("tool_settled").await;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + CEILING;
     loop {
         let state = state_of(&session.ctl(&["stop"]).await);
         if state["window"] == 262_144 {
