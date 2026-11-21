@@ -25,7 +25,7 @@ cargo install kelir --locked
 From source (Rust 1.88 or newer):
 
 ```sh
-git clone https://github.com/<owner>/kelir.git
+git clone https://github.com/adhikasp/kelir.git
 cd kelir
 cargo build --release
 ./target/release/kelir --help

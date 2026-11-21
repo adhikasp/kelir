@@ -175,7 +175,7 @@ failure that cannot be reproduced locally.
   neutral copyright holder "kelir contributors". **No choice was made.**
 - `Cargo.toml` — added neutral `authors`, `readme`, `repository`, `homepage`,
   `documentation`, `keywords` and `categories`. The repository/homepage URL
-  uses a `<owner>` placeholder deliberately, so the drafted files contain no
+  uses a `adhikasp` placeholder deliberately, so the drafted files contain no
   personal account name; the maintainer must substitute the real public owner
   before publishing. `license = "MIT"` was already present and was **left as
   found** because choosing a license is the maintainer's decision (see open
@@ -247,7 +247,7 @@ both pass on this branch.
   existing `license = "MIT"` field is a pre-existing value, not a choice made
   here. The maintainer must choose and the docs/Cargo.toml must be updated in
   the same commit.
-- **Repository owner/URL** — the drafted files use a `<owner>` placeholder;
+- **Repository owner/URL** — the drafted files used an `<owner>` placeholder;
   the real public owner must be supplied.
 - **crates.io name** — verify `kelir` is available (needs network).
 - **Real CI run** — only GitHub can prove the matrix; do not treat this dry
