@@ -763,6 +763,10 @@ pub struct Inputs<'a> {
     pub cwd: &'a std::path::Path,
     /// `YYYY-MM-DD`: the date goes in, never the time.
     pub date: &'a str,
+    /// The session id, when the caller has one. Stable across a resume, so it
+    /// belongs in the frozen prompt: it makes the agent self-aware of which
+    /// session it is in and able to hand a human the resume command.
+    pub session_id: Option<&'a str>,
     /// The one Herdr line (`herdr_ctx`), when the session runs in a pane.
     pub herdr: Option<&'a str>,
 }
@@ -844,6 +848,11 @@ pub fn render_system(inputs: &Inputs) -> Rendered {
         std::env::consts::OS,
         inputs.date
     ));
+    if let Some(id) = inputs.session_id {
+        text.push_str(&format!(
+            "\n# Session\nid: {id}\nresume: kelir tui --resume {id}\n"
+        ));
+    }
     if let Some(line) = inputs.herdr {
         text.push_str(line);
         text.push('\n');
@@ -1486,6 +1495,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         assert!(found.iter().all(|item| item.path.as_os_str().is_empty()));
         let rendered = render_system(&Inputs {
             herdr: None,
+            session_id: None,
             base: "BASE",
             base_path: None,
             places: &places,
@@ -1493,6 +1503,44 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
             date: "2026-11-19",
         });
         assert!(rendered.text.starts_with("BASE"));
+    }
+
+    #[test]
+    fn the_session_id_and_resume_command_are_in_the_frozen_prompt() {
+        let places = Places::default();
+        let rendered = render_system(&Inputs {
+            herdr: None,
+            session_id: Some("ses_abc123"),
+            base: "BASE",
+            base_path: None,
+            places: &places,
+            cwd: &places.cwd,
+            date: "2026-11-19",
+        });
+        assert!(
+            rendered.text.contains("id: ses_abc123"),
+            "{}",
+            rendered.text
+        );
+        assert!(
+            rendered
+                .text
+                .contains("resume: kelir tui --resume ses_abc123"),
+            "{}",
+            rendered.text
+        );
+        // No session id: no session block, and the two prompts differ.
+        let without = render_system(&Inputs {
+            herdr: None,
+            session_id: None,
+            base: "BASE",
+            base_path: None,
+            places: &places,
+            cwd: &places.cwd,
+            date: "2026-11-19",
+        });
+        assert!(!without.text.contains("# Session"));
+        assert_ne!(rendered.hash, without.hash);
     }
 
     #[test]
@@ -1544,6 +1592,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         // is not announced again at the first boundary.
         let rendered = render_system(&Inputs {
             herdr: None,
+            session_id: None,
             base: "BASE",
             base_path: None,
             places: &places,
@@ -1630,6 +1679,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         );
         let inputs = Inputs {
             herdr: None,
+            session_id: None,
             base: crate::config::DEFAULT_PROMPT,
             base_path: None,
             places: &places,
@@ -1656,6 +1706,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         );
         let inputs = Inputs {
             herdr: None,
+            session_id: None,
             base: "BASE {{skills_dirs}}",
             base_path: None,
             places: &places,
@@ -1698,6 +1749,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         write(&machine, "MACHINE PROMPT");
         let inputs = Inputs {
             herdr: None,
+            session_id: None,
             base: "MACHINE PROMPT",
             base_path: Some(&machine),
             places: &places,
@@ -1726,6 +1778,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         write(&file, "ONE");
         let rendered = render_system(&Inputs {
             herdr: None,
+            session_id: None,
             base: "BASE",
             base_path: None,
             places: &places,
@@ -1762,6 +1815,7 @@ metadata:\n  owner: gates\n---\n\n# Sift\n\nRead the tail first.\n";
         write(&file, "SAME");
         let rendered = render_system(&Inputs {
             herdr: None,
+            session_id: None,
             base: "BASE",
             base_path: None,
             places: &places,
@@ -1906,6 +1960,7 @@ READ THE TAIL
         let places = places_in(&dir);
         let rendered = render_system(&Inputs {
             herdr: None,
+            session_id: None,
             base: "BASE",
             base_path: None,
             places: &places,

@@ -173,7 +173,7 @@ fn snapshot_the_idle_viewport() {
     row_eq(&screen, 2, "");
     row_eq(&screen, 3, " ● idle · ready");
     row_eq(&screen, 4, "›");
-    row_eq(&screen, 7, "kelir idle · 0 tok");
+    row_eq(&screen, 7, "kelir idle · 0 tok in");
 }
 
 #[test]
@@ -1581,7 +1581,7 @@ async fn the_idle_status_line_stays_calm_even_with_a_cap() {
             state,
             base_url,
             b"",
-            vec!["kelir idle · 0 tok".into()],
+            vec!["kelir idle · 0 tok in".into()],
         )
     })
     .await
@@ -1589,7 +1589,7 @@ async fn the_idle_status_line_stays_calm_even_with_a_cap() {
 
     assert_eq!(run.code, 0, "screen: {:?}", run.screen);
     assert!(
-        run.screen.contains("kelir idle · 0 tok"),
+        run.screen.contains("kelir idle · 0 tok in"),
         "the idle line is phase, model and tokens: {:?}",
         run.screen
     );

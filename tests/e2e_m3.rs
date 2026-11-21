@@ -482,7 +482,9 @@ async fn a_human_compact_keeps_the_task_and_human_messages_verbatim() {
     assert_eq!(compacted.len(), 1, "{log:?}");
     assert_eq!(compacted[0]["by"], "user");
     assert_eq!(compacted[0]["cache_restart"], true);
-    assert_eq!(compacted[0]["pinned_seqs"].as_array().unwrap().len(), 2);
+    // With `/compact` immediate, the “next” message arrives *after* the
+    // compaction, so only the original task is pinned (compact_keep = 0).
+    assert_eq!(compacted[0]["pinned_seqs"].as_array().unwrap().len(), 1);
     assert!(
         compacted[0]["tokens_after"].as_u64().unwrap()
             < compacted[0]["tokens_before"].as_u64().unwrap(),

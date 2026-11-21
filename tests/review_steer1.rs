@@ -208,9 +208,23 @@ async fn the_window_does_not_change_the_request_bytes() {
     );
     on_config.end().await;
 
+    // The two live sessions get different ids; strip both the body field and
+    // the session block embedded in the system prompt before comparing.
     let strip = |body: &Value| {
         let mut body = body.clone();
-        body.as_object_mut().unwrap().remove("session_id");
+        let obj = body.as_object_mut().unwrap();
+        obj.remove("session_id");
+        if let Some(messages) = obj.get_mut("messages").and_then(|m| m.as_array_mut())
+            && let Some(content) = messages.first_mut().and_then(|m| m.get_mut("content"))
+            && let Some(text) = content.as_str()
+        {
+            let clean = text
+                .split("\n# Session\n")
+                .next()
+                .unwrap_or(text)
+                .to_string();
+            *content = Value::String(clean);
+        }
         body
     };
     let provider_request = strip(&provider_mock.requests()[0].body);

@@ -213,6 +213,10 @@ pub struct Status {
     pub turn: u32,
     pub step: u32,
     pub prompt_tokens: u64,
+    /// Input tokens of the *last* request sent to the model (the full context:
+    /// system, history, tool inputs and results) — not the accumulated sum.
+    /// This is what the status line shows.
+    pub last_prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: u64,
     pub cost: f64,
@@ -236,6 +240,7 @@ impl Default for Status {
             turn: 0,
             step: 0,
             prompt_tokens: 0,
+            last_prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: 0,
             cost: 0.0,
@@ -296,10 +301,10 @@ fn facts_text(status: &Status) -> String {
     if !status.model.is_empty() {
         parts.push(status.model.clone());
     }
-    parts.push(format!(
-        "{} tok",
-        tokens(status.prompt_tokens + status.completion_tokens)
-    ));
+    // The input tokens of the last request to the model: the whole context
+    // it saw (system, history, tool inputs and results from earlier steps),
+    // not the accumulated sum across the session.
+    parts.push(format!("{} tok in", tokens(status.last_prompt_tokens)));
     parts.join(" · ")
 }
 
@@ -319,9 +324,9 @@ pub fn facts_for_width(status: &Status, width: usize) -> String {
     }
     fit(
         &format!(
-            "{} · {} tok",
+            "{} · {} tok in",
             status.phase.word(),
-            tokens(status.prompt_tokens + status.completion_tokens)
+            tokens(status.last_prompt_tokens)
         ),
         width,
     )
@@ -753,8 +758,10 @@ pub struct App {
     /// Images saved from pastes, by content hash: a second paste of the same
     /// bytes reuses the file.
     seen_images: HashMap<u64, String>,
-    /// The session dir, for `attachments/`; `None` in a unit test with no
-    /// session (pastes then stay text).
+    /// The session id, once the session exists. Shown only on exit, as the
+    /// exact command to resume this session — not in the welcome banner.
+    session_id: Option<String>,
+    /// The session dir (for `attachments/`), once the session exists.
     session_dir: Option<std::path::PathBuf>,
     /// The image paths already turned into pointers at submit, so a line
     /// submitted twice (history) does not save the same file twice.
@@ -806,6 +813,7 @@ impl App {
             turn_tokens: 0,
             frame: 0,
             seen_images: HashMap::new(),
+            session_id: None,
             session_dir: None,
             absorbed: std::collections::HashSet::new(),
             note: String::new(),
@@ -823,6 +831,11 @@ impl App {
     /// The session dir (for `attachments/`), once the session exists.
     pub fn set_session_dir(&mut self, dir: std::path::PathBuf) {
         self.session_dir = Some(dir);
+    }
+
+    /// The session id, used on exit to print the exact resume command.
+    pub fn set_session_id(&mut self, id: String) {
+        self.session_id = Some(id);
     }
 
     pub fn theme(&self) -> Theme {
@@ -1175,6 +1188,7 @@ impl App {
                 cost,
             } => {
                 self.status.prompt_tokens += prompt;
+                self.status.last_prompt_tokens = prompt;
                 self.status.completion_tokens += completion;
                 self.status.cached_tokens += cached;
                 self.status.cost += cost;
@@ -2424,6 +2438,14 @@ impl Tui {
         // line the prompt needs.
         let _ =
             ratatui::crossterm::execute!(stdout, Show, ratatui::crossterm::style::Print("\r\n"));
+        // The welcome banner deliberately omits the session id; on exit, hand
+        // the person the exact command to come back to *this* session.
+        if let Some(id) = &self.app.session_id {
+            let _ = ratatui::crossterm::execute!(
+                stdout,
+                ratatui::crossterm::style::Print(format!("resume: kelir tui --resume {id}\r\n"))
+            );
+        }
         let _ = stdout.flush();
         let _ = ratatui::crossterm::terminal::disable_raw_mode();
     }
@@ -2528,6 +2550,7 @@ mod tests {
             turn: 1,
             step: 3,
             prompt_tokens: 1200,
+            last_prompt_tokens: 1200,
             completion_tokens: 340,
             cached_tokens: 900,
             cost: 0.00042,
@@ -2539,7 +2562,7 @@ mod tests {
         };
         assert_eq!(
             status_text(&status),
-            "kelir working · deepseek/deepseek-chat · 1.5k tok"
+            "kelir working · deepseek/deepseek-chat · 1.2k tok in"
         );
         assert!(!status_text(&status).contains("step"));
         assert!(!status_text(&status).contains("cache"));
@@ -2563,6 +2586,7 @@ mod tests {
             model: "test/model".into(),
             step: 3,
             prompt_tokens: 1200,
+            last_prompt_tokens: 1200,
             completion_tokens: 340,
             phase: Phase::Working,
             ..Status::default()
@@ -2587,7 +2611,7 @@ mod tests {
         // The facts row comes back when the wait ends.
         status.retrying = None;
         assert!(
-            status_text(&status).contains("1.5k tok"),
+            status_text(&status).contains("1.2k tok in"),
             "{}",
             status_text(&status)
         );
@@ -2685,6 +2709,22 @@ mod tests {
     /// The same row under the name main's side gave it: after the merge there
     /// is one facts row, so both names assert it.
     #[test]
+    fn the_facts_row_shows_the_last_request_input_not_the_running_sum() {
+        let status = Status {
+            model: "m".into(),
+            prompt_tokens: 9_000,      // accumulated across the session
+            last_prompt_tokens: 4_096, // the last request's full context
+            completion_tokens: 800,
+            phase: Phase::Working,
+            ..Status::default()
+        };
+        let text = status_text(&status);
+        assert!(text.contains("4.1k tok in"), "{text}");
+        assert!(!text.contains("9.0k"), "{text}");
+        assert!(!text.contains("9.8k"), "{text}");
+    }
+
+    #[test]
     fn the_status_line_is_phase_model_and_tokens() {
         let status = Status {
             provider: "openrouter".into(),
@@ -2692,6 +2732,7 @@ mod tests {
             turn: 1,
             step: 3,
             prompt_tokens: 1200,
+            last_prompt_tokens: 1200,
             completion_tokens: 340,
             cached_tokens: 900,
             cost: 0.00042,
@@ -2703,12 +2744,12 @@ mod tests {
         };
         assert_eq!(
             status_text(&status),
-            "kelir working · deepseek/deepseek-chat · 1.5k tok"
+            "kelir working · deepseek/deepseek-chat · 1.2k tok in"
         );
         // The state row carries the running count now, so the facts row does
         // not repeat it.
         assert!(!status_text(&status).contains("running"));
-        assert_eq!(status_text(&Status::default()), "kelir idle · 0 tok");
+        assert_eq!(status_text(&Status::default()), "kelir idle · 0 tok in");
     }
 
     /// A step counter is not ambient: neither the count nor a cap belongs in
@@ -2737,6 +2778,7 @@ mod tests {
             model: "deepseek/deepseek-v4.1-flash-1017".into(),
             step: 12,
             prompt_tokens: 12_000,
+            last_prompt_tokens: 12_000,
             completion_tokens: 100,
             cached_tokens: 10_000,
             cost: 0.0028,
