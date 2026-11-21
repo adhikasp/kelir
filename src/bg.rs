@@ -2594,8 +2594,18 @@ mod tests {
         assert_eq!(status.observed().state, STATE_RUNNING);
 
         // The process is ours, but the status does not say when it started.
+        // On macOS `identity` returns `NoPlatform` before it ever looks at the
+        // record: without a platform start time it cannot compare one. Where
+        // start times exist, the missing record must still say `NoRecord`.
         status.shim_started = None;
-        assert_eq!(shim_identity(&status), ShimIdentity::NoRecord);
+        assert_eq!(
+            shim_identity(&status),
+            if mine.is_some() {
+                ShimIdentity::NoRecord
+            } else {
+                ShimIdentity::NoPlatform
+            }
+        );
         assert_eq!(
             status.observed().state,
             if crate::proc::start_time(me).is_some() {
@@ -2621,7 +2631,8 @@ mod tests {
             assert_eq!(shim_identity(&status), ShimIdentity::Different);
         }
 
-        // No shim at all is nobody's.
+        // No shim at all is nobody's: the missing pid is caught before the
+        // platform check, so this is `NoRecord` on every OS.
         status.shim = None;
         assert_eq!(shim_identity(&status), ShimIdentity::NoRecord);
         assert_ne!(status.observed().state, STATE_RUNNING);
@@ -2654,8 +2665,18 @@ mod tests {
                 ShimIdentity::NoPlatform
             }
         );
+        // Without a record there is nothing to compare on platforms that can
+        // report start times; on macOS `NoPlatform` is decided first, even
+        // with no record. A pid of 0 is always `NoRecord`, on every OS.
         status.pid_started = None;
-        assert_eq!(pid_identity(&status), ShimIdentity::NoRecord);
+        assert_eq!(
+            pid_identity(&status),
+            if crate::proc::start_time(me).is_some() {
+                ShimIdentity::NoRecord
+            } else {
+                ShimIdentity::NoPlatform
+            }
+        );
         status.pid = Some(0);
         assert_eq!(pid_identity(&status), ShimIdentity::NoRecord);
     }

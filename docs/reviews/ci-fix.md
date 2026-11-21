@@ -64,3 +64,81 @@ otherwise keep the existing directory. Production path resolution (the
 fallback and its record) is untouched and is covered by the neighbouring
 `a_too_long_session_dir_binds_a_short_recorded_socket` test. No path contract
 changed.
+
+---
+
+# Second public CI fix (run 44885707434) — branch job/ci-fix2
+
+Base `job/ci-fix2` @ d6bc110. Eight remaining failures: 5 Windows (embedded
+text checked out as CRLF), 2 macOS (start-time identity `NoRecord` branches),
+1 macOS (a gate descendant survived). No production prompt/reference bytes
+change; the fixes are a checkout-level EOL rule, two platform-aware test
+expectations and a portable macOS tree-kill.
+
+## A. Windows 5 failures: CRLF checkout of embedded text
+
+`src/prompt.md` is 1014 bytes with 20 LF newlines. On a Windows CI runner
+Git converts those to CRLF, making it 1034 bytes; the byte-exact prompt
+snapshot and the 1024-byte budgets then fail, and the generated reference
+blocks (config/cli/env/verbs/events) go stale because the `include_str!`-ed
+`.rs` sources are CRLF too. Local Linux (LF checkout) passes all five.
+
+Fix: a root `.gitattributes` forcing LF for every embedded text family:
+`*.md`, `*.snapshot` and `*.rs`, each `text eol=lf`. That covers the prompt,
+its snapshot, all `docs/reference/*.md`, the builtin skills, and the
+`include_str!`-ed source files (`config.rs`, `event.rs`, `verbs.rs`) read by
+the docs drift test. Other file types keep Git's default handling.
+Verified: `cargo test --lib docs::tests` (24 passed) and
+`cargo test --lib sources::tests` (25 passed) locally.
+
+## B. macOS 2 failures: start-time identity `NoRecord` branches
+
+`identity()` at `src/bg.rs:306` returns `NoPlatform` before it ever looks at
+the recorded start time when the platform cannot report one (macOS:
+`proc::start_time` is `None`). The first ci-fix made the `Same` cases
+platform-aware but left two `NoRecord` asserts unconditional:
+`a_status_is_matched_with_its_own_process_not_just_its_pid` (missing
+`shim_started`) and `a_command_pid_is_only_trusted_with_its_own_start_time`
+(missing `pid_started`). On macOS they saw `NoPlatform` and failed with
+`left: NoPlatform, right: NoRecord`.
+
+Fix: both asserts now expect `NoRecord` where `start_time` is available
+(Windows/Linux) and `NoPlatform` on macOS, mirroring the `Same` fix. The
+`Different` case, the pid-0 `NoRecord` case and every liveness assertion
+are unchanged. Windows and Linux keep their strict `NoRecord` checks.
+
+## C. macOS 1 failure: gate descendant survived
+
+`reap::kill_run` was a no-op off Linux. On macOS only the process group was
+signalled; a gate script's detached `(sleep 3; echo alive > flag.txt) &`
+child could survive and write the marker.
+
+Fix: `kill_run` now runs on macOS too. It reuses the bounded Linux
+set-based descendant walk (5 rounds, 15 ms) with a macOS `process_table()`
+built from `ps -ax -o pid=,ppid=`, and a token sweep built from one
+`ps axww -e -o pid=,command=` invocation. The token sweep matches the exact
+`KELIR_GATE_RUN=<token>` field; `ps` output is never printed or logged, and
+only exact PIDs are signalled (never this process, never a group). A pure
+parser unit test covers whole-field matching. The documented Linux-only
+limitation in `docs/reference/gates.md` was updated. Windows/Job Object
+behaviour and the Linux `/proc` path are unchanged.
+
+## Gate evidence
+
+Full gate `bash scripts/gate.sh --linux=the maintainer` at HEAD `17da1ae`, exit 0,
+`gate: PASS`. Logs: `/c/Users/the maintainer/kelir-scratch/gate-job-ci-fix2-20261121T085925Z/`.
+
+- Windows: fmt ok, clippy ok, nextest 1433 passed / 6 skipped (230.5 s),
+  doctest ok.
+- Linux (`the maintainer`): fmt ok, clippy ok, nextest 1435 passed / 3 skipped
+  (123.8 s), doctest ok.
+- Targeted: `cargo test --lib docs::tests` 24 passed;
+  `cargo test --lib sources::tests` 25 passed;
+  `cargo test --lib bg` identity tests 2 passed;
+  `cargo test --lib gates::tests` 28 passed (Linux);
+  `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean.
+
+The macOS-only tree-kill path was compile-checked by temporarily swapping the
+target cfg so the macOS functions were compiled on this Windows host (then
+restored); the Linux gate compiles the Linux path. A pure parser unit test for
+the macOS `ps e` sweep is included in `src/gates.rs`.
