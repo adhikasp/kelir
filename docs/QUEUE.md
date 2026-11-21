@@ -336,3 +336,26 @@ Starting points (verify before designing):
 - **In flight:** steer9 (de-flake; worktree steer9, pane a Linux box/t19g, resuming 23 uncommitted edits after t18y was killed) and M11 (attach viewer + notifications; worktree m11, pane a Linux box/t19h). Next after those: fresh reviewer per milestone, merge, re-gate main, then M12 publish prep. **M12's push needs the maintainera's explicit yes.**
 - **Known environment issue:** four STEER-7 memory-scan / e2e_m7 registry tests fail intermittently on a Linux box under load; they passed in two gates earlier the same day on the same code lineage. Do not change product code for them; re-gate on a quiet box. Gate-lock can go stale when a worker is killed — check the recorded pid before waiting.
 - **Harness:** the maintainer t19n holds role=kelir-orchestrator; subagents report via kelir-scratch/report-to-orchestrator.sh (resolves the live role holder). The kelir-drive.timer that spawned a second Claude orchestrator is stopped and disabled; re-enable only on an explicit decision.
+
+
+## Queue item (the maintainera via Telegram 317113, 2026-11-21 16:50): channel reply is a fallback only
+
+In channel mode, kelir currently sends the final assistant text as a reply even when the model already
+called the channel server's reply tool itself during the turn (e.g. `kelir mcp telegram reply ...`),
+so Telegram gets two messages (seen live on the the maintainer test topic dm-490161027-312337).
+
+Wanted:
+1. The final-text reply becomes a FALLBACK: send it only when the model sent nothing to that
+   conversation via the reply tool during the turn. The existing error/paused/timeout fallback stays.
+2. Add a short line to the channel envelope / system prompt telling the model it replies via
+   `kelir mcp <server> reply` (conversation_id, text), and that its plain final text is only sent if
+   it did not call the reply tool.
+3. Add an e2e test with the fake channel server proving exactly one reply when the model calls the
+   reply tool, and the fallback reply when it does not. Drive the fake server deterministically.
+
+Repro setup (maintainer-side, the maintainer): pane tg-dm-490161027-312337 (kelir channel), MCP config
+`~/.local/state/telegram-session/routes/dm-490161027-312337/kelir-mcp.toml`, adapter
+`scripts/the maintainer/telegram-session/kelir-tg-shim`. Do not copy secrets or personal paths into the repo.
+
+Queue order: after the current CI fix lands and public CI is green. Report to
+`tg-ask dm:490161027:317113 "channel reply fallback merged"` when merged.
