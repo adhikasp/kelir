@@ -178,9 +178,9 @@ A gate is any executable. kelir sends it the event as JSON on stdin; it answers
 
 ```toml
 [gates]
-before_tool = { command = "python3 ~/.config/kelir/gates/no_force_push.py", tools = ["bash"] }
-turn_end    = "python3 ~/.config/kelir/gates/verify_before_claim.py"
-session_end = "python3 ~/.config/kelir/gates/git_sync.py"
+before_tool = { command = "python3 ~/gates/no_force_push.py", tools = ["bash"] }
+turn_end    = "python3 ~/gates/verify_before_claim.py"
+session_end = "python3 ~/gates/git_sync.py"
 ```
 
 ```python
@@ -190,7 +190,8 @@ import json, re, sys
 
 event = json.load(sys.stdin)
 if re.search(r"git\s+push\b.*(--force|\s-f\b)", event["input"].get("command", "")):
-    print(json.dumps({"decision": "deny", "reason": "no force-push here; push a branch instead"}))
+    reason = "no force-push here; push a branch instead"
+    print(json.dumps({"decision": "deny", "reason": reason}))
 ```
 
 A denied call returns the reason to the model, which adapts. A gate that crashes or
