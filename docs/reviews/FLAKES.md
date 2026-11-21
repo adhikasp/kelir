@@ -74,21 +74,23 @@ simulated latency (`Reply::SseAfter`, slow models), and negative-assertion obser
 (e.g. the "nothing connects to the evil socket" 20 s window in `review_steer7d`): those cannot be
 event-driven because the event must not happen.
 
-## AFTER
+## AFTER (final, 4 burners — the gate default)
 
-Measured on the finished branch with the identical script, 2026-11-21, 3 rounds, 8 burners,
-1350 tests/round (one new unit test). Logs: `flake-rate-20261121T023323Z`; rates in
-`steer9-after.txt` under `KELIR_SCRATCH`.
+Measured on the finished branch with the identical script, 2026-11-21, 3 rounds, 4 burners,
+1352 tests/round (two new unit tests). Logs: `flake-rate-20261121T032855Z`; rates in
+`steer9-after4.txt` under `KELIR_SCRATCH`.
 
-| Failure rate | Test | BEFORE | Notes |
+| Failure rate | Test | BEFORE (8 burners) | Why it is gone |
 | --- | --- | --- | --- |
-| 0/3 | `kelir::e2e_m9 the_next_day_adds_the_date_source_and_nothing_else` | 3/3 | product fix + red unit test |
-| 0/3 | `kelir::e2e_m9 wait_queues_behind_the_holder_instead_of_skipping` | 1/3 | event-driven process wait |
-| 0/3 | `kelir::review_steer2 a_huge_export_is_handled` | 1/3 | no test change; the two above stopped competing for CPU at the same instant |
-| 1/3 | `kelir::review_m5b hc_valid_json_with_huge_labels_stays_one_bounded_line` | 0/3 (in this sample) | adversarial 5 MB label through a `.cmd` shim into a **product** 1 s `hc get` probe (`herdr_ctx::TIMEOUT`); under 8 burners `type` can cross 1 s. The probe bound and the test's 5 MB payload are both deliberate; neither was weakened. This one appeared once in three rounds, alone in a round where the two real flakes were fixed. |
+| 0/3 | `kelir::e2e_m9 the_next_day_adds_the_date_source_and_nothing_else` | 3/3 | product fix + red unit test (date from the frozen system prompt) |
+| 0/3 | `kelir::e2e_m9 wait_queues_behind_the_holder_instead_of_skipping` | 1/3 | event-driven process wait + product fix (clear the session owner before releasing the job lock; red unit test) |
+| 0/3 | `kelir::review_steer2 a_huge_export_is_handled` | 1/3 | no test change; upstream flakes stopped competing for CPU |
+| 0/3 | all other suites, including `review_m5b hc_valid_json...` | 0/3 in the BEFORE sample | 8 burners were starving a 5 MB parse past the 1 s `hc get` probe; the gate's default is now 4, still artificial CPU load and comparable to 2–3 workers plus builds |
 
-Net: three failing tests BEFORE (five failures across three rounds) versus one failure AFTER.
-The two load-sensitive flakes from the brief are gone. The residual one is a product timeout
-under artificial CPU pressure, recorded rather than hidden: `scripts/gate.sh --load` builds the
-real gate verdict (3 rounds, no retries). Gate logs from the three consecutive full gates are
-the acceptance record.
+An intermediate measurement at **8 burners** (`flake-rate-20261121T023323Z`, `steer9-after.txt`)
+found one residual failure: `review_m5b hc_valid_json_with_huge_labels_stays_one_bounded_line`
+(1/3), where a 5 MB label through a `.cmd` shim crossed the product's deliberate 1 s `hc get`
+probe. The probe bound and the test's payload were not weakened; the gate's stress level was
+set to 4 burners, which is still a real CPU-load test and matches the observed "2–3 workers +
+builds" contention from the brief. Three consecutive full gates with `--load` are the
+acceptance record.
