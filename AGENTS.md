@@ -29,10 +29,15 @@ authoritative; if you must deviate, write the deviation and the reason in `docs/
 
 1. **Unit** (`cargo test --lib`): pure logic: fold, event serialisation, spill, edit semantics,
    SSE parsing, cache-key construction, verb handling. Many, fast, no network, no processes.
-2. **Integration / e2e** (`cargo test --test '*'`): the real `kelir` binary driven against an
+2. **Integration / e2e** (`cargo nextest run -E 'binary(e2e)'`): the real `kelir` binary driven against an
    in-process **scripted mock** OpenAI-compatible server (SSE, tool calls, usage with cached
    tokens, injected failures). Deterministic. Assert on `events.jsonl` and NDJSON stdout, on
    request headers/bodies the mock received, and on process behaviour (kill, resume, signals).
+   **Never run the whole suite as `cargo test --all-targets -- --test-threads 1|2`:** that runs
+   ~60 test binaries one after another (measured 450–600 s here), while nextest runs tests in
+   separate processes concurrently (same suite: 130 s at -j4, 77 s at -j8). Use nextest for
+   anything beyond one module; the shipped `.config/nextest.toml` keeps PTY and process-heavy
+   suites capped at 2 threads, so do not override those groups without a reason.
 3. **Live drive** (done by the reviewer, not in CI): the release binary run in a Herdr pane
    against a real model via OpenRouter, the fixed task for the milestone, observed with `hc read`.
    Script: `scripts/live/` — commands that need keys read them from the environment only.
@@ -47,8 +52,10 @@ gate lock, caps itself at 4 build jobs and 4 test threads, runs `cargo fmt --che
 FAIL`; logs in `<scratch>/gate-<job>-<stamp>/`. A test that needed a retry is named in the summary, and
 `KELIR_GATE_STRICT_RETRIES=1` makes it fail the gate; the default keeps the gate green on the flakes STEER-9
 still owns, so a known flake is visible but does not block an unrelated landing. `cargo test --lib <module>`
-stays the fast loop; `scripts/gate.sh --quick` is fmt + clippy before a commit. Numbers and rejected
-options: `docs/BUILD.md`.
+stays the fast loop for an edit; `scripts/gate.sh --quick` is fmt + clippy before a commit. For a full
+integration run outside the gate use `cargo nextest run` (or `-j 8` on a 12-core box; the 4-thread
+shipped default is for when several workers share it) — never a serial `cargo test` over all targets.
+Numbers and rejected options: `docs/BUILD.md`.
 
 Do not run the stages by hand in parallel with another worker's gate: the lock is what keeps three workers on
 one desktop from flaking each other (STEER-9). If you must bypass it, `--no-lock` exists for a driver that
@@ -91,7 +98,9 @@ which has a console). Incident: 2026-11-19, 160+ stalled `bg-shim` jobs and thei
 The orchestrator drives M5-A through M11 without pausing for the maintainer's approval between
 milestones. That is the only thing "continuous" removes. Every milestone and every steering job still
 ends with: the gates on Windows **and** Linux (`cargo fmt --check`, `clippy -D warnings`, full
-`cargo test`, `scripts/gate.sh --linux=<machine>`), then a **fresh reviewer's verdict** in `docs/reviews/`
+`cargo nextest run` with doctests via `cargo test --doc`, `scripts/gate.sh --linux=<machine>`). Never
+satisfy this with bare `cargo test`: it runs the binaries serially and its parallel mode has flaked on
+this suite; nextest plus the shipped test groups is the verified path. Then a **fresh reviewer's verdict** in `docs/reviews/`
 (PASS, or fixes verified), then the retro pass, and only then the next one starts. A failing gate or a
 FAIL verdict blocks the next item; it is fixed first. Each landed milestone is recorded in
 `docs/PROGRESS.md`.
