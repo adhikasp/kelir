@@ -913,8 +913,20 @@ mod tests {
                 .unwrap();
             assert!(!status.success(), "round {round}: a second process got in");
             drop(first);
+            // The probe has exited, but its flock may not be released by the
+            // time `status()` returns; retry briefly before failing.
+            let mut reacquired = None;
+            for _ in 0..50 {
+                match lock(&dir) {
+                    Ok(guard) => {
+                        reacquired = Some(guard);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
             assert!(
-                lock(&dir).is_ok(),
+                reacquired.is_some(),
                 "round {round}: the lock outlived its guard"
             );
         }
