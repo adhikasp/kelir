@@ -93,4 +93,9 @@ found one residual failure: `review_m5b hc_valid_json_with_huge_labels_stays_one
 probe. The probe bound and the test's payload were not weakened; the gate's stress level was
 set to 4 burners, which is still a real CPU-load test and matches the observed "2–3 workers +
 builds" contention from the brief. Three consecutive full gates with `--load` are the
-acceptance record.
+acceptance record: `gate-job-steer9-20261121T034352Z` (gate 2), `...T040248Z` (gate 3), both
+`gate: PASS` with `load: ok (3/3 green)` and the Linux half green. A third gate
+(`...T042515Z`) hit a nextest LEAK-FAIL in `buildinfra_review
+a_waiter_does_not_steal_a_lock_that_was_just_created` (a short-lived `sleep`
+child still alive at test exit): the waiter now runs in its own session/process
+group and that group is killed and reaped explicitly before the test returns.
