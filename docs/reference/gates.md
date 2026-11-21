@@ -105,10 +105,11 @@ run's `KELIR_GATE_RUN` token, so a gate that detaches with `setsid` or a double
 fork is found too); no gate leaves a process behind, and none opens a console
 window on Windows. If kelir itself is killed mid-gate, a small `kelir gate-guard`
 process started beside the gate notices within about 0.2 s and kills the gate's
-tree (Unix). **Limits:** the token sweep reads `/proc`, so it is Linux only (on
-other Unix systems only the process group is killed); a gate that clears its own
-environment before detaching escapes the sweep, and one that crosses `ssh` or a
-container boundary is out of reach on any system. While a gate runs the session waits
+tree (Unix). **Limits:** the token sweep reads `/proc` on Linux and `ps` on
+macOS (on other Unix systems only the process group is killed); a gate that
+clears its own environment before detaching escapes the sweep on either system,
+and one that crosses `ssh` or a container boundary is out of reach on any
+system. While a gate runs the session waits
 for it, so a `stop` verb is read when the gate ends (at most 30 s).
 
 ## Limits: a gate cannot multiply

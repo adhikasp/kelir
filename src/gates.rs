@@ -123,14 +123,14 @@ fn run_token() -> String {
 /// group, and a killed session cannot orphan it (F2, F3 of the M8 review).
 #[cfg(unix)]
 pub mod reap {
-    #[cfg(target_os = "linux")]
     use super::RUN_ENV;
 
     /// Kill the gate's descendants (by parent links) and every process that
     /// carries the run's token in its environment, until none is left. The
-    /// token scan is Linux-only (`/proc`); elsewhere only the process group is
-    /// signalled by the caller, which `gates.md` states.
-    #[cfg(target_os = "linux")]
+    /// token scan reads `/proc` on Linux and one `ps axww -e` on macOS; on
+    /// other Unix systems the caller only signals the process group. No
+    /// process outside the tree (and never this one) is signalled.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn kill_run(root: u32, token: &str) {
         let me = std::process::id();
         let needle = format!("{RUN_ENV}={token}");
@@ -145,16 +145,16 @@ pub mod reap {
                     }
                 }
             }
-            for (pid, _) in &table {
-                if *pid != me && !victims.contains(pid) && marked(*pid, needle.as_bytes()) {
-                    victims.insert(*pid);
+            for pid in marked_pids(&needle) {
+                if pid != me {
+                    victims.insert(pid);
                 }
             }
             if victims.is_empty() {
                 return;
             }
             for pid in victims {
-                // Safe: SIGKILL to a pid read from /proc a moment ago.
+                // Safe: SIGKILL to a pid read from /proc or ps a moment ago.
                 unsafe {
                     libc::kill(pid as libc::pid_t, libc::SIGKILL);
                 }
@@ -163,10 +163,10 @@ pub mod reap {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub fn kill_run(_root: u32, _token: &str) {}
 
-    /// `(pid, ppid)` of every process.
+    /// `(pid, ppid)` of every process, read from `/proc` on Linux.
     #[cfg(target_os = "linux")]
     fn process_table() -> Vec<(u32, u32)> {
         let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -185,11 +185,78 @@ pub mod reap {
             .collect()
     }
 
+    /// macOS has no `/proc`: `ps` is the portable way to read the parent
+    /// links. Only pid/ppid are parsed (no command line, no environment).
+    #[cfg(target_os = "macos")]
+    fn process_table() -> Vec<(u32, u32)> {
+        let output = std::process::Command::new("ps")
+            .args(["-ax", "-o", "pid=,ppid="])
+            .output();
+        let Ok(output) = output else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid: u32 = fields.next()?.parse().ok()?;
+                let ppid: u32 = fields.next()?.parse().ok()?;
+                Some((pid, ppid))
+            })
+            .collect()
+    }
+
+    /// macOS: one `ps axww -e` gives both pids and their environments. Match
+    /// the one exact `KELIR_GATE_RUN=<token>` entry and never print or log the
+    /// output: the token is a secret for this run only. A whole-entry match
+    /// avoids a false hit on a different token with the same prefix.
+    #[cfg(target_os = "macos")]
+    fn marked_pids(needle: &str) -> std::collections::BTreeSet<u32> {
+        let Ok(output) = std::process::Command::new("ps")
+            .args(["axww", "-e", "-o", "pid=,command="])
+            .output()
+        else {
+            return std::collections::BTreeSet::new();
+        };
+        if !output.status.success() {
+            return std::collections::BTreeSet::new();
+        }
+        parse_marked_pids(&String::from_utf8_lossy(&output.stdout), needle)
+    }
+
+    /// Pure parser for the `ps` output: a line starts with the pid, the rest
+    /// is the command and its `ps e` environment. Only whole entries count.
+    #[cfg(target_os = "macos")]
+    fn parse_marked_pids(ps: &str, needle: &str) -> std::collections::BTreeSet<u32> {
+        ps.lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid: u32 = fields.next()?.parse().ok()?;
+                line.split_whitespace()
+                    .any(|entry| entry == needle)
+                    .then_some(pid)
+            })
+            .collect()
+    }
+
     #[cfg(target_os = "linux")]
-    fn marked(pid: u32, needle: &[u8]) -> bool {
-        std::fs::read(format!("/proc/{pid}/environ"))
-            .map(|bytes| bytes.split(|b| *b == 0).any(|entry| entry == needle))
-            .unwrap_or(false)
+    fn marked_pids(needle: &str) -> std::collections::BTreeSet<u32> {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return std::collections::BTreeSet::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+                std::fs::read(format!("/proc/{pid}/environ"))
+                    .map(|bytes| bytes.split(|b| *b == 0).any(|e| e == needle.as_bytes()))
+                    .unwrap_or(false)
+                    .then_some(pid)
+            })
+            .collect()
     }
 
     /// Owns the cleanup of one run: a guard process that outlives a killed
@@ -2036,6 +2103,26 @@ sleep 1
         assert!(project_trusted(&root.path().join("a"), &trusted));
         assert!(!project_trusted(&beside, &trusted));
         assert!(!project_trusted(&inside, &[]));
+    }
+
+    /// The macOS `ps e` parser matches only whole environment entries, never
+    /// a prefix or a command word. No process is spawned.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_token_sweep_matches_only_exact_entries() {
+        let ps = concat!(
+            "  1 /sbin/launchd\n",
+            " 42 bash gate.sh KELIR_GATE_RUN=token123 HOME=/x\n",
+            " 43 sleep 3 KELIR_GATE_RUN=token1234\n",
+            " 44 echo KELIR_GATE_RUN=token123 done\n",
+            " 45 sh -c KELIR_GATE_RUN=token123 sleep\n",
+        );
+        let found = reap::parse_marked_pids(ps, "KELIR_GATE_RUN=token123");
+        // Every whole field equal to the token counts, whether the `ps e`
+        // output carries it as a command word or an environment entry. The
+        // longer token (line 43) and an unknown one must never match.
+        assert_eq!(found, [42, 44, 45].into_iter().collect());
+        assert!(reap::parse_marked_pids(ps, "KELIR_GATE_RUN=zzz").is_empty());
     }
 
     /// F2/F3 (Linux): the sweep finds a process that left the group by its token.
