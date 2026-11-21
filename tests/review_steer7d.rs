@@ -203,7 +203,11 @@ async fn a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose(
     for id in ids {
         let _ = session.ctl(&["cancel", &id]).await;
     }
-    let _ = session.end().await;
+    // This is a negative assertion about teardown: the session is killed (not
+    // gracefully ended) so its kill-on-close guard reaps every process it owns
+    // before this test returns — `end()` parks that guard for promoted jobs,
+    // which nextest's leak checker flags under load (STEER-9).
+    session.kill().await;
     let _ = std::fs::remove_dir_all(&evil_dir);
     if let Some(line) = heard
         .as_deref()

@@ -99,3 +99,7 @@ acceptance record: `gate-job-steer9-20261121T034352Z` (gate 2), `...T040248Z` (g
 a_waiter_does_not_steal_a_lock_that_was_just_created` (a short-lived `sleep`
 child still alive at test exit): the waiter now runs in its own session/process
 group and that group is killed and reaped explicitly before the test returns.
+The next gate found `review_steer7d
+a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose`
+leaking its promoted `ping` jobs because `end()` parks the kill-on-close guard;
+that negative test now kills the session (reaping the guard) instead.
