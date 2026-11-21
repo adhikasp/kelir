@@ -66,8 +66,17 @@ pub fn record(state: State) -> String {
     out
 }
 
-/// `done` is the "finished while you were looking" word; a Telegram bridge
-/// pane has nobody looking, so there kelir reports `idle`.
+/// One terminal-title record (OSC 0), so a Herdr pane/tab names the session
+/// the way the facts row does. The tab-titles mod reads the pane's own title;
+/// this is the one source for both. ST-terminated, like the status record.
+pub fn title_record(title: &str) -> String {
+    // A title is derived from the first prompt and bounded to 60 chars; strip
+    // control characters defensively so a crafted prompt cannot inject a new
+    // OSC sequence into the terminal.
+    let clean: String = title.chars().filter(|c| !c.is_control()).take(80).collect();
+    format!("\x1b]0;{clean}{ST}")
+}
+
 pub fn state_for(outcome: State, telegram: bool) -> State {
     match (outcome, telegram) {
         (State::Done, true) => State::Idle,
@@ -132,6 +141,13 @@ impl Herdr {
     pub fn report(&mut self, state: State) {
         let state = state_for(state, self.telegram);
         let _ = self.out.write_all(record(state).as_bytes());
+        let _ = self.out.flush();
+    }
+
+    /// Write a prebuilt terminal record (the session derives OSC titles as
+    /// well as statuses so the two writers stay in one module).
+    pub fn write_record(&mut self, record: &str) {
+        let _ = self.out.write_all(record.as_bytes());
         let _ = self.out.flush();
     }
 
@@ -227,6 +243,41 @@ mod tests {
         assert!(is_telegram(Some("herdr-telegram")));
         assert!(!is_telegram(Some("vscode")));
         assert!(!is_telegram(None));
+    }
+
+    #[test]
+    fn title_record_is_osc_zero_st_terminated() {
+        assert_eq!(
+            title_record("Fix the input box"),
+            "\u{1b}]0;Fix the input box\u{1b}\\"
+        );
+    }
+
+    #[test]
+    fn title_record_strips_control_chars_so_a_prompt_cannot_inject_osc() {
+        // A crafted title with an embedded ST must not escape the OSC string.
+        // The embedded ESC bytes are stripped so no new OSC can start.
+        let record = title_record("ok\u{1b}]0;evil\u{1b}\\ tail");
+        assert_eq!(record, "\u{1b}]0;ok]0;evil\\ tail\u{1b}\\");
+        // Exactly one introducer and one terminator: the injected ESC is gone.
+        assert_eq!(record.matches("\u{1b}]").count(), 1);
+        assert_eq!(record.matches(ST).count(), 1);
+    }
+
+    #[test]
+    fn title_record_is_bounded() {
+        let long = "x".repeat(200);
+        let record = title_record(&long);
+        let payload = record.trim_start_matches("\u{1b}]0;").trim_end_matches(ST);
+        assert_eq!(payload.len(), 80);
+    }
+
+    #[test]
+    fn write_record_writes_prebuilt_bytes() {
+        let sink = Sink::default();
+        let mut herdr = Herdr::with_writer(false, sink.clone());
+        herdr.write_record("\u{1b}]0;hello\u{1b}\\");
+        assert_eq!(sink_text(&sink), "\u{1b}]0;hello\u{1b}\\");
     }
 
     #[test]

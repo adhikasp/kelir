@@ -28,6 +28,26 @@ pub fn now_ts() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
+/// A session's title, derived deterministically from its first prompt. No
+/// model call: a title is a label for a human, never part of the request, and
+/// spending tokens on one would break the cache-prefix story (design note §9).
+pub fn title_from_prompt(prompt: &str) -> String {
+    let first = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let flat: String = first.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = flat.trim();
+    if flat.is_empty() {
+        return "untitled".to_string();
+    }
+    let max = 60;
+    if flat.chars().count() <= max {
+        return flat.to_string();
+    }
+    format!("{}…", flat.chars().take(max - 1).collect::<String>())
+}
+
 /// A spilled payload: the event holds this object in place of the value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlobRef {
@@ -772,6 +792,11 @@ pub enum EventBody {
     SessionEnded {
         reason: String,
     },
+    /// A deterministic title derived from the session's first prompt. Written
+    /// once; later prompts do not change it. Never sent to the model.
+    SessionTitle {
+        title: String,
+    },
     /// A notification hook ran (M11): one event per event kind, with its
     /// outcome. Never part of the conversation the model reads.
     Notify {
@@ -850,6 +875,7 @@ impl LogEvent {
             EventBody::Resumed { .. } => "resumed",
             EventBody::Error { .. } => "error",
             EventBody::SessionEnded { .. } => "session_ended",
+            EventBody::SessionTitle { .. } => "session_title",
             EventBody::Warning { .. } => "warning",
             EventBody::Gate { .. } => "gate",
             EventBody::Notify { .. } => "notify",
@@ -1484,6 +1510,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
+    }
+
+    #[test]
+    fn a_title_is_the_first_prompt_line_flattened_and_bounded() {
+        assert_eq!(
+            title_from_prompt("  fix the  input gap\nand more"),
+            "fix the input gap"
+        );
+        assert_eq!(title_from_prompt("\n\n  "), "untitled");
+        let long = "a".repeat(200);
+        let title = title_from_prompt(&long);
+        assert_eq!(title.chars().count(), 60);
+        assert!(title.ends_with('…'));
     }
 
     #[test]

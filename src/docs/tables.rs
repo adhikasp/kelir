@@ -727,4 +727,9 @@ pub const EVENTS: &[EventDoc] = &[
         fields: "`reason`",
         written_by: "the end of the session",
     },
+    EventDoc {
+        name: "session_title",
+        fields: "`title`",
+        written_by: "the first human prompt, as a deterministic one-line label (no model call)",
+    },
 ];

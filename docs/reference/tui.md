@@ -19,16 +19,22 @@ image chips).
 |---|---|
 | live (3) | the tail of the streaming answer (markdown) or the open tool group |
 | state (1) | `● idle · ready`, `⠹ thinking 12s · waiting for the provider · esc stops`, … |
-| editor (3) | `› your message` in the user colour (cyan); the prompt dims while the agent works. Long prompts wrap onto the next editor row (prompt only on the first row); the window scrolls to keep the cursor visible |
-| facts (1) | `kelir working · model · 1.5k tok` — steps, cache and cost are not ambient |
+| editor (3+) | `› your message` in the user colour (cyan); the prompt dims while the agent works. Long prompts wrap onto the next editor row (prompt only on the first row) and the editor **grows** with the wrapped text (up to a cap) so the whole message is visible; the window scrolls to keep the cursor visible |
+| facts (1) | the session title (from the first prompt), `model · 1.5k tok` — steps, cache and cost are not ambient |
 
 A shorter terminal gives rows up in this order: the facts row, live rows, the
-editor down to one row; the state row is the last to go.
+editor down to one row; the state row is the last to go. Up and Down move
+between **visual** (wrapped) rows, keeping the display column you see.
+
+The session title is a short summary of the first prompt, recorded as a
+`session_title` event. It replaces the old `kelir idle`/`kelir working` prefix
+in the facts row and is written as the terminal/OSC title so a Herdr pane is
+named after the session. Before a first prompt, facts shows just model + tokens.
 
 ## The banner
 
 The banner is `kelir · provider · model`, `session <id>`, `cwd <path>`, the
-help line, the step cap when set, and a `resumed …` line after a resume. It carries **no** window line: the window compaction
+help line (`Enter sends · /help shows the commands`), the step cap when set, and a `resumed …` line after a resume. It carries **no** window line: the window compaction
 measures against is not ambient, and `state` (every `kelir ctl` verb's answer)
 reports `window`, `window_source` and `window_note` for anyone who asks.
 
@@ -73,9 +79,8 @@ A turn that ends **paused** or **in error** keeps its row after it ends (with
 the step cap or the provider's reason and the next action) and writes one
 outcome line (`⏸ paused · 3 steps · 4.8k tok`, no cost or timing); `done` ends
 on its prose and goes back to `● idle · ready`, and `stopped` writes one line
-and does the same. The facts row says `kelir idle` for a finished turn,
-`kelir paused`/`kelir error` for the two that need a human: one word for one
-state.
+and does the same. The facts row names the session title for a finished turn — the state row is
+where the phase word lives.
 
 Spinner and elapsed time exist only while working. Herdr's OSC 7501 word comes
 from the same state: thinking/writing/running/rate limited → `working`,

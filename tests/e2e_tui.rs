@@ -173,7 +173,7 @@ fn snapshot_the_idle_viewport() {
     row_eq(&screen, 2, "");
     row_eq(&screen, 3, " ● idle · ready");
     row_eq(&screen, 4, "›");
-    row_eq(&screen, 7, "kelir idle · 0 tok in");
+    row_eq(&screen, 7, "0 tok in");
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn snapshot_streaming_text_in_the_live_area() {
         "no literal markers: {committed:?}"
     );
     let facts = screen.lines().nth(7).unwrap_or_default();
-    assert!(facts.starts_with("kelir working · test/model"), "{facts:?}");
+    assert!(facts.starts_with("test/model"), "{facts:?}");
 }
 
 #[test]
@@ -255,7 +255,7 @@ fn snapshot_an_error() {
     assert!(state.contains("error"), "{screen:?}");
     assert!(state.contains("provider said no"), "{screen:?}");
     let facts = screen.lines().nth(7).unwrap_or_default();
-    assert!(facts.starts_with("kelir error"), "{facts:?}");
+    assert_eq!(facts.trim(), "test/model · 0 tok in", "{facts:?}");
 }
 
 /// Ctrl-O: the last call's output tail takes the whole area above the facts
@@ -291,7 +291,7 @@ fn snapshot_the_output_tail_view() {
     // The state row is still there (the overlay only takes the area above it).
     assert!(rows[7].starts_with("tail (Ctrl-O closes)"), "{screen}");
     assert!(
-        rows[7].starts_with("tail (Ctrl-O closes) · kelir idle"),
+        rows[7].starts_with("tail (Ctrl-O closes) · 0 tok in"),
         "{}",
         rows[7]
     );
@@ -319,7 +319,7 @@ fn snapshot_a_long_editor_line_wraps_across_its_rows() {
     assert!(rows[5].starts_with("  "), "row 5: {:?}", rows[5]);
     assert_eq!(rows[4].chars().count(), 60, "{}", rows[4]);
     assert_eq!(rows[5].trim_end().chars().count(), 24, "{}", rows[5]);
-    assert!(rows[7].starts_with("kelir idle"), "{}", rows[7]);
+    assert_eq!(rows[7], "0 tok in", "{}", rows[7]);
     // The live rows above are untouched.
     assert!(rows[0..3].iter().all(|row| row.is_empty()), "{screen:?}");
 }
@@ -1594,21 +1594,14 @@ async fn the_idle_status_line_stays_calm_even_with_a_cap() {
     let state = temp.path().join("state");
     let base_url = mock.base_url();
     let run = tokio::task::spawn_blocking(move || {
-        drive_in_a_pty(
-            cwd,
-            config,
-            state,
-            base_url,
-            b"",
-            vec!["kelir idle · 0 tok in".into()],
-        )
+        drive_in_a_pty(cwd, config, state, base_url, b"", vec!["0 tok in".into()])
     })
     .await
     .expect("the pty driver");
 
     assert_eq!(run.code, 0, "screen: {:?}", run.screen);
     assert!(
-        run.screen.contains("kelir idle · 0 tok in"),
+        run.screen.contains("0 tok in"),
         "the idle line is phase, model and tokens: {:?}",
         run.screen
     );

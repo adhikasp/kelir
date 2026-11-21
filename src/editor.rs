@@ -129,6 +129,31 @@ pub struct VisualRow {
     pub first: bool,
 }
 
+impl VisualRow {
+    /// Display columns before this row's first character on its logical line.
+    fn start_col(&self, line: &str) -> usize {
+        use unicode_width::UnicodeWidthChar as _;
+        line.chars()
+            .take(self.start)
+            .map(|c| c.width().unwrap_or(0))
+            .sum()
+    }
+}
+
+/// The offset into a slice of chars at (or just before) a display column.
+fn column_to_index_chars(chars: &[char], column: usize) -> usize {
+    use unicode_width::UnicodeWidthChar as _;
+    let mut used = 0usize;
+    for (index, c) in chars.iter().enumerate() {
+        let width = c.width().unwrap_or(0);
+        if used + width > column {
+            return index;
+        }
+        used += width;
+    }
+    chars.len()
+}
+
 impl Default for Editor {
     fn default() -> Self {
         Self {
@@ -397,6 +422,44 @@ impl Editor {
         (candidates.last().copied().unwrap_or(0), rows.len())
     }
 
+    /// The display column the cursor is on within its visual row, excluding
+    /// the prompt. Wide characters count two, matching [`Self::visual_rows`].
+    fn visual_column(&self) -> usize {
+        use unicode_width::UnicodeWidthChar as _;
+        let (visual, _) = self.cursor_visual();
+        let row = &self.visual_rows()[visual];
+        let before: usize = self.lines[self.row]
+            .chars()
+            .take(self.col)
+            .map(|c| c.width().unwrap_or(0))
+            .sum();
+        before.saturating_sub(row.start_col(&self.lines[self.row]))
+    }
+
+    /// Move one visual (wrapped) row, preserving the display column. Returns
+    /// false when there is no such row (the caller then falls back to history).
+    fn move_visual(&mut self, direction: isize) -> bool {
+        let rows = self.visual_rows();
+        let (visual, _) = self.cursor_visual();
+        let target = visual as isize + direction;
+        if target < 0 || target >= rows.len() as isize {
+            return false;
+        }
+        let row = rows[target as usize].clone();
+        // Keep the display column *within the current visual row*; that is
+        // what a person sees and follows when pressing up/down. Clamp to the
+        // target row's length.
+        let wanted = self.visual_column();
+        let chars: Vec<char> = self.lines[row.logical]
+            .chars()
+            .skip(row.start)
+            .take(row.end - row.start)
+            .collect();
+        self.col = row.start + column_to_index_chars(&chars, wanted);
+        self.row = row.logical;
+        true
+    }
+
     /// Apply one key.
     pub fn handle(&mut self, key: Key) -> Outcome {
         // A line feed that arrives as a character (a paste, an unusual
@@ -520,18 +583,14 @@ impl Editor {
                 Outcome::Edited
             }
             Key::Up => {
-                if self.row > 0 {
-                    self.row -= 1;
-                    self.col = self.col.min(self.lines[self.row].chars().count());
+                if self.move_visual(-1) {
                     Outcome::Edited
                 } else {
                     self.history_prev()
                 }
             }
             Key::Down => {
-                if self.row + 1 < self.lines.len() {
-                    self.row += 1;
-                    self.col = self.col.min(self.lines[self.row].chars().count());
+                if self.move_visual(1) {
                     Outcome::Edited
                 } else {
                     self.history_next()
@@ -997,6 +1056,45 @@ mod tests {
         assert_eq!(editor.cursor_display(), (2, 2));
         editor.handle(Key::Home);
         assert_eq!(editor.cursor_display(), (0, 2));
+    }
+
+    #[test]
+    fn up_down_follow_the_visual_column_on_wrapped_text() {
+        let mut editor = Editor::default();
+        editor.set_width(12); // 10 text columns: 26 chars wrap into 3 rows
+        type_text(&mut editor, "abcdefghijklmnopqrstuvwxyz");
+        // Cursor at the end of the last visual row (char 26).
+        assert_eq!(editor.cursor(), (0, 26));
+        assert_eq!(editor.cursor_display().0, 2);
+        // Up from the last row keeps the display column: 26 on row 2 sits at
+        // column 6, so on row 1 (chars 10..20) it lands at char 16.
+        editor.handle(Key::Up);
+        assert_eq!(editor.cursor(), (0, 16));
+        assert_eq!(editor.cursor_display(), (1, 8));
+        // Down returns to the same display column on the last row.
+        editor.handle(Key::Down);
+        assert_eq!(editor.cursor(), (0, 26));
+
+        // Move left to a mid-row column and go Up again: the visual column,
+        // not the logical index, is what stays the same.
+        editor.handle(Key::Left);
+        assert_eq!(editor.cursor(), (0, 25));
+        editor.handle(Key::Up);
+        assert_eq!(editor.cursor(), (0, 15));
+        assert_eq!(editor.cursor_display(), (1, 7));
+    }
+
+    #[test]
+    fn up_down_cross_logical_lines_at_a_wrap_boundary() {
+        let mut editor = Editor::default();
+        editor.set_width(12);
+        type_text(&mut editor, "abcdefghijklmnopqrst\nsecond");
+        // On the second logical line; Up crosses to the last visual row of
+        // the wrapped first line, keeping the display column.
+        assert_eq!(editor.cursor(), (1, 6));
+        editor.handle(Key::Up);
+        assert_eq!(editor.row, 0);
+        assert_eq!(editor.cursor_display().0, 1);
     }
 
     #[test]

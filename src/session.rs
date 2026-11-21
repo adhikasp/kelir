@@ -502,6 +502,9 @@ struct Session {
     /// The command-line task, held back until `session_start` gates ran and
     /// `prompt_submit` gates saw it: (text, delivery).
     initial_task: Option<(String, &'static str, &'static str)>,
+    /// Whether a `session_title` event has been written (or was present on
+    /// resume). The first human prompt names the session; later ones do not.
+    titled: bool,
     /// Problems found while reading gate declarations; logged once at start.
     gate_notes: Vec<String>,
 }
@@ -936,7 +939,7 @@ async fn drive(opts: Options) -> u8 {
             banner.push(tui::BannerLine::dim(line));
         }
         banner.push(tui::BannerLine::plain(
-            "Enter sends · Alt/Shift-Enter adds a line · /help shows the commands",
+            "Enter sends · /help shows the commands",
         ));
         // The cap is worth a banner line only when one is set: the status line
         // carries the count ("step 3/5") while a turn runs.
@@ -972,6 +975,15 @@ async fn drive(opts: Options) -> u8 {
                 // `attachments/…` in a prompt resolves.
                 handle.app.set_session_dir(session.dir.clone());
                 handle.app.set_session_id(session.id.clone());
+                // A resumed session's title was written when its first prompt
+                // arrived; show it from the first frame instead of waiting for
+                // a new prompt (which may never come).
+                if let Some(title) = session.events.iter().find_map(|event| match &event.body {
+                    crate::event::EventBody::SessionTitle { title } => Some(title.clone()),
+                    _ => None,
+                }) {
+                    handle.app.set_title(title);
+                }
                 session.ui = Some(to_tui.clone());
                 let task = tokio::spawn(handle.run());
                 // If the UI dies (a panic, a terminal error) the session ends
@@ -1765,6 +1777,11 @@ impl Session {
                 .as_ref()
                 .map(|read| read.events.clone())
                 .unwrap_or_default(),
+            titled: prepared.resume.as_ref().is_some_and(|read| {
+                read.events
+                    .iter()
+                    .any(|event| matches!(event.body, EventBody::SessionTitle { .. }))
+            }),
             cfg: prepared.cfg.clone(),
             provider_name: prepared.provider_name.clone(),
             model: prepared.model.clone(),
@@ -2357,6 +2374,16 @@ impl Session {
     /// seq the event is about to get.
     fn record(&mut self, body: EventBody) -> Result<LogEvent, String> {
         let seq = self.writer.next_seq();
+        let title = if !self.titled
+            && let EventBody::User { text, from, .. } = &body
+            && from != "cli"
+        {
+            Some(crate::event::title_from_prompt(
+                text.inline_str().unwrap_or(""),
+            ))
+        } else {
+            None
+        };
         let body = spill_payloads(body, &self.blobs, seq)?;
         let event = self
             .writer
@@ -2374,6 +2401,17 @@ impl Session {
         }
         self.tally.observe(event.seq, &event.body);
         self.events.push(event.clone());
+        // Name the session from its first human prompt. Deterministic, no model
+        // call (design note §9). Children and jobs get the same title as any
+        // other session; a `continue` note and a compaction do not rename it.
+        if let Some(title) = title {
+            self.titled = true;
+            self.record(EventBody::SessionTitle {
+                title: title.clone(),
+            })?;
+            self.emit(UiEvent::Title(title.clone()));
+            self.report_title(&title);
+        }
         Ok(event)
     }
 
@@ -2542,6 +2580,21 @@ impl Session {
             self.emit(UiEvent::Herdr { state });
         } else if let Some(herdr) = &mut self.herdr {
             herdr.report(state);
+        }
+    }
+
+    /// Set the Herdr pane title from the session title. In the TUI the record
+    /// travels with the other status records and is written between paints;
+    /// non-TUI paths write it here.
+    fn report_title(&mut self, title: &str) {
+        if self.herdr.is_none() {
+            return;
+        }
+        let record = crate::herdr::title_record(title);
+        if self.tui {
+            self.emit(UiEvent::TitleRecord(record));
+        } else if let Some(herdr) = &mut self.herdr {
+            herdr.write_record(&record);
         }
     }
 
@@ -6655,6 +6708,7 @@ mod tests {
             turn_blocked: false,
             turn_tool_calls: 0,
             initial_task: None,
+            titled: false,
             gate_notes: Vec::new(),
             kids: children::Kids::new("ses_1", Default::default(), None),
         }

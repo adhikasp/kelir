@@ -53,9 +53,21 @@ use crate::theme::Theme;
 pub const PROMPT_WIDTH: usize = 2;
 use crate::tools_view::{self, CallLine};
 
-/// Rows the inline viewport occupies: three live rows, the state row, three
-/// editor rows and the facts row.
+/// Rows the inline viewport occupies at its baseline: three live rows, the
+/// state row, three editor rows and the facts row. A short prompt makes the
+/// viewport *shorter* (no blank editor rows); a long one makes it taller so
+/// the full prompt stays visible.
 pub const VIEWPORT_HEIGHT: u16 = 8;
+/// Most rows the editor may occupy on its own. Beyond this the window scrolls
+/// to keep the cursor visible (the pane has to end somewhere).
+pub const MAX_EDITOR_ROWS: u16 = 12;
+
+/// The viewport height for an editor showing `editor_rows` wrapped rows: the
+/// three live rows, the state row and the facts row are constant; only the
+/// editor grows or shrinks. Kept between 5 and the screen height by the caller.
+pub fn viewport_height_for(editor_rows: u16) -> u16 {
+    5 + editor_rows.clamp(1, MAX_EDITOR_ROWS)
+}
 /// A second Ctrl-C within this window quits instead of stopping.
 pub const DOUBLE_CTRL_C: Duration = Duration::from_millis(1000);
 /// How far ahead a countdown is still a countdown. A slot wait is armed far in
@@ -166,6 +178,12 @@ pub enum UiEvent {
         outcome: String,
         final_text: String,
     },
+    /// The session's title, derived from the first prompt. Shown in the facts
+    /// row in place of the redundant `kelir idle` / `kelir working` prefix.
+    Title(String),
+    /// OSC terminal-title record for Herdr's pane title, written by the TUI
+    /// task alongside the other status records.
+    TitleRecord(String),
     /// The session is gone; draw once more and restore the terminal.
     Quit,
 }
@@ -230,6 +248,8 @@ pub struct Status {
     pub turn_steps: u32,
     pub limit: Option<u32>,
     pub phase: Phase,
+    /// The session title from its first prompt, when one has been sent.
+    pub title: String,
     /// The retry countdown: the line and when the wait ends. `None` when
     /// nothing is waiting.
     pub retrying: Option<(String, Instant)>,
@@ -251,6 +271,7 @@ impl Default for Status {
             turn_steps: 0,
             limit: None,
             phase: Phase::Idle,
+            title: String::new(),
             retrying: None,
         }
     }
@@ -300,7 +321,13 @@ fn status_word(status: &Status) -> &'static str {
 
 /// The facts row when nothing is waiting.
 fn facts_text(status: &Status) -> String {
-    let mut parts = vec![format!("kelir {}", status_word(status))];
+    // The state row already says whether kelir is idle or working. The facts
+    // row names the session instead: the first prompt's own words, or just the
+    // token count before one is sent.
+    let mut parts = Vec::new();
+    if !status.title.is_empty() {
+        parts.push(status.title.clone());
+    }
     if !status.model.is_empty() {
         parts.push(status.model.clone());
     }
@@ -328,7 +355,11 @@ pub fn facts_for_width(status: &Status, width: usize) -> String {
     fit(
         &format!(
             "{} · {} tok in",
-            status.phase.word(),
+            if status.title.is_empty() {
+                "kelir".to_string()
+            } else {
+                status.title.clone()
+            },
             tokens(status.last_prompt_tokens)
         ),
         width,
@@ -833,6 +864,12 @@ impl App {
     /// The session id, used on exit to print the exact resume command.
     pub fn set_session_id(&mut self, id: String) {
         self.session_id = Some(id);
+    }
+
+    /// Set the title from the session log (a resumed session already has one).
+    pub fn set_title(&mut self, title: String) {
+        self.status.title = title.clone();
+        self.status_records.push(crate::herdr::title_record(&title));
     }
 
     pub fn theme(&self) -> Theme {
@@ -1349,6 +1386,8 @@ impl App {
                 self.turn_summary(&outcome);
             }
             UiEvent::Herdr { state } => self.status_records.push(herdr::record(state)),
+            UiEvent::Title(title) => self.status.title = title,
+            UiEvent::TitleRecord(record) => self.status_records.push(record),
             UiEvent::Quit => self.quit = true,
         }
     }
@@ -1867,11 +1906,15 @@ fn layout_of(width: usize, height: usize) -> Areas {
     // live rows, then the editor down to one row; the state row is the last to
     // go, because a user who cannot see whether the agent is working has
     // nothing left.
+    // The editor takes exactly the rows the viewport reserved for it; the
+    // live rows take the rest. No spare editor rows are painted when the
+    // prompt is short — that was the blank gap above the input. The state and
+    // facts rows are each one row and only disappear on a very short screen.
     let facts_height = u16::from(area.height >= 6);
     let state_height = u16::from(area.height >= 2);
     let space = area.height.saturating_sub(facts_height + state_height);
-    let editor_height = 3.min(space.saturating_sub(1)).max(u16::from(space > 0));
-    let live_height = space.saturating_sub(editor_height);
+    let live_height = space.saturating_sub(1).min(3);
+    let editor_height = space.saturating_sub(live_height);
 
     let live = Rect::new(area.x, area.y, area.width, live_height);
     let state = Rect::new(area.x, live.y + live_height, area.width, state_height);
@@ -2077,6 +2120,11 @@ pub struct Tui {
     tick: Option<Instant>,
     /// When the last frame went out, for the frame cap.
     last_paint: Option<Instant>,
+    /// Rows the current inline viewport was created with. When the editor
+    /// wraps to more (or shrinks to fewer) rows, `draw` rebuilds the terminal
+    /// at this many rows so the whole prompt is visible and no blank editor
+    /// row sits above the input.
+    viewport_rows: u16,
 }
 
 enum Step {
@@ -2194,6 +2242,7 @@ pub fn start(
         keys,
         tick: None,
         last_paint: None,
+        viewport_rows: VIEWPORT_HEIGHT.min(height),
     })
 }
 
@@ -2335,6 +2384,29 @@ impl Tui {
         let _ = self.terminal.autoresize();
     }
 
+    /// Rebuild the inline viewport at a new height while keeping its top row
+    /// anchored. The terminal owns the rows above the viewport (committed
+    /// scrollback), so we clear only our own rows, move the cursor to their
+    /// top, and let ratatui anchor the fresh inline viewport there.
+    fn rebuild_viewport(&mut self, rows: u16) -> std::io::Result<()> {
+        let top = VIEWPORT_Y.load(Ordering::Relaxed);
+        let mut stdout = std::io::stdout();
+        if top != u16::MAX {
+            let _ = ratatui::crossterm::execute!(
+                stdout,
+                MoveTo(0, top),
+                Clear(ClearType::FromCursorDown)
+            );
+        }
+        let _ = ratatui::crossterm::execute!(stdout, MoveTo(0, top.min(u16::MAX - 1)));
+        let _ = stdout.flush();
+        self.terminal = ratatui::try_init_with_options(ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Inline(rows),
+        })?;
+        self.viewport_rows = rows;
+        Ok(())
+    }
+
     /// Write the committed rows above the viewport, inside synchronised output
     /// so a frame is never torn.
     fn flush_scroll(&mut self) -> std::io::Result<()> {
@@ -2378,6 +2450,21 @@ impl Tui {
     /// One frame, wrapped in synchronised output: terminals that do not know
     /// the sequence ignore it, so there is no capability probing.
     fn draw(&mut self) -> std::io::Result<()> {
+        // The editor may have wrapped onto more rows since the last frame.
+        // Rebuild the inline viewport at exactly the height the content needs:
+        // five fixed rows (three live, state, facts) plus the editor's visual
+        // rows. Without this, a short prompt leaves blank editor rows above
+        // the input and a long one is clipped.
+        let width = self.app.width.max(1);
+        self.app.editor.set_width(width);
+        let wanted = viewport_height_for(self.app.editor.visual_rows().len() as u16).min(
+            ratatui::crossterm::terminal::size()
+                .map(|(_, h)| h)
+                .unwrap_or(u16::MAX),
+        );
+        if wanted != self.viewport_rows {
+            self.rebuild_viewport(wanted)?;
+        }
         let mut stdout = std::io::stdout();
         let _ = ratatui::crossterm::execute!(
             stdout,
@@ -2538,11 +2625,9 @@ mod tests {
             limit: None,
             phase: Phase::Working,
             retrying: None,
+            title: String::new(),
         };
-        assert_eq!(
-            status_text(&status),
-            "kelir working · deepseek/deepseek-chat · 1.2k tok in"
-        );
+        assert_eq!(status_text(&status), "deepseek/deepseek-chat · 1.2k tok in");
         assert!(!status_text(&status).contains("step"));
         assert!(!status_text(&status).contains("cache"));
         assert!(!status_text(&status).contains('$'));
@@ -2552,8 +2637,13 @@ mod tests {
             phase: Phase::Done,
             ..Status::default()
         };
+        let titled = Status {
+            title: "fix the input gap".into(),
+            ..Status::default()
+        };
+        assert_eq!(status_text(&titled), "fix the input gap · 0 tok in");
         assert!(
-            status_text(&done).starts_with("kelir idle"),
+            !status_text(&done).contains("kelir idle"),
             "{}",
             status_text(&done)
         );
@@ -2657,7 +2747,7 @@ mod tests {
         );
         assert!(row.contains("say continue"), "{row}");
         assert!(!row.contains("say continue to retry"), "{row}");
-        assert!(status_text(&app.status).starts_with("kelir paused"));
+        assert_eq!(status_text(&app.status), "test/model · 0 tok in");
     }
 
     /// The countdown draws: it is one row, clipped to the width, and never
@@ -2720,15 +2810,13 @@ mod tests {
             limit: None,
             phase: Phase::Working,
             retrying: None,
+            title: String::new(),
         };
-        assert_eq!(
-            status_text(&status),
-            "kelir working · deepseek/deepseek-chat · 1.2k tok in"
-        );
+        assert_eq!(status_text(&status), "deepseek/deepseek-chat · 1.2k tok in");
         // The state row carries the running count now, so the facts row does
         // not repeat it.
         assert!(!status_text(&status).contains("running"));
-        assert_eq!(status_text(&Status::default()), "kelir idle · 0 tok in");
+        assert_eq!(status_text(&Status::default()), "0 tok in");
     }
 
     /// A step counter is not ambient: neither the count nor a cap belongs in
@@ -2778,7 +2866,7 @@ mod tests {
                 "width {width}: {text:?}"
             );
             assert!(
-                text.contains("kelir") || text.contains("working"),
+                text.contains("tok") || text.contains("deepseek") || text.contains("…"),
                 "{text:?}"
             );
         }
@@ -3770,16 +3858,35 @@ mod tests {
     /// from the frame's own origin, or every row is clipped (a real terminal
     /// showed a stale screen because of exactly this).
     #[test]
+    fn the_viewport_grows_with_the_editor_and_never_leaves_blank_input_rows() {
+        // Five fixed rows plus exactly the editor's visual rows: a short
+        // prompt has one editor row and no blank row above the input; a long
+        // one gets as many rows as it needs, up to the cap.
+        assert_eq!(viewport_height_for(1), 6);
+        assert_eq!(viewport_height_for(3), 8);
+        assert_eq!(viewport_height_for(5), 10);
+        assert_eq!(viewport_height_for(99), 5 + MAX_EDITOR_ROWS);
+        for rows in 1..=12 {
+            let height = viewport_height_for(rows);
+            let areas = layout(Rect::new(0, 0, 80, height));
+            assert_eq!(areas.editor.height, rows, "rows {rows}");
+            assert_eq!(areas.live.height, 3, "rows {rows}");
+            assert_eq!(areas.state.height, 1, "rows {rows}");
+            assert_eq!(areas.facts.height, 1, "rows {rows}");
+        }
+    }
+
+    #[test]
     fn every_row_is_positioned_from_the_frames_own_origin() {
         for top in [0u16, 6, 40] {
-            let areas = layout(Rect::new(3, top, 80, 8));
+            let areas = layout(Rect::new(3, top, 80, 6));
             assert_eq!(areas.live.y, top, "live");
             assert_eq!(areas.state.y, top + 3, "state");
             assert_eq!(areas.editor.y, top + 4, "editor");
-            assert_eq!(areas.facts.y, top + 7, "facts");
+            assert_eq!(areas.facts.y, top + 5, "facts");
             for row in [areas.live, areas.state, areas.editor, areas.facts] {
                 assert_eq!(row.x, 3, "x follows the frame");
-                assert!(row.bottom() <= top + 8, "row inside the frame: {row:?}");
+                assert!(row.bottom() <= top + 6, "row inside the frame: {row:?}");
             }
         }
     }

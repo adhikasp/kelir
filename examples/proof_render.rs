@@ -1,0 +1,61 @@
+//! Proof: render the idle viewport and a long wrapped prompt as plain text.
+use kelir::editor::Key;
+use kelir::tui::{self, App, Press, UiEvent};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
+use tokio::sync::mpsc;
+
+fn channels() -> (
+    mpsc::UnboundedSender<UiEvent>,
+    mpsc::UnboundedSender<kelir::ipc::Incoming>,
+) {
+    (mpsc::unbounded_channel().0, mpsc::unbounded_channel().0)
+}
+
+fn dump(app: &mut App, height: u16, label: &str) {
+    let backend = TestBackend::new(80, height);
+    let mut terminal = Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Inline(height),
+        },
+    )
+    .unwrap();
+    terminal.draw(|frame| tui::render(app, frame)).unwrap();
+    println!("===== {label} =====");
+    let buffer = terminal.backend().buffer();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            if let Some(cell) = buffer.cell(Rect::new(x, y, 1, 1).as_position()) {
+                line.push_str(cell.symbol());
+            }
+        }
+        println!("|{}|", line.trim_end());
+    }
+}
+
+fn main() {
+    let (to_tui, verbs) = channels();
+    let mut app = App::new(80, 24, to_tui, verbs, String::new());
+    // One finished answer so the live area has content above the editor.
+    app.apply(UiEvent::Assistant {
+        text: "Here is the answer to your first question.".into(),
+    });
+    app.apply(UiEvent::TurnEnded {
+        outcome: "done".into(),
+        final_text: "Here is the answer to your first question.".into(),
+    });
+    app.apply(UiEvent::Title("Fix the input box gap".into()));
+    let h = tui::viewport_height_for(app.editor.visual_rows().len() as u16);
+    dump(&mut app, h, "idle with title");
+
+    // A long prompt that wraps across several visual rows at width 80.
+    let text = "Please refactor the editor so that the cursor moves by visual row when the prompt wraps across several lines and the input box grows to keep the whole message visible at all times. Also remove the redundant status prefix, add an automatic session title from the first prompt, show it in the facts row, and make the Herdr pane title match it too.";
+    for c in text.chars() {
+        app.press(Press::Edit(Key::Char(c)));
+    }
+    let h2 = tui::viewport_height_for(app.editor.visual_rows().len() as u16);
+    dump(&mut app, h2, "long wrapped prompt");
+}

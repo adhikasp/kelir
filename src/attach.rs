@@ -136,6 +136,9 @@ pub fn from_event(event: &LogEvent) -> Vec<UiEvent> {
             turn_steps: *step,
             limit: None,
         }),
+        EventBody::SessionTitle { title } => {
+            out.push(UiEvent::Title(title.clone()));
+        }
         EventBody::Assistant { text, .. } => {
             let text = payload_text(text);
             if !text.is_empty() {
@@ -640,13 +643,16 @@ mod tests {
                 reason: None,
                 final_text: Payload::text("done"),
             },
+            EventBody::SessionTitle {
+                title: "a title".into(),
+            },
         ];
         let mut viewer = Viewer::new(80, 24);
         for body in bodies {
             let _ = viewer.apply(&event(body));
         }
-        assert_eq!(viewer.applied, 5);
-        assert!(viewer.status_line().contains("kelir"));
+        assert_eq!(viewer.applied, 6);
+        assert!(viewer.status_line().contains("tok in"));
         assert!(!viewer.plain_lines().is_empty());
     }
 }
