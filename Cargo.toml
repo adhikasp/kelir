@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A small, steerable coding-agent harness"
+authors = ["kelir contributors"]
+readme = "README.md"
+repository = "https://github.com/<owner>/kelir"
+homepage = "https://github.com/<owner>/kelir"
+documentation = "https://docs.rs/kelir"
+keywords = ["agent", "cli", "coding", "harness", "tui"]
+categories = ["command-line-utilities", "development-tools"]
 license = "MIT"
 
 [dependencies]
