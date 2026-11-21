@@ -194,7 +194,8 @@ mod tests {
     use super::*;
 
     fn temp_sessions(name: &str, ids: &[&str]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kelir-paths-{}-{name}", ulid::Ulid::new()));
+        let dir =
+            std::env::temp_dir().join(format!("kelir-paths-{}-{name}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         for id in ids {
             std::fs::create_dir_all(dir.join(id)).unwrap();

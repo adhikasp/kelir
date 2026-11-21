@@ -209,7 +209,7 @@ fn r17_torn_multibyte_tail_keeps_every_good_byte_and_the_exact_torn_suffix() {
     use kelir::channel::{Message, Spool};
     let dir = std::env::temp_dir().join(format!(
         "kelir-m10fix-torn-{}",
-        ulid::Ulid::new().to_string().to_lowercase()
+        ulid::Ulid::generate().to_string().to_lowercase()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let msg = |id: &str| Message {

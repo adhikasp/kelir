@@ -582,7 +582,8 @@ mod tests {
     }
 
     fn temp_out(name: &str, bytes: &[u8]) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("kelir-partial-{name}-{}", ulid::Ulid::new()));
+        let path =
+            std::env::temp_dir().join(format!("kelir-partial-{name}-{}", ulid::Ulid::generate()));
         std::fs::write(&path, bytes).unwrap();
         path
     }
@@ -614,7 +615,7 @@ mod tests {
 
     #[test]
     fn partial_output_of_a_missing_file_is_an_error() {
-        let path = std::env::temp_dir().join(format!("kelir-none-{}", ulid::Ulid::new()));
+        let path = std::env::temp_dir().join(format!("kelir-none-{}", ulid::Ulid::generate()));
         assert!(partial(&path).is_err());
     }
 

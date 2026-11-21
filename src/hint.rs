@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn the_catalogue_lists_parsed_skills_once_each() {
-        let dir = std::env::temp_dir().join(format!("kelir-hint-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-hint-{}", ulid::Ulid::generate()));
         let skills = dir.join(".kelir").join("skills");
         for (name, text) in [
             (

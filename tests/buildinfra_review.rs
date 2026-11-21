@@ -35,8 +35,34 @@ fn fwd(path: &std::path::Path) -> String {
 
 /// `bash -c <script>` with no console window and the session's KELIR_* scrubbed.
 fn run_bash(script: &str, env: &[(&str, String)]) -> Output {
+    // BSD `touch -d` takes an absolute ISO timestamp; GNU's takes a relative
+    // string like '500 hours ago'. Give every script a portable `age_hours`
+    // helper and route the test scripts through it (buildinfra-review tests
+    // age throwaway work dirs to make the prune script treat them as stale).
+    let script = format!(
+        r#"
+age_hours() {{
+  n="$1"; shift
+  if date -d "$n hours ago" +%Y-%m-%dT%H:%M:%S >/dev/null 2>&1; then
+    touch -d "$n hours ago" "$@"
+  else
+    stamp=$(date -v-"${{n}}H" +%Y-%m-%dT%H:%M:%S)
+    touch -d "$stamp" "$@"
+  fi
+}}
+age_link_hours() {{
+  n="$1"; shift
+  if date -d "$n hours ago" +%Y-%m-%dT%H:%M:%S >/dev/null 2>&1; then
+    touch -h -d "$n hours ago" "$@"
+  else
+    stamp=$(date -v-"${{n}}H" +%Y-%m-%dT%H:%M:%S)
+    touch -h -d "$stamp" "$@"
+  fi
+}}
+{script}"#
+    );
     let mut cmd = Command::new(bash());
-    cmd.args(["-c", script]);
+    cmd.args(["-c", &script]);
     support::scrub_std(&mut cmd);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -68,10 +94,8 @@ fn text(out: &Output) -> String {
 /// reads the parsed values.
 #[test]
 fn release_is_pinned_by_value_not_by_substring() {
-    let manifest: toml::Value = std::fs::read_to_string(repo().join("Cargo.toml"))
-        .unwrap()
-        .parse()
-        .unwrap();
+    let manifest: toml::Value =
+        toml::from_str(&std::fs::read_to_string(repo().join("Cargo.toml")).unwrap()).unwrap();
     let release = &manifest["profile"]["release"];
     assert_eq!(
         release["lto"].as_bool(),
@@ -118,7 +142,7 @@ H='{home}'
 for j in alpha alpha-2 alpha-3 beta gamma delta; do
   mkdir -p "$H/kelir-verify-$j/src-tree"
   printf 'token t\ncreated x\njob %s\n' "$j" > "$H/kelir-verify-$j/.kelir-workdir"
-  touch -d '500 hours ago' "$H/kelir-verify-$j"
+  age_hours 500 "$H/kelir-verify-$j"
 done
 HOME="$H" KEEP=9 YES=0 JOB='' bash -c "$FAR"
 "#
@@ -154,7 +178,7 @@ fn prune(setup: &str, keep: &str, force: &str, job: &str) -> (Output, tempfile::
 const DECOYS: &str = r#"
 mkdir -p "$H/kelir-verify-notes/.git" "$H/kelir-verifyXYZ" "$H/precious" "$H/target-of-link"
 echo mine > "$H/kelir-verify-notes/README"; echo u > "$H/kelir-verifyXYZ/u"; echo p > "$H/target-of-link/p"
-touch -d '500 hours ago' "$H/kelir-verify-notes" "$H/kelir-verifyXYZ"
+age_hours 500 "$H/kelir-verify-notes" "$H/kelir-verifyXYZ"
 "#;
 
 /// A user's own directory whose name merely starts `kelir-verify` has no marker
@@ -177,7 +201,7 @@ fn prune_only_removes_directories_it_created() {
 fn prune_job_cannot_name_a_path() {
     let setup = r#"
 mkdir -p "$H/kelir-verify-alpha" "$H/Documents"; echo d > "$H/Documents/d.txt"
-touch -d '500 hours ago' "$H/kelir-verify-alpha" "$H/Documents"
+age_hours 500 "$H/kelir-verify-alpha" "$H/Documents"
 "#;
     let (out, dir) = prune(setup, "0", "1", "alpha/../Documents");
     assert!(
@@ -215,7 +239,7 @@ fn a_waiter_does_not_steal_a_lock_that_was_just_created() {
 L='{base}/t.lock'; OUT='{base}/out.txt'; : > "$OUT"
 sleep 60 & LIVE=$!
 mkdir "$L"; printf 'pid %s\nstarted x\ncmd y\n' "$LIVE" > "$L/owner"
-KELIR_GATE_LOCK="$L" setsid bash '{gate_lock}' --timeout 40 -- echo WAITER-RAN > "$OUT" 2>&1 &
+KELIR_GATE_LOCK="$L" bash '{gate_lock}' --timeout 40 -- echo WAITER-RAN > "$OUT" 2>&1 &
 W=$!
 # Wait for the gate to announce that it is waiting, not for a clock: under load
 # the old fixed 30 s both wasted time and could still be too short. The message
@@ -230,7 +254,7 @@ rm -f "$L/owner"; touch "$L"
 # Give the waiter one full poll (the script naps 2 s between looks) plus slack.
 sleep 5                               # ... and has not written its owner file yet
 if grep -q WAITER-RAN "$OUT"; then echo STOLEN; else echo KEPT; fi
-kill "$LIVE" 2>/dev/null; kill -- -$W 2>/dev/null
+kill "$LIVE" 2>/dev/null; kill "$W" 2>/dev/null
 wait "$LIVE" 2>/dev/null; wait "$W" 2>/dev/null; true
 "#
     );
@@ -420,7 +444,7 @@ H='{home}'
 mkwork() {{
   mkdir -p "$H/$1/src-tree" "$H/$1/logs"
   printf 'token t.%s\ncreated x\njob %s\ncreator remote-check.sh\n' "$$" "$1" > "$H/$1/.kelir-workdir"
-  echo x > "$H/$1/k.b64"; touch -d "$2 hours ago" "$H/$1"
+  echo x > "$H/$1/k.b64"; age_hours "$2" "$H/$1"
 }}
 mkwork kelir-verify-alpha 500
 mkwork kelir-verify-alpha 400
@@ -436,9 +460,9 @@ echo p > "$H/target-of-link/p"
 # shortcut. If the platform still cannot, the decoy is skipped rather than
 # silently weaker.
 MSYS=winsymlinks:nativestrict ln -s "$H/target-of-link" "$H/kelir-verify-linky" 2>/dev/null || true
-touch -d '500 hours ago' "$H/kelir-verify-notes" "$H/kelir-verify-noMk" \
+age_hours 500 "$H/kelir-verify-notes" "$H/kelir-verify-noMk" \
   "$H/kelir-verify-away" "$H/sub/kelir-verify-nested"
-touch -h -d '500 hours ago' "$H/kelir-verify-linky"
+age_link_hours 500 "$H/kelir-verify-linky"
 HOME="$H" KEEP=0 YES=1 JOB='' bash -c "$FAR"
 echo "--- survivors:"
 for d in kelir-verify-notes kelir-verify-noMk kelir-verify-away sub/kelir-verify-nested target-of-link; do
@@ -479,7 +503,7 @@ H='{home}'
 mkwork() {{
   mkdir -p "$H/$1/src-tree"
   printf 'token t\ncreated x\njob %s\n' "$1" > "$H/$1/.kelir-workdir"
-  touch -d "$2 hours ago" "$H/$1"
+  age_hours "$2" "$H/$1"
 }}
 mkwork kelir-verify-alpha 100
 mkwork kelir-verify-alpha 90
@@ -515,7 +539,7 @@ fn prune_removes_nothing_without_yes() {
 H='{home}'
 mkdir -p "$H/kelir-verify-old/src-tree"
 printf 'token t\ncreated x\njob old\n' > "$H/kelir-verify-old/.kelir-workdir"
-touch -d '500 hours ago' "$H/kelir-verify-old"
+age_hours 500 "$H/kelir-verify-old"
 HOME="$H" KEEP=0 YES=0 JOB='' bash -c "$FAR"
 [ -d "$H/kelir-verify-old" ] && echo "survived the dry run"
 "#

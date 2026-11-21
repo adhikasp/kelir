@@ -694,8 +694,8 @@ fn the_embedded_reference_fits_its_size_budget() {
     }
     // 145 KB: room for the reference to grow, small enough that it is a
     // rounding error next to the binary's budget.
-    // M10 adds the channel topic and five config keys; 145 KB is still a
-    // rounding error next to the binary's 20 MB budget (measured: ~139 KB).
+    // M10/M11 topics, the session-title docs and the load-project-agents
+    // example gate landed near 143.5 KB; 140 KB was already too tight for main.
     assert!(body <= 145 * 1024, "the reference is {body} bytes");
 }
 

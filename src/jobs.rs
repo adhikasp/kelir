@@ -700,7 +700,7 @@ pub fn history(dir: &Path, n: usize) -> Vec<Value> {
 /// A `runs.jsonl` record for a run that did not start.
 pub fn skipped_record(job: &str, holder_pid: Option<u32>) -> Value {
     json!({
-        "run": format!("run_{}", ulid::Ulid::new().to_string().to_lowercase()),
+        "run": format!("run_{}", ulid::Ulid::generate().to_string().to_lowercase()),
         "job": job,
         "outcome": "skipped",
         "started": crate::event::now_ts(),

@@ -902,7 +902,9 @@ fn overlay(base: RawProvider, user: RawProvider) -> RawProvider {
 fn read_toml(path: &Path) -> Result<toml::Value, ConfigError> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| ConfigError(format!("cannot read {}: {error}", path.display())))?;
-    text.parse::<toml::Value>()
+    // toml 1.x: `str::parse::<Value>()` parses a single TOML *value*, not a
+    // document; `from_str` parses the document into a Value (table).
+    toml::from_str(&text)
         .map_err(|error| ConfigError(format!("invalid TOML in {}: {error}", path.display())))
 }
 
@@ -1036,7 +1038,7 @@ mod tests {
     use std::io::Write;
 
     fn temp_config(text: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kelir-config-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-config-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let mut file = std::fs::File::create(&path).unwrap();
@@ -1269,8 +1271,8 @@ extra = 3
 
     #[test]
     fn deep_merge_keeps_sibling_keys() {
-        let mut base: toml::Value = "a = 1\n[t]\nx = 1\ny = 2\n".parse().unwrap();
-        let over: toml::Value = "a = 2\n[t]\ny = 3\n".parse().unwrap();
+        let mut base: toml::Value = toml::from_str("a = 1\n[t]\nx = 1\ny = 2\n").unwrap();
+        let over: toml::Value = toml::from_str("a = 2\n[t]\ny = 3\n").unwrap();
         merge(&mut base, over);
         assert_eq!(base["a"].as_integer(), Some(2));
         assert_eq!(base["t"]["x"].as_integer(), Some(1));
@@ -1509,7 +1511,7 @@ max_concurrent_requests = 0
 
     #[test]
     fn a_prompt_file_records_the_path_it_came_from() {
-        let dir = std::env::temp_dir().join(format!("kelir-prompt-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-prompt-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let prompt = dir.join("my-prompt.txt");
         std::fs::write(&prompt, "EXPLICIT BASE").unwrap();
@@ -1528,7 +1530,7 @@ max_concurrent_requests = 0
 
     #[test]
     fn a_compact_prompt_file_replaces_the_default() {
-        let dir = std::env::temp_dir().join(format!("kelir-compact-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-compact-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let prompt = dir.join("compact.md");
         std::fs::write(&prompt, "SUMMARISE HARD").unwrap();

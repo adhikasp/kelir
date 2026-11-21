@@ -792,7 +792,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kelir-ipc-{name}-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-ipc-{name}-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -853,7 +853,7 @@ mod tests {
         let dir = if fits(&dir.join(SOCKET_FILE)) {
             dir
         } else {
-            let short = std::env::temp_dir().join(format!("k-{}", ulid::Ulid::new()));
+            let short = std::env::temp_dir().join(format!("k-{}", ulid::Ulid::generate()));
             std::fs::create_dir_all(&short).unwrap();
             short
         };
@@ -893,14 +893,25 @@ mod tests {
 
     /// N3: only one process can hold a session's log, and releasing the guard
     /// releases the lock. Repeated, because a one-shot pass proves nothing.
+    ///
+    /// The contender is a separate process: on BSD/macOS `flock` locks are on
+    /// the *file*, so a second descriptor opened in this process shares the
+    /// lock and closing any descriptor drops it for everyone. A second `kelir`
+    /// process is the real contract, and it behaves the same on Linux.
     #[cfg(unix)]
     #[test]
     fn only_one_holder_can_lock_a_session() {
         let dir = temp_dir("lock");
         for round in 0..5 {
             let first = lock(&dir).unwrap_or_else(|error| panic!("round {round}: {error}"));
-            assert!(lock(&dir).is_err(), "round {round}: a second holder got in");
-            assert!(lock(&dir).is_err(), "round {round}: a third holder got in");
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "ipc::tests::lock_probe", "--nocapture"])
+                .env("KELIR_IPC_LOCK_PROBE", &dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(!status.success(), "round {round}: a second process got in");
             drop(first);
             assert!(
                 lock(&dir).is_ok(),
@@ -908,6 +919,18 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Helper for `only_one_holder_can_lock_a_session`: succeed only if the
+    /// lock is free. A normal test run has no test hook and exits immediately.
+    #[cfg(unix)]
+    #[test]
+    fn lock_probe() {
+        let Some(dir) = crate::envs::var("KELIR_IPC_LOCK_PROBE") else {
+            return;
+        };
+        let lock = lock(std::path::Path::new(&dir)).expect("probe acquired the lock");
+        drop(lock);
     }
 
     /// The race the connect-then-bind check cannot win: two lockers start

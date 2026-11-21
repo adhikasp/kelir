@@ -2942,7 +2942,7 @@ impl Session {
             .get("parent_call_id")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let mcp_id = format!("mcp_{}", ulid::Ulid::new().to_string().to_lowercase());
+        let mcp_id = format!("mcp_{}", ulid::Ulid::generate().to_string().to_lowercase());
         if let Err(message) = self.record(EventBody::McpStarted {
             mcp_id: mcp_id.clone(),
             server: server.clone(),
@@ -6457,7 +6457,7 @@ fn one_line(text: &str) -> String {
 }
 
 fn new_session_id() -> String {
-    format!("ses_{}", ulid::Ulid::new().to_string().to_lowercase())
+    format!("ses_{}", ulid::Ulid::generate().to_string().to_lowercase())
 }
 
 /// Render the system prompt once, from the config and the cwd's sources.
@@ -6604,7 +6604,7 @@ mod tests {
     /// A session with nothing but a model set: enough for a request to be built
     /// from the empty fold.
     fn test_session(model: &str) -> Session {
-        let dir = std::env::temp_dir().join(format!("kelir-session-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-session-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let writer = EventLog::open(&dir.join("events.jsonl")).unwrap();
         Session {
@@ -6716,7 +6716,7 @@ mod tests {
     }
 
     fn dir_for_trust() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("kelir-trust-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("kelir-trust-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

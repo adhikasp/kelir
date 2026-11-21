@@ -265,6 +265,10 @@ pub const VARS: &[Var] = &[
         "KELIR_SHELL_RAW",
         "`cr`: send a POSIX script raw, keeping CRLF terminators",
     ),
+    hook(
+        "KELIR_IPC_LOCK_PROBE",
+        "a session dir: a test child tries to take the lock there, to prove a second process is refused (the IPC tests)",
+    ),
 ];
 
 /// The registry entry for `name`, if kelir declares it.

@@ -290,7 +290,9 @@ for d in "$HOME"/kelir-verify*; do
     esac
   fi
   n=$((n + 1))
-  mtime=$(stat -c %Y "$d" 2>/dev/null || echo 0)
+  # GNU stat uses -c %Y; BSD/macOS uses -f %m. Without this fallback every
+  # dir reads mtime 0 on macOS and the prune treats fresh work dirs as stale.
+  mtime=$(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null || echo 0)
   size=$(du -sm "$d" 2>/dev/null | cut -f1)
   recs+=("$mtime$tab${size:-0}$tab$d")
 done

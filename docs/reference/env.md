@@ -80,6 +80,7 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_CRASH_AT` | abort at a named point (`before_append`, …): the crash tests |
 | `KELIR_TEST_PANIC` | panic once the TUI owns the terminal, to prove the restore path |
 | `KELIR_SHELL_RAW` | `cr`: send a POSIX script raw, keeping CRLF terminators |
+| `KELIR_IPC_LOCK_PROBE` | a session dir: a test child tries to take the lock there, to prove a second process is refused (the IPC tests) |
 <!-- /generated -->
 
 ## Notes

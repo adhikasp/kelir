@@ -188,7 +188,7 @@ pub async fn run(args: JobRunArgs) -> u8 {
         );
     }
 
-    let run_id = format!("run_{}", ulid::Ulid::new().to_string().to_lowercase());
+    let run_id = format!("run_{}", ulid::Ulid::generate().to_string().to_lowercase());
     let started = crate::event::now_ts();
     let shell = cfg
         .as_ref()

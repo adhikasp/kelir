@@ -217,7 +217,7 @@ mod tests {
     use serde_json::json;
 
     fn dir(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("kelir-render-{name}-{}", ulid::Ulid::new()))
+        std::env::temp_dir().join(format!("kelir-render-{name}-{}", ulid::Ulid::generate()))
     }
 
     #[test]
