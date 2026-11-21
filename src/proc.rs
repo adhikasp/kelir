@@ -354,7 +354,7 @@ pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
                 offset,
             ))
         })
-        .map(|t| std::time::SystemTime::from(t))
+        .map(std::time::SystemTime::from)
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
