@@ -62,9 +62,84 @@ pub fn truncate_bytes(text: &str, max: usize) -> String {
     text[..end].to_string()
 }
 
+/// A path we can actually spawn as the current kelir binary.
+///
+/// `current_exe()` on Linux reads `/proc/self/exe`. After `cargo install
+/// --force` replaces the on-disk binary, that read becomes a literal path
+/// ending in ` (deleted)` and the file is gone, so `Command::new` on it fails
+/// ENOENT — every self-spawn (bash shim, child host, gate guard) then dies and
+/// the live session looks broken. Detect that and resolve `kelir` on PATH
+/// instead, which now points at the replacement binary.
+fn usable_exe(path: &std::path::Path) -> bool {
+    !path.to_string_lossy().ends_with(" (deleted)") && path.is_file()
+}
+
+/// Resolve a runnable path to this binary for self-spawns, falling back to a
+/// PATH lookup when `current_exe()` is stale (binary replaced under a live
+/// session). See [`usable_exe`].
+pub fn self_binary() -> Result<std::path::PathBuf, String> {
+    let current = std::env::current_exe().ok();
+    resolve_binary(
+        current.as_deref(),
+        &crate::envs::var_os("PATH").unwrap_or_default(),
+    )
+}
+
+/// Pure core of [`self_binary`], so the stale-exe fallback can be tested.
+fn resolve_binary(
+    current: Option<&std::path::Path>,
+    path: &std::ffi::OsStr,
+) -> Result<std::path::PathBuf, String> {
+    if let Some(path) = current.filter(|p| usable_exe(p)) {
+        return Ok(path.to_path_buf());
+    }
+    let name = if cfg!(windows) { "kelir.exe" } else { "kelir" };
+    std::env::split_paths(path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| usable_exe(candidate))
+        .ok_or_else(|| "cannot find the kelir binary (current_exe is stale and not on PATH)".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stale_or_deleted_exe_is_rejected() {
+        // A real, existing path is usable.
+        let here = std::env::current_exe().unwrap();
+        assert!(usable_exe(&here));
+        // A deleted path (the literal suffix Linux puts on /proc/self/exe) is not.
+        let deleted = std::path::PathBuf::from(format!("{}/kelir (deleted)", "/usr/bin"));
+        assert!(!usable_exe(&deleted));
+        // A path that does not exist is not.
+        assert!(!usable_exe(std::path::Path::new(
+            "/no/such/kelir-binary-xyz"
+        )));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolver_falls_back_to_path_when_current_exe_is_stale() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("kelir");
+        std::fs::write(&binary, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::ffi::OsString::from(dir.path().as_os_str());
+
+        // A stale current_exe (deleted suffix) must resolve via PATH.
+        let stale = std::path::PathBuf::from("/old/kelir (deleted)");
+        assert_eq!(resolve_binary(Some(&stale), &path).unwrap(), binary);
+
+        // A usable current_exe wins over PATH.
+        let good = std::env::current_exe().unwrap();
+        assert_eq!(resolve_binary(Some(&good), &path).unwrap(), good);
+
+        // No usable exe anywhere is an error.
+        let empty = std::ffi::OsString::new();
+        assert!(resolve_binary(Some(&stale), &empty).is_err());
+    }
 
     #[test]
     fn fnv_is_stable_and_hex() {
