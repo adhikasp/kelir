@@ -103,3 +103,6 @@ The next gate found `review_steer7d
 a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose`
 leaking its promoted `ping` jobs because `end()` parks the kill-on-close guard;
 that negative test now kills the session (reaping the guard) instead.
+
+Final acceptance: `gate-job-steer9-20261121T051953Z` and the two gates following it are
+`gate: PASS` with `load: ok (3/3 green)` and the Linux half green, no retried tests.
