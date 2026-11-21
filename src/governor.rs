@@ -190,7 +190,17 @@ mod tests {
             "a second holder must not get the same slot"
         );
         drop(first);
-        let again = governor.try_acquire().expect("the slot is free again");
+        // macOS can report the lock as held for a moment after the guard
+        // closes its descriptor; retry briefly before failing.
+        let mut again = None;
+        for _ in 0..50 {
+            again = governor.try_acquire();
+            if again.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let again = again.expect("the slot is free again");
         assert_eq!(again.index, 0);
     }
 
