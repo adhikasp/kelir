@@ -6277,7 +6277,13 @@ fn print_result_event(
     let _ = lock.flush();
 }
 
+/// The head of a settled call in headless output: a `bash` call's
+/// human-readable `description` when it supplied one, otherwise the command
+/// (or an `edit` path). The full args stay in the log and in `/expand`.
 fn compact_input(args: &Value) -> String {
+    if let Some(label) = crate::tools_view::description(args) {
+        return label;
+    }
     let text = args
         .get("command")
         .and_then(|value| value.as_str())
@@ -6620,6 +6626,19 @@ mod tests {
         assert_eq!(compact_input(&json!({"command": "ls -la"})), "ls -la");
         assert_eq!(compact_input(&json!({"path": "src/a.rs"})), "src/a.rs");
         assert_eq!(compact_input(&json!({"x": 1})), "{\"x\":1}");
+        // A supplied description is what the human reads; the full command
+        // still goes to the log and to `/expand`.
+        assert_eq!(
+            compact_input(&json!({
+                "command": "ls -la",
+                "description": "list the working directory"
+            })),
+            "list the working directory"
+        );
+        assert_eq!(
+            compact_input(&json!({"command": "ls -la", "description": ""})),
+            "ls -la"
+        );
     }
 
     #[test]
