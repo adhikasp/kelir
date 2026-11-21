@@ -351,7 +351,10 @@ pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
         if !converted.status.success() {
             return None;
         }
-        let seconds: u64 = String::from_utf8_lossy(&converted.stdout).trim().parse().ok()?;
+        let seconds: u64 = String::from_utf8_lossy(&converted.stdout)
+            .trim()
+            .parse()
+            .ok()?;
         Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
