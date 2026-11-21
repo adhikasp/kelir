@@ -108,6 +108,10 @@ Run a task to completion
 | `--child` | nothing | Start the task as a child of the session this tool call runs in (it needs `KELIR_SOCK`): the child's final text is this command's stdout |
 | `--background` | nothing | With `--child`: return a handle at once; the child's completion wakes the parent at its next boundary |
 | `--name` | `<NAME>` | Run in the named session: create it, or resume it and add the task as a new message (`a-z`, `0-9`, `.`, `_`, `-`; up to 64 characters) |
+| `--single-flight` | nothing | Take the name's single-flight lock, write its STATUS, and skip with exit 75 when another run holds the lock. Needs `--name` |
+| `--timeout` | `<D>` | Wall-clock deadline for the run (`90`, `30m`, `2h`, `1d`, `1w`): stop the turn at the deadline and exit 124. Needs `--single-flight` |
+| `--task-file` | `<PATH>` | Read the task from a file instead of the command line |
+| `--fresh` | nothing | Start a fresh session and rebind the name, carrying its last summary or answer into the new one (scheduler decides when: a weekly cron line) |
 
 ### `kelir ask`
 
@@ -243,13 +247,6 @@ Stop a child (and everything below it): `kill <session>` or `kill --tree`
 |---|---|---|
 | `<SESSION>` | `<SESSION>` | The child (session id or a unique prefix) to stop, with everything below it |
 | `--tree` | nothing | Stop every descendant of this session (from a tool call), or of the session named |
-
-### `kelir job`
-
-Jobs for a scheduler to call: run, status, history
-
-| flag | takes | what it does |
-|---|---|---|
 
 ### `kelir sessions`
 

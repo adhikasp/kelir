@@ -48,8 +48,6 @@ pub enum Command {
     Ls(LsArgs),
     /// Stop a child (and everything below it): `kill <session>` or `kill --tree`.
     Kill(KillArgs),
-    /// Jobs for a scheduler to call: run, status, history.
-    Job(JobArgs),
     /// Named sessions: ls, rename, forget.
     Sessions(SessionsArgs),
     /// Headless channel bridge: serve conversations from channel MCP servers.
@@ -117,6 +115,21 @@ pub struct RunArgs {
     /// new message (`a-z`, `0-9`, `.`, `_`, `-`; up to 64 characters).
     #[arg(long, value_name = "NAME", conflicts_with_all = ["resume", "child"])]
     pub name: Option<String>,
+    /// Take the name's single-flight lock, write its STATUS, and skip with exit
+    /// 75 when another run holds the lock. Needs `--name`.
+    #[arg(long, requires = "name")]
+    pub single_flight: bool,
+    /// Wall-clock deadline for the run (`90`, `30m`, `2h`, `1d`, `1w`): stop the
+    /// turn at the deadline and exit 124. Needs `--single-flight`.
+    #[arg(long, value_name = "D", requires = "single_flight")]
+    pub timeout: Option<String>,
+    /// Read the task from a file instead of the command line.
+    #[arg(long, value_name = "PATH", conflicts_with = "task")]
+    pub task_file: Option<PathBuf>,
+    /// Start a fresh session and rebind the name, carrying its last summary or
+    /// answer into the new one (scheduler decides when: a weekly cron line).
+    #[arg(long, requires = "name")]
+    pub fresh: bool,
 }
 
 /// `kelir resume <id> [task]`: continue a session from its log.
@@ -274,63 +287,6 @@ pub struct KillArgs {
     /// session named.
     #[arg(long)]
     pub tree: bool,
-}
-
-/// `kelir job …`: what a scheduler (cron, a systemd timer, Task Scheduler) runs.
-#[derive(Debug, Args, Clone)]
-pub struct JobArgs {
-    #[command(subcommand)]
-    pub command: JobCommand,
-}
-
-#[derive(Debug, Subcommand, Clone)]
-pub enum JobCommand {
-    /// Run the job `<name>` from `jobs.toml`, resuming its named session. A run
-    /// that overlaps another exits 75.
-    Run(JobRunArgs),
-    /// Print a job's STATUS (all jobs when no name is given).
-    Status(JobStatusArgs),
-    /// List a job's last runs.
-    History(JobHistoryArgs),
-}
-
-#[derive(Debug, Args, Clone)]
-#[command(
-    after_help = "Exit codes: 0 done (or paused), 1 error or stopped, 2 usage, 75 skipped because another run holds the lock, 124 timeout."
-)]
-pub struct JobRunArgs {
-    /// The job's name in `jobs.toml`.
-    #[arg(value_name = "NAME")]
-    pub name: String,
-    #[command(flatten)]
-    pub common: CommonArgs,
-    /// If another run of this job is in progress, wait up to this many seconds
-    /// for it instead of skipping.
-    #[arg(long, value_name = "SECONDS")]
-    pub wait: Option<u64>,
-}
-
-#[derive(Debug, Args, Clone)]
-pub struct JobStatusArgs {
-    /// The job (all jobs when omitted).
-    #[arg(value_name = "NAME")]
-    pub name: Option<String>,
-    /// Print JSON instead of text.
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-pub struct JobHistoryArgs {
-    /// The job.
-    #[arg(value_name = "NAME")]
-    pub name: String,
-    /// How many runs to show.
-    #[arg(short = 'n', long, value_name = "N", default_value_t = 10)]
-    pub last: usize,
-    /// Print JSON instead of a table.
-    #[arg(long)]
-    pub json: bool,
 }
 
 /// `kelir sessions …`.

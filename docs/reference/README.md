@@ -27,7 +27,7 @@ else has to move with it.
 | `mcp` | `mcp.toml`, `kelir mcp`, exit codes, the session broker, channel servers |
 | `channels` | `kelir channel`, the bridge protocol, spool, fallback replies, `/stop` |
 | `gates` | `[gates]`, skill-bound gates, the six events, allow/deny/rewrite, fail-open, the example gates |
-| `jobs` | named sessions, `kelir job run`, `jobs.toml`, single-flight, STATUS, scheduler recipes |
+| `jobs` | named sessions, `kelir run --name --single-flight`, the name lock, STATUS, scheduler recipes |
 | `children` | `kelir run --child`, `brief`, `ls`, `kill`: children, caps, the tree, the trust model |
 | `providers` | the two providers: key sources, retries, limits, model metadata |
 | `sources-and-skills` | instruction files, skills, hints, memory, attachments |

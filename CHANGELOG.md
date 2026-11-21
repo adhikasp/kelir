@@ -50,6 +50,14 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
   with `prices` or `warn_cost` gets the ordinary unread-key treatment (no
   special "removed" message); old logs are not read by the rewritten binary.
 
+### Rewrite (issue #16)
+
+- Cut `jobs.toml` and `kelir job run|status|history`; scheduled runs are
+  `kelir run --name --single-flight` with `--timeout`, `--task-file` and
+  `--fresh`. STATUS is one `names/<name>.status.json` per name, no history.
+- Removed module-static run state: the deadline watcher and finalize path
+  share a per-run `Arc<RunState>`.
+
 ### Changed
 
 - The gate now caps itself at four build jobs and four test threads, takes a

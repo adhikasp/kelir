@@ -13,9 +13,22 @@ use crate::atomic::{Published, publish_new, write_atomic};
 pub const MAX_LEN: usize = 64;
 pub const OWNER_FILE: &str = "owner";
 
+/// Files in `names/` that belong to a scheduled run, not to a name binding.
+/// Keeping them out of `validate()` stops a name from clobbering a STATUS record
+/// (and a STATUS record from being listed as a phantom name).
+fn is_run_file(name: &str) -> bool {
+    name.ends_with(".status.json")
+        || name.ends_with(".lock")
+        || name.contains(".stale.")
+        || name.ends_with(".lock.stale")
+}
+
 /// `[a-z0-9._-]{1,64}`, and nothing that would be a different file on another platform: it starts with
 /// a letter or digit, does not end in a dot (Windows drops it), and is not a device name.
 pub fn validate(name: &str) -> Result<(), String> {
+    if is_run_file(name) {
+        return Err(format!("`{name}` is reserved for scheduled-run files"));
+    }
     if name.is_empty() || name.len() > MAX_LEN {
         return Err(format!(
             "a name is 1 to {MAX_LEN} characters of a-z, 0-9, `.`, `_` and `-` (got {} characters)",
@@ -205,7 +218,7 @@ pub fn list() -> Vec<Listed> {
         .flatten()
         .flatten()
         .filter_map(|item| item.file_name().into_string().ok())
-        .filter(|name| !name.starts_with('.') && validate(name).is_ok())
+        .filter(|name| !name.starts_with('.') && !is_run_file(name) && validate(name).is_ok())
         .map(|name| {
             let entry = match std::fs::read_to_string(path_of(&name)) {
                 Ok(text) => parse(&text),
@@ -320,6 +333,9 @@ pub struct Summary {
     pub cache_hit_ratio: Option<f64>,
     pub pid: Option<u32>,
     pub parent: Option<String>,
+    /// Outcome of the last single-flight run bound to this name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 /// Summarise one session from its log, or `None` when it has none.
@@ -374,6 +390,11 @@ pub fn summarize(id: &str, names: &std::collections::HashMap<String, String>) ->
         cache_hit_ratio: (tally.prompt > 0).then(|| tally.cached as f64 / tally.prompt as f64),
         pid,
         parent,
+        outcome: names
+            .iter()
+            .find(|(session, _)| session.as_str() == id)
+            .and_then(|(_, name)| crate::namedrun::read_status(name).ok().flatten())
+            .map(|status| status.outcome),
     })
 }
 
@@ -423,7 +444,7 @@ pub fn sessions_ls(args: &crate::cli::SessionsLsArgs) -> u8 {
                 {
                     dangling.push(Summary {
                         session: entry.session,
-                        name: Some(row.name),
+                        name: Some(row.name.clone()),
                         state: "new".into(),
                         model: String::new(),
                         started: entry.created.clone(),
@@ -433,6 +454,10 @@ pub fn sessions_ls(args: &crate::cli::SessionsLsArgs) -> u8 {
                         cache_hit_ratio: None,
                         pid: None,
                         parent: None,
+                        outcome: crate::namedrun::read_status(&row.name)
+                            .ok()
+                            .flatten()
+                            .map(|status| status.outcome),
                     });
                 }
             }
@@ -453,19 +478,20 @@ pub fn sessions_ls(args: &crate::cli::SessionsLsArgs) -> u8 {
         return 0;
     }
     println!(
-        "{:<20} {:<30} {:<9} {:<20} {:>9} {:>6}",
-        "NAME", "SESSION", "STATE", "LAST ACTIVITY", "TOKENS", "CACHE"
+        "{:<20} {:<30} {:<9} {:<20} {:>9} {:>6} {:<9}",
+        "NAME", "SESSION", "STATE", "LAST ACTIVITY", "TOKENS", "CACHE", "OUTCOME"
     );
     for row in &rows {
         println!(
-            "{:<20} {:<30} {:<9} {:<20} {:>9} {:>6}",
+            "{:<20} {:<30} {:<9} {:<20} {:>9} {:>6} {:<9}",
             row.name.as_deref().unwrap_or("-"),
             row.session,
             row.state,
             row.last_activity.chars().take(19).collect::<String>(),
             row.tokens,
             row.cache_hit_ratio
-                .map_or("-".to_string(), |ratio| format!("{:.0}%", ratio * 100.0))
+                .map_or("-".to_string(), |ratio| format!("{:.0}%", ratio * 100.0)),
+            row.outcome.as_deref().unwrap_or("-")
         );
     }
     0
@@ -545,6 +571,10 @@ mod tests {
             "nul.txt",
             "com1",
             "lpt9",
+            "nightly.status.json",
+            "nightly.lock",
+            "nightly.stale.123.01abc.456",
+            "nightly.lock.stale.deadbeef",
             &"x".repeat(65),
         ] {
             assert!(validate(bad).is_err(), "{bad:?} should be refused");

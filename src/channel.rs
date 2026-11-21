@@ -18,6 +18,33 @@ use serde_json::{Value, json};
 use crate::mcp::broker::Broker;
 use crate::mcp::rpc::Notification;
 
+/// The task of every session in this process comes from a remote chat user.
+/// Set once by `kelir channel`; no scheduler or CLI run sets it.
+static CHANNEL_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_channel_mode() -> bool {
+    CHANNEL_MODE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+tokio::task_local! {
+    /// The id of the session a channel turn is starting, scoped to that
+    /// turn's task so concurrent conversations cannot take each other's id.
+    static NEXT_ID: std::cell::RefCell<Option<String>>;
+}
+
+pub async fn with_next_id<F: std::future::Future>(id: String, future: F) -> F::Output {
+    NEXT_ID
+        .scope(std::cell::RefCell::new(Some(id)), future)
+        .await
+}
+
+pub fn next_id() -> Option<String> {
+    NEXT_ID
+        .try_with(|slot| slot.borrow_mut().take())
+        .ok()
+        .flatten()
+}
+
 /// Default reply tool on the channel server.
 pub const DEFAULT_REPLY_TOOL: &str = "reply";
 /// The capability kelir declares to a bridge so it starts sending.
@@ -807,11 +834,14 @@ async fn start_turn(
             resume: None,
             child: false,
             background: false,
-            // No `name`: that installs the process-wide plan, which only one run per process may do. The
-            // name is already bound above and the id travels in the turn's own task-local slot.
+            // The id travels in the turn's own task-local slot.
             name: None,
+            fresh: false,
+            single_flight: false,
+            timeout: None,
+            task_file: None,
         };
-        crate::jobs::with_next_id(started, crate::session::run(task)).await
+        crate::channel::with_next_id(started, crate::session::run(task)).await
     };
     if code != 0 {
         return Err(format!("session {session} exited {code}"));
@@ -1150,7 +1180,7 @@ async fn drive(args: crate::cli::ChannelArgs) -> u8 {
             return 1;
         }
     };
-    crate::jobs::set_channel_mode();
+    CHANNEL_MODE.store(true, std::sync::atomic::Ordering::SeqCst);
     let state = crate::paths::state_dir();
     let session_dir = state.join("channel");
     let _ = crate::paths::create_private_dir(&session_dir);

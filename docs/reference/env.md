@@ -60,11 +60,6 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_GATE_EVENT` | set for a gate only: the event it was started for (`turn_end`, …); a gate never gets `KELIR_TOKEN`, `KELIR_SOCK` or a provider key |
 | `KELIR_GATE_NAME` | set for a gate only: the gate's name, as the `gate` event records it |
 | `KELIR_GATE_RUN` | set for a gate only: a token unique to this gate run, so kelir can find and kill what the gate left behind (a `setsid` daemon); do not clear it |
-| `KELIR_JOB` | set for a job's notify hook only: the job's name |
-| `KELIR_JOB_OUTCOME` | set for a notify hook only: `done`, `error`, `stopped`, `timeout` or `paused` |
-| `KELIR_JOB_RUN` | set for a notify hook only: the run's id (`run_…`) |
-| `KELIR_JOB_SESSION` | set for a notify hook only: the id of the session the run used |
-| `KELIR_JOB_STATUS` | set for a notify hook only: the path of the job's `STATUS.json` |
 | `KELIR_NOTIFY_EVENT` | set for an event hook only: the event that fired (`turn_done`, `error`, `paused`, `bg_settled`, `child_settled`) |
 | `KELIR_NOTIFY_MESSAGE` | set for an event hook only: the terminal record's message (title and event kind) |
 

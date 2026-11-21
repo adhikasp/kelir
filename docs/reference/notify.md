@@ -22,8 +22,7 @@ rate_limit = 5           # seconds between two records of the same kind; default
 title = "kelir"          # prefix of the terminal message
 ```
 
-A per-job `notify` list in `jobs.toml` is a **different, older mechanism**: those commands run once
-at job run end (`jobrun.rs`; see `docs/reference/jobs.md`), and are not fired by the five event kinds
+A scheduled run with `--single-flight` writes a STATUS file (`src/namedrun.rs`; see `docs/reference/jobs.md`) when the run ends. It is not a `notify` hook and is not fired by the five event kinds
 above. To get a hook on `bg_settled` or `child_settled`, put it in `[notify]` in `config.toml`.
 Hooks run through the
 configured shell with a **scrubbed environment** (the platform allow-list, plus `KELIR_NOTIFY_EVENT`

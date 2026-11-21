@@ -50,7 +50,6 @@ const CONTINUE_NOTE: &str = "[kelir] the session was interrupted between turns; 
                              from where it stopped.";
 
 mod children;
-mod jobhooks;
 
 type Inbox = mpsc::UnboundedReceiver<Incoming>;
 
@@ -78,10 +77,16 @@ pub async fn run(args: RunArgs) -> u8 {
             return 2;
         }
     }
+    let single = args.single_flight || args.timeout.is_some() || args.fresh;
+    if single {
+        return crate::namedrun::run(args).await;
+    }
     let mut resume = args.resume;
+    let mut bound_id = None;
     if let Some(name) = &args.name {
-        match crate::jobrun::plan_for_name(name) {
-            Ok(id) => resume = id,
+        match crate::names::resolve_for_run(name) {
+            Ok(crate::names::Target::Resume(id)) => resume = Some(id),
+            Ok(crate::names::Target::New(id)) => bound_id = Some(id),
             Err(message) => {
                 eprintln!("kelir: {message}");
                 return 1;
@@ -96,22 +101,41 @@ pub async fn run(args: RunArgs) -> u8 {
         common: args.common,
         task: args.task,
         resume,
+        id: bound_id,
         child: None,
+        run_options: None,
     })
     .await
 }
 
-/// `kelir job run`: one turn of a named session, its final text on stdout.
-pub async fn run_as_job(common: CommonArgs, task: String, resume: Option<String>) -> u8 {
+/// The fields a scheduled run hands to the loop, plus the resolved session id.
+pub struct RunRequest {
+    pub common: CommonArgs,
+    pub json: bool,
+    pub keep: bool,
+    pub ask: bool,
+    pub task: Vec<String>,
+}
+
+/// Run one turn of a session with the scheduled-run options passed in
+/// explicitly (no process-wide plan or mutable static).
+pub async fn run_with_options(
+    request: RunRequest,
+    options: crate::namedrun::RunOptions,
+    resume: Option<String>,
+    sources: Vec<(String, EventBody)>,
+) -> u8 {
     drive(Options {
-        json: false,
-        ask: true,
-        keep: false,
+        json: request.json,
+        ask: request.ask,
+        keep: request.keep,
         tui: false,
-        common,
-        task: vec![task],
+        common: request.common,
+        task: request.task,
         resume,
+        id: options.planned_id.clone(),
         child: None,
+        run_options: Some((options, sources)),
     })
     .await
 }
@@ -126,7 +150,9 @@ pub async fn resume(args: ResumeArgs) -> u8 {
         common: args.common,
         task: args.task,
         resume: Some(args.id),
+        id: None,
         child: None,
+        run_options: None,
     })
     .await
 }
@@ -140,7 +166,9 @@ pub async fn ask(args: AskArgs) -> u8 {
         common: args.common,
         task: args.question,
         resume: None,
+        id: None,
         child: None,
+        run_options: None,
     })
     .await
 }
@@ -166,7 +194,9 @@ pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
         // message. `TuiArgs` has no positional, so there is none to reject.
         task: Vec::new(),
         resume: args.resume,
+        id: None,
         child: None,
+        run_options: None,
     })
     .await
 }
@@ -198,7 +228,9 @@ pub async fn child_host() -> u8 {
         // A brief is the parent's log, copied and cut: it continues that log
         // with the question.
         resume: brief.then(|| handoff.session.clone()),
+        id: None,
         child: Some(handoff),
+        run_options: None,
     })
     .await
 }
@@ -243,8 +275,13 @@ struct Options {
     task: Vec<String>,
     /// Continue this session (id or unique prefix) from its log.
     resume: Option<String>,
+    /// A bound name's session id for a fresh run; otherwise a new id is minted.
+    id: Option<String>,
     /// This process is a child session: who started it, where the root is.
     child: Option<crate::child::Handoff>,
+    /// A scheduled run's explicit options and pre-task sources, or `None` for
+    /// an ordinary interactive/CLI run.
+    run_options: Option<(crate::namedrun::RunOptions, Vec<(String, EventBody)>)>,
 }
 
 enum Failure {
@@ -294,6 +331,10 @@ struct Prepared {
     tui: bool,
     herdr: Option<Herdr>,
     resume: Option<Reopened>,
+    /// Sources a scheduled run passes in explicitly.
+    run_sources: Vec<EventBody>,
+    task_from: &'static str,
+    step_cap: Option<u32>,
     /// Set when this process is a child session.
     child: Option<crate::child::Handoff>,
     /// The window compaction measures against, and where it came from
@@ -400,6 +441,12 @@ struct Session {
     /// The tool names frozen at `session_started`; a resumed session sends the
     /// same list, so its cache prefix is unchanged.
     tool_names: Vec<String>,
+    /// Sources a scheduled run passes in explicitly (a `--fresh` carry hand-over).
+    run_sources: Vec<EventBody>,
+    /// Who a task's `user` event says it came from.
+    task_from: &'static str,
+    /// The session-wide step cap a scheduled run declared, if any.
+    step_cap: Option<u32>,
     /// This process reopened the log instead of writing `session_started`.
     resumed: bool,
     /// The log was not closed cleanly: a turn is continued on resume.
@@ -734,7 +781,9 @@ async fn drive(opts: Options) -> u8 {
         Ok(prepared) => prepared,
         Err(failure) => {
             eprintln!("kelir: {}", failure.message());
-            crate::jobs::note_error(failure.message());
+            if let Some((_, sources)) = &opts.run_options {
+                let _ = sources;
+            }
             // A scripted caller reads the result line, even for a usage error.
             if opts.json {
                 print_result_event(
@@ -828,8 +877,11 @@ async fn drive(opts: Options) -> u8 {
 
     // A job's wall clock: at the deadline the turn is told to stop; if the loop
     // is still there after a grace period, the process is forced out.
-    if let Some(deadline) = crate::jobs::plan().and_then(|plan| plan.deadline) {
-        watch_deadline(deadline, tx.clone(), trust.token().to_string());
+    if let Some((options, _)) = &opts.run_options
+        && let Some(deadline) = options.deadline
+        && let Some(state) = options.state.clone()
+    {
+        watch_deadline(deadline, tx.clone(), trust.token().to_string(), state);
     }
 
     // The interactive session: the TUI runs as a task beside the loop, and all
@@ -991,12 +1043,15 @@ fn watch_parent(
 
 /// A job's timeout: stop the turn at the deadline, force the process out if the
 /// loop does not end by itself.
-fn watch_deadline(deadline: Duration, tx: mpsc::UnboundedSender<Incoming>, token: String) {
+fn watch_deadline(
+    deadline: Duration,
+    tx: mpsc::UnboundedSender<Incoming>,
+    token: String,
+    state: std::sync::Arc<crate::namedrun::RunState>,
+) {
     tokio::spawn(async move {
         tokio::time::sleep(deadline).await;
-        if let Some(plan) = crate::jobs::plan() {
-            plan.timed_out.store(true, Ordering::SeqCst);
-        }
+        state.note_timeout();
         let (reply, _answer) = oneshot::channel();
         let _ = tx.send(Incoming {
             request: Request::new("stop", json!({"reason": "job timeout"}), "job-timeout")
@@ -1012,8 +1067,8 @@ fn watch_deadline(deadline: Duration, tx: mpsc::UnboundedSender<Incoming>, token
             reply,
             action: None,
         });
-        tokio::time::sleep(crate::jobrun::FORCE_AFTER).await;
-        crate::jobrun::force_timeout().await;
+        tokio::time::sleep(crate::namedrun::FORCE_AFTER).await;
+        crate::namedrun::force_timeout(state).await;
     });
 }
 
@@ -1276,6 +1331,20 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             crate::models::resolve(over, list.cache.as_ref(), list.fetched, &reopened.model);
         let window_note = window_note(over, list.why.as_deref(), window_source);
         return Ok(Prepared {
+            run_sources: opts
+                .run_options
+                .as_ref()
+                .map(|(_, sources)| sources.iter().map(|(_, body)| body.clone()).collect())
+                .unwrap_or_default(),
+            task_from: opts
+                .run_options
+                .as_ref()
+                .and_then(|(options, _)| options.task_from)
+                .unwrap_or("cli"),
+            step_cap: opts
+                .run_options
+                .as_ref()
+                .and_then(|(options, _)| options.step_cap),
             json: opts.json,
             ask: opts.ask,
             keep: opts.keep,
@@ -1347,7 +1416,16 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     // A child's id was minted by the root, which already named it in its log.
     let id = match &opts.child {
         Some(child) => child.session.clone(),
-        None => crate::jobs::planned_id().unwrap_or_else(new_session_id),
+        None => opts
+            .id
+            .clone()
+            .or_else(|| {
+                opts.run_options
+                    .as_ref()
+                    .and_then(|(options, _)| options.planned_id.clone())
+            })
+            .or_else(crate::channel::next_id)
+            .unwrap_or_else(new_session_id),
     };
     // The key is resolved here, at session start, and held in memory only. `config::load` stays pure: reading opencode's store is a
     // process read, and a config load happens in tests and in `doctor` too.
@@ -1391,6 +1469,20 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     };
 
     Ok(Prepared {
+        run_sources: opts
+            .run_options
+            .as_ref()
+            .map(|(_, sources)| sources.iter().map(|(_, body)| body.clone()).collect())
+            .unwrap_or_default(),
+        task_from: opts
+            .run_options
+            .as_ref()
+            .and_then(|(options, _)| options.task_from)
+            .unwrap_or("cli"),
+        step_cap: opts
+            .run_options
+            .as_ref()
+            .and_then(|(options, _)| options.step_cap),
         json: opts.json,
         ask: opts.ask,
         keep: opts.keep,
@@ -1598,6 +1690,48 @@ async fn reopen(
 }
 
 impl Session {
+    /// The date the session's frozen system prompt was rendered with (the
+    /// `date:` line in its Environment block).
+    fn rendered_date(&self) -> Option<String> {
+        let text = self.events.iter().find_map(|event| {
+            if let EventBody::SessionStarted { system, .. } = &event.body {
+                system.text.resolve_text(&self.dir).ok()
+            } else {
+                None
+            }
+        })?;
+        text.lines()
+            .find_map(|line| line.strip_prefix("date: "))
+            .map(str::trim)
+            .filter(|date| {
+                date.len() == 10 && date.as_bytes()[4] == b'-' && date.as_bytes()[7] == b'-'
+            })
+            .map(str::to_string)
+    }
+
+    /// Record the sources a resumed session owes its context: the new date if
+    /// the day changed (the frozen system prompt keeps the old one, and the
+    /// provider's cache lives in that prefix), then any source a scheduled
+    /// run passed in explicitly.
+    pub(super) fn record_plan_sources(&mut self, resumed: bool) -> Result<(), String> {
+        let mut sources: Vec<EventBody> = Vec::new();
+        if resumed
+            && self.kids.root.is_none()
+            && let Some(clock) = crate::namedrun::clock_source_from(
+                &self.events,
+                &today(),
+                self.rendered_date().as_deref(),
+            )
+        {
+            sources.push(clock);
+        }
+        sources.extend(self.run_sources.clone());
+        for source in sources {
+            self.record(source)?;
+        }
+        Ok(())
+    }
+
     fn open(
         prepared: Prepared,
         trust: std::sync::Arc<crate::trust::Trust>,
@@ -1677,6 +1811,9 @@ impl Session {
                 .map(|read| read.tools.clone())
                 .unwrap_or_else(tools::names),
             resumed: reopened,
+            run_sources: prepared.run_sources.clone(),
+            task_from: prepared.task_from,
+            step_cap: prepared.step_cap,
             in_flight: prepared
                 .resume
                 .as_ref()
@@ -4700,7 +4837,7 @@ impl Session {
                 }
                 // A job's declared `max_steps` caps the run itself: if this was the last allowed step, the job is
                 // `paused` even when the model answered on it, so the scheduler's next invocation resumes it.
-                if let Some(cap) = crate::jobs::plan().and_then(|p| p.job_step_cap)
+                if let Some(cap) = self.step_cap
                     && self.turn_steps >= cap
                 {
                     self.emit(UiEvent::Paused { steps: cap });
@@ -6039,6 +6176,9 @@ mod tests {
             last_prompt_tokens: None,
             compact_floor: None,
             tool_names: tools::names(),
+            run_sources: Vec::new(),
+            task_from: "cli",
+            step_cap: None,
             resumed: false,
             in_flight: false,
             retryable_failure: false,

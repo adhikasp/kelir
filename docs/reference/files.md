@@ -62,7 +62,7 @@ Session ids are ULIDs, so the directory names sort into creation order and
   names/<name>            # a named session: {"session","created","updated"} (owner-only dir)
   spool/<server>.jsonl    # channel mode's fsync'd, append-only inbound queue (src/channel.rs)
   channel-status/status.json # live channel driver status snapshot
-  jobs/<job>/             # lock, STATUS.json, STATUS.md, runs.jsonl, notes/ (`docs/reference/jobs.md`)
+  names/<name>           # name binding; .lock while a run is in flight; .status.json (`docs/reference/jobs.md`)
   models-<endpoint>.json  # one endpoint's model list, cached for a day, written temp-then-rename
   locks/<provider>-<slot> # the concurrency governor's advisory locks
   bg/<bg-id>.*            # jobs started outside a session (kelir bg run from a plain shell)
@@ -106,7 +106,7 @@ name (`docs/reference/mcp.md`).
 | `names/` | `src/names.rs` | named sessions; the session `owner` file |
 | `spool/` | `src/channel.rs` | channel mode's durable inbound queue, one file per server |
 | `channel-status/` | `src/channel.rs` | the live `kelir channel` status snapshot |
-| `jobs/<job>/` | `src/jobrun.rs`, `src/jobs.rs`, `src/joblock.rs` | the job lock, STATUS, run history, notes |
+| `names/<name>.*` | `src/namedrun.rs`, `src/names.rs` | name binding, single-flight lock, STATUS |
 
 ## Cleaning up, safely
 

@@ -396,35 +396,37 @@ session*).
 
 ## Jobs: named sessions, single-flight, STATUS
 
-kelir has no daemon and no scheduler; `kelir job run <name>` is what a scheduler (cron, a
-systemd timer, Task Scheduler, any trigger) calls. Reference: `docs/reference/jobs.md`.
+kelir has no daemon, no scheduler and no job configuration file. A scheduler (cron,
+a systemd timer, Task Scheduler, any trigger) calls `kelir run --name <n>
+--single-flight` directly. Reference: `docs/reference/jobs.md`.
 
 - **Named sessions.** `kelir run --name <n>` binds `names/<n>` (`[a-z0-9._-]{1,64}`) to a
   session id, published create-or-fail and replaced by rename. An existing name **resumes** that
   session (M3 resume) and appends the task as a `user` event `from: "job"`; a name whose session
   is running is refused with the holder's pid (the session's `owner` file: pid + start time).
-  `kelir sessions ls|rename|forget`.
-- **Jobs.** `jobs.toml` (config dir, then the project's `.kelir/jobs.toml`): `task`/`task_file`,
-  `provider`, `model`, `max_steps`, `timeout`, `session` (default: the job name), `new_session_every`
-  (`never` or a duration: a fresh session when the old one is older or its context is large,
-  carrying a summary as a `carry` source), `notify`, and `schedule`, a string for humans.
-- **Single flight.** One lock per job (`jobs/<name>/lock`): a record (token, pid, process start
+  `kelir sessions ls|rename|forget`. `--fresh` rebinds a name to a new session and carries the old
+  one's last summary or answer into it as a `carry` source.
+- **Run flags.** `--single-flight` takes the lock and writes STATUS; `--timeout D` is the
+  wall-clock deadline (stop the turn, exit 124); `--task-file PATH` reads the task from a file;
+  `--max-steps N` caps the turn. There is no `jobs.toml`, no `kelir job` command and no
+  `new_session_every`/`notify` per job — a schedule owns those decisions (DEVIATIONS).
+- **Single flight.** One lock per name (`names/<n>.lock`): a record (token, pid, process start
   time, command) published atomically, so an ownerless lock is never observed; taken over only when
   the holder is provably gone (pid reuse is a different start time), never from a young lock, only
   after two agreeing looks, and only if the record moved aside is the one judged; released only by
-  its holder. A second run exits 75 at once (`--wait` queues), appends `skipped` to `runs.jsonl` and
-  does not touch the holder's STATUS.
-- **STATUS.** `STATUS.json` + `STATUS.md` written atomically at run start (`running`) and end:
-  job, session, run, started/finished, outcome (`done|error|stopped|timeout|skipped|paused`),
-  steps, tokens, cache hit ratio, the first lines of the answer, the last error and the
-  job's `schedule`. Exit codes: 0 done, 1 error/stopped, 2 usage, 75 skipped, 124 timeout.
+  its holder. A second run exits 75 at once, writes a `skipped` STATUS naming the holder, and does
+  not touch the holder's STATUS.
+- **STATUS.** `names/<n>.status.json` is written atomically at run start (`running`) and end:
+  name, session, started/finished, outcome (`done|error|stopped|timeout|skipped|paused`), exit code,
+  steps, tokens, cache hit ratio, the first lines of the answer and the last error. There is no
+  STATUS.md and no run history. Exit codes: 0 done/paused, 1 error/stopped, 2 usage, 75 skipped,
+  124 timeout.
 - **The next day.** The system prompt is frozen at session start and holds the date, never the
   time. A resume on a later UTC day appends a `clock` source ("it is now <date>") at the tail; the
-  cached prefix is not touched. Under `kelir job run` one `job` source line tells the model where
-  STATUS and `notes/` are.
-- **Trust.** `names/` and `jobs/` are owner-only directories; no key or token is written to
-  either; notify hooks run gate-style (scrubbed environment, 30 s, tree kill, never change the exit
-  code) and a project's hooks only in a trusted project.
+  cached prefix is not touched. A `--fresh` run adds a `carry` source the same way.
+- **Trust.** `names/` is an owner-only directory; no key or token is written to it. Notify hooks
+  are configured in `config.toml` (`[notify]`) and run gate-style (scrubbed environment, 30 s,
+  tree kill, never change the exit code).
 
 ## Scriptable, TUI and Herdr status
 

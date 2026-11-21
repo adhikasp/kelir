@@ -45,11 +45,6 @@ async fn main() -> ExitCode {
         Some(Command::Brief(args)) => kelir::childcli::brief(args).await,
         Some(Command::Ls(args)) => kelir::childcli::ls(args).await,
         Some(Command::Kill(args)) => kelir::childcli::kill(args).await,
-        Some(Command::Job(args)) => match args.command {
-            kelir::cli::JobCommand::Run(args) => kelir::jobrun::run(args).await,
-            kelir::cli::JobCommand::Status(args) => kelir::jobrun::status(args),
-            kelir::cli::JobCommand::History(args) => kelir::jobrun::history(args),
-        },
         Some(Command::Sessions(args)) => match args.command {
             kelir::cli::SessionsCommand::Ls(args) => kelir::names::sessions_ls(&args),
             kelir::cli::SessionsCommand::Rename(args) => kelir::names::sessions_rename(&args),

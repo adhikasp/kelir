@@ -202,26 +202,6 @@ pub const VARS: &[Var] = &[
     ),
     // ------------------------------------------------------------- test hooks
     set(
-        "KELIR_JOB",
-        "set for a job's notify hook only: the job's name",
-    ),
-    set(
-        "KELIR_JOB_OUTCOME",
-        "set for a notify hook only: `done`, `error`, `stopped`, `timeout` or `paused`",
-    ),
-    set(
-        "KELIR_JOB_RUN",
-        "set for a notify hook only: the run's id (`run_…`)",
-    ),
-    set(
-        "KELIR_JOB_SESSION",
-        "set for a notify hook only: the id of the session the run used",
-    ),
-    set(
-        "KELIR_JOB_STATUS",
-        "set for a notify hook only: the path of the job's `STATUS.json`",
-    ),
-    set(
         "KELIR_NOTIFY_EVENT",
         "set for an event hook only: the event that fired (`turn_done`, `error`, `paused`, `bg_settled`, `child_settled`)",
     ),
