@@ -134,7 +134,7 @@ pub mod reap {
     pub fn kill_run(root: u32, token: &str) {
         let me = std::process::id();
         let needle = format!("{RUN_ENV}={token}");
-        for attempt in 0..5 {
+        for attempt in 0..20 {
             let table = process_table();
             let mut victims: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
             let mut frontier = vec![root];
@@ -162,8 +162,8 @@ pub mod reap {
                     }
                 }
             }
-            if attempt < 4 {
-                std::thread::sleep(std::time::Duration::from_millis(40));
+            if attempt < 19 {
+                std::thread::sleep(std::time::Duration::from_millis(25));
             }
         }
     }
