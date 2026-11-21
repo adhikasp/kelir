@@ -337,24 +337,22 @@ pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
         if !output.status.success() {
             return None;
         }
-        let text = String::from_utf8_lossy(&output.stdout);
-        time::format_description::parse_borrowed::<2>(
-            "[weekday] [month] [day] [hour]:[minute]:[second] [year]",
-        )
-        .ok()
-        .and_then(|f| {
-            let local = time::PrimitiveDateTime::parse(text.trim(), &f).ok()?;
-            // `ps lstart` is local time; the recorded RFC 3339 timestamp
-            // carries an offset. Anchor the local wall clock to UTC by
-            // asking the platform for the offset at this instant.
-            let offset = time::UtcOffset::current_local_offset().ok()?;
-            Some(time::OffsetDateTime::new_in_offset(
-                local.date(),
-                local.time(),
-                offset,
-            ))
-        })
-        .map(std::time::SystemTime::from)
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        // `ps lstart` is local time. Let the system's `date` convert it to a
+        // Unix timestamp using its own timezone rules — parsing the wall
+        // clock in Rust needs an offset that is unreliable in sandboxes.
+        let converted = std::process::Command::new("date")
+            .args(["-j", "-f", "%a %b %e %T %Y", &text, "+%s"])
+            .output()
+            .ok()?;
+        if !converted.status.success() {
+            return None;
+        }
+        let seconds: u64 = String::from_utf8_lossy(&converted.stdout).trim().parse().ok()?;
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
