@@ -177,10 +177,7 @@ async fn r3_a_dead_shim_does_not_leave_the_job_running_for_ever() {
     let command = status["pid"].as_u64().expect("command pid") as u32;
 
     force_kill(shim);
-    wait_until("the shim to die", Duration::from_secs(10), || {
-        !pid_alive(shim)
-    })
-    .await;
+    wait_until("the shim to die", CEILING, || !pid_alive(shim)).await;
     let waited = sandbox
         .kelir(NO_PROVIDER, &["bg", "wait", &id, "--timeout", "4"], &[])
         .await;
@@ -519,12 +516,17 @@ async fn r11_a_leftover_background_child_dies_with_a_killed_session() {
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     live.wait_for("turn_ended").await;
     let ticks = live.cwd.join("left.txt");
-    wait_until("the leftover to write", Duration::from_secs(20), || {
-        bytes_len(&ticks) > 0
+    wait_until("the leftover to write", CEILING, || bytes_len(&ticks) > 0).await;
+    live.kill().await;
+    // The leftover may be mid-write when the kill lands, and on a loaded box
+    // the tree takes a while to go (STEER-9): `first` is taken once the file has
+    // stopped moving, and the window after it is what proves nothing writes.
+    wait_until("the file to stop growing", CEILING, || {
+        let before = bytes_len(&ticks);
+        std::thread::sleep(Duration::from_millis(500));
+        before == bytes_len(&ticks)
     })
     .await;
-    live.kill().await;
-    tokio::time::sleep(Duration::from_millis(800)).await;
     let first = bytes_len(&ticks);
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let second = bytes_len(&ticks);
@@ -830,14 +832,18 @@ async fn r18_a_killed_session_takes_exec_grandchildren_with_it() {
     .await;
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     live.wait_for("tool_started").await;
-    wait_until(
-        "the grandchildren to exist",
-        Duration::from_secs(20),
-        || pids_with("7311").len() + pids_with("7312").len() + pids_with("7313").len() >= 3,
-    )
+    wait_until("the grandchildren to exist", CEILING, || {
+        pids_with("7311").len() + pids_with("7312").len() + pids_with("7313").len() >= 3
+    })
     .await;
     live.kill().await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    settle_to_zero(|| {
+        ["7311", "7312", "7313"]
+            .iter()
+            .map(|marker| pids_with(marker).len())
+            .sum()
+    })
+    .await;
     let left: Vec<u32> = ["7311", "7312", "7313"]
         .iter()
         .flat_map(|marker| pids_with(marker))
@@ -868,17 +874,21 @@ async fn r19_cancel_takes_exec_grandchildren_with_it() {
         .await;
     assert_eq!(started.code, 0, "{}", started.stderr);
     let id = id_of(&started);
-    wait_until(
-        "the grandchildren to exist",
-        Duration::from_secs(20),
-        || pids_with("7321").len() + pids_with("7322").len() + pids_with("7323").len() >= 3,
-    )
+    wait_until("the grandchildren to exist", CEILING, || {
+        pids_with("7321").len() + pids_with("7322").len() + pids_with("7323").len() >= 3
+    })
     .await;
     let cancelled = sandbox
         .kelir(NO_PROVIDER, &["bg", "cancel", &id], &[])
         .await;
     assert_eq!(cancelled.code, 0, "{}", cancelled.stderr);
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    settle_to_zero(|| {
+        ["7321", "7322", "7323"]
+            .iter()
+            .map(|marker| pids_with(marker).len())
+            .sum()
+    })
+    .await;
     let left: Vec<u32> = ["7321", "7322", "7323"]
         .iter()
         .flat_map(|marker| pids_with(marker))

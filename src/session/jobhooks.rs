@@ -5,6 +5,27 @@
 use super::*;
 
 impl Session {
+    /// The date the session's frozen system prompt was rendered with (the
+    /// `date:` line in its Environment block). The event's `ts` is wall-clock
+    /// time; with a `KELIR_TODAY` override the two can disagree, and the model
+    /// only knows what the prompt said (STEER-9).
+    fn rendered_date(&self) -> Option<String> {
+        let text = self.events.iter().find_map(|event| {
+            if let EventBody::SessionStarted { system, .. } = &event.body {
+                system.text.resolve_text(&self.dir).ok()
+            } else {
+                None
+            }
+        })?;
+        text.lines()
+            .find_map(|line| line.strip_prefix("date: "))
+            .map(str::trim)
+            .filter(|date| {
+                date.len() == 10 && date.as_bytes()[4] == b'-' && date.as_bytes()[7] == b'-'
+            })
+            .map(str::to_string)
+    }
+
     /// Record the sources a run owes the context before its task: on a resume,
     /// the new date if the day changed (the frozen system prompt keeps the old
     /// one, the provider's cache lives in it), then the plan's sources (a job's
@@ -15,7 +36,11 @@ impl Session {
         // business.
         if resumed
             && self.kids.link.is_none()
-            && let Some(clock) = crate::jobs::clock_source(&self.events, &today())
+            && let Some(clock) = crate::jobs::clock_source_from(
+                &self.events,
+                &today(),
+                self.rendered_date().as_deref(),
+            )
         {
             sources.push(clock);
         }

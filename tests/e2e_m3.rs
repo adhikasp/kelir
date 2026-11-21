@@ -111,7 +111,7 @@ async fn crash_point(point: &str) {
     // first (a Unix shim notices its dead owner within one 25 ms poll), so the
     // number cannot move while the resume runs.
     if point == "mid_tool" {
-        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        sandbox.trees_gone(&id).await;
     }
     let at_crash = sandbox.lines_in("side_effect.log");
 

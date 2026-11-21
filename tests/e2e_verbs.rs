@@ -53,7 +53,7 @@ async fn say_mid_turn_is_in_the_next_request() {
         Reply::Sse(sse(&tool_turn(
             "call_1",
             "bash",
-            &serde_json::json!({"command": "sleep 1"}),
+            &serde_json::json!({"command": HOLD}),
         ))),
         Reply::Sse(sse(&text_turn("done", 0))),
     ])
@@ -67,6 +67,7 @@ async fn say_mid_turn_is_in_the_next_request() {
     assert_eq!(response["ok"], true);
     assert_eq!(response["verb"], "say");
     assert_eq!(response["applies"], "queued");
+    session.release();
 
     let settled = session.wait_for("tool_settled").await;
     assert_eq!(settled["outcome"], "ok");
@@ -119,10 +120,12 @@ async fn say_now_stops_the_running_call_within_two_seconds() {
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     session.wait_for("tool_started").await;
 
-    let started = Instant::now();
     let answer = session
         .ctl(&["say", "--now", "change of plan: just print hello"])
         .await;
+    // The clock starts at the acknowledgement: how long the `ctl` process takes
+    // to start on a loaded box is not the session's latency (STEER-9).
+    let started = Instant::now();
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     let settled = session.wait_for("tool_settled").await;
     let elapsed = started.elapsed();
@@ -216,7 +219,7 @@ async fn stop_call_stops_one_of_two_parallel_calls() {
             (
                 "call_b",
                 "bash",
-                serde_json::json!({"command": "sleep 1; printf 'b\\n'"}),
+                serde_json::json!({"command": hold_then("printf 'b\\n'")}),
             ),
         ))),
         Reply::Sse(sse(&text_turn("a was stopped, b finished", 0))),
@@ -230,6 +233,9 @@ async fn stop_call_stops_one_of_two_parallel_calls() {
         .ctl(&["stop", "--call", "call_a", "wrong call"])
         .await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    // `call_b` is held until the stop has been answered, so `call_a` settles
+    // first by construction, not by the race between a stopwatch and a ctl.
+    session.release();
 
     let first = session.wait_for("tool_settled").await;
     let second = session.wait_for("tool_settled").await;
@@ -305,7 +311,7 @@ async fn model_swap_applies_at_the_next_step() {
         Reply::Sse(sse(&tool_turn(
             "call_1",
             "bash",
-            &serde_json::json!({"command": "sleep 1"}),
+            &serde_json::json!({"command": HOLD}),
         ))),
         Reply::Sse(sse(&text_turn("done on the new model", 0))),
     ])
@@ -316,6 +322,7 @@ async fn model_swap_applies_at_the_next_step() {
     let answer = session.ctl(&["model", "other/cheap-model"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     assert_eq!(answer.response()["applies"], "next_step");
+    session.release();
 
     session.wait_for("tool_settled").await;
     session.wait_for("turn_ended").await;
@@ -347,7 +354,7 @@ async fn model_swap_can_change_the_provider() {
         Reply::Sse(sse(&tool_turn(
             "call_1",
             "bash",
-            &serde_json::json!({"command": "sleep 1"}),
+            &serde_json::json!({"command": HOLD}),
         ))),
         Reply::Sse(sse(&text_turn("done", 0))),
     ])
@@ -360,6 +367,7 @@ async fn model_swap_can_change_the_provider() {
 
     let answer = session.ctl(&["model", "opencode-go/some-model"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    session.release();
     session.wait_for("tool_settled").await;
     session.wait_for("turn_ended").await;
 
@@ -379,7 +387,7 @@ async fn tools_disable_returns_disabled_by_user_and_keeps_the_tool_list() {
         Reply::Sse(sse(&tool_turn(
             "call_1",
             "bash",
-            &serde_json::json!({"command": "sleep 1"}),
+            &serde_json::json!({"command": HOLD}),
         ))),
         Reply::Sse(sse(&tool_turn(
             "call_2",
@@ -394,6 +402,7 @@ async fn tools_disable_returns_disabled_by_user_and_keeps_the_tool_list() {
 
     let answer = session.ctl(&["tools", "--disable", "bash"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    session.release();
 
     session.wait_for("tool_settled").await;
     let disabled = session.wait_for("tool_settled").await;
@@ -496,17 +505,13 @@ async fn say_during_a_stream_gets_another_step() {
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     session.wait_for("step_started").await;
-    for _ in 0..100 {
-        if mock.request_count() == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert_eq!(
-        mock.request_count(),
-        1,
-        "the request never reached the mock"
-    );
+    eventually(
+        "the first request to reach the mock",
+        || mock.request_count() >= 1,
+        || session.dump(),
+    )
+    .await;
+    assert_eq!(mock.request_count(), 1, "one request, held by the gate");
 
     let answer = session.ctl(&["say", "one more thing"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
@@ -725,7 +730,7 @@ async fn a_headless_run_drains_queued_later_messages_before_exiting() {
         Reply::Sse(sse(&tool_turn(
             "call_1",
             "bash",
-            &serde_json::json!({"command": "sleep 1"}),
+            &serde_json::json!({"command": HOLD}),
         ))),
         Reply::Sse(sse(&text_turn("first done", 0))),
         Reply::Sse(sse(&text_turn("second done", 0))),
@@ -735,6 +740,7 @@ async fn a_headless_run_drains_queued_later_messages_before_exiting() {
     session.wait_for("tool_started").await;
     let answer = session.ctl(&["later", "one more turn"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
+    session.release();
 
     let first = session.wait_for("turn_ended").await;
     assert_eq!(first["outcome"], "done");
@@ -874,7 +880,7 @@ async fn a_rejected_model_fails_the_turn_but_not_a_keep_session() {
 /// waiting it out (M1 review N5).
 ///
 /// Event-driven, not timing-driven (STEER-5 review F1): the wait the session
-/// enters is five seconds long (`retry_base_ms = retry_cap_ms = 5000`, a budget
+/// enters is 45 seconds long (`retry_base_ms = retry_cap_ms = 45000`, a budget
 /// that affords it), and the test only sends `stop` after reading the `error`
 /// event that announces it. So the `ctl` process has seconds to start even on a
 /// loaded box, where the suite's default 200/400 ms schedule could finish all
@@ -889,8 +895,8 @@ async fn stop_during_a_provider_backoff_is_obeyed_at_once() {
         Reply::Http(500, "boom".to_string()),
     ])
     .await;
-    let config = "retry_base_ms = 5000\nretry_cap_ms = 5000\nretry_max_attempts = 3\n\
-                  retry_max_wait = 60\n";
+    let config = "retry_base_ms = 45000\nretry_cap_ms = 45000\nretry_max_attempts = 3\n\
+                  retry_max_wait = 180\n";
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], config).await;
     let error = session.wait_for("error").await;
     assert_eq!(error["retryable"], true, "{error}");
@@ -925,23 +931,30 @@ async fn stop_during_a_provider_backoff_is_obeyed_at_once() {
 /// forward-slashed path the event log uses.
 async fn wait_for_output(session: &LiveSession, needle: &str) -> String {
     let commands = session.session_dir.join("commands");
-    for _ in 0..250 {
-        if let Ok(entries) = std::fs::read_dir(&commands) {
-            for entry in entries.flatten() {
-                let out = entry.path().join("out");
-                if let Ok(text) = std::fs::read_to_string(&out)
-                    && text.contains(needle)
-                {
-                    return out.to_string_lossy().replace('\\', "/");
+    let mut found = None;
+    eventually(
+        &format!(
+            "a call output containing {needle:?} under {}",
+            commands.display()
+        ),
+        || {
+            if let Ok(entries) = std::fs::read_dir(&commands) {
+                for entry in entries.flatten() {
+                    let out = entry.path().join("out");
+                    if let Ok(text) = std::fs::read_to_string(&out)
+                        && text.contains(needle)
+                    {
+                        found = Some(out.to_string_lossy().replace('\\', "/"));
+                        return true;
+                    }
                 }
             }
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!(
-        "no call output containing {needle:?} under {}",
-        commands.display()
-    );
+            false
+        },
+        || session.dump(),
+    )
+    .await;
+    found.expect("found")
 }
 
 /// A `stop` that arrives while the session is idle has nothing to stop: it is

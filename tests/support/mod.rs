@@ -10,6 +10,67 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+
+/// How long any wait in the harness may take before it calls the thing hung
+/// (STEER-9). It bounds a hang, never a normal run: every wait below returns the
+/// moment its event, file or exit shows up, so the ceiling only has to be larger
+/// than the worst scheduling stall on a box running several workers and builds.
+pub const CEILING: Duration = Duration::from_secs(90);
+
+/// A bash command that blocks until the test calls [`LiveSession::release`]
+/// (STEER-9). The tests used `sleep 1` to mean "a call that is still running when
+/// the verb arrives", which holds on a quiet box and not on one where the `ctl`
+/// process takes two seconds to start. Held by the test, the call is running for
+/// exactly as long as the test needs.
+pub const HOLD: &str = "while [ ! -e kelir-release ]; do sleep 0.05; done";
+
+/// [`HOLD`], then `rest`.
+pub fn hold_then(rest: &str) -> String {
+    format!("{HOLD}; {rest}")
+}
+
+/// Poll `check` (cheap, synchronous) until it returns true; panic with `what`,
+/// the ceiling and the `diagnostics()` text when it never does. The one
+/// replacement for "sleep N and hope": a wait that ends on the condition.
+pub async fn eventually(what: &str, check: impl FnMut() -> bool, diagnostics: impl Fn() -> String) {
+    if !eventually_within(CEILING, check).await {
+        panic!(
+            "timed out after {CEILING:?} waiting for {what}
+--- diagnostics ---
+{}",
+            diagnostics()
+        );
+    }
+}
+
+/// [`eventually`] without the panic: true if `check` held within `limit`. For
+/// a caller that has its own assertion message.
+pub async fn eventually_within(limit: Duration, mut check: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if check() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Poll `count` until it reads zero (a process tree that must be gone) and
+/// return the last value read. The caller keeps its own assertion on the number,
+/// so nothing is weakened: the only change from `sleep(3s); count()` is that a
+/// slow teardown on a loaded box gets until the ceiling instead of a guess.
+pub async fn settle_to_zero(mut count: impl FnMut() -> usize) -> usize {
+    let mut last = count();
+    let deadline = std::time::Instant::now() + CEILING;
+    while last > 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        last = count();
+    }
+    last
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -120,6 +181,10 @@ pub struct ModelsAnswer {
     /// Held this long before answering: a slow list is a real case (a big
     /// catalogue through a proxy, STEER-6 review S2).
     pub delay: Option<Duration>,
+    /// Held until the test notifies this gate (STEER-9): "slower than the turn"
+    /// as an ordering the test controls, not as a number of seconds a loaded
+    /// box can overtake.
+    pub gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl ModelsAnswer {
@@ -128,6 +193,7 @@ impl ModelsAnswer {
             status: 200,
             body: body.into(),
             delay: None,
+            gate: None,
         }
     }
 
@@ -136,7 +202,14 @@ impl ModelsAnswer {
             status,
             body: body.into(),
             delay: None,
+            gate: None,
         }
+    }
+
+    /// The same answer, held until `gate` is notified.
+    pub fn gated(mut self, gate: Arc<tokio::sync::Notify>) -> ModelsAnswer {
+        self.gate = Some(gate);
+        self
     }
 
     /// The same answer, held `delay` before it is written.
@@ -326,6 +399,9 @@ async fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) {
         };
         if let Some(delay) = answer.delay {
             tokio::time::sleep(delay).await;
+        }
+        if let Some(gate) = answer.gate {
+            gate.notified().await;
         }
         let head = format!(
             "HTTP/1.1 {} Models\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -637,9 +713,9 @@ pub async fn run_task(
         handle.write_all(input.as_bytes()).await.unwrap();
         drop(handle);
     }
-    let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+    let output = tokio::time::timeout(CEILING, child.wait_with_output())
         .await
-        .expect("kelir did not finish within 60s")
+        .expect("kelir did not finish within the ceiling")
         .expect("wait for kelir");
 
     let sessions = temp.path().join("state").join("sessions");
@@ -886,14 +962,14 @@ impl LiveSession {
         let pid = self.pid();
         let started = std::time::Instant::now();
         let mut line = String::new();
-        let read = tokio::time::timeout(Duration::from_secs(30), async {
+        let read = tokio::time::timeout(CEILING, async {
             use tokio::io::AsyncBufReadExt as _;
             self.stdout.read_line(&mut line).await
         })
         .await
         .unwrap_or_else(|_| {
             panic!(
-                "no event within 30 s (session pid {pid} alive={} after {:?}, seen so far: {:?}, stderr: {})",
+                "no event within {CEILING:?} (session pid {pid} alive={} after {:?}, seen so far: {:?}, stderr: {})",
                 pid_alive_here(pid),
                 started.elapsed(),
                 self.events
@@ -945,6 +1021,47 @@ impl LiveSession {
 
     pub fn stderr(&self) -> String {
         self.stderr.lock().unwrap().clone()
+    }
+
+    /// Let every call that is blocked on [`HOLD`] go on.
+    pub fn release(&self) {
+        std::fs::write(self.cwd.join("kelir-release"), b"go").expect("write the release file");
+    }
+
+    /// What to print when a wait times out: the pid and whether it is alive,
+    /// the event types seen (stream and log), the last log lines and stderr.
+    pub fn dump(&self) -> String {
+        let pid = self.pid();
+        let log = self.log();
+        let tail: Vec<String> = log
+            .iter()
+            .rev()
+            .take(12)
+            .rev()
+            .map(|event| event.to_string())
+            .collect();
+        format!(
+            "session pid {pid} alive={}; streamed: {:?}; log has {} events, last:
+{}
+stderr: {}",
+            pid_alive_here(pid),
+            self.events
+                .iter()
+                .map(|event| event["type"].clone())
+                .collect::<Vec<_>>(),
+            log.len(),
+            tail.join(
+                "
+"
+            ),
+            self.stderr()
+        )
+    }
+
+    /// Poll the on-disk log until `check` holds over it; the panic carries
+    /// [`LiveSession::dump`]. Use this instead of sleeping and then looking.
+    pub async fn log_eventually(&self, what: &str, check: impl Fn(&[Value]) -> bool) {
+        eventually(what, || check(&self.log()), || self.dump()).await;
     }
 
     /// The session process's pid, for a test that has to say whether it is
@@ -1026,7 +1143,7 @@ impl LiveSession {
 
     /// Wait for the process to exit on its own.
     pub async fn finish(mut self) -> (i32, String) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + CEILING;
         match tokio::time::timeout_at(deadline, self.child.wait()).await {
             Ok(Ok(status)) => {
                 let code = status.code().unwrap_or(-1);
@@ -1037,7 +1154,7 @@ impl LiveSession {
             Ok(Err(error)) => panic!("wait for kelir: {error}"),
             Err(_) => {
                 let _ = self.child.kill().await;
-                panic!("kelir did not exit within 30 s; stderr: {}", self.stderr());
+                panic!("kelir did not exit within {CEILING:?}; {}", self.dump());
             }
         }
     }
@@ -1286,9 +1403,9 @@ impl Sandbox {
             command.env(key, value);
         }
         let child = self.guard.spawn(&mut command).await.expect("run kelir");
-        let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        let output = tokio::time::timeout(CEILING, child.wait_with_output())
             .await
-            .expect("kelir did not finish within 60 s")
+            .expect("kelir did not finish within the ceiling")
             .expect("run kelir");
         Output {
             code: output.status.code().unwrap_or(-1),
@@ -1352,6 +1469,43 @@ impl Sandbox {
             .filter(|line| !line.trim().is_empty())
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect()
+    }
+
+    /// Wait until every process the session `id` recorded for its calls (the
+    /// shim and the command, from `bg/*.status`) is gone. A crashed session's
+    /// shim notices its dead owner and takes the tree down, but on a loaded box
+    /// that takes longer than any fixed sleep the tests used to guess (STEER-9).
+    /// Returns false if something recorded is still alive at the ceiling (a
+    /// recycled pid, say); the caller's own assertions then speak.
+    pub async fn trees_gone(&self, id: &str) -> bool {
+        let bg = self.session_dir(id).join("bg");
+        let pids = || -> Vec<u32> {
+            let mut out = Vec::new();
+            for entry in std::fs::read_dir(&bg).into_iter().flatten().flatten() {
+                if entry.path().extension().and_then(|e| e.to_str()) != Some("status") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                    continue;
+                };
+                let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                for key in ["shim", "pid"] {
+                    if let Some(pid) = value[key].as_u64() {
+                        out.push(pid as u32);
+                    }
+                }
+            }
+            out
+        };
+        // Nothing recorded yet: the crash may have come before the shim wrote
+        // its status, and then there is no pid to wait for. That one case keeps
+        // a short grace (the old fixed wait); it cannot be event-driven.
+        if pids().is_empty() {
+            tokio::time::sleep(Duration::from_millis(750)).await;
+        }
+        eventually_within(CEILING, || !pids().into_iter().any(pid_alive_here)).await
     }
 
     /// The lines of a file the tools wrote, 0 when it does not exist.
@@ -1456,9 +1610,9 @@ pub async fn ctl_in(
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = guard.spawn(&mut command).await.expect("spawn ctl");
-    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+    let output = tokio::time::timeout(CEILING, child.wait_with_output())
         .await
-        .expect("ctl did not finish within 30 s")
+        .expect("ctl did not finish within the ceiling")
         .expect("run ctl");
     Ctl {
         code: output.status.code().unwrap_or(-1),

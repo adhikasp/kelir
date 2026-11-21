@@ -10,7 +10,8 @@
 #   --jobs N            CARGO_BUILD_JOBS and nextest test threads (default 4; BUILD-INFRA rule 1)
 #   --out DIR           where the logs go (default: <scratch>/gate-<job>-<stamp>)
 #   --quick             fmt + clippy only (the loop you run before every commit)
-#   --load              also re-run the suite under artificial CPU load, 3x (STEER-9 stress mode)
+#   --load              also run the suite 3x in a row under artificial CPU load, no retries
+#                       (STEER-9 stress mode; KELIR_GATE_LOAD sets the busy loops, default 8)
 #
 # Everything a gate needs is here so nothing has to remember the flags:
 #   * exactly one gate at a time across all worktrees (scripts/gate-lock.sh);
@@ -71,7 +72,7 @@ while [ $# -gt 0 ]; do
     --quick) quick=1; shift ;;
     --load) load=1; shift ;;
     --) shift; extra+=("$@"); break ;;
-    -h | --help) sed -n '2,31p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "gate: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -224,12 +225,26 @@ gate_body() {
   fi
 
   if [ "$load" = 1 ]; then
-    say "  load: 3x under artificial load"
+    # STEER-9: the whole suite, three times in a row, with ${KELIR_GATE_LOAD:-8}
+    # busy loops beside it and no retries. A test that fails here is a flake (or
+    # a bug) and is named, per round, so the fix has a name to start from.
+    local load_threads="${KELIR_GATE_LOAD:-8}"
+    say "  load: 3 rounds under $load_threads busy loops, no retries"
     local n=0
     for round in 1 2 3; do
-      if run_stage "load-$round" "$out/load-$round.log" bash "$root/scripts/gate-load.sh" "$jobs"; then n=$((n + 1)); fi
+      if run_stage "load-$round" "$out/load-$round.log" bash "$root/scripts/gate-load.sh" "$load_threads"; then
+        n=$((n + 1))
+      else
+        local names
+        names="$(nextest_names "$out/load-$round.log" failed)"
+        if [ -n "$names" ]; then
+          say "    load-$round FAILED TESTS:"
+          echo "$names" | sed 's/^/      /' | tee -a "$log"
+        fi
+      fi
     done
     [ "$n" = 3 ] || { failed=1; say "  load: FAILED ($n/3 green)"; }
+    [ "$n" = 3 ] && say "  load: ok (3/3 green)"
   fi
 
   if [ -n "$linux" ]; then

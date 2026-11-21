@@ -143,6 +143,9 @@ async fn a_spawn_cannot_send_the_jobs_capability_to_an_address_the_caller_chose(
     let listener = kelir::ipc::bind(&evil_dir, &evil_id).expect("bind the caller's own endpoint");
     let heard = tokio::spawn(async move {
         use interprocess::local_socket::tokio::prelude::*;
+        // A negative assertion needs a bounded observation window, not the
+        // hang ceiling: no one should ever connect, and waiting 90 s only
+        // makes a loaded gate slower. 20 s is far beyond a legitimate connect.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut lines_seen = Vec::new();
         while let Ok(Ok(accepted)) = tokio::time::timeout_at(deadline, listener.accept()).await {
@@ -428,11 +431,8 @@ async fn a_fifo_planted_as_the_final_sidecar_does_not_hang_the_session() {
     let id = start_job(&session, long_command()).await;
     let fifo = session.session_dir.join("bg").join(format!("{id}.final"));
     let made = std::process::Command::new("mkfifo").arg(&fifo).status();
-    let answered = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        session.ctl(&["tools", "--disable", "bash"]),
-    )
-    .await;
+    let answered =
+        tokio::time::timeout(CEILING, session.ctl(&["tools", "--disable", "bash"])).await;
     // Open the fifo for writing so a blocked reader can be released and the session can end.
     let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
     let _ = std::fs::remove_file(&fifo);

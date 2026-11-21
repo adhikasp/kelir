@@ -449,7 +449,7 @@ async fn cancel_kills_a_tree_of_children_and_records_it() {
 
     let one = sandbox.cwd.join("one.txt");
     let two = sandbox.cwd.join("two.txt");
-    wait_until("both loops to write", Duration::from_secs(20), || {
+    wait_until("both loops to write", CEILING, || {
         bytes_len(&one) > 0 && bytes_len(&two) > 0
     })
     .await;
@@ -464,6 +464,15 @@ async fn cancel_kills_a_tree_of_children_and_records_it() {
         cancelled.stdout
     );
 
+    // A tick already in flight when the tree died may still land; the numbers
+    // are taken once they have stopped moving (STEER-9), and the window below
+    // is what proves nothing writes afterwards.
+    wait_until("both loops to stop", CEILING, || {
+        let (a, b) = (bytes_len(&one), bytes_len(&two));
+        std::thread::sleep(Duration::from_millis(500));
+        (a, b) == (bytes_len(&one), bytes_len(&two))
+    })
+    .await;
     let (before_one, before_two) = (bytes_len(&one), bytes_len(&two));
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(
@@ -522,16 +531,13 @@ async fn a_session_killed_mid_call_leaves_no_orphan_behind() {
     let started = live.wait_for("tool_started").await;
     assert_eq!(started["name"], "bash");
     let ticks = live.cwd.join("ticks.txt");
-    wait_until("the call to write", Duration::from_secs(20), || {
-        bytes_len(&ticks) > 0
-    })
-    .await;
+    wait_until("the call to write", CEILING, || bytes_len(&ticks) > 0).await;
 
     live.kill().await;
 
     // The shim notices the session is gone and takes the tree down; nothing
     // may keep writing after that.
-    wait_until("the orphan to stop", Duration::from_secs(20), || {
+    wait_until("the orphan to stop", CEILING, || {
         let first = bytes_len(&ticks);
         std::thread::sleep(Duration::from_millis(600));
         bytes_len(&ticks) == first
@@ -560,11 +566,9 @@ async fn a_bg_run_inside_a_call_outlives_a_killed_session() {
     assert_eq!(settled["outcome"], "ok", "{settled}");
     // A job runs where `kelir bg run` was invoked, even when the shim is
     // started by the session (which is in its own directory) — M4 review F2.
-    wait_until(
-        "the job to run in the call's cwd",
-        Duration::from_secs(20),
-        || live.cwd.join("job-cwd.txt").is_file(),
-    )
+    wait_until("the job to run in the call's cwd", CEILING, || {
+        live.cwd.join("job-cwd.txt").is_file()
+    })
     .await;
     let seen = std::fs::read_to_string(live.cwd.join("job-cwd.txt")).unwrap_or_default();
     assert!(
@@ -582,7 +586,7 @@ async fn a_bg_run_inside_a_call_outlives_a_killed_session() {
     assert!(id.starts_with("bg_"), "{settled}");
 
     let status_file = live.session_dir.join("bg").join(format!("{id}.status"));
-    wait_until("the job to start", Duration::from_secs(20), || {
+    wait_until("the job to start", CEILING, || {
         std::fs::read_to_string(&status_file)
             .ok()
             .and_then(|text| serde_json::from_str::<Value>(&text).ok())
@@ -756,14 +760,10 @@ async fn a_job_started_from_a_console_less_parent_runs_and_leaves_nothing_behind
             .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
             .collect()
     };
-    wait_until(
-        "five console-less jobs to exit",
-        Duration::from_secs(10),
-        || {
-            let all = statuses();
-            all.len() == 5 && all.iter().all(|status| status["state"] == "exited")
-        },
-    )
+    wait_until("five console-less jobs to exit", CEILING, || {
+        let all = statuses();
+        all.len() == 5 && all.iter().all(|status| status["state"] == "exited")
+    })
     .await;
 
     for status in statuses() {

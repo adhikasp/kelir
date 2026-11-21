@@ -83,7 +83,7 @@ async fn wait_gone(pid: u32) {
     let started = Instant::now();
     while pid_alive(pid) {
         assert!(
-            started.elapsed() < Duration::from_secs(20),
+            started.elapsed() < CEILING,
             "process {pid} is still running"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;

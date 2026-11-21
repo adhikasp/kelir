@@ -572,6 +572,30 @@ fn drive_idle_in_a_pty(
     drive_pty_in_idle_or_turn(cwd, config, state, base_url, None, b"", expect)
 }
 
+/// True once some session under `state` has a line in its `events.jsonl`
+/// containing `needle` (a verb the TUI sent itself, for one).
+fn wait_for_session_log(state: &std::path::Path, needle: &str, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    loop {
+        let found = std::fs::read_dir(state.join("sessions"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                std::fs::read_to_string(entry.path().join("events.jsonl"))
+                    .map(|text| text.contains(needle))
+                    .unwrap_or(false)
+            });
+        if found {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn drive_pty_in_idle_or_turn(
     cwd: std::path::PathBuf,
     config: std::path::PathBuf,
@@ -661,19 +685,42 @@ fn drive_pty_in_idle_or_turn(
         out.flush().unwrap();
     };
     let mut typed = false;
-    if wait_for(&screen, "kelir", Duration::from_secs(20)) {
+    if wait_for(&screen, "kelir", support::CEILING) {
         // A moment for raw mode; then anything the test types first, the
         // message, and Enter.
         // A bracketed paste is only delivered as a paste once the app has
-        // enabled the mode; half a second is enough on every terminal seen.
-        std::thread::sleep(Duration::from_millis(600));
+        // enabled the mode, and that mode switch is the last thing the TUI does
+        // when it takes the terminal over: wait for the terminal to *show* it
+        // (STEER-9; this was a fixed 600 ms). A terminal layer that swallows
+        // the sequence costs the short fallback, not a failure.
+        let _ = wait_for(&screen, "\u{1b}[?2004h", Duration::from_secs(3));
         if !preamble.is_empty() {
             send(preamble);
-            std::thread::sleep(Duration::from_millis(200));
+            if preamble == b"\x03" {
+                // Ctrl-C is a verb: it has been dealt with when the session
+                // logged it. Typing the message before that races the stop
+                // against the turn it must not stop (the old 200 ms sleep).
+                assert!(
+                    wait_for_session_log(&state, "\"name\":\"stop\"", support::CEILING),
+                    "the Ctrl-C never reached the session: {:?}",
+                    text(&screen)
+                );
+            } else {
+                // Anything else is text: it has been taken when it is echoed.
+                let tail: String = String::from_utf8_lossy(preamble)
+                    .chars()
+                    .rev()
+                    .take(6)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                let _ = wait_for(&screen, &tail, Duration::from_secs(3));
+            }
         }
         if let Some(message) = message {
             send(message);
-            let _ = wait_for(&screen, "hello there", Duration::from_secs(5));
+            let _ = wait_for(&screen, "hello there", Duration::from_secs(20));
             send(b"\r");
         }
         typed = true;
@@ -681,16 +728,16 @@ fn drive_pty_in_idle_or_turn(
     assert!(typed, "the TUI never drew: {:?}", text(&screen));
     for needle in &expect {
         assert!(
-            wait_for(&screen, needle, Duration::from_secs(30)),
+            wait_for(&screen, needle, support::CEILING),
             "{needle:?} never reached the terminal: {:?}",
             text(&screen)
         );
     }
     send(b"/quit");
-    std::thread::sleep(Duration::from_millis(100));
+    let _ = wait_for(&screen, "/quit", Duration::from_secs(5));
     send(b"\r");
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + support::CEILING;
     let code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.exit_code() as u64,
@@ -984,7 +1031,7 @@ fn drive_and_count_idle_bytes(
         out.flush().unwrap();
     };
     assert!(
-        wait_for(&screen, "kelir", Duration::from_secs(20)),
+        wait_for(&screen, "kelir", support::CEILING),
         "the TUI never drew"
     );
     std::thread::sleep(Duration::from_millis(200));
@@ -992,14 +1039,14 @@ fn drive_and_count_idle_bytes(
     std::thread::sleep(Duration::from_millis(100));
     send(b"\r");
     assert!(
-        wait_for(&screen, "DONE", Duration::from_secs(30)),
+        wait_for(&screen, "DONE", support::CEILING),
         "the answer never arrived: {:?}",
         text(&screen)
     );
     // Wait for the state row to say idle again (the turn is over and the
     // spinner is gone).
     assert!(
-        wait_for(&screen, "idle", Duration::from_secs(10)),
+        wait_for(&screen, "idle", support::CEILING),
         "the TUI never went idle: {:?}",
         text(&screen)
     );
@@ -1010,7 +1057,7 @@ fn drive_and_count_idle_bytes(
     send(b"/quit");
     std::thread::sleep(Duration::from_millis(100));
     send(b"\r");
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + support::CEILING;
     let code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.exit_code() as u64,
@@ -1474,7 +1521,7 @@ fn panic_in_a_pty(
             }
         }
     });
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + support::CEILING;
     let code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.exit_code() as u64,

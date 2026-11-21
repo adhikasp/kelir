@@ -189,7 +189,7 @@ async fn b1_cwd_with_a_space_and_a_non_ascii_letter_reaches_both_routes() {
         "the call did not run in --cwd {}",
         other.display()
     );
-    wait_until("the bg run job to write", Duration::from_secs(20), || {
+    wait_until("the bg run job to write", CEILING, || {
         other.join("job.txt").is_file()
     })
     .await;
@@ -222,10 +222,7 @@ async fn b2_a_promoted_exec_tree_survives_a_killed_session_and_cancel_takes_it()
     let settled = live.wait_for("tool_settled").await;
     assert_eq!(settled["outcome"], "promoted", "{settled}");
     let id = promoted_id(&settled);
-    wait_until("the grandchildren", Duration::from_secs(20), || {
-        count_with(&markers) >= 3
-    })
-    .await;
+    wait_until("the grandchildren", CEILING, || count_with(&markers) >= 3).await;
     live.kill().await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     let survivors = count_with(&markers);
@@ -233,8 +230,7 @@ async fn b2_a_promoted_exec_tree_survives_a_killed_session_and_cancel_takes_it()
     let cancelled = sandbox
         .kelir(NO_PROVIDER, &["bg", "cancel", &id], &[])
         .await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let left = count_with(&markers);
+    let left = settle_to_zero(|| count_with(&markers)).await;
     let remaining = describe(&markers);
     reap(&markers);
     assert!(
@@ -267,14 +263,13 @@ async fn b3_an_unpromoted_call_whose_shim_is_killed_settles_and_its_tree_goes() 
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     live.wait_for("tool_started").await;
     let bg = live.session_dir.join("bg");
-    wait_until("the call's status", Duration::from_secs(20), || {
+    wait_until("the call's status", CEILING, || {
         shim_of(&bg, "").is_some() && count_with(&markers) >= 2
     })
     .await;
     force_kill(shim_of(&bg, "").unwrap());
     let settled = live.wait_for("tool_settled").await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let left = count_with(&markers);
+    let left = settle_to_zero(|| count_with(&markers)).await;
     reap(&markers);
     live.kill().await;
     assert_eq!(settled["outcome"], "unknown", "{settled}");
@@ -344,8 +339,7 @@ async fn b5_a_graceful_exit_takes_a_leftover_child_with_it() {
         .kelir(&mock.base_url(), &["run", "--json", "go"], &[])
         .await;
     assert_eq!(run.code, 0, "{}", run.stderr);
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let left = count_with(&markers);
+    let left = settle_to_zero(|| count_with(&markers)).await;
     let remaining = describe(&markers);
     reap(&markers);
     assert_eq!(
@@ -408,10 +402,7 @@ async fn b7_a_lost_promoted_job_can_still_be_cancelled() {
     assert_eq!(settled["outcome"], "promoted", "{settled}");
     let id = promoted_id(&settled);
     let bg = live.session_dir.join("bg");
-    wait_until("the grandchildren", Duration::from_secs(20), || {
-        count_with(&markers) >= 2
-    })
-    .await;
+    wait_until("the grandchildren", CEILING, || count_with(&markers) >= 2).await;
     live.kill().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     force_kill(shim_of(&bg, &id).expect("a shim pid"));
@@ -423,8 +414,7 @@ async fn b7_a_lost_promoted_job_can_still_be_cancelled() {
     let cancelled = sandbox
         .kelir(NO_PROVIDER, &["bg", "cancel", &id], &[])
         .await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let left = count_with(&markers);
+    let left = settle_to_zero(|| count_with(&markers)).await;
     let remaining = describe(&markers);
     reap(&markers);
     assert!(
