@@ -903,7 +903,19 @@ mod tests {
     fn only_one_holder_can_lock_a_session() {
         let dir = temp_dir("lock");
         for round in 0..5 {
-            let first = lock(&dir).unwrap_or_else(|error| panic!("round {round}: {error}"));
+            // A previously reacquired guard may not release its flock on
+            // macOS until shortly after the drop; retry the initial lock too.
+            let mut first = None;
+            for _ in 0..50 {
+                match lock(&dir) {
+                    Ok(guard) => {
+                        first = Some(guard);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+            let first = first.unwrap_or_else(|| panic!("round {round}: cannot take the lock"));
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "ipc::tests::lock_probe", "--nocapture"])
                 .env("KELIR_IPC_LOCK_PROBE", &dir)
@@ -929,6 +941,7 @@ mod tests {
                 reacquired.is_some(),
                 "round {round}: the lock outlived its guard"
             );
+            drop(reacquired);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
