@@ -71,10 +71,7 @@ pub fn truncate_bytes(text: &str, max: usize) -> String {
 /// the live session looks broken. Detect that and resolve `kelir` on PATH
 /// instead, which now points at the replacement binary.
 fn usable_exe(path: &std::path::Path) -> bool {
-    if path.to_string_lossy().ends_with(" (deleted)") || !path.is_file() {
-        return false;
-    }
-    true
+    !path.to_string_lossy().ends_with(" (deleted)") && path.is_file()
 }
 
 /// Resolve a runnable path to this binary for self-spawns, falling back to a

@@ -1816,3 +1816,20 @@ side). Where the code had to choose:
   and fire on `turn_done`, `error`, `paused`, `bg_settled` and `child_settled`. `jobs.toml`'s legacy
   `notify` list still runs once at job run end (`jobrun.rs`); it is a separate mechanism, not an
   addition to those five kinds. `docs/reference/notify.md` states this distinction directly.
+
+## Tool-call lines: no fold, no `ok` verdict (2026-11-21)
+
+The TUI v2 design note (`docs/design/TUI-v2.md` §4) and the reference described tool calls
+settling into an open group that folded runs of three or more into one `✓ N calls` line, with a
+right-aligned `ok · N B` verdict on each remaining line. Maintainer request: every call keeps its
+own line, and a clean call shows no `ok` word.
+
+- **No fold.** A settled call commits one dim line immediately, in event order. A run of calls
+  separated only by an empty assistant text (a reasoning-only step, which emits no `Delta`) stays
+  one contiguous block: `begin_prose` is now guarded on real text in both `Delta` and `Assistant`.
+  `Group`, the fold counter and `Policy::Collapsed` are gone; `/collapse` and bare `/expand` were
+  removed as commands entirely (there is no policy left to toggle), and `/expand n|last` still
+  appends a call's output.
+- **No `ok` verdict.** A clean call's right-hand column shows only its output size (`29 B`);
+  a failure (`✗ exit 101`) and a stop (`⏹ cancelled`) keep their words. The headless progress
+  line (`→ bash … · ok · …`) is a separate path and is unchanged.

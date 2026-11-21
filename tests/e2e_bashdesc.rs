@@ -132,7 +132,8 @@ fn a_description_reaches_the_tui_settled_line_and_live_row() {
         .collect();
     assert!(rendered.starts_with(&format!("  {DESC}")), "{rendered:?}");
     assert!(!rendered.contains("printf"), "{rendered:?}");
-    assert!(rendered.ends_with("ok · 9 B"), "{rendered:?}");
+    assert!(rendered.ends_with("9 B"), "{rendered:?}");
+    assert!(!rendered.contains("ok"), "{rendered:?}");
 
     // The label is dim, never prose weight; the verdict is still right-aligned.
     assert_eq!(

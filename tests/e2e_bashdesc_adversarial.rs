@@ -66,7 +66,8 @@ fn a_wide_multibyte_label_is_capped_in_characters_and_keeps_the_verdict() {
     };
     let line = call.line(kelir::theme::Theme::plain(), 60);
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(text.ends_with("ok · 9 B"), "{text:?}");
+    assert!(text.ends_with("9 B"), "{text:?}");
+    assert!(!text.contains("ok"), "{text:?}");
     assert_eq!(kelir::scrollback::display_width(&text), 60, "{text:?}");
     let now = std::time::Instant::now();
     let mut activity = kelir::activity::Activity::idle(now);
@@ -131,7 +132,8 @@ fn a_wide_multibyte_label_is_capped_in_characters_and_keeps_the_verdict() {
         .take(60)
         .map(|cell| cell.symbol())
         .collect();
-    assert!(painted.ends_with("ok · 9 B"), "{painted:?}");
+    assert!(painted.ends_with("9 B"), "{painted:?}");
+    assert!(!painted.contains("ok"), "{painted:?}");
 }
 
 /// Finding N-ESC: ESC/CSI/OSC bytes in a model-supplied label are NOT

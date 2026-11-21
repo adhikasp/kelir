@@ -3,7 +3,8 @@
 **Status: PREPARED, NOTHING PUSHED OR PUBLISHED.** This document records the
 M12 publish-preparation work and the exact commands for the maintainer to run
 *after* giving the explicit go-ahead. The push, repository creation, crates.io
-publish and license choice are open decisions (see the end).
+the push and crate publish are open decisions (see the end). The license is
+settled: MIT (`LICENSE-MIT`, `license = "MIT"`).
 
 All work was done in the `job/m12prep` worktree on top of `main` `058d3ca`.
 No remote was added, no push, publish or `gh repo create` was performed.
@@ -24,9 +25,8 @@ Windows host name, a personal host name and a numeric address).
 
 ### Findings (categories only, no values)
 
-- Every one of the 571 identities (author and committer) matched a personal
-  name pattern; three different identity spellings were in use. **All authors
-  and committers must be rewritten.**
+- Identity fields are left as they are. Commits carry the real author; the
+  publish export must not rewrite them to a neutral identity.
 - Commit messages: a handful of commits (single digits per pattern) carried a
   personal name in the message text (e.g. attribution notes).
 - Tracked blobs across history: the name patterns appeared broadly in docs
@@ -42,7 +42,7 @@ Windows host name, a personal host name and a numeric address).
 
 1. Keep the pattern file outside the repository (never commit it — a committed
    list of what to avoid would defeat the check).
-2. Rewrite all identity fields to one neutral public identity.
+2. Do not rewrite author or committer identities — keep the real author.
 3. Replace every pattern occurrence, case-insensitively, in commit messages
    and blob contents with neutral wording from a second outside-repo map:
    `C:/Users/<user>/kelir-scratch/m12-replacements.txt`. The mapping is one
@@ -77,8 +77,8 @@ OUT=/c/Users/<user>/kelir-scratch/publish/kelir
 rm -rf "$OUT"
 git init -q -b main "$OUT"
 cd "$OUT"
-git config user.name "kelir contributors"
-git config user.email "noreply@users.noreply.github.com"
+git config user.name "Adhika Setya Pramudita"
+git config user.email "hello@adhikasp.id"
 git config commit.gpgsign false
 
 python C:/Users/<user>/kelir-scratch/m12-export.py "$SRC" "$PAT" "$REP" "$OUT"
@@ -93,8 +93,6 @@ If `git filter-repo` is available instead, the equivalent one-liner shape is
 
 ```sh
 git filter-repo --force \
-  --name-callback  'return b"kelir contributors"' \
-  --email-callback 'return b"noreply@users.noreply.github.com"' \
   --commit-callback 'c.message = scrub(c.message)' \
   --blob-callback  'blob.data = scrub(blob.data)'
 ```
@@ -108,7 +106,7 @@ where `scrub()` applies the same outside-repo pattern/replacement map.
 - 572 commits, 447 tracked files; working tree clean after checking out
   the M12 commit as `main` (the export's `main` initially pointed at the
   pre-M12 merge commit; `git checkout -B main job/m12prep` fixes it).
-- Identity fields: one neutral identity only.
+- Identity fields: unchanged (real author).
 - All-history verifier: **`RESULT=CLEAN`** (identities, messages and all
   blobs); report at
   `C:/Users/<user>/kelir-scratch/m12-export-verify.txt`.
@@ -171,8 +169,8 @@ failure that cannot be reproduced locally.
   scrub check.
 - `CHANGELOG.md` — release notes derived from `docs/PROGRESS.md` (M0–M11 and
   STEER-9), plus a `0.1.0 — pending release` heading.
-- `LICENSE-MIT` and `LICENSE-APACHE` — both full texts prepared using the
-  neutral copyright holder "kelir contributors". **No choice was made.**
+- `LICENSE-MIT` — the full MIT text, the single chosen license. `Cargo.toml`
+  already carried `license = "MIT"`; published under MIT.
 - `Cargo.toml` — added neutral `authors`, `readme`, `repository`, `homepage`,
   `documentation`, `keywords` and `categories`. The repository/homepage URL
   used an `<owner>` placeholder deliberately, so the drafted files contained no
@@ -213,9 +211,8 @@ both pass on this branch.
 
 1. Get the explicit maintainer decision on **push yes/no** and on **license**.
 2. Substitute the real public owner in `Cargo.toml` (`repository`, `homepage`)
-   and `README.md` (clone URL); set the chosen license in `Cargo.toml`
-   (`license = "MIT"`, `"Apache-2.0"`, or the dual `MIT OR Apache-2.0` if both
-   files are kept) and keep only the chosen `LICENSE*` file.
+   and `README.md` (clone URL); the license is already settled as MIT
+   (`license = "MIT"` in `Cargo.toml`, `LICENSE-MIT` as the only license file).
 3. Check the crates.io name `kelir` is free; adjust if needed.
 4. Re-run the export from the final committed state (commands in §1), then
    the all-history verifier and `scripts/scrub-check.sh` on the export.
@@ -243,10 +240,8 @@ both pass on this branch.
 - **Push / publish: YES or NO** — the maintainer must explicitly confirm
   before the first push, repository creation, crate publish or any other
   outward-facing action. This job did none of them.
-- **License: MIT vs Apache-2.0** (or dual). Both texts are prepared; the
-  existing `license = "MIT"` field is a pre-existing value, not a choice made
-  here. The maintainer must choose and the docs/Cargo.toml must be updated in
-  the same commit.
+- **License: settled as MIT** (`LICENSE-MIT`, `license = "MIT"`). No open
+  decision remains here.
 - **Repository owner/URL** — the drafted files used an `<owner>` placeholder;
   the real public owner must be supplied.
 - **crates.io name** — verify `kelir` is available (needs network).

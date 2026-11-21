@@ -278,9 +278,8 @@ fn snapshot_the_output_tail_view() {
         out_path: out.to_string_lossy().into_owned(),
         tail: String::new(),
     });
-    // The call is still in the open group, not committed yet: nothing to
-    // scroll.
-    assert!(app.take_scroll().is_empty());
+    // The call's line commits as it settles; the tail overlay is independent.
+    app.take_scroll();
     app.press(tui::Press::ToggleTail);
     let screen = snapshot(&mut app);
     let rows: Vec<&str> = screen.lines().collect();
@@ -385,10 +384,9 @@ fn snapshot_the_idle_and_working_rows_are_visibly_different() {
     );
 }
 
-/// A tool group that folds: the live area shows the calls, the scrollback gets
-/// the folded line plus the errors.
+/// Each call commits its own line the moment it settles; there is no fold.
 #[test]
-fn snapshot_a_tool_group_before_and_after_it_closes() {
+fn every_tool_call_commits_its_line_without_a_fold() {
     let mut app = new_app();
     for command in ["git --version", "python --version", "cargo fmt"] {
         app.apply(UiEvent::ToolSettled {
@@ -404,20 +402,17 @@ fn snapshot_a_tool_group_before_and_after_it_closes() {
             tail: String::new(),
         });
     }
-    let open = render_at(&mut app, 60);
-    let live: Vec<&str> = open.lines().take(3).collect();
-    // Already three calls: the live area shows the same fold the scrollback
-    // will get, so nobody sees it change shape when it commits.
-    assert!(
-        live.iter().any(|row| row.contains("3 calls")),
-        "the open group is visible: {live:?}"
-    );
-    app.apply(UiEvent::Assistant {
-        text: "all good".into(),
-    });
     let committed: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+    assert_eq!(committed.len(), 3, "{committed:?}");
+    assert!(committed[0].contains("git --version"), "{committed:?}");
+    assert!(committed[1].contains("python --version"), "{committed:?}");
+    assert!(committed[2].contains("cargo fmt"), "{committed:?}");
     assert!(
-        committed.iter().any(|row| row.contains("3 calls")),
+        !committed.iter().any(|row| row.contains("calls")),
+        "{committed:?}"
+    );
+    assert!(
+        !committed.iter().any(|row| row.contains(" ok")),
         "{committed:?}"
     );
 }
