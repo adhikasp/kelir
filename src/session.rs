@@ -441,10 +441,6 @@ struct Session {
     /// This session's socket trust boundary: its token and the jobs it owns. The `bg`, `cancel` and `bg-spawn` verbs are refused here
     /// when they name a job this session did not start.
     trust: std::sync::Arc<crate::trust::Trust>,
-    /// Job ids whose status file was refused (unsigned or badly signed): the log
-    /// records each once, so a child rewriting a file cannot grow it.
-    refused_status: std::collections::HashSet<String>,
-    seen_seq: std::collections::HashMap<String, u64>,
     /// What this session has spent and what state it is in, folded from the log as it is written:
     /// the `status` verb's answer, and what the warnings are decided from.
     tally: crate::usage::Tally,
@@ -1623,7 +1619,6 @@ impl Session {
             // Every tool child exports the session's token as `KELIR_TOKEN`
             // , exactly as it already gets `KELIR_SOCK`.
             ctx.token = trust.token().to_string();
-            ctx.trust = Some(trust.clone());
             ctx
         };
         let reopened = prepared.resume.is_some();
@@ -1700,8 +1695,6 @@ impl Session {
             watch: crate::sources::Watch::default(),
             governor: prepared.governor,
             trust,
-            refused_status: std::collections::HashSet::new(),
-            seen_seq: std::collections::HashMap::new(),
             tally: crate::usage::Tally::default(),
             kids: children::Kids::new(&prepared.id, prepared.cfg.children, prepared.child.as_ref()),
             retry_wait: std::cell::Cell::new(None),
@@ -1711,7 +1704,7 @@ impl Session {
             initial_task: None,
             gate_notes: Vec::new(),
         };
-        if session.kids.link.is_some() {
+        if session.kids.root.is_some() {
             crate::gates::limit_for_child();
         }
         session.gates = session.build_gates();
@@ -1905,10 +1898,8 @@ impl Session {
         // record, and this is where it reaches the log (`bg_started`, `bg_settled` and the message that wakes
         for event in &self.events {
             match &event.body {
-                EventBody::BgStarted { bg_id, pubkey, .. } => {
-                    self.trust.adopt(bg_id, pubkey.as_deref())
-                }
-                EventBody::ToolStarted { dir: Some(dir), .. } => self.trust.adopt(dir, None),
+                EventBody::BgStarted { bg_id, .. } => self.trust.adopt(bg_id),
+                EventBody::ToolStarted { dir: Some(dir), .. } => self.trust.adopt(dir),
                 _ => {}
             }
         }
@@ -3150,13 +3141,7 @@ impl Session {
                 Verb::Status => {}
                 // A job of this session's own, killed on request.
                 Verb::Cancel { id } => {
-                    match crate::bg::cancel_in(
-                        &self.trust.bg_dir(),
-                        &id,
-                        self.trust.key(&id).as_deref(),
-                    )
-                    .await
-                    {
+                    match crate::bg::cancel_in(&self.trust.bg_dir(), &id).await {
                         Ok(text) => self.emit(UiEvent::Info(format!("· {text}"))),
                         Err(text) => {
                             self.record(EventBody::Error {
@@ -3447,96 +3432,47 @@ impl Session {
     /// Record what a job's status file says: `bg_started` once, and — when it settled — `bg_settled` plus
     /// the `user` message from `job` that wakes the agent.
     fn note_bg(&mut self, reported: &crate::bg::Status) -> Result<bool, String> {
-        use crate::trust::Seal;
-        // The id is this session's own or nothing: a status file nobody minted
-        // never reaches the log as a job.
         let id = reported.id.clone();
+        // The id is this session's own or nothing: a status file nobody minted never reaches the log
+        // as a job. Same-user children are trusted; ownership is the only check here.
         if !self.trust.owns(&id) {
             return Ok(false);
         }
         // The file is the truth as of now, the argument is a snapshot from when the report was made.
         let dir = self.trust.bg_dir();
         let file = crate::bg::Status::read(&crate::bg::status_path(&dir, &id));
-        // A final record is terminal: the shim also keeps it beside the status file, and a validly signed
-        // final record wins over whatever the status file now says, so putting an older record back cannot un-
-        let last = crate::bg::Status::read(&crate::bg::final_path(&dir, &id)).filter(|last| {
-            last.id == id && last.is_job() && last.settled() && self.trust.seal(last) == Seal::Good
-        });
-        let candidate = last.as_ref().or(file.as_ref()).unwrap_or(reported);
-        let sealed = if candidate.id == id {
-            self.trust.seal(candidate)
-        } else {
-            Seal::Forged
-        };
-        // Sequence numbers only go up: a record older than one already
-        // believed is a replay.
-        if sealed == Seal::Good {
-            let seen = self.seen_seq.entry(id.clone()).or_insert(0);
-            if candidate.seq < *seen {
-                return Ok(false);
-            }
-            *seen = candidate.seq;
-        }
-        // A signed record still cannot point the session at a file outside its
-        // own `bg/`: its `out` is quoted into the wake message.
-        if sealed == Seal::Good
-            && !candidate.out.trim().is_empty()
-            && !self.trust.inside_bg(&candidate.out)
+        // A final record is terminal: the shim keeps it beside the status file so a running record
+        // put back later cannot un-settle a job.
+        let final_status = crate::bg::Status::read(&crate::bg::final_path(&dir, &id))
+            .filter(|last| last.id == id && last.is_job() && last.settled());
+        let candidate = final_status.as_ref().or(file.as_ref()).unwrap_or(reported);
+        if candidate.id != id
+            || !candidate.out.trim().is_empty() && !self.trust.inside_bg(&candidate.out)
         {
             return Ok(false);
         }
-        let status = match sealed {
-            Seal::Good => crate::bg::observed_in(&dir, candidate),
-            Seal::Unowned => return Ok(false),
-            // A resumed session adopted this id from its log and no longer holds the key (it died with the process
-            // that minted it), so a record cannot be authenticated.
-            Seal::NoKey => match self.adopted_outcome(&id, candidate) {
-                Some(lost) => lost,
-                None => return Ok(false),
-            },
-            Seal::Unsigned | Seal::Forged => {
-                if self.refused_status.insert(id.clone()) {
-                    let why = if sealed == Seal::Unsigned {
-                        "its status file carries no signature"
-                    } else {
-                        "its status file's signature is not the job's"
-                    };
-                    let message = format!(
-                        "bg: the status file of `{id}` was ignored: {why}, so it was not written by that job's shim"
-                    );
-                    self.refuse_verb("bg", &json!({"id": id}), "job", &message)?;
-                }
-                return Ok(false);
-            }
-        };
-
-        let status = &status;
+        let status = crate::bg::observed_in(&dir, candidate);
         let started = self.events.iter().any(|event| {
             matches!(&event.body, EventBody::BgStarted { bg_id, .. } if bg_id == &status.id)
         });
         if !started {
-            // The public key goes into the log with the job: a resume verifies
-            // a surviving shim's records under it.
-            let mut body = crate::bg::started_body(status);
-            if let EventBody::BgStarted { pubkey, .. } = &mut body {
-                *pubkey = self.trust.public(&status.id);
-            }
-            self.record(body)?;
+            self.record(crate::bg::started_body(&status))?;
         }
         if !status.settled() {
             self.sync();
             return Ok(false);
         }
+        // Settle once. The log is the record: a repeated report (a stale watcher pass, a child
+        // replaying a settled status 50 times) finds `bg_settled` here and writes nothing — no
+        // second event, no second wake message.
         let settled = self.events.iter().any(|event| {
             matches!(&event.body, EventBody::BgSettled { bg_id, .. } if bg_id == &status.id)
         });
         if settled {
             return Ok(false);
         }
-        self.record(crate::bg::settled_body(status))?;
-        let text = crate::bg::wake_text(status);
-        // : a settled background job is its own notification kind. It uses the same fire-and-record
-        // path as turn_done/error/paused.
+        self.record(crate::bg::settled_body(&status))?;
+        let text = crate::bg::wake_text(&status);
         self.notify("bg_settled", &text);
         self.record(EventBody::User {
             text: Payload::text(text.clone()),
@@ -3550,38 +3486,6 @@ impl Session {
         )));
         self.sync();
         Ok(true)
-    }
-
-    /// What a resumed session may say about a job whose status it cannot authenticate: nothing while the
-    /// file says it runs, and `lost` (built from the log's own `bg_started`) once the file says it stopped.
-    fn adopted_outcome(&self, id: &str, file: &crate::bg::Status) -> Option<crate::bg::Status> {
-        if !file.settled() {
-            return None;
-        }
-        let (cmd, out, call) = self.events.iter().find_map(|event| match &event.body {
-            EventBody::BgStarted {
-                bg_id,
-                cmd,
-                out_path,
-                call_id,
-                ..
-            } if bg_id == id => Some((
-                cmd.inline_str().unwrap_or("").to_string(),
-                out_path.clone(),
-                call_id.clone(),
-            )),
-            _ => None,
-        })?;
-        let mut lost =
-            crate::bg::Status::new(id, crate::bg::KIND_JOB, &cmd, std::path::Path::new(&out));
-        lost.state = crate::bg::STATE_LOST.into();
-        lost.finished = Some(crate::event::now_ts());
-        lost.call = call;
-        lost.error = Some(
-            "the session was resumed after this job started, so its result could not be authenticated; read its output"
-                .into(),
-        );
-        Some(lost)
     }
 
     /// A wake-up the session raised itself (its own `bg/` watcher) is not a request: there is no `Request`
@@ -5405,8 +5309,8 @@ impl Session {
                 input: call.args.clone(),
             });
             let dir = format!("{}-{}-{}", started.seq, step, index + 1);
-            // The job registry: a call's output dir name is the id its `bg` reports carry, so the session
-            // registers it — with a capability minted here and handed to that call's shim only — before the call
+            // The job registry: a call's output dir name is the id its `bg` reports carry, so the
+            // session registers it before the shim starts.
             let _ = self.trust.issue_call(&dir, &call.id);
             plan.push((dir, call.clone()));
         }
@@ -5659,7 +5563,7 @@ impl Session {
                 );
                 // A child's stdout is its answer, which its parent reads: the progress lines go to stderr,
                 // where the parent keeps them in the child's `host.err`.
-                if self.kids.link.is_some() {
+                if self.kids.root.is_some() {
                     eprintln!("{line}");
                 } else {
                     println!("{line}");
@@ -6150,8 +6054,6 @@ mod tests {
             // A throwaway trust state in the same temp dir: no socket here, and
             // nothing in these tests sends a `bg` or `cancel` verb.
             trust: std::sync::Arc::new(crate::trust::Trust::new(dir_for_trust(), String::new())),
-            refused_status: std::collections::HashSet::new(),
-            seen_seq: std::collections::HashMap::new(),
             tally: Default::default(),
             retry_wait: Default::default(),
             gates: None,

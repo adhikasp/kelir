@@ -27,16 +27,26 @@ variables above still win when set. Isolate a run with the two `*_DIR` variables
   events.jsonl            # append-only, fsync'd per batch, monotonic seq: the only source of truth
   events.jsonl.torn       # the fragment of a torn last line, kept when it was cut off
   sock                    # the session socket (a pipe name on Windows)
+  token                   # 64-hex per-session socket token, owner-only; read by kelir ctl
   commands/<call-id>/out  # a tool call's whole output, from the first byte
   gates/g<n>.sh|.bat|.ps1 # the command text of gate number n, written for the shell (`gates`)
   commands/mcp_<ulid>/    # a `kelir mcp` call: `out` (its text) and any decoded image/blob files
   blobs/<seq>-<field>     # a payload over 10 KB, referenced from its event
   attachments/<n>-<name>  # an image `kelir view` queued
-  bg/<bg-id>.status       # a job's state, written by its shim: survives kelir exiting
+  bg/<bg-id>.status       # a job's state, plain JSON written atomically (tmp + rename); survives kelir exiting
   bg/<bg-id>.out          # a job's output
   owner                   # {"pid","start"} of the process that owns the session (who holds a name)
   host.err                # a child session only: its progress lines and errors (its stdout is its answer)
 ```
+
+`token` is 32 random bytes as 64 lowercase hex characters, written with owner-only permissions
+(`0600` on Unix, a protected DACL on Windows) and removed when the session ends. Every socket
+request must carry it; `kelir ctl` reads the file itself and a tool child inherits it as
+`KELIR_TOKEN`. A `bg/<bg-id>.status` record is plain JSON (id, state, start/finish times, command,
+output path and, when settled, exit code); there are no signature, capability or sequence fields.
+The shim writes it to a temp file and renames it into place so a reader never sees a partial
+record, and keeps the final settled record in `bg/<bg-id>.final` so a later `running` record cannot
+un-settle the job.
 
 Session ids are ULIDs, so the directory names sort into creation order and
 `ctl latest` can pick the newest; `kelir ls` shows them as a tree (a child's

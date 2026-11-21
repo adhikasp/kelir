@@ -1011,7 +1011,6 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "reqwest",
- "ring",
  "serde",
  "serde_json",
  "tempfile",

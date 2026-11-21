@@ -1863,3 +1863,19 @@ display-only. The deviation from the old SPEC is deliberate:
   became `src/usage.rs` with tokens and status only.
 - The built-in delegation skill says children use tokens and shows the
   cache-hit ratio, not a spend figure.
+
+## Signed status and child links removed (P2A, 2026-11-21)
+
+The rewrite drops the STEER-7 Ed25519 status signatures, per-job capabilities, per-child link
+secrets and socket/pipe permission read-back (#12). Same-user processes cannot be kept out of a
+harness that gives the model a real shell as that user, so those checks added complexity and keys
+without holding a real boundary. What remains: a 256-bit per-session token required on every
+socket request, owner-only state directories and socket/pipe creation, an owned-job check on
+`bg`/`cancel`/`bg-spawn`, subtree checks in the child registry, and settle-once for each job id
+(the bound on the original forged-report flood). Status files are plain JSON written atomically;
+`bg_started` no longer carries `pubkey`, and a resume does not verify signatures.
+
+`SystemRng::fill_bytes` panics when the OS has no entropy. The rewrite catches that panic and
+returns an empty token/id: `Trust::create` and `Trust::mint_for` then refuse cleanly, so no
+predictable fallback is ever used and an entropy-less platform fails to start instead of
+minting a session. The emptiness guards in `src/trust.rs` are live on that path.

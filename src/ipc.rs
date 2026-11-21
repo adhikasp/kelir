@@ -54,10 +54,6 @@ pub struct Request {
     /// The session's token ([`crate::trust::TOKEN_ENV`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// The **job capability** the sender holds (returned by `bg-claim` to the process that started the
-    /// job): a per-job secret.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capability: Option<String>,
 }
 
 fn default_from() -> String {
@@ -71,19 +67,12 @@ impl Request {
             args,
             from: from.into(),
             token: None,
-            capability: None,
         }
     }
 
     /// The same request, carrying a token (what the client side does).
     pub fn with_token(mut self, token: Option<String>) -> Self {
         self.token = token;
-        self
-    }
-
-    /// The same request, carrying a job's capability (what a shim's report does).
-    pub fn with_capability(mut self, capability: Option<String>) -> Self {
-        self.capability = capability.filter(|capability| !capability.trim().is_empty());
         self
     }
 }
@@ -316,11 +305,8 @@ pub fn bind(dir: &Path, id: &str) -> Result<LocalListener, String> {
     {
         use std::os::unix::fs::PermissionsExt as _;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        crate::perm::check_socket(&path)?;
         record_socket_path(dir, &path);
     }
-    #[cfg(windows)]
-    crate::perm::check_pipe(&value(dir, id))?;
     Ok(listener)
 }
 

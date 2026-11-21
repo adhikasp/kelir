@@ -61,6 +61,10 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 - Session directories and tokens are owner-only; key values are never logged,
   only their source; child environments are scrubbed before spawn.
+- Signed bg status, per-job capabilities, per-child links and permission
+  read-back are gone. A session token, owned-job checks and settle-once keep
+  other users and duplicate reports out. `bg_started` no longer carries
+  `pubkey`; status files are plain JSON.
 
 ## [0.1.0] — pending release
 

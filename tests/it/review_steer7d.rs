@@ -501,9 +501,8 @@ async fn a_same_user_child_cannot_read_job_keys_from_the_sessions_memory() {
 }
 
 /// The boundary that IS promised: a spawn request's `kind` is pinned to `job` by the session,
-/// so the caller cannot ask for an unhardened shim, and the signing key is never returned by a
-/// verb, logged, or placed on the shim's command line. This is what the STEER-7 round-4 fix
-/// (`src/bg.rs SpawnRequest::pinned`) actually guarantees.
+/// so the caller cannot ask for an unhardened shim, and no secret is returned by a verb,
+/// logged, or placed on the shim's command line.
 #[cfg(windows)]
 #[tokio::test]
 async fn a_spawned_job_pins_its_kind_and_never_exposes_the_key() {
@@ -606,7 +605,7 @@ async fn the_session_process_is_not_dumpable_while_it_holds_job_keys() {
     assert_eq!(
         owner,
         Some(0),
-        "the session (holding every job's signing key) is dumpable; ptrace_scope={}",
+        "the session is dumpable; ptrace_scope={}",
         scope.trim()
     );
 }

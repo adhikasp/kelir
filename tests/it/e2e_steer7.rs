@@ -271,91 +271,6 @@ async fn a_path_escaping_the_session_is_refused() {
     assert_eq!(code, 0, "{stderr}");
 }
 
-/// B1, the whole point: a tool child holds the session's token, so a report for
-/// one of the session's *own* jobs still needs that job's capability. With the
-/// token alone it is refused, and nothing it claims reaches the log.
-#[tokio::test]
-async fn a_report_with_the_token_but_no_capability_is_refused() {
-    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
-    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("turn_ended").await;
-    let token = token_of(&session);
-
-    // A real job of this session: the same route a bash child takes.
-    let sandbox = Sandbox::from_live(&session);
-    let started = sandbox
-        .kelir(
-            "http://127.0.0.1:9/v1",
-            &["bg", "run", "sleep 5; echo job"],
-            &[
-                (
-                    "KELIR_SESSION_DIR",
-                    &kelir::util::path_string(&session.session_dir),
-                ),
-                (
-                    "KELIR_SOCK",
-                    &kelir::ipc::value(&session.session_dir, &session.id),
-                ),
-                ("KELIR_TOKEN", &token),
-            ],
-        )
-        .await;
-    assert_eq!(started.code, 0, "stderr: {}", started.stderr);
-    let id = started
-        .stdout
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
-    assert!(id.starts_with("bg_"), "{}", started.stdout);
-    let out = session.session_dir.join("bg").join(format!("{id}.out"));
-
-    // The token, a real job id, and a claim that it was lost: exactly what a
-    // child can write, without the job's capability.
-    for capability in [None, Some("0".repeat(64)), Some("wrong".to_string())] {
-        let mut request = json!({
-            "verb": "bg",
-            "from": "job",
-            "token": token,
-            "args": {"id": id, "state": "lost", "started": "2026-11-19T00:00:00Z",
-                     "out": kelir::util::path_string(&out), "kind": "job",
-                     "cmd": "forged"},
-        });
-        if let Some(capability) = capability {
-            request["capability"] = json!(capability);
-        }
-        let answer = raw(&session, request).await;
-        assert_eq!(answer["ok"], false, "{answer}");
-        assert!(
-            answer["error"]
-                .as_str()
-                .unwrap_or("")
-                .contains("capability"),
-            "the refusal names what is missing: {answer}"
-        );
-    }
-    let log = session.log();
-    assert!(
-        !log.iter()
-            .any(|event| event["type"] == "user" && event["from"] == "job"),
-        "a forged `lost` report reached the log: {log:?}"
-    );
-    assert!(
-        !log.iter().any(|event| event["type"] == "bg_settled"),
-        "a forged report settled the job in the log: {log:?}"
-    );
-
-    // Clean up the job this test really started, and its shim.
-    let cancelled = session.ctl(&["cancel", &id]).await;
-    assert_eq!(
-        cancelled.code, 0,
-        "{}{}",
-        cancelled.stdout, cancelled.stderr
-    );
-    let (code, stderr) = session.end().await;
-    assert_eq!(code, 0, "{stderr}");
-}
-
 /// F8, second half: reaching the socket is not authorisation. A request with no
 /// token is answered and dropped at the listener — the session never sees it, so
 /// it cannot log it either.
@@ -589,6 +504,94 @@ async fn ctl_cancel_kills_an_owned_job_and_the_log_records_it() {
     assert_eq!(code, 0, "{stderr}");
 }
 
+/// The 43-message incident in one test: a token holder replays a settled report
+/// 50 times. The job id is owned and already settled, so every report passes the
+/// ownership check, but only the first one reaches the model — settle-once is
+/// what bounds the wake-up, not a signature or a per-job secret.
+#[tokio::test]
+async fn a_settled_report_replayed_fifty_times_wakes_the_model_once() {
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&text_turn("ok", 0))),
+        Reply::Sse(sse(&text_turn("woke", 0))),
+    ])
+    .await;
+    let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
+    session.wait_for("turn_ended").await;
+    let token = token_of(&session);
+    let sandbox = Sandbox::from_live(&session);
+    let started = sandbox
+        .kelir(
+            "http://127.0.0.1:9/v1",
+            &["bg", "run", "sleep 20"],
+            &[
+                (
+                    "KELIR_SESSION_DIR",
+                    &kelir::util::path_string(&session.session_dir),
+                ),
+                (
+                    "KELIR_SOCK",
+                    &kelir::ipc::value(&session.session_dir, &session.id),
+                ),
+                ("KELIR_TOKEN", token.as_str()),
+            ],
+        )
+        .await;
+    assert_eq!(started.code, 0, "stderr: {}", started.stderr);
+    let id = started
+        .stdout
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(id.starts_with("bg_"), "{}", started.stdout);
+
+    let cancelled = session.ctl(&["cancel", &id]).await;
+    assert_eq!(
+        cancelled.code, 0,
+        "{}{}",
+        cancelled.stdout, cancelled.stderr
+    );
+    session.wait_for("bg_settled").await;
+
+    let out = session.session_dir.join("bg").join(format!("{id}.out"));
+    for _ in 0..50 {
+        let answer = raw(
+            &session,
+            json!({
+                "verb": "bg", "from": "job", "token": token,
+                "args": {
+                    "id": id, "state": "exited", "exit_code": 0,
+                    "started": "2026-11-19T00:00:00Z",
+                    "finished": "2026-11-19T00:00:01Z",
+                    "out": kelir::util::path_string(&out), "kind": "job",
+                    "cmd": "REPLAYED",
+                },
+            }),
+        )
+        .await;
+        assert_eq!(answer["ok"], true, "{answer}");
+    }
+    let log = session.log();
+    let settles = log
+        .iter()
+        .filter(|event| event["type"] == "bg_settled" && event["bg_id"] == id.as_str())
+        .count();
+    let wakes = log
+        .iter()
+        .filter(|event| event["type"] == "user" && event["from"] == "job")
+        .count();
+    assert_eq!(
+        settles, 1,
+        "the replay settled the job more than once: {log:?}"
+    );
+    assert_eq!(
+        wakes, 1,
+        "the replay woke the model more than once: {log:?}"
+    );
+    let (code, stderr) = session.end().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
 /// `kelir ctl` from a human's terminal keeps working: it reads the token from
 /// the session's own directory, and that file exists, is not world-readable, and
 /// is the only place the secret lives — never the log, never stdout, never an
@@ -601,15 +604,10 @@ async fn ctl_reads_the_token_file_and_the_secret_is_never_logged() {
     let token = token_of(&session);
     assert_eq!(token.len(), 64, "256 bits, hex: {token}");
     assert!(token.chars().all(|ch| ch.is_ascii_hexdigit()));
-    let path = session.session_dir.join("token");
-    assert!(
-        kelir::trust::owner_only(&path).unwrap(),
-        "{}",
-        path.display()
-    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+        let path = session.session_dir.join("token");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{mode:o}");
     }

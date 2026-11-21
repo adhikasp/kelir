@@ -982,7 +982,7 @@ fn command_line_of(pid: u32) -> String {
 }
 
 #[tokio::test]
-async fn registry_operations_need_the_childs_link_and_no_secret_travels() {
+async fn registry_operations_need_a_child_session_in_the_tree_and_no_secret_travels() {
     let gate = Arc::new(tokio::sync::Notify::new());
     let held_gate = gate.clone();
     let mock = Mock::start_routed(vec![], move |request| {
@@ -1011,8 +1011,8 @@ async fn registry_operations_need_the_childs_link_and_no_secret_travels() {
         .cloned()
         .unwrap();
 
-    // 1. The root's token is not enough to act as a child: every registry
-    //    operation names a link, and a guess is no link.
+    // 1. The token reaches every same-user caller, so the root checks the caller's session id:
+    //    a guessed id is not in the tree, and a registry operation naming one is refused.
     let child_id = sleeper["child_id"].as_str().unwrap().to_string();
     for (op, extra) in [
         ("admit", json!({"task": "forged", "kind": "child"})),
@@ -1021,17 +1021,17 @@ async fn registry_operations_need_the_childs_link_and_no_secret_travels() {
             "settle",
             json!({"child_id": child_id, "outcome": "done", "result": "forged"}),
         ),
-        ("kill", json!({"target": child_id, "link": "guess"})),
+        ("kill", json!({"target": child_id})),
     ] {
-        for link in ["", "guess", "0000"] {
-            let mut args = json!({"op": op, "link": link});
+        for session in ["", "guess", "0000"] {
+            let mut args = json!({"op": op, "session": session});
             for (key, value) in extra.as_object().unwrap() {
                 args[key] = value.clone();
             }
             let answer = raw(&root, "child", args, "child").await;
             assert!(
                 !answer.ok,
-                "{op} with link {link:?} was accepted: {answer:?}"
+                "{op} with session {session:?} was accepted: {answer:?}"
             );
             let error = answer.error.unwrap_or_default();
             assert!(error.contains("refused"), "{op}: {error}");

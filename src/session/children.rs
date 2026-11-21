@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::*;
 use crate::child::{
     self, Admission, Caps, ChildNote, Entry, Handoff, KIND_BRIEF, KIND_CHILD, Lineage, NewChild,
-    Registry, RootLink,
+    Registry, RootChannel,
 };
 
 /// What the session keeps about the family it is in.
@@ -20,7 +20,7 @@ pub(super) struct Kids {
     /// The registry: only the root's has entries.
     pub registry: Registry,
     /// How a non-root session reaches the root. Never exported, never logged.
-    pub link: Option<RootLink>,
+    pub root: Option<RootChannel>,
     /// The nonce this session's own tasks sign their internal requests with.
     pub key: String,
     /// This session is a brief: `edit` and `compact` are refused by result.
@@ -48,10 +48,9 @@ impl Kids {
         };
         Kids {
             registry: Registry::new(&lineage.root, caps),
-            link: handoff.map(|handoff| RootLink {
+            root: handoff.map(|handoff| RootChannel {
                 sock: handoff.root_sock.clone(),
                 token: handoff.root_token.clone(),
-                link: handoff.link.clone(),
             }),
             key: crate::trust::random_hex(16),
             brief: handoff.is_some_and(|handoff| handoff.kind == KIND_BRIEF),
@@ -82,11 +81,11 @@ struct Plan {
     inbox: mpsc::UnboundedSender<Incoming>,
     key: String,
     /// How to reach the root: the session's own socket and token when it is
-    /// the root, the link it was handed otherwise.
+    /// the root, the root's socket and token otherwise. The caller's own session
+    /// id identifies it to the root; no per-child secret is needed.
     root: String,
     root_sock: String,
     root_token: String,
-    link: Option<String>,
     groups: crate::proc::SessionGroups,
     /// A brief: the by-value copy of the log, and the cache id it shares.
     snapshot: Option<(PathBuf, Vec<LogEvent>)>,
@@ -122,7 +121,7 @@ async fn ask_loop(
 }
 
 async fn ask_root(plan: &Plan, mut args: Value) -> Result<Response, String> {
-    args["link"] = json!(plan.link.clone().unwrap_or_default());
+    args["session"] = json!(plan.me);
     let request =
         Request::new(child::VERB, args, "child").with_token(Some(plan.root_token.clone()));
     ipc::request_value_within(
@@ -231,13 +230,9 @@ impl Session {
             let cut = child::snapshot_cut(&self.events);
             (self.dir.clone(), self.events[..cut].to_vec())
         });
-        let (root_sock, root_token, link) = match &self.kids.link {
-            Some(link) => (
-                link.sock.clone(),
-                link.token.clone(),
-                Some(link.link.clone()),
-            ),
-            None => (self.ctx.sock.clone(), self.ctx.token.clone(), None),
+        let (root_sock, root_token) = match &self.kids.root {
+            Some(link) => (link.sock.clone(), link.token.clone()),
+            None => (self.ctx.sock.clone(), self.ctx.token.clone()),
         };
         let plan = Plan {
             kind: if brief { KIND_BRIEF } else { KIND_CHILD },
@@ -252,7 +247,6 @@ impl Session {
             root: self.kids.lineage.root.clone(),
             root_sock,
             root_token,
-            link,
             groups: self.ctx.groups.clone(),
             snapshot,
         };
@@ -350,20 +344,20 @@ impl Session {
     }
 
     /// An operation a descendant sent over this (root) session's socket: the token got it here,
-    /// and the link says which child it is and so what it may touch.
+    /// and the caller's own session id says what it may touch. Only a descendant (live or settled)
+    /// of this root is allowed; same-user processes are trusted by design.
     fn child_remote(&mut self, op: &str, args: &Value) -> Response {
         if !self.kids.is_root() {
             return Response::error("child: only the root session keeps the registry");
         }
-        let link = args.get("link").and_then(Value::as_str).unwrap_or("");
-        let Some(who) = self
-            .kids
-            .registry
-            .by_link(link)
-            .map(|entry| entry.session.clone())
-        else {
-            return Response::error("refused: this is not the link of a live child");
-        };
+        let who = args
+            .get("session")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if !self.kids.registry.is_descendant(&self.id, &who) {
+            return Response::error("refused: this session is not a child of this root");
+        }
         match op {
             "admit" => self.registry_admit(&who, args),
             "up" => self.registry_up(&who, args),
@@ -425,7 +419,6 @@ impl Session {
                 "child_id": admission.child_id,
                 "session": admission.session,
                 "depth": admission.depth,
-                "link": admission.link,
             }),
         )
     }
@@ -580,7 +573,8 @@ impl Session {
     // -------------------------------------------------------------- kill
 
     /// `kelir kill`: stop descendants of the asker. In the root it is decided here; elsewhere it
-    /// is forwarded with the link (the root decides what is below whom).
+    /// is forwarded with the session's token and its own session id (the root decides what is
+    /// below whom).
     fn child_kill(&mut self, args: &Value, reply: oneshot::Sender<Response>) {
         let target = args
             .get("target")
@@ -600,37 +594,31 @@ impl Session {
             return;
         }
         if self.kids.is_root() {
-            // A link means a descendant is asking through the root's socket.
-            let link = args.get("link").and_then(Value::as_str).unwrap_or("");
-            let asker = if link.is_empty() {
-                self.id.clone()
-            } else {
-                match self
-                    .kids
-                    .registry
-                    .by_link(link)
-                    .map(|entry| entry.session.clone())
-                {
-                    Some(asker) => asker,
-                    None => {
-                        let _ = reply.send(Response::error(
-                            "refused: this is not the link of a live child",
-                        ));
-                        return;
-                    }
-                }
-            };
+            // A local caller (`kelir children kill` in the root's own pane) has no session field;
+            // it is the root. A forwarded call always carries its caller's id.
+            let asker = args
+                .get("session")
+                .and_then(Value::as_str)
+                .unwrap_or(self.id.as_str())
+                .to_string();
+            if asker != self.id && !self.kids.registry.is_descendant(&self.id, &asker) {
+                let _ = reply.send(Response::error(
+                    "refused: this session is not a child of this root",
+                ));
+                return;
+            }
             let answer = self.kill_below(&asker, target.as_deref(), tree);
             let _ = reply.send(answer);
             return;
         }
-        let Some(link) = self.kids.link.clone() else {
+        let Some(link) = self.kids.root.clone() else {
             let _ = reply.send(Response::error(
-                "kill: this session has no link to its root",
+                "kill: this session has no route to its root",
             ));
             return;
         };
-        let forwarded = json!({"op": "kill", "target": target, "tree": tree, "link": link.link});
+        let forwarded =
+            json!({"op": "kill", "target": target, "tree": tree, "session": self.id.clone()});
         tokio::spawn(async move {
             let request =
                 Request::new(child::VERB, forwarded, "child").with_token(Some(link.token));
@@ -788,7 +776,7 @@ async fn run_child(plan: Plan, reply: oneshot::Sender<Response>) {
         "task": child::clip(&plan.task, REMOTE_TEXT),
         "model": plan.model,
     });
-    let root_is_me = plan.link.is_none();
+    let root_is_me = plan.me == plan.root;
     let admitted = if root_is_me {
         ask_loop(
             &plan.inbox,
@@ -803,7 +791,7 @@ async fn run_child(plan: Plan, reply: oneshot::Sender<Response>) {
         Ok(Err(message)) | Err(message) => return refuse(&mut reply, message),
     };
     let text = |key: &str| admitted[key].as_str().unwrap_or("").to_string();
-    let (child_id, session, link) = (text("child_id"), text("session"), text("link"));
+    let (child_id, session) = (text("child_id"), text("session"));
     let depth = admitted["depth"].as_u64().unwrap_or(0) as u32;
     if !root_is_me {
         let _ = ask_loop(
@@ -858,7 +846,6 @@ async fn run_child(plan: Plan, reply: oneshot::Sender<Response>) {
         root: plan.root.clone(),
         root_sock: plan.root_sock.clone(),
         root_token: plan.root_token.clone(),
-        link,
         cache_id: (plan.kind == KIND_BRIEF).then(|| plan.me.clone()),
     };
     let _ = crate::paths::create_private_dir(&dir);
@@ -1030,7 +1017,7 @@ async fn settle_child(
         "child_id": child_id, "outcome": outcome,
         "exit_code": exit_code, "result": child::clip(result, REMOTE_TEXT),
     });
-    let root_is_me = plan.link.is_none();
+    let root_is_me = plan.me == plan.root;
     let answered = if root_is_me {
         ask_loop(
             &plan.inbox,
@@ -1065,7 +1052,7 @@ impl Session {
     /// Who a task's `user` event says it came from: the command line, the
     /// parent that started this child, or the parent asking a brief.
     pub(super) fn task_from(&self) -> &'static str {
-        if self.kids.link.is_none() {
+        if self.kids.root.is_none() {
             if crate::jobs::channel_mode() {
                 return "channel";
             }

@@ -31,7 +31,7 @@ impl Session {
         // A child or a brief reads its parent's log; the date is the parent's
         // business.
         if resumed
-            && self.kids.link.is_none()
+            && self.kids.root.is_none()
             && let Some(clock) = crate::jobs::clock_source_from(
                 &self.events,
                 &today(),

@@ -107,14 +107,13 @@ stdout is its answer. A child's Herdr status is never reported: only the root wr
 
 ## Trust
 
-Reaching the root takes **two** things: the root's session token and a *link* the root
-minted for that one child. The parent hands both to the child over its stdin pipe; they
-are held in memory, never in argv, the environment, a file, a log line or a tool call's
-environment (a tool call gets its own session's token only). A registry operation
-(`admit`, `up`, `settle`, and a `kill` that is not the root's own) without a live child's
-link is refused, and a refusal writes nothing. `kill` is limited to what is below the
-asker. The ids are random (`chd_` and 128 bits). Not defended: a process of the same user
-that reads the root's token **file** can drive the root as `kelir ctl` can.
+Reaching the root takes the root's session token. The parent hands it to the child over its stdin
+pipe; it is held in memory, never in argv, the environment, a file, a log line or a tool call's
+environment (a tool call gets its own session's token only). The root also checks that the caller's
+own session id is a live descendant before an `admit`, `up`, `settle` or `kill`; a refusal writes
+nothing. `kill` is limited to what is below the asker. The ids are random (`chd_` and 128 bits).
+Not defended: a process of the same user that reads the root's token **file** can drive the root as
+`kelir ctl` can.
 
 ## Events
 

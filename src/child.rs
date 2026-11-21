@@ -131,9 +131,6 @@ pub struct Entry {
     pub outcome: Option<String>,
     /// A kill was aimed at it: the outcome it settles with.
     pub killed: bool,
-    /// The secret its parent hands it so it can reach the root. Never logged,
-    /// never returned to a caller, never printed.
-    link: String,
     admitted: Instant,
     /// When the process was first seen gone without having been settled.
     dead_since: Option<Instant>,
@@ -150,7 +147,6 @@ pub struct Admission {
     pub child_id: String,
     pub session: String,
     pub depth: u32,
-    pub link: String,
 }
 
 pub struct NewChild<'a> {
@@ -240,7 +236,6 @@ impl Registry {
             });
         }
         let child_id = format!("chd_{}", crate::trust::random_hex(16));
-        let link = crate::trust::random_hex(32);
         self.entries.push(Entry {
             child_id: child_id.clone(),
             session: new.session.clone(),
@@ -254,7 +249,6 @@ impl Registry {
             started_ms: None,
             outcome: None,
             killed: false,
-            link: link.clone(),
             admitted: Instant::now(),
             dead_since: None,
         });
@@ -262,7 +256,6 @@ impl Registry {
             child_id,
             session: new.session,
             depth,
-            link,
         })
     }
 
@@ -328,17 +321,6 @@ impl Registry {
             .find(|entry| entry.child_id == child_id)
     }
 
-    /// The live entry whose link this is. The comparison does not stop at the
-    /// first differing byte.
-    pub fn by_link(&self, link: &str) -> Option<&Entry> {
-        if link.is_empty() {
-            return None;
-        }
-        self.entries
-            .iter()
-            .find(|entry| entry.live() && crate::trust::same(&entry.link, link))
-    }
-
     /// Everything below `session`, nearest first.
     pub fn descendants_of(&self, session: &str) -> Vec<&Entry> {
         let mut out: Vec<&Entry> = Vec::new();
@@ -400,7 +382,6 @@ impl Registry {
                     started_ms: None,
                     outcome: None,
                     killed: false,
-                    link: String::new(),
                     admitted: Instant::now(),
                     dead_since: None,
                 }),
@@ -499,7 +480,7 @@ pub fn kill_registered(pid: u32, started_ms: Option<u64>) -> bool {
 // ----------------------------------------------------------------- hand-off
 
 /// What a spawner tells a child host over its stdin pipe. Holds secrets
-/// (`root_token`, `link`), so `Debug` leaves them out.
+/// (`root_token`), so `Debug` leaves it out.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Handoff {
     pub kind: String,
@@ -519,7 +500,6 @@ pub struct Handoff {
     pub root: String,
     pub root_sock: String,
     pub root_token: String,
-    pub link: String,
     /// Brief: the session id whose provider cache the snapshot shares.
     #[serde(default)]
     pub cache_id: Option<String>,
@@ -540,15 +520,14 @@ impl std::fmt::Debug for Handoff {
 
 /// How a child host reaches the root: kept in memory, never exported.
 #[derive(Clone)]
-pub struct RootLink {
+pub struct RootChannel {
     pub sock: String,
     pub token: String,
-    pub link: String,
 }
 
-impl std::fmt::Debug for RootLink {
+impl std::fmt::Debug for RootChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RootLink")
+        f.debug_struct("RootChannel")
             .field("sock", &self.sock)
             .finish_non_exhaustive()
     }
@@ -983,38 +962,6 @@ mod tests {
     }
 
     #[test]
-    fn a_link_finds_its_entry_and_nothing_else() {
-        let mut registry = registry(Caps::default());
-        let a = registry.admit(new("root", "a")).unwrap();
-        assert_eq!(registry.by_link(&a.link).unwrap().session, "a");
-        assert!(registry.by_link("").is_none());
-        assert!(registry.by_link("nope").is_none());
-        registry.settle(&a.child_id, "done");
-        assert!(
-            registry.by_link(&a.link).is_none(),
-            "a settled link is dead"
-        );
-    }
-
-    #[test]
-    fn ids_and_links_are_random_and_do_not_repeat() {
-        let mut registry = registry(Caps {
-            depth: 3,
-            per_agent: 100,
-            live: 100,
-        });
-        let mut seen = std::collections::HashSet::new();
-        for index in 0..50 {
-            let admitted = registry.admit(new("root", &format!("c{index}"))).unwrap();
-            assert!(admitted.child_id.starts_with("chd_"));
-            assert_eq!(admitted.child_id.len(), 4 + 32);
-            assert_eq!(admitted.link.len(), 64);
-            assert!(seen.insert(admitted.child_id));
-            assert!(seen.insert(admitted.link));
-        }
-    }
-
-    #[test]
     fn concurrent_admissions_never_pass_the_cap() {
         let shared = Shared::new(registry(Caps {
             depth: 3,
@@ -1255,15 +1202,13 @@ mod tests {
             root: "ses_0".into(),
             root_sock: "sock".into(),
             root_token: "CANARY-ROOT-TOKEN".into(),
-            link: "CANARY-LINK".into(),
             cache_id: None,
         };
         let shown = format!(
             "{handoff:?} {:?}",
-            RootLink {
+            RootChannel {
                 sock: "s".into(),
                 token: "CANARY-ROOT-TOKEN".into(),
-                link: "CANARY-LINK".into(),
             }
         );
         assert!(!shown.contains("CANARY"), "{shown}");

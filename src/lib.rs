@@ -1,3 +1,4 @@
+#![feature(random)]
 // Cargo's `[lints.clippy]` allow-list is overwritten by the `pedantic`/ `nursery` group flags on this
 // nightly (lint-groups-priority).
 #![allow(

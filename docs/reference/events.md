@@ -31,7 +31,7 @@ resume: `src/fold.rs` renders the frozen system message, then `user`,
 | `turn_ended` | `outcome`, `reason?`, `final_text` | the end of a turn; `reason` distinguishes `steps` from `provider` pausing |
 | `mcp_started` | `mcp_id`, `server`, `tool`, `args`, `parent_call_id?` | a `kelir mcp <server> <tool>` call reached the session broker with the session token (intent: written before the server is asked); `args` is the arguments' shape (keys kept, each string replaced by `<string, N bytes>`), never their values |
 | `mcp_settled` | `mcp_id`, `server`, `tool`, `outcome`, `exit_code`, `bytes`, `out_path`, `parent_call_id?` | the call's one commit; `outcome` is `ok`, `error`, `timeout`, `unavailable`, `disabled`, or `unknown` (a resume found no settlement), and the result is in the file `out_path` names |
-| `bg_started` | `bg_id`, `call_id?`, `cmd`, `pid?`, `out_path`, `pubkey?` | a promoted bash call or an explicit `kelir bg run` |
+| `bg_started` | `bg_id`, `call_id?`, `cmd`, `pid?`, `out_path` | a promoted bash call or an explicit `kelir bg run` |
 | `bg_settled` | `bg_id`, `call_id?`, `cmd`, `exit_code?`, `state`, `out_path` | a job that settled while this session owned its log (`state`: `exited` or `cancelled`) |
 | `gate` | `gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?` | every gate run, including the ones that failed open (`error` says why: crash, timeout, garbage) |
 | `notify` | `event`, `outcome`, `error?`, `hooks` | a notification hook ran (`outcome`: `ok`, `rate_limited`, `failed` or `no_hooks`); never part of the conversation the model reads |

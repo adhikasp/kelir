@@ -25,9 +25,6 @@ pub struct Ctx {
     pub token: String,
     /// This session's id: the bash call's job object name is derived from it.
     pub session_id: String,
-    /// The session's trust state: a bash call asks it for the status key the session minted for that call
-    /// and hands it to the call's shim over a pipe.
-    pub trust: Option<std::sync::Arc<crate::trust::Trust>>,
     /// A call still running after this long is promoted to a background job
     /// (`promote_after` in the config; zero disables it).
     pub promote_after: std::time::Duration,
@@ -53,7 +50,6 @@ impl Ctx {
             sock,
             token: String::new(),
             session_id: String::new(),
-            trust: None,
             promote_after: std::time::Duration::from_secs(600),
             groups: SessionGroups::new(),
             running: Running::new(),
