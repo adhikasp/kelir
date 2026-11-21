@@ -692,11 +692,11 @@ fn the_embedded_reference_fits_its_size_budget() {
             entry.body.len()
         );
     }
-    // 128 KB: room for the reference to grow, small enough that it is a
+    // 145 KB: room for the reference to grow, small enough that it is a
     // rounding error next to the binary's budget.
-    // M10 adds the channel topic and five config keys; 140 KB is still a
-    // rounding error next to the binary's 20 MB budget (measured: ~135 KB).
-    assert!(body <= 140 * 1024, "the reference is {body} bytes");
+    // M10 adds the channel topic and five config keys; 145 KB is still a
+    // rounding error next to the binary's 20 MB budget (measured: ~139 KB).
+    assert!(body <= 145 * 1024, "the reference is {body} bytes");
 }
 
 // ---------------------------------------------------------- the builtin skill

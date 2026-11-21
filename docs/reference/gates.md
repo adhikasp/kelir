@@ -3,7 +3,7 @@
 **Summary:** a gate is an executable kelir runs at a named event; it reads the
 event as JSON on stdin and may answer `allow`, `deny` or `rewrite` as JSON on
 stdout. How to declare one, what each event sends and accepts, the fail-open
-rule, the environment a gate gets, and the four example gates.
+rule, the environment a gate gets, and the five example gates.
 **Read this when:** you want a veto, a nudge or a side effect (pull, commit,
 check a file) around a session, or a `gate` event in a log needs explaining
 (`src/gates.rs`; the hooks are in `src/session.rs`: `gate`, `gate_prompt`,
@@ -161,6 +161,27 @@ library only.
 | `note_check.py` | `after_tool` on `edit` | runs the checker named in the gate's `env` table (`NOTE_CHECK_CMD`) over the edited file and appends its output as a note |
 | `git_sync.py` | `session_start`, `session_end` | `git pull --ff-only` at start; at end commits **tracked** changes only (`git add -u`) and pushes. `GIT_SYNC_ADD_NEW = "1"` also stages new files; a secret-like name (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `credentials*`, `*secret*`) refuses the whole commit; `GIT_SYNC_DRY_RUN = "1"` only prints what it would do; `GIT_SYNC_PUSH = "0"` turns the push off; never forces. All in the gate's `env` table |
 | `numbered_answers.py` | `prompt_submit` | turns "do 1,4" into the text of items 1 and 4 of the last numbered list in the log |
+| `load_project_agents.py` | `before_tool` on `edit`/`bash` | first call touching a repo whose `AGENTS.md` wasn't loaded is denied with a read instruction; `PROJECT_ROOT` (or `KELIR_AGENTS_REPO`) in the gate's `env` names it; once per session |
+
+### Reading a repo's instructions when the session starts elsewhere
+
+kelir walks up from the session cwd for `AGENTS.md`/`CLAUDE.md`; it does not
+re-scan when a tool targets another repo. `load_project_agents.py` checks the
+session log (`session_started` `sources[]` plus its own deny marker): the first
+`edit`/`bash` touching `PROJECT_ROOT` is denied with a `cat` instruction, later
+calls pass; read-only bash (`cat`, `rg`, `head`, ...) is never denied.
+
+```toml
+[gates]
+before_tool = [
+  { name = "load-project-agents", tools = ["edit", "bash"],
+    command = "python3 /path/to/load_project_agents.py",
+    env = { PROJECT_ROOT = "/path/to/the/code/repo" } },
+]
+```
+
+`PROJECT_ROOT` must be in the gate's `env`: gates get a scrubbed environment.
+Sessions started in the repo already load its instructions and are left alone.
 
 ## A gate that talks to its own session
 
