@@ -134,7 +134,8 @@ pub mod reap {
     pub fn kill_run(root: u32, token: &str) {
         let me = std::process::id();
         let needle = format!("{RUN_ENV}={token}");
-        for attempt in 0..20 {
+        let mut quiet = 0;
+        for _ in 0..20 {
             let table = process_table();
             let mut victims: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
             let mut frontier = vec![root];
@@ -152,9 +153,16 @@ pub mod reap {
             }
             // A descendant can be reparented to init and become invisible to
             // the parent-link walk before `ps` sees it with the run token.
-            // Keep scanning for the full window instead of returning on an
-            // empty pass: macOS `ps -E` can lag a freshly forked child.
-            if !victims.is_empty() {
+            // Tolerate a couple of empty passes for that lag, then stop: a
+            // gate run under a thousand-call stream must not pay the whole
+            // window every time.
+            if victims.is_empty() {
+                quiet += 1;
+                if quiet >= 3 {
+                    return;
+                }
+            } else {
+                quiet = 0;
                 for pid in victims {
                     // Safe: SIGKILL to a pid read from /proc or ps a moment ago.
                     unsafe {
@@ -162,9 +170,10 @@ pub mod reap {
                     }
                 }
             }
-            if attempt < 19 {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
+            // macOS `ps` can lag a freshly forked child; `/proc` on Linux is
+            // immediate. Only the former needs a delay between sweeps.
+            #[cfg(target_os = "macos")]
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
 
