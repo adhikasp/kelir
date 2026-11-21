@@ -77,7 +77,7 @@ event-driven because the event must not happen.
 ## AFTER (final, 4 burners — the gate default)
 
 Measured on the finished branch with the identical script, 2026-11-21, 3 rounds, 4 burners,
-1352 tests/round (two new unit tests). Logs: `flake-rate-20261121T032855Z`; rates in
+1352 tests/round (two new unit tests across the suite). Logs: `flake-rate-20261121T032855Z`; rates in
 `steer9-after4.txt` under `KELIR_SCRATCH`.
 
 | Failure rate | Test | BEFORE (8 burners) | Why it is gone |
