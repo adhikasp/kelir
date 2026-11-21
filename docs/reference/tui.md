@@ -27,9 +27,8 @@ editor down to one row; the state row is the last to go.
 
 ## The banner
 
-The banner above the viewport is `kelir · provider · model`, `session <id>`,
-`cwd <path>`, the help line, the step cap when one is set, and a `resumed …`
-line after a resume. It carries **no** window line: the window compaction
+The banner is `kelir · provider · model`, `session <id>`, `cwd <path>`, the
+help line, the step cap when set, and a `resumed …` line after a resume. It carries **no** window line: the window compaction
 measures against is not ambient, and `state` (every `kelir ctl` verb's answer)
 reports `window`, `window_source` and `window_note` for anyone who asks.
 
@@ -130,7 +129,9 @@ A settled call is one dim line with a right-aligned verdict:
 `  $ cargo test            ✗ exit 101 · 4.1 KB` (no duration: the transcript
 is not a profiler). A failure is red, keeps its line and gains one dim tail
 line with the last output line. One or two calls in a group (a run of calls
-between two pieces of prose) keep one line each.
+between two pieces of prose) keep one line each. A `bash` call's optional
+`description` (one line, <= 120 chars) is its head in every view; otherwise
+`$ <command>`. The command stays in the log.
 
 Three or more calls collapse into one checked line, and that line names what
 it does **not** stand in for:
@@ -143,14 +144,12 @@ it does **not** stand in for:
     edit src/lib.rs                 ok · 1.2 KB
 ```
 
-The checked count covers only the calls the fold hides: a `bash` call that
-finished cleanly. A failure, a call a human stopped (Esc) and a call that
-changed a file all keep their own line below — a stopped call is never counted
-as checked, and the count adds up (`2 calls · 1 failed · 1 stopped`), so a
-reader can trust the arithmetic. `edit` (and any tool that is not `bash`) never
-folds away for a reason of its own: which file an agent touched is what a
-reader wants from the transcript. A run with nothing cleanly finished has no
-`✓` line at all. Prose is the only default-weight text.
+The checked count covers only cleanly finished calls the fold hides. A failure,
+a stopped call (Esc) and a file change keep their own line — a stopped call is
+never counted, and the count adds up (`2 calls · 1 failed · 1 stopped`), so a
+reader can trust it. `edit` (and any non-`bash` tool) never folds away: which
+file an agent touched is what a reader wants. With nothing cleanly finished
+there is no `✓` line. Prose is the only default-weight text.
 
 ## Markdown
 
