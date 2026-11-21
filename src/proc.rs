@@ -338,17 +338,23 @@ pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
             return None;
         }
         let text = String::from_utf8_lossy(&output.stdout);
-        time::format_description::parse("[weekday] [month] [day] [hour]:[minute]:[second] [year]")
-            .ok()
-            .and_then(|f| {
-                let local = time::PrimitiveDateTime::parse(text.trim(), &f).ok()?;
-                // `ps lstart` is local time; the recorded RFC 3339 timestamp
-                // carries an offset. Anchor the local wall clock to UTC by
-                // asking the platform for the offset at this instant.
-                let offset = time::UtcOffset::current_local_offset().ok()?;
-                time::OffsetDateTime::from_local(local, offset).ok()
-            })
-            .map(|t| std::time::SystemTime::from(t))
+        time::format_description::parse_borrowed::<2>(
+            "[weekday] [month] [day] [hour]:[minute]:[second] [year]",
+        )
+        .ok()
+        .and_then(|f| {
+            let local = time::PrimitiveDateTime::parse(text.trim(), &f).ok()?;
+            // `ps lstart` is local time; the recorded RFC 3339 timestamp
+            // carries an offset. Anchor the local wall clock to UTC by
+            // asking the platform for the offset at this instant.
+            let offset = time::UtcOffset::current_local_offset().ok()?;
+            Some(time::OffsetDateTime::new_in_offset(
+                local.date(),
+                local.time(),
+                offset,
+            ))
+        })
+        .map(|t| std::time::SystemTime::from(t))
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
