@@ -344,15 +344,18 @@ async fn r5_a_settled_bg_job_fires_its_notify_hook() {
     let _slot = slot();
     let temp = tempfile::tempdir().unwrap();
     let marker = temp.path().join("bg-notify.txt");
+    // Use the config's default shell: the gate's env may not put `bash` on
+    // PATH. `sleep 5` is long enough for promotion to win the race on both
+    // Windows and Linux (`sleep 1` sometimes finishes first on Linux).
     let config = format!(
-        "shell = 'bash'\npromote_after = 1\n[notify]\nbg_settled = '{}'\n",
+        "promote_after = 1\n[notify]\nbg_settled = '{}'\n",
         hook_touch_command(&marker)
     );
     let mock = Mock::start(vec![
         Reply::Sse(sse(&tool_turn(
             "call_p",
             "bash",
-            &json!({"command": "sleep 1; echo the-job-ran"}),
+            &json!({"command": "sleep 5; echo the-job-ran"}),
         ))),
         Reply::Sse(sse(&text_turn("carrying on while it runs", 0))),
         Reply::Sse(sse(&text_turn("noted: the job finished", 0))),
@@ -389,13 +392,14 @@ async fn r5_a_settled_bg_job_fires_its_notify_hook() {
 async fn r9_a_settled_job_and_its_turn_notify_once_each() {
     init();
     let _slot = slot();
-    let config =
-        "shell = 'bash'\npromote_after = 1\n[notify]\nbg_settled = 'true'\nturn_done = 'true'\n";
+    // The default shell and a long enough command: promotion must win the
+    // race on both OSes (see r5).
+    let config = "promote_after = 1\n[notify]\nbg_settled = 'true'\nturn_done = 'true'\n";
     let mock = Mock::start(vec![
         Reply::Sse(sse(&tool_turn(
             "call_dual",
             "bash",
-            &json!({"command": "sleep 1; echo dual-job"}),
+            &json!({"command": "sleep 5; echo dual-job"}),
         ))),
         Reply::Sse(sse(&text_turn("carrying on", 0))),
         Reply::Sse(sse(&text_turn("noted", 0))),
