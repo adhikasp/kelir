@@ -936,7 +936,7 @@ async fn drive(opts: Options) -> u8 {
             banner.push(tui::BannerLine::dim(line));
         }
         banner.push(tui::BannerLine::plain(
-            "Enter sends · Alt-Enter adds a line · /help shows the commands",
+            "Enter sends · Alt/Shift-Enter adds a line · /help shows the commands",
         ));
         // The cap is worth a banner line only when one is set: the status line
         // carries the count ("step 3/5") while a turn runs.

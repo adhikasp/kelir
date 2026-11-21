@@ -22,13 +22,16 @@
 //! ```
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Write as _;
+use std::io::Write;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::cursor::{MoveTo, Show};
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::terminal::{Clear, ClearType};
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
@@ -1740,6 +1743,28 @@ pub enum Press {
     Redraw,
 }
 
+/// Ask the host terminal to report modified keys as CSI-u sequences.
+///
+/// Without this, a terminal multiplexer (Herdr in particular) sees a plain
+/// legacy terminal and downgrades Shift-Enter to a bare carriage return before
+/// it reaches us, so `translate` never sees the SHIFT modifier. Only
+/// `DISAMBIGUATE_ESCAPE_CODES` is pushed: `REPORT_ALTERNATE_KEYS` would make
+/// crossterm replace the Enter keycode with the shifted character, and
+/// `REPORT_ALL_KEYS` would break the shell's plain Enter/Tab/Backspace.
+/// Terminals that do not know the protocol ignore the sequence.
+fn push_keyboard_enhancements(stdout: &mut impl Write) {
+    let _ = ratatui::crossterm::execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+}
+
+/// Undo [`push_keyboard_enhancements`] on the way out, so the host's keyboard
+/// mode is not left changed for the shell after the TUI exits.
+fn pop_keyboard_enhancements(stdout: &mut impl Write) {
+    let _ = ratatui::crossterm::execute!(stdout, PopKeyboardEnhancementFlags);
+}
+
 /// Translate one key event. `None` means "nothing to do".
 pub fn translate(key: KeyEvent) -> Option<Press> {
     if key.kind == KeyEventKind::Release {
@@ -2110,6 +2135,10 @@ pub fn start(
         viewport: ratatui::Viewport::Inline(VIEWPORT_HEIGHT.min(height)),
     })?;
     install_panic_hook();
+    // Negotiate CSI-u key reporting so Shift-Enter survives a multiplexer
+    // (Herdr forwards it as ESC[13;2u only when the pane asked for kitty
+    // keyboard mode). Popped in finish() and in the panic hook.
+    push_keyboard_enhancements(&mut std::io::stdout());
     // Bracketed paste, so a pasted block of text arrives as one `Paste` event
     // (with its newlines) instead of a burst of keystrokes whose Enter would
     // submit it.
@@ -2187,6 +2216,7 @@ fn install_panic_hook() {
         let _ = ratatui::crossterm::execute!(
             stdout,
             ratatui::crossterm::event::DisableBracketedPaste,
+            PopKeyboardEnhancementFlags,
             Show,
             ratatui::crossterm::style::Print("\r\n")
         );
@@ -2370,6 +2400,7 @@ impl Tui {
         let mut stdout = std::io::stdout();
         let _ =
             ratatui::crossterm::execute!(stdout, ratatui::crossterm::event::DisableBracketedPaste);
+        pop_keyboard_enhancements(&mut stdout);
         // Erase the inline area only: everything above it is the turn history
         // (the banner included) and stays.
         let top = VIEWPORT_Y.load(Ordering::Relaxed);
@@ -3693,6 +3724,28 @@ mod tests {
                 .any(|row| row.contains("view attachments/1-shot.png") && row.contains("312 KB")),
             "{texts:?}"
         );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    // On Windows crossterm's push/pop are no-ops (no ANSI keyboard protocol).
+    fn the_keyboard_handshake_uses_disambiguate_only_and_pops_on_exit() {
+        let mut out = Vec::new();
+        push_keyboard_enhancements(&mut out);
+        pop_keyboard_enhancements(&mut out);
+        // ESC[>1u pushes flag 1 (disambiguate escape codes); ESC[<1u pops it.
+        // No REPORT_ALTERNATE_KEYS (4): crossterm would replace Enter with the
+        // shifted character and break the SHIFT branch in translate().
+        assert_eq!(out, b"\x1b[>1u\x1b[<1u");
+    }
+
+    #[test]
+    fn shift_enter_from_csi_u_is_decoded_as_a_newline() {
+        // crossterm 0.29 decodes Ghostty/Herdr's ESC[13;2u into this event.
+        let mut key = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(translate(key), Some(Press::Edit(Key::Newline)));
+        key.modifiers = KeyModifiers::NONE;
+        assert_eq!(translate(key), Some(Press::Edit(Key::Enter)));
     }
 
     #[test]

@@ -557,6 +557,10 @@ fn drive_in_a_pty(
         Some(b"hello there"),
         preamble,
         expect,
+        PtyInput {
+            submit: b"\r",
+            message_echo: "hello there",
+        },
     )
 }
 
@@ -570,7 +574,19 @@ fn drive_idle_in_a_pty(
     base_url: String,
     expect: Vec<String>,
 ) -> PtyRun {
-    drive_pty_in_idle_or_turn(cwd, config, state, base_url, None, b"", expect)
+    drive_pty_in_idle_or_turn(
+        cwd,
+        config,
+        state,
+        base_url,
+        None,
+        b"",
+        expect,
+        PtyInput {
+            submit: b"\r",
+            message_echo: "",
+        },
+    )
 }
 
 /// True once some session under `state` has a line in its `events.jsonl`
@@ -597,6 +613,13 @@ fn wait_for_session_log(state: &std::path::Path, needle: &str, limit: Duration) 
     }
 }
 
+/// The part of a PTY drive that only the Shift-Enter scenario varies.
+struct PtyInput<'a> {
+    submit: &'a [u8],
+    message_echo: &'a str,
+}
+
+#[allow(clippy::too_many_arguments)] // test-only PTY driver; every knob is explicit
 fn drive_pty_in_idle_or_turn(
     cwd: std::path::PathBuf,
     config: std::path::PathBuf,
@@ -605,6 +628,7 @@ fn drive_pty_in_idle_or_turn(
     message: Option<&[u8]>,
     preamble: &[u8],
     expect: Vec<String>,
+    input: PtyInput<'_>,
 ) -> PtyRun {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
@@ -721,8 +745,8 @@ fn drive_pty_in_idle_or_turn(
         }
         if let Some(message) = message {
             send(message);
-            let _ = wait_for(&screen, "hello there", Duration::from_secs(20));
-            send(b"\r");
+            let _ = wait_for(&screen, input.message_echo, Duration::from_secs(20));
+            send(input.submit);
         }
         typed = true;
     }
@@ -1872,4 +1896,67 @@ async fn a_model_swap_announces_the_new_window() {
         screen.matches("» window 200000 tokens").count() == 1,
         "the swap's window is announced, once: {screen:?}"
     );
+}
+
+/// Shift-Enter arrives as a CSI-u `ESC[13;2u` sequence (Ghostty, or Herdr
+/// forwarding one after the TUI negotiated kitty keyboard mode). It must add
+/// a newline to the prompt, not submit the message early: the logged user
+/// text still contains the whole two-line input.
+#[cfg(not(windows))] // Windows crossterm reads Win32 keys, not CSI-u byte streams.
+#[tokio::test]
+async fn a_csi_u_shift_enter_adds_a_newline_instead_of_submitting() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("OK", 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    // "first line" + Shift-Enter + "second line", then a plain Enter to
+    // submit the whole thing as one message.
+    let message = b"first line\x1b[13;2usecond line";
+    let run = tokio::task::spawn_blocking(move || {
+        drive_pty_in_idle_or_turn(
+            cwd,
+            config,
+            state,
+            base_url,
+            Some(message),
+            b"",
+            vec!["OK".into()],
+            PtyInput {
+                submit: b"\r",
+                message_echo: "first line",
+            },
+        )
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    // The TUI negotiated kitty keyboard mode on startup (this is what makes
+    // Herdr forward Shift-Enter instead of flattening it to a bare CR).
+    // On Windows crossterm's push is a no-op (no ANSI keyboard protocol).
+    #[cfg(not(windows))]
+    assert!(
+        run.screen.contains("\u{1b}[>1u"),
+        "no kitty keyboard push on startup: {:?}",
+        run.screen
+    );
+    let text = std::fs::read_to_string(run.session_dir.join("events.jsonl")).unwrap();
+    let events: Vec<serde_json::Value> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let user = events
+        .iter()
+        .find(|event| event["type"] == "user")
+        .expect("a user event");
+    assert_eq!(user["text"], "first line\nsecond line");
 }

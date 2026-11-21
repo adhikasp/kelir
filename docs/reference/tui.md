@@ -86,7 +86,7 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | key | does |
 |---|---|
 | Enter | send; while working it is a `say` (the prompt dims to say so) |
-| Alt-Enter, Shift-Enter, Ctrl-J | newline (Shift-Enter needs the terminal to report the modifier, e.g. kitty keyboard protocol) |
+| Alt-Enter, Shift-Enter, Ctrl-J | newline (kelir negotiates the kitty keyboard protocol so Shift-Enter survives nested terminals such as Herdr) |
 | Esc | stop the turn (only while working) |
 | Ctrl-C once | stop the turn; twice within 1 s quits |
 | Ctrl-O | the last tool call's output tail (`Esc`/`Ctrl-O` closes) |
