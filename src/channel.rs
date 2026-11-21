@@ -55,8 +55,6 @@ pub const MAX_SPOOL_LINE: usize = 256 * 1024;
 pub const MALFORMED_NOTE: &str = "channel: dropped a malformed or oversized notification";
 /// Default text of the one fallback reply on error/paused/timeout.
 pub const DEFAULT_FALLBACK: &str = "Sorry — I couldn't finish that. Please try again.";
-/// Fallback when the underlying session is paused.
-pub const PAUSED_FALLBACK: &str = "That session is paused. Start a new one to continue.";
 /// Fallback on timeout.
 pub const TIMEOUT_FALLBACK: &str = "Sorry — that request timed out. Please try again.";
 /// Fallback when a gate denies the prompt.
@@ -1091,7 +1089,6 @@ fn fallback_text(cfg: &Config, outcome: &Outcome) -> String {
     }
     match outcome {
         Outcome::Gated(_) => GATED_FALLBACK.into(),
-        Outcome::Failed(reason) if reason.starts_with("turn paused") => PAUSED_FALLBACK.into(),
         Outcome::Failed(reason)
             if reason.starts_with("turn timeout") || reason.starts_with("turn timed") =>
         {
@@ -1650,10 +1647,6 @@ mod tests {
         assert_eq!(
             fallback_text(&cfg, &Outcome::Gated(String::new())),
             GATED_FALLBACK
-        );
-        assert_eq!(
-            fallback_text(&cfg, &Outcome::Failed("turn paused: x".into())),
-            PAUSED_FALLBACK
         );
         assert_eq!(
             fallback_text(&cfg, &Outcome::Failed("turn timeout: x".into())),
