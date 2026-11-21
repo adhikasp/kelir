@@ -1,7 +1,7 @@
 # FLAKES — e2e flake inventory and measured rates (STEER-9)
 
 The stress mode is `bash scripts/gate.sh --linux=<machine> --load`: three rounds of the whole
-suite with `KELIR_GATE_LOAD` (default 8) busy loops beside it and `--retries 0`, so a flake is a
+suite with `KELIR_GATE_LOAD` (default 4) busy loops beside it and `--retries 0`, so a flake is a
 failure rather than a quiet retry. `scripts/flake-rate.sh ROUNDS BUSY_LOOPS OUT` is the measurement
 wrapper; it takes the gate lock itself (do not run it while another gate holds it) and writes one
 `<failures>/<rounds> <binary> <test>` line per test that failed at least once.

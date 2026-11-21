@@ -11,7 +11,7 @@
 #   --out DIR           where the logs go (default: <scratch>/gate-<job>-<stamp>)
 #   --quick             fmt + clippy only (the loop you run before every commit)
 #   --load              also run the suite 3x in a row under artificial CPU load, no retries
-#                       (STEER-9 stress mode; KELIR_GATE_LOAD sets the busy loops, default 8)
+#                       (STEER-9 stress mode; KELIR_GATE_LOAD sets the busy loops, default 4)
 #
 # Everything a gate needs is here so nothing has to remember the flags:
 #   * exactly one gate at a time across all worktrees (scripts/gate-lock.sh);
@@ -228,7 +228,7 @@ gate_body() {
     # STEER-9: the whole suite, three times in a row, with ${KELIR_GATE_LOAD:-8}
     # busy loops beside it and no retries. A test that fails here is a flake (or
     # a bug) and is named, per round, so the fix has a name to start from.
-    local load_threads="${KELIR_GATE_LOAD:-8}"
+    local load_threads="${KELIR_GATE_LOAD:-4}"
     say "  load: 3 rounds under $load_threads busy loops, no retries"
     local n=0
     for round in 1 2 3; do

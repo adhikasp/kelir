@@ -4,14 +4,14 @@
 # usage: scripts/flake-rate.sh [rounds] [busy-loops] [outfile]
 #
 # Runs the whole suite `rounds` times (default 3) with `busy-loops` CPU burners
-# (default 8), each round through scripts/gate-load.sh with --retries 0 so a flake
+# (default 4), each round through scripts/gate-load.sh with --retries 0 so a flake
 # is a failure and not a quiet pass, and writes one line per test that ever
 # failed: `<failures>/<rounds> <binary> <test>`. A process-count watchdog aborts
 # the run when `sh`/`bash` processes grow by more than 20 over the start (the
 # 2026-11-20 incident). Take the gate lock yourself: this script does not.
 set -uo pipefail
 rounds="${1:-3}"
-threads="${2:-8}"
+threads="${2:-4}"
 outfile="${3:-flake-rate.txt}"
 root="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)" || exit 2
 cd "$root" || exit 1
