@@ -344,18 +344,20 @@ In channel mode, kelir currently sends the final assistant text as a reply even 
 called the channel server's reply tool itself during the turn (e.g. `kelir mcp telegram reply ...`),
 so Telegram gets two messages (seen live on the the maintainer test topic dm-490161027-312337).
 
-Wanted:
-1. The final-text reply becomes a FALLBACK: send it only when the model sent nothing to that
-   conversation via the reply tool during the turn. The existing error/paused/timeout fallback stays.
-2. Add a short line to the channel envelope / system prompt telling the model it replies via
-   `kelir mcp <server> reply` (conversation_id, text), and that its plain final text is only sent if
-   it did not call the reply tool.
+Wanted (the maintainera addendum 16:53 — keep it GENERIC channel semantics, nothing Telegram-specific
+in the kelir repo; no 'telegram' strings in src/docs beyond neutral examples):
+1. Generic channel behaviour: the final-text reply is a FALLBACK only when the model did not call
+   the channel's reply tool this turn. The existing error/paused/timeout fallback stays.
+2. The instruction line telling the model how to reply must NOT be hardcoded. Make it a per-server
+   config in mcp.toml, e.g. `[servers.x] channel_instructions = "..."`, appended to the channel
+   envelope / system prompt. the maintainera supplies the concrete wording from the maintainer (Telegram bridge);
+   the repo ships only neutral examples.
 3. Add an e2e test with the fake channel server proving exactly one reply when the model calls the
    reply tool, and the fallback reply when it does not. Drive the fake server deterministically.
 
-Repro setup (maintainer-side, the maintainer): pane tg-dm-490161027-312337 (kelir channel), MCP config
-`~/.local/state/telegram-session/routes/dm-490161027-312337/kelir-mcp.toml`, adapter
-`scripts/the maintainer/telegram-session/kelir-tg-shim`. Do not copy secrets or personal paths into the repo.
+Repro setup (maintainer-side, the maintainer — NOT copied into the repo): pane tg-dm-490161027-312337
+(kelir channel), MCP config `~/.local/state/telegram-session/routes/dm-490161027-312337/kelir-mcp.toml`,
+adapter `scripts/the maintainer/telegram-session/kelir-tg-shim`. No secrets or personal paths in the repo.
 
 Queue order: after the current CI fix lands and public CI is green. Report to
 `tg-ask dm:490161027:317113 "channel reply fallback merged"` when merged.
