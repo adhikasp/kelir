@@ -1095,7 +1095,14 @@ async fn registry_operations_need_the_childs_link_and_no_secret_travels() {
         }
         assert!(!line.contains(&root_token), "{line}");
     }
-    // The env dump finished: its tool result is in its own log.
+    // The env dump finished: wait for the child's own `tool_settled` event, not a fixed
+    // sleep or a "done" guess in `ls`. The full `env | sort` output is in the child's
+    // `commands/<id>/out` file; the event's `result` is only the model's preview and is
+    // deliberately spilled (first/last 1 KB) when the inherited environment is large.
+    // Under nextest each test process inherits a different set of `KELIR_*`/`CARGO_*`
+    // variables, so the sorted dump crosses the 10 KB spill limit on some runs: the
+    // `KELIR_*` lines then fall in the omitted middle. Assert on the real file, bounded
+    // by the same CEILING (STEER-9: event-driven, no weaker proposition).
     let waiting = Instant::now();
     let envdump = loop {
         assert!(
@@ -1114,30 +1121,68 @@ async fn registry_operations_need_the_childs_link_and_no_secret_travels() {
         .join("sessions")
         .join(envdump["session"].as_str().unwrap());
     let dump_log = std::fs::read_to_string(dump_dir.join("events.jsonl")).unwrap();
+    let mut spill_found = false;
     let dump: String = dump_log
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|event| event["type"] == "tool_settled")
-        .map(|event| event["result"].to_string())
+        .map(|event| {
+            spill_found |= event["result"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("[output spilled:");
+            event["result"].to_string()
+        })
         .collect();
-    assert!(dump.contains("KELIR_ROOT="), "{dump}");
+    // The authoritative output is the child's `out` file. Find the `tool_started`
+    // call directory so the assertion holds whatever the inherited env size is.
+    let mut full_dump = dump.clone();
+    for path in dump_dir
+        .join("commands")
+        .read_dir()
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if let Ok(text) = std::fs::read_to_string(path.path().join("out"))
+            && text.contains("KELIR_ROOT=")
+        {
+            full_dump = text;
+            break;
+        }
+    }
+    assert!(full_dump.contains("KELIR_ROOT="), "{full_dump}");
     assert!(
-        dump.contains(&format!(
+        full_dump.contains(&format!(
             "KELIR_PARENT={}",
             envdump["session"].as_str().unwrap()
         )),
-        "{dump}"
+        "{full_dump}"
     );
-    assert!(dump.contains("KELIR_DEPTH=1"), "{dump}");
-    assert!(dump.contains(&format!("KELIR_ROOT={}", root.id)), "{dump}");
+    assert!(full_dump.contains("KELIR_DEPTH=1"), "{full_dump}");
     assert!(
-        !dump.contains(&root_token),
+        full_dump.contains(&format!("KELIR_ROOT={}", root.id)),
+        "{full_dump}"
+    );
+    assert!(
+        !full_dump.contains(&root_token),
         "the root's token reached a tool child"
     );
     assert!(
-        !dump.contains("test-openrouter-key"),
+        !full_dump.contains("test-openrouter-key"),
         "the provider key reached a tool child"
     );
+    // The preview is the model's view: it must be bounded and must not carry a
+    // secret even when the full output spilled.
+    assert!(
+        !dump.contains(&root_token),
+        "the root's token reached a tool result preview"
+    );
+    assert!(
+        !dump.contains("test-openrouter-key"),
+        "a provider key reached a tool result preview"
+    );
+    let _ = spill_found;
     let mut files = Vec::new();
     all_files(&root.state.join("sessions"), &mut files);
     for path in files {
@@ -1152,14 +1197,24 @@ async fn registry_operations_need_the_childs_link_and_no_secret_travels() {
                 path.display()
             );
             // A child's own token is its tool calls' by design (`env` shows
-            // it in its own directory); it must not appear in anyone else's.
+            // it in its own directory, and any file under that session is
+            // inside the same trust boundary); it must not appear under a
+            // DIFFERENT session. Check the path's session component, not just
+            // any path component: a `commands/<seq>/out` file belongs to its
+            // session even though its own name is not a session id.
             for (owner, token) in &child_tokens {
-                let inside = path
+                let session_name = path
                     .components()
-                    .any(|part| part.as_os_str().to_string_lossy() == owner.as_str());
+                    .rev()
+                    .find(|part| {
+                        let name = part.as_os_str().to_string_lossy();
+                        name.starts_with("ses_")
+                    })
+                    .map(|part| part.as_os_str().to_string_lossy().into_owned());
+                let inside = session_name.as_deref() == Some(owner.as_str());
                 assert!(
                     inside || !text.contains(token),
-                    "child {owner}'s token in {}",
+                    "child {owner}'s token in {} (path session: {session_name:?})",
                     path.display()
                 );
             }
