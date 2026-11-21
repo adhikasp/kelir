@@ -134,7 +134,7 @@ pub mod reap {
     pub fn kill_run(root: u32, token: &str) {
         let me = std::process::id();
         let needle = format!("{RUN_ENV}={token}");
-        for _ in 0..5 {
+        for attempt in 0..5 {
             let table = process_table();
             let mut victims: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
             let mut frontier = vec![root];
@@ -150,16 +150,21 @@ pub mod reap {
                     victims.insert(pid);
                 }
             }
-            if victims.is_empty() {
-                return;
-            }
-            for pid in victims {
-                // Safe: SIGKILL to a pid read from /proc or ps a moment ago.
-                unsafe {
-                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            // A descendant can be reparented to init and become invisible to
+            // the parent-link walk before `ps` sees it with the run token.
+            // Keep scanning for the full window instead of returning on an
+            // empty pass: macOS `ps -E` can lag a freshly forked child.
+            if !victims.is_empty() {
+                for pid in victims {
+                    // Safe: SIGKILL to a pid read from /proc or ps a moment ago.
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                    }
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(15));
+            if attempt < 4 {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
         }
     }
 
