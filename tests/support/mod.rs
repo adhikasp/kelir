@@ -1103,6 +1103,8 @@ stderr: {}",
         // still alive, the guard is parked until this test *process* exits,
         // where the OS closes the job handle and kill-on-close reaps it; a test
         // that leaves nothing running is still terminated and asserted here.
+        // A test that cancels its jobs must wait for their processes to exit
+        // before `end()`, or nextest's leak check flags the parked guard (STEER-9).
         let parked = self.guard.active() > 0;
         let guard = self.guard.clone();
         let result = self.finish().await;
