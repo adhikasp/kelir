@@ -18,6 +18,19 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: No binaries in commit range
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_SHA" ] || [ "${#BASE_SHA}" -ne 40 ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "No usable base sha; checking only the latest commit."
+            BASE_SHA="$(git rev-parse HEAD~1)"
+          fi
+          bash scripts/no-binary-check.sh range "$BASE_SHA" "${{ github.sha }}"
 
       - name: Toolchain
         uses: dtolnay/rust-toolchain@stable

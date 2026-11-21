@@ -30,12 +30,26 @@ fn channels() -> (
 
 /// Render one app state into a 60x8 TestBackend and return the inline area as
 /// text, one line per row, trailing spaces trimmed.
+/// Render the app at the viewport height it actually asks for: the real TUI
+/// rebuilds the viewport from its content each frame, so a fixed 8-row buffer
+/// would leave stale rows below a short idle input.
 fn snapshot(app: &mut App) -> String {
-    let backend = TestBackend::new(60, VIEWPORT_HEIGHT);
+    let content_height = tui::viewport_height_for(
+        app.editor.visual_rows().len() as u16,
+        app.wanted_live_rows(),
+    );
+    // The tail overlay replaces the live/state/editor rows with the captured
+    // output; give it at least enough rows for the header and the tail lines.
+    let height = if app.show_tail {
+        content_height.max((app.tail.len() as u16 + 2).min(VIEWPORT_HEIGHT))
+    } else {
+        content_height
+    };
+    let backend = TestBackend::new(60, height);
     let mut terminal = Terminal::with_options(
         backend,
         ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Inline(VIEWPORT_HEIGHT),
+            viewport: ratatui::Viewport::Inline(height),
         },
     )
     .unwrap();
@@ -55,13 +69,18 @@ fn snapshot(app: &mut App) -> String {
     out
 }
 
-/// Render `app` into a `width`x8 TestBackend, one string per row.
+/// Render `app` into a `width`x`VIEWPORT_HEIGHT` TestBackend (the maximum,
+/// used by the width-tier and streaming tests) with rows sized to content.
 fn render_at(app: &mut App, width: u16) -> String {
-    let backend = TestBackend::new(width, VIEWPORT_HEIGHT);
+    let height = tui::viewport_height_for(
+        app.editor.visual_rows().len() as u16,
+        app.wanted_live_rows(),
+    );
+    let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::with_options(
         backend,
         ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Inline(VIEWPORT_HEIGHT),
+            viewport: ratatui::Viewport::Inline(height),
         },
     )
     .unwrap();
@@ -161,19 +180,57 @@ fn row_eq(screen: &str, index: usize, expected: &str) {
     );
 }
 
-/// The viewport's rows 0..3 are the live area. The idle one is blank; a
-/// streaming answer renders markdown with no `##`/`**` left in it.
+/// The viewport is content-sized: with nothing streaming there are no blank
+/// live rows above the state row. A streaming answer renders markdown with no
+/// `##`/`**` left in it.
 #[test]
 fn snapshot_the_idle_viewport() {
     let mut app = new_app();
     app.push_text(""); // nothing to commit
     let screen = snapshot(&mut app);
-    row_eq(&screen, 0, "");
-    row_eq(&screen, 1, "");
-    row_eq(&screen, 2, "");
-    row_eq(&screen, 3, " ● idle · ready");
-    row_eq(&screen, 4, "›");
-    row_eq(&screen, 7, "0 tok in");
+    row_eq(&screen, 0, " ● idle · ready");
+    row_eq(&screen, 1, "›");
+    row_eq(&screen, 2, "0 tok in");
+    assert_eq!(screen.lines().count(), 3, "no blank live rows: {screen:?}");
+}
+
+/// A settled answer never leaves blank live rows between it and the input.
+/// This is the gap the user saw after a turn ended and at the welcome banner;
+/// with a long, wrapping, multi-paragraph answer it must still hold.
+#[test]
+fn a_settled_long_answer_leaves_no_blank_gap_above_the_input() {
+    let mut app = new_app();
+    let answer = "## Notes\n\n".to_string()
+        + &"A long paragraph that wraps across several editor columns and scrolls \
+            through the terminal as it is committed, with enough words to fill many rows. "
+            .repeat(12);
+    app.apply(UiEvent::Delta(answer.clone()));
+    app.apply(UiEvent::Assistant {
+        text: answer.clone(),
+    });
+    app.apply(UiEvent::TurnEnded {
+        outcome: "done".into(),
+        final_text: answer,
+    });
+    // Everything settled into scrollback; the viewport is the input only.
+    assert!(
+        app.wanted_live_rows() == 0,
+        "no live content after the turn"
+    );
+    let screen = snapshot(&mut app);
+    let rows: Vec<&str> = screen.lines().collect();
+    assert!(rows.len() <= 4, "no spare rows: {screen:?}");
+    assert!(
+        rows[0].contains("idle"),
+        "state follows the answer: {screen:?}"
+    );
+    assert!(
+        !rows[..2].iter().any(|row| row.is_empty()),
+        "no blank gap: {screen:?}"
+    );
+    // A subsequent empty frame is just as tight: no stale live rows.
+    let screen2 = snapshot(&mut app);
+    assert_eq!(screen, screen2, "the viewport stays tight across paints");
 }
 
 #[test]
@@ -198,7 +255,7 @@ fn snapshot_streaming_text_in_the_live_area() {
     assert!(screen.contains("Hello **wor"), "{screen:?}");
     app.apply(UiEvent::Delta("ld**\n\n".into()));
     let screen = snapshot(&mut app);
-    let state = screen.lines().nth(3).unwrap_or_default();
+    let state = screen.lines().next().unwrap_or_default();
     assert!(state.contains("writing"), "{screen:?}");
     // A closed block goes straight into the scrollback now (S1): the closed
     // emphasis shows there, with no literal markers.
@@ -211,7 +268,7 @@ fn snapshot_streaming_text_in_the_live_area() {
         !committed.iter().any(|row| row.contains("**")),
         "no literal markers: {committed:?}"
     );
-    let facts = screen.lines().nth(7).unwrap_or_default();
+    let facts = screen.lines().last().unwrap_or_default();
     assert!(facts.starts_with("test/model"), "{facts:?}");
 }
 
@@ -232,11 +289,11 @@ fn snapshot_a_running_call() {
         input: json!({"command": "sleep 1"}),
     });
     let screen = snapshot(&mut app);
-    let state = screen.lines().nth(3).unwrap_or_default();
+    let state = screen.lines().next().unwrap_or_default();
     assert!(state.contains("running bash: sleep 1"), "{screen:?}");
-    // The live rows are quiet while a call runs: the state row says what is
-    // happening, and it is the only thing that moved.
-    assert_eq!(screen.lines().next(), Some(""), "{screen:?}");
+    // No live rows while a call runs: the state row is the first row, right
+    // under the last committed scrollback line.
+    assert!(state.contains("running"), "{screen:?}");
 }
 
 #[test]
@@ -251,10 +308,10 @@ fn snapshot_an_error() {
     app.apply(UiEvent::Error("provider said no".into()));
     assert_eq!(app.status.phase, Phase::Error);
     let screen = snapshot(&mut app);
-    let state = screen.lines().nth(3).unwrap_or_default();
+    let state = screen.lines().next().unwrap_or_default();
     assert!(state.contains("error"), "{screen:?}");
     assert!(state.contains("provider said no"), "{screen:?}");
-    let facts = screen.lines().nth(7).unwrap_or_default();
+    let facts = screen.lines().last().unwrap_or_default();
     assert_eq!(facts.trim(), "test/model · 0 tok in", "{facts:?}");
 }
 
@@ -288,12 +345,12 @@ fn snapshot_the_output_tail_view() {
     assert_eq!(rows[1], "line one", "{screen}");
     assert_eq!(rows[2], "line two", "{screen}");
     assert_eq!(rows[3], "line three", "{screen}");
-    // The state row is still there (the overlay only takes the area above it).
-    assert!(rows[7].starts_with("tail (Ctrl-O closes)"), "{screen}");
+    // The facts row is last and says how to close the overlay.
+    let facts = rows.last().unwrap();
+    assert!(facts.starts_with("tail (Ctrl-O closes)"), "{screen}");
     assert!(
-        rows[7].starts_with("tail (Ctrl-O closes) · 0 tok in"),
-        "{}",
-        rows[7]
+        facts.starts_with("tail (Ctrl-O closes) · 0 tok in"),
+        "{facts}"
     );
     assert!(!screen.contains('›'), "the editor is hidden: {screen}");
     // Ctrl-O again closes it.
@@ -311,17 +368,19 @@ fn snapshot_a_long_editor_line_wraps_across_its_rows() {
     }
     let screen = snapshot(&mut app);
     let rows: Vec<&str> = screen.lines().collect();
-    assert_eq!(rows.len(), 8);
-    // Editor rows are 4, 5, 6; each holds the 2-column prompt plus 58 columns
+    // The viewport grows with the wrapped prompt: state, two editor rows,
+    // facts — no spare blank editor or live rows.
+    assert_eq!(rows.len(), 4, "{screen:?}");
+    // Editor rows are 1 and 2; each holds the 2-column prompt plus 58 columns
     // of text (60 - 2). 80 characters wrap to 58 on the first row and 22 on
-    // the second; the third editor row is blank.
-    assert!(rows[4].starts_with("› "), "row 4: {:?}", rows[4]);
-    assert!(rows[5].starts_with("  "), "row 5: {:?}", rows[5]);
-    assert_eq!(rows[4].chars().count(), 60, "{}", rows[4]);
-    assert_eq!(rows[5].trim_end().chars().count(), 24, "{}", rows[5]);
-    assert_eq!(rows[7], "0 tok in", "{}", rows[7]);
-    // The live rows above are untouched.
-    assert!(rows[0..3].iter().all(|row| row.is_empty()), "{screen:?}");
+    // the second.
+    assert!(rows[1].starts_with("› "), "row 1: {:?}", rows[1]);
+    assert!(rows[2].starts_with("  "), "row 2: {:?}", rows[2]);
+    assert_eq!(rows[1].chars().count(), 60, "{}", rows[1]);
+    assert_eq!(rows[2].trim_end().chars().count(), 24, "{}", rows[2]);
+    assert_eq!(rows[3], "0 tok in", "{}", rows[3]);
+    // The state row is first, right under the scrollback: no blank live rows.
+    assert!(rows[0].contains("idle"), "{screen:?}");
 }
 
 /// 80, 60 and 40 columns: the state row, the facts row and a tool line all fit
@@ -355,7 +414,7 @@ fn snapshot_narrow_panes_keep_every_row_inside_its_width() {
                 "width {width}, row {index}: {row:?}"
             );
         }
-        let state = screen.lines().nth(3).unwrap_or_default();
+        let state = screen.lines().next().unwrap_or_default();
         assert!(state.contains("running"), "width {width}: {state:?}");
     }
 }
@@ -373,8 +432,8 @@ fn snapshot_the_idle_and_working_rows_are_visibly_different() {
         limit: None,
     });
     let working = render_at(&mut app, 60);
-    let idle_state = idle.lines().nth(3).unwrap_or_default().to_string();
-    let working_state = working.lines().nth(3).unwrap_or_default().to_string();
+    let idle_state = idle.lines().next().unwrap_or_default().to_string();
+    let working_state = working.lines().next().unwrap_or_default().to_string();
     assert!(idle_state.contains("idle"), "{idle_state:?}");
     assert!(working_state.contains("thinking"), "{working_state:?}");
     assert_ne!(

@@ -53,20 +53,24 @@ use crate::theme::Theme;
 pub const PROMPT_WIDTH: usize = 2;
 use crate::tools_view::{self, CallLine};
 
-/// Rows the inline viewport occupies at its baseline: three live rows, the
-/// state row, three editor rows and the facts row. A short prompt makes the
-/// viewport *shorter* (no blank editor rows); a long one makes it taller so
-/// the full prompt stays visible.
+/// Rows the inline viewport occupies when the answer is streaming: three live
+/// rows, the state row, three editor rows and the facts row. When nothing is
+/// live the viewport shrinks: empty live rows are never painted, so there is
+/// no blank gap between the scrollback and the input.
 pub const VIEWPORT_HEIGHT: u16 = 8;
 /// Most rows the editor may occupy on its own. Beyond this the window scrolls
 /// to keep the cursor visible (the pane has to end somewhere).
 pub const MAX_EDITOR_ROWS: u16 = 12;
+/// Most rows the live area may occupy (the tail of a streamed answer).
+pub const MAX_LIVE_ROWS: u16 = 3;
 
-/// The viewport height for an editor showing `editor_rows` wrapped rows: the
-/// three live rows, the state row and the facts row are constant; only the
-/// editor grows or shrinks. Kept between 5 and the screen height by the caller.
-pub fn viewport_height_for(editor_rows: u16) -> u16 {
-    5 + editor_rows.clamp(1, MAX_EDITOR_ROWS)
+/// The viewport height for `editor_rows` wrapped prompt rows and `live_rows`
+/// streamed rows: the state and facts rows are constant, and the editor and
+/// live area grow only with their own content. With nothing streaming the live
+/// area is zero rows, so the input sits immediately below the last committed
+/// scrollback line. Kept between 2 and the screen height by the caller.
+pub fn viewport_height_for(editor_rows: u16, live_rows: u16) -> u16 {
+    2 + editor_rows.clamp(1, MAX_EDITOR_ROWS) + live_rows.min(MAX_LIVE_ROWS)
 }
 /// A second Ctrl-C within this window quits instead of stopping.
 pub const DOUBLE_CTRL_C: Duration = Duration::from_millis(1000);
@@ -754,6 +758,12 @@ pub struct App {
     pub status: Status,
     pub width: usize,
     pub height: usize,
+    /// Rows the inline viewport reserved for the editor and live area this
+    /// frame. Set by `render()` from the content counts. `None` before the
+    /// first frame (e.g. a bare `App` in a unit test) means the live area can
+    /// hold up to `MAX_LIVE_ROWS` rows.
+    editor_rows: u16,
+    live_rows: Option<usize>,
     /// Rows ready to be written above the viewport, styled.
     pub scroll: Vec<Line<'static>>,
     /// Whether a message row has reached the scrollback in this message (so the
@@ -828,6 +838,8 @@ impl App {
             status: Status::default(),
             width,
             height,
+            editor_rows: 1,
+            live_rows: None,
             scroll: Vec::new(),
             committed_message: false,
             last_row: None,
@@ -894,8 +906,22 @@ impl App {
         Layout::with_glyphs(self.width, self.theme.glyphs)
     }
 
+    /// Live rows the current message still needs, capped at the viewport's
+    /// reserved live area. The viewport is rebuilt to this count in `draw()`,
+    /// and the layout uses what the viewport reserved, so no empty live row is
+    /// painted. Does not call `live_view()` (that would recurse).
     fn live_height(&self) -> usize {
-        layout_of(self.width, self.height).live.height as usize
+        self.live_rows.unwrap_or(MAX_LIVE_ROWS as usize)
+    }
+
+    /// Set the frame to the viewport's real height before rendering. The
+    /// viewport was sized by `draw()` to `state + editor + facts + live`; from
+    /// the height we recover the live rows so `live_view()` trims to exactly
+    /// what fits.
+    pub fn set_viewport_height(&mut self, height: u16, editor_rows: u16, live_rows: u16) {
+        self.editor_rows = editor_rows;
+        self.live_rows = Some(live_rows as usize);
+        self.height = height as usize;
     }
 
     /// Rows to write above the viewport, in order.
@@ -929,19 +955,15 @@ impl App {
         &self.note
     }
 
-    /// The live rows: the tail of the message — every
-    /// row the streamed text has produced that is not in the scrollback yet,
-    /// trimmed to the live area's height.
-    pub fn live_view(&self) -> Vec<Row> {
+    /// Every live row the message currently holds, before trimming to the
+    /// viewport's live area. The viewport is sized from this count in `draw()`.
+    fn live_content(&self) -> Vec<Row> {
         let layout = self.layout();
         let mut rows = self.message.live_rows(layout);
         if !self.stream.is_empty() {
             if !rows.is_empty() {
                 rows.push(Row::default());
             }
-            // Only what is not in the scrollback yet: a fence's delivered lines
-            // are history, and rendering them again every frame is what made a
-            // long block cost its whole length per delta (`P1`).
             rows.extend(markdown::open_rows(
                 self.stream.open(),
                 self.stream.shape(),
@@ -949,9 +971,23 @@ impl App {
                 layout,
             ));
         }
+        rows
+    }
+
+    /// The live rows: the tail of the message — every
+    /// row the streamed text has produced that is not in the scrollback yet,
+    /// trimmed to the live area's height.
+    pub fn live_view(&self) -> Vec<Row> {
+        let mut rows = self.live_content();
         let start = rows.len().saturating_sub(self.live_height());
         rows.drain(..start);
         rows
+    }
+
+    /// The number of live rows the message wants, capped at `MAX_LIVE_ROWS`:
+    /// the height `draw()` reserves for the live area.
+    pub fn wanted_live_rows(&self) -> u16 {
+        self.live_content().len().min(MAX_LIVE_ROWS as usize) as u16
     }
 
     /// The live area as ratatui lines: the tail of the streamed message.
@@ -1871,12 +1907,19 @@ pub struct Areas {
     pub facts: Rect,
 }
 
-/// Three live rows, the state row, three editor rows, the facts row — fewer
-/// when the screen is shorter than the viewport. The state row goes last (a
-/// user who cannot see whether the agent runs has nothing left), then the
-/// live rows, then the facts row, then the editor to one row.
-pub fn layout(area: Rect) -> Areas {
-    let mut areas = layout_of(area.width as usize, area.height as usize);
+/// Three live rows at most, the state row, up to `MAX_EDITOR_ROWS` editor
+/// rows, and the facts row. The viewport is built from the content counts in
+/// `draw()`, so `layout_of` uses those counts to hand each row exactly the
+/// space it needs: no blank live rows above the state row. On a short screen
+/// the live rows go first, then the facts row, then the editor down to one row;
+/// the state row is the last to go.
+pub fn layout(area: Rect, editor_rows: u16, live_rows: u16) -> Areas {
+    let mut areas = layout_of(
+        area.width as usize,
+        area.height as usize,
+        editor_rows,
+        live_rows,
+    );
     // The rects are built from the row count alone; move them to where the
     // caller's area really starts (an inline viewport does not start at row 0,
     // and drawing at row 0 would paint over the scrollback above it).
@@ -1892,7 +1935,7 @@ pub fn layout(area: Rect) -> Areas {
     areas
 }
 
-fn layout_of(width: usize, height: usize) -> Areas {
+fn layout_of(width: usize, height: usize, editor_rows: u16, live_rows: u16) -> Areas {
     let area = Rect::new(0, 0, width as u16, height as u16);
     if area.height == 0 {
         return Areas {
@@ -1902,19 +1945,17 @@ fn layout_of(width: usize, height: usize) -> Areas {
             facts: area,
         };
     }
-    // The order rows are given up (design note §7): the facts row first, then
-    // live rows, then the editor down to one row; the state row is the last to
-    // go, because a user who cannot see whether the agent is working has
-    // nothing left.
-    // The editor takes exactly the rows the viewport reserved for it; the
-    // live rows take the rest. No spare editor rows are painted when the
-    // prompt is short — that was the blank gap above the input. The state and
-    // facts rows are each one row and only disappear on a very short screen.
-    let facts_height = u16::from(area.height >= 6);
+    // The viewport was sized to `2 + editor_rows + live_rows`, so the
+    // content counts describe exactly how to split the space. The live area
+    // takes its rows first (streamed text must not be clipped); the editor
+    // takes its own wrapped rows. Neither gets blank spare rows.
+    let facts_height = u16::from(area.height >= 3);
     let state_height = u16::from(area.height >= 2);
     let space = area.height.saturating_sub(facts_height + state_height);
-    let live_height = space.saturating_sub(1).min(3);
-    let editor_height = space.saturating_sub(live_height);
+    let live_height = space.min(live_rows.min(MAX_LIVE_ROWS));
+    let editor_height = space
+        .saturating_sub(live_height)
+        .min(editor_rows.clamp(1, MAX_EDITOR_ROWS));
 
     let live = Rect::new(area.x, area.y, area.width, live_height);
     let state = Rect::new(area.x, live.y + live_height, area.width, state_height);
@@ -1939,8 +1980,20 @@ static VIEWPORT_Y: AtomicU16 = AtomicU16::new(u16::MAX);
 pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     app.set_size(area.width as usize, area.height as usize);
+    app.set_viewport_height(
+        area.height,
+        app.editor.visual_rows().len() as u16,
+        app.wanted_live_rows(),
+    );
     VIEWPORT_Y.store(area.y, Ordering::Relaxed);
-    let areas = layout(area);
+    // The Ctrl-O overlay replaces the live, state and editor rows with the
+    // captured output; only the facts row survives. Give it a layout that
+    // puts facts at the very bottom so the overlay gets all the rows above.
+    let areas = if app.show_tail {
+        layout(area, VIEWPORT_HEIGHT, 0)
+    } else {
+        layout(area, app.editor_rows, app.wanted_live_rows())
+    };
     if app.show_tail {
         render_tail(app, frame, area, areas.facts);
     } else {
@@ -2179,8 +2232,12 @@ pub fn start(
     theme: Theme,
 ) -> std::io::Result<Tui> {
     let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, VIEWPORT_HEIGHT));
+    // Start with the input only: no streaming rows yet, so no blank gap
+    // between the welcome banner and the prompt. `draw()` grows the live area
+    // on the first token and shrinks it again when the message settles.
+    let initial_rows = viewport_height_for(1, 0).min(height);
     let terminal = ratatui::try_init_with_options(ratatui::TerminalOptions {
-        viewport: ratatui::Viewport::Inline(VIEWPORT_HEIGHT.min(height)),
+        viewport: ratatui::Viewport::Inline(initial_rows),
     })?;
     install_panic_hook();
     // Negotiate CSI-u key reporting so Shift-Enter survives a multiplexer
@@ -2242,7 +2299,7 @@ pub fn start(
         keys,
         tick: None,
         last_paint: None,
-        viewport_rows: VIEWPORT_HEIGHT.min(height),
+        viewport_rows: initial_rows,
     })
 }
 
@@ -2450,14 +2507,25 @@ impl Tui {
     /// One frame, wrapped in synchronised output: terminals that do not know
     /// the sequence ignore it, so there is no capability probing.
     fn draw(&mut self) -> std::io::Result<()> {
-        // The editor may have wrapped onto more rows since the last frame.
-        // Rebuild the inline viewport at exactly the height the content needs:
-        // five fixed rows (three live, state, facts) plus the editor's visual
-        // rows. Without this, a short prompt leaves blank editor rows above
-        // the input and a long one is clipped.
+        // The editor may have wrapped onto more rows since the last frame, and
+        // the streamed answer may have grown or settled. Rebuild the inline
+        // viewport at exactly the height the content needs: the state and facts
+        // rows, the editor's visual rows, and only the live rows the message is
+        // actually using. With nothing streaming that leaves no blank rows
+        // between the scrollback and the input.
         let width = self.app.width.max(1);
         self.app.editor.set_width(width);
-        let wanted = viewport_height_for(self.app.editor.visual_rows().len() as u16).min(
+        let live_rows = self.app.wanted_live_rows();
+        let mut wanted = viewport_height_for(self.app.editor.visual_rows().len() as u16, live_rows);
+        // The Ctrl-O overlay replaces the live/state/editor rows with the
+        // captured output: reserve a row for the call header plus one per tail
+        // line (capped at the old eight-row height), so nothing is clipped.
+        if self.app.show_tail {
+            wanted = wanted
+                .max((self.app.tail.len() as u16 + 2).min(VIEWPORT_HEIGHT))
+                .min(MAX_EDITOR_ROWS + 2);
+        }
+        let wanted = wanted.min(
             ratatui::crossterm::terminal::size()
                 .map(|(_, h)| h)
                 .unwrap_or(u16::MAX),
@@ -3858,42 +3926,57 @@ mod tests {
     /// from the frame's own origin, or every row is clipped (a real terminal
     /// showed a stale screen because of exactly this).
     #[test]
-    fn the_viewport_grows_with_the_editor_and_never_leaves_blank_input_rows() {
-        // Five fixed rows plus exactly the editor's visual rows: a short
-        // prompt has one editor row and no blank row above the input; a long
-        // one gets as many rows as it needs, up to the cap.
-        assert_eq!(viewport_height_for(1), 6);
-        assert_eq!(viewport_height_for(3), 8);
-        assert_eq!(viewport_height_for(5), 10);
-        assert_eq!(viewport_height_for(99), 5 + MAX_EDITOR_ROWS);
+    fn the_viewport_has_no_blank_live_rows_when_idle() {
+        // Two fixed rows (state, facts) plus exactly the editor's visual rows.
+        // Nothing is streaming, so no blank live rows are painted above the
+        // input — that was the gap between the banner and the first prompt.
+        assert_eq!(viewport_height_for(1, 0), 3);
+        assert_eq!(viewport_height_for(3, 0), 5);
+        assert_eq!(viewport_height_for(5, 0), 7);
+        assert_eq!(viewport_height_for(99, 0), 2 + MAX_EDITOR_ROWS);
         for rows in 1..=12 {
-            let height = viewport_height_for(rows);
-            let areas = layout(Rect::new(0, 0, 80, height));
+            let height = viewport_height_for(rows, 0);
+            let areas = layout(Rect::new(0, 0, 80, height), rows, 0);
             assert_eq!(areas.editor.height, rows, "rows {rows}");
-            assert_eq!(areas.live.height, 3, "rows {rows}");
+            assert_eq!(areas.live.height, 0, "rows {rows}: no blank live rows");
             assert_eq!(areas.state.height, 1, "rows {rows}");
             assert_eq!(areas.facts.height, 1, "rows {rows}");
+            assert_eq!(areas.state.y, 0, "the state row follows the scrollback");
         }
+    }
+
+    #[test]
+    fn the_viewport_grows_with_the_live_area_only_as_content_arrives() {
+        for live in 0..=5 {
+            let height = viewport_height_for(1, live);
+            let areas = layout(Rect::new(0, 0, 80, height), 1, live);
+            assert_eq!(areas.live.height, live.min(MAX_LIVE_ROWS), "live {live}");
+            assert_eq!(areas.editor.height, 1, "live {live}");
+            assert_eq!(areas.state.height, 1, "live {live}");
+            assert_eq!(areas.facts.height, 1, "live {live}");
+        }
+        assert_eq!(viewport_height_for(3, 3), 8);
     }
 
     #[test]
     fn every_row_is_positioned_from_the_frames_own_origin() {
         for top in [0u16, 6, 40] {
-            let areas = layout(Rect::new(3, top, 80, 6));
-            assert_eq!(areas.live.y, top, "live");
-            assert_eq!(areas.state.y, top + 3, "state");
-            assert_eq!(areas.editor.y, top + 4, "editor");
-            assert_eq!(areas.facts.y, top + 5, "facts");
+            // A 3-row viewport is the idle input: state, editor, facts.
+            let areas = layout(Rect::new(3, top, 80, 3), 1, 0);
+            assert_eq!(areas.live.height, 0, "live");
+            assert_eq!(areas.state.y, top, "state");
+            assert_eq!(areas.editor.y, top + 1, "editor");
+            assert_eq!(areas.facts.y, top + 2, "facts");
             for row in [areas.live, areas.state, areas.editor, areas.facts] {
                 assert_eq!(row.x, 3, "x follows the frame");
-                assert!(row.bottom() <= top + 6, "row inside the frame: {row:?}");
+                assert!(row.bottom() <= top + 3, "row inside the frame: {row:?}");
             }
         }
     }
 
     #[test]
-    fn the_eight_rows_are_three_live_a_state_row_three_editor_rows_and_the_facts() {
-        let areas = layout(Rect::new(0, 0, 80, 8));
+    fn three_live_rows_fit_an_eight_row_viewport_with_a_three_row_editor() {
+        let areas = layout(Rect::new(0, 0, 80, 8), 3, 3);
         assert_eq!(areas.live.y, 0);
         assert_eq!(areas.live.height, 3);
         assert_eq!(areas.state.height, 1);
@@ -3902,10 +3985,10 @@ mod tests {
         assert_eq!(areas.state.y, areas.live.y + 3);
         assert_eq!(areas.editor.y, 4);
         assert_eq!(areas.facts.y, 7);
-        // A shorter screen drops the live rows first, then the facts row; the
-        // state row is the last to go.
+        // A shorter screen drops the live rows first, then the editor, then
+        // the facts row; the state row is the last to go.
         for height in [7u16, 5, 3, 2] {
-            let areas = layout(Rect::new(0, 0, 40, height));
+            let areas = layout(Rect::new(0, 0, 40, height), 3, 3);
             let areas_sum =
                 areas.live.height + areas.state.height + areas.editor.height + areas.facts.height;
             assert_eq!(areas_sum, height, "height {height}");

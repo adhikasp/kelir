@@ -8,3 +8,4 @@ __pycache__/
 
 # Per-run agent notes (src/prompt.md tells the model to write them here).
 /.kelir/notes.md
+/docs/screenshots/

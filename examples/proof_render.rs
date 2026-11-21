@@ -48,7 +48,7 @@ fn main() {
         final_text: "Here is the answer to your first question.".into(),
     });
     app.apply(UiEvent::Title("Fix the input box gap".into()));
-    let h = tui::viewport_height_for(app.editor.visual_rows().len() as u16);
+    let h = tui::viewport_height_for(app.editor.visual_rows().len() as u16, 0);
     dump(&mut app, h, "idle with title");
 
     // A long prompt that wraps across several visual rows at width 80.
@@ -56,6 +56,6 @@ fn main() {
     for c in text.chars() {
         app.press(Press::Edit(Key::Char(c)));
     }
-    let h2 = tui::viewport_height_for(app.editor.visual_rows().len() as u16);
+    let h2 = tui::viewport_height_for(app.editor.visual_rows().len() as u16, 0);
     dump(&mut app, h2, "long wrapped prompt");
 }
