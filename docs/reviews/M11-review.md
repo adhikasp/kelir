@@ -82,5 +82,13 @@ _verified by the follow-up session._
 - **S4 — kept and cleaned.** The Windows and Linux footprint probes remain under `scripts/live/`
   with paths parameterised by env vars; no personal paths or keys. Exact-PID kill via trap only.
 
-Gate and counts: recorded below in this section after the full `bash scripts/gate.sh --linux=the maintainer`
-run on the committed fix HEAD. Live-drive verdict: _pending reviewer sign-off on the fix_.
+Gate and counts: `bash scripts/gate.sh --linux=the maintainer` on committed HEAD `5d0b2ff` (logs in
+`C:/Users/the maintainer/kelir-scratch/gate-job-m11fix-20261121T053227Z/`): fmt ok, clippy `-D warnings` ok,
+Windows nextest **1432 run / 1432 passed / 3 skipped, 0 retried**, doctest ok; Linux (the maintainer) fmt,
+clippy, full nextest **1433 run / 1433 passed / 3 skipped**, doctest ok, `remote-check rc=0`;
+**gate: PASS**. No STEER-7 memory-scan or M5A flake appeared in this run. An earlier gate at
+`6442557` failed on Linux only: the two new bg proofs used `sleep 1`, which completed before
+`promote_after = 1` could fire on that host; lengthened to `sleep 5` in `5d0b2ff` (default shell,
+no `bash` assumption).
+Live-drive verdict: reviewer sign-off on the fix still pending (the original M11 live drive
+remains valid; B1's change is an additional dispatch on the same notify path).
