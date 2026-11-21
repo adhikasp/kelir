@@ -113,6 +113,8 @@ impl Tail {
         }
         file.seek(SeekFrom::Start(self.offset))?;
         let mut out = Vec::new();
+        // First drain lines left in `pending` from a previous capped call.
+        self.take_lines(&mut out, max);
         let mut buf = [0u8; CHUNK];
         loop {
             if out.len() >= max {
@@ -124,23 +126,7 @@ impl Tail {
             }
             self.offset += read as u64;
             self.pending.extend_from_slice(&buf[..read]);
-            while let Some(index) = self.pending.iter().position(|byte| *byte == b'\n') {
-                let line: Vec<u8> = self.pending.drain(..=index).collect();
-                let line = &line[..line.len() - 1]; // the newline
-                let line = line.strip_suffix(b"\r").unwrap_or(line); // CRLF logs
-                if line.len() > MAX_LINE {
-                    self.skipped += 1;
-                    continue;
-                }
-                if let Ok(text) = std::str::from_utf8(line)
-                    && !text.trim().is_empty()
-                {
-                    out.push(text.to_string());
-                    if out.len() >= max {
-                        break;
-                    }
-                }
-            }
+            self.take_lines(&mut out, max);
             if self.pending.len() > MAX_LINE {
                 // A line that grows without a newline (a runaway writer): drop
                 // up to the last newline, or all of it, and keep the cursor
@@ -150,6 +136,27 @@ impl Tail {
             }
         }
         Ok(out)
+    }
+
+    /// Drain complete lines from `pending` into `out`, up to `max`.
+    fn take_lines(&mut self, out: &mut Vec<String>, max: usize) {
+        while let Some(index) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=index).collect();
+            let line = &line[..line.len() - 1]; // the newline
+            let line = line.strip_suffix(b"\r").unwrap_or(line); // CRLF logs
+            if line.len() > MAX_LINE {
+                self.skipped += 1;
+                continue;
+            }
+            if let Ok(text) = std::str::from_utf8(line)
+                && !text.trim().is_empty()
+            {
+                out.push(text.to_string());
+                if out.len() >= max {
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -216,6 +223,23 @@ mod tests {
         file.flush().unwrap();
         let mut tail = Tail::new();
         assert!(tail.poll(file.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn capped_poll_streams_a_log_in_bounded_pages() {
+        let lines: Vec<String> = (0..100).map(|i| format!("line-{i}")).collect();
+        let file = log(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut tail = Tail::new();
+        let mut got = Vec::new();
+        loop {
+            let page = tail.poll_capped(file.path(), 7).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            assert!(page.len() <= 7, "a page is bounded");
+            got.extend(page);
+        }
+        assert_eq!(got, lines);
     }
 
     #[test]

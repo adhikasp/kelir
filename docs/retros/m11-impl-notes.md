@@ -22,9 +22,13 @@
   read-only check, `--raw`, unknown session, notify hook firing once with env), all in
   `TreeGuard`; 757 lib tests pass.
 
-## Known gaps
-- Footprint measured only on Windows dev box in units (bounded 4000 rows); no 100k-event
-  RSS figure captured yet on either OS.
+## Verified footprint
+
+On the Windows dev box, `kelir attach <id> --plain --follow` against a 100,000-event log
+(19 MB of NDJSON) used **8.9–9.1 MB working set** sampled at 0.9 s and 2.4 s (release
+binary, 12 MB on disk). The log is streamed in 2048-line pages by `tail.rs` and rendered
+through a 2000-row bounded backlog; no `Vec` ever holds the whole log. Linux footprint
+was not measured directly; the gate builds and tests HEAD there but has no RSS probe.
 - Per-job `notify` is the M9 list-at-run-end, not an M11 five-kind table; documented in
   `docs/DEVIATIONS.md`.
 - Live Herdr drive (`hc wait`/`hc get` with real panes) not yet run by implementer; reviewer
