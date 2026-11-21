@@ -24,7 +24,7 @@ kelir docs --find retry max wait  # ranked search: which file mentions these wor
 ```
 
 Topics: `README`, `config`, `cli`, `env`, `verbs`, `mcp`, `channels`, `gates`, `children`, `jobs`,
-`providers`, `sources-and-skills`, `files`, `events`, `tui`, `troubleshooting`, `source-map`.
+`providers`, `sources-and-skills`, `files`, `events`, `attach`, `notify`, `tui`, `troubleshooting`, `source-map`.
 
 ## The five things worth knowing by heart
 

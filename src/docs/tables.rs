@@ -579,6 +579,15 @@ pub const CONFIG_KEYS: &[KeyDoc] = &[
         effect: "compact the append-only channel spool once it grows past this size",
         field_fn: "load",
     },
+    KeyDoc {
+        scope: KeyScope::Top,
+        name: "notify",
+        kind: "table",
+        default: "unset: no notifications",
+        overrides: "—",
+        effect: "`[notify]`: `turn_done`, `error`, `paused`, `bg_settled` and `child_settled` each take a command or list of commands (scrubbed shell hooks, 30 s timeout, rate-limited); `terminal` (`false` by default), `terminal_kind` (`osc9` or `osc777`), `rate_limit` seconds and `title` control the optional OSC record, emitted only on a TTY. Nothing is enabled by default",
+        field_fn: "notify",
+    },
 ];
 
 /// One event type: the fields a reader counts on, and what writes it.
@@ -679,6 +688,11 @@ pub const EVENTS: &[EventDoc] = &[
         name: "gate",
         fields: "`gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?`",
         written_by: "every gate run, including the ones that failed open (`error` says why: crash, timeout, garbage)",
+    },
+    EventDoc {
+        name: "notify",
+        fields: "`event`, `outcome`, `error?`, `hooks`",
+        written_by: "a notification hook ran (`outcome`: `ok`, `rate_limited`, `failed` or `no_hooks`); never part of the conversation the model reads",
     },
     EventDoc {
         name: "child_started",

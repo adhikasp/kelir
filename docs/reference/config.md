@@ -62,6 +62,7 @@ keys come from the environment, `key_cmd`, or opencode's store.
 | `channel_global_rpm` | integer | `120` | — | at most this many messages across all conversations in a 60-second window | `src/config.rs:load` |
 | `channel_fallback` | string | `Sorry — I couldn't finish that. Please try again.` | — | the single fallback reply sent when a channel turn errors, pauses or times out | `src/config.rs:load` |
 | `channel_spool_limit` | integer (bytes) | `8388608` | — | compact the append-only channel spool once it grows past this size | `src/config.rs:load` |
+| `notify` | table | unset: no notifications | — | `[notify]`: `turn_done`, `error`, `paused`, `bg_settled` and `child_settled` each take a command or list of commands (scrubbed shell hooks, 30 s timeout, rate-limited); `terminal` (`false` by default), `terminal_kind` (`osc9` or `osc777`), `rate_limit` seconds and `title` control the optional OSC record, emitted only on a TTY. Nothing is enabled by default | `src/config.rs:notify` |
 
 ### Per provider (`[providers.<name>]`)
 
