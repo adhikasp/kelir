@@ -5,6 +5,8 @@
 //! session; session cases drive a mock-provider session whose bash call runs
 //! `kelir mcp …` through the broker.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::PathBuf;

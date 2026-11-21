@@ -5,6 +5,8 @@
 //! would. Assertions are on the event log, on the mock's requests, and on the
 //! session process itself.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::time::{Duration, Instant};

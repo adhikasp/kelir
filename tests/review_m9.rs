@@ -6,6 +6,8 @@
 //! and SPAWN_CAP bounds the whole file. No console windows: the harness
 //! creates children with `CREATE_NO_WINDOW`, never a visible console.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::{Path, PathBuf};

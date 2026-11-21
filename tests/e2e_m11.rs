@@ -2,6 +2,8 @@
 //! hooks firing on turn completion. Every process lives in a TreeGuard, so a
 //! failure cannot leave a `kelir` behind.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::Path;

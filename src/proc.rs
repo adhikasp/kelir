@@ -719,7 +719,7 @@ pub mod win {
                 SetInformationJobObject(
                     self.0,
                     JobObjectExtendedLimitInformation,
-                    &info as *const _ as *const c_void,
+                    std::ptr::from_ref(&info).cast::<c_void>(),
                     std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
                 ) != 0
             }
@@ -778,7 +778,7 @@ pub mod win {
                 QueryInformationJobObject(
                     self.0,
                     JobObjectBasicAccountingInformation,
-                    &mut info as *mut _ as *mut c_void,
+                    std::ptr::from_mut(&mut info).cast::<c_void>(),
                     std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
                     std::ptr::null_mut(),
                 )

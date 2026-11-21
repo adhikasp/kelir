@@ -3,6 +3,8 @@
 //! These try to break durability, resume and compaction rather than mirror the
 //! implementation. A failing test here is a real bug; each names its finding.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::sync::Arc;

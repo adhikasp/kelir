@@ -7,6 +7,8 @@
 //! child holds nothing it needs for that: it only writes a file. Files are therefore still
 //! evidence for the ids that are not capability-protected.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};

@@ -2,6 +2,8 @@
 //! scripted mock provider. Real processes, in the test's TreeGuard: a failing
 //! test cannot leave a server or a channel driver behind.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::PathBuf;

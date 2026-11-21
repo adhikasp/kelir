@@ -7,6 +7,8 @@
 //! in-process mock. The harness's default `KELIR_GO_API_KEY=test-go-key` is
 //! cleared per test with an empty value, which is the resolver's "unset".
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::{Path, PathBuf};

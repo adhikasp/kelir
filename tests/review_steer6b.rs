@@ -2,6 +2,8 @@
 //! `cmd.exe /C` and PowerShell (B1/N2), regressions around stdin, CRLF, unicode,
 //! exit codes, and the S2/S3 capability gates. Real binary + scripted mock.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};

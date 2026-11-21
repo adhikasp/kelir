@@ -4,6 +4,8 @@
 //! The headline: `kelir observe <s> --raw` equals, byte for byte, the body the
 //! mock received for the request it describes.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::{Path, PathBuf};

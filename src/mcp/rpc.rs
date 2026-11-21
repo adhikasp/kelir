@@ -296,7 +296,10 @@ impl Client {
                 let mut line = message.to_string();
                 line.push('\n');
                 let mut stdin = stdin.lock().await;
-                if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
+                let failed =
+                    stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err();
+                drop(stdin);
+                if failed {
                     return;
                 }
             }

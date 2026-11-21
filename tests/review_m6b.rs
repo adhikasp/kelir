@@ -5,6 +5,8 @@
 //! Tests carrying `#[ignore = "m6b-Fn"]` prove a finding of
 //! `docs/reviews/m6b-review.md`; run them with `--run-ignored all`.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::{Path, PathBuf};

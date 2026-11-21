@@ -60,6 +60,7 @@ impl Assembler {
     }
 
     /// Feed one SSE event. `[DONE]` marks the end of the stream.
+    #[optimize(speed)]
     pub fn feed_event(&mut self, event: &SseEvent) -> Result<(), String> {
         let data = event.data.trim();
         if data.is_empty() {

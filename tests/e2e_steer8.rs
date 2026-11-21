@@ -4,6 +4,8 @@
 //! asked of a live session in whatever state it is in: before the first
 //! request, mid-request, in a retry wait, paused.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::sync::Arc;

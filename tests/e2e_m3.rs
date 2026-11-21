@@ -6,6 +6,8 @@
 //! a completed command is never re-run, and a call that may or may not have run
 //! is reported as unknown.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::sync::Arc;

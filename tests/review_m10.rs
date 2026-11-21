@@ -2,6 +2,8 @@
 //! concrete failure of the milestone task; a failing test is a real finding.
 //! Real-process cases use the TreeGuard harness with a shell-count watchdog.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 use std::path::PathBuf;
 use std::time::Duration;
 

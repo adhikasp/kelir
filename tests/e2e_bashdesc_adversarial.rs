@@ -3,6 +3,8 @@
 //! Focus: exact fallback (byte-for-byte), control-character safety, character
 //! (not byte) cap, non-ASCII/wide labels, and no data loss in the event log.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use kelir::tools_view::{DESCRIPTION_MAX, description};
@@ -184,7 +186,6 @@ fn control_bytes_and_osc_sequences_are_stripped_from_the_label() {
 ///
 /// Proving command: `cargo test --test e2e_bashdesc_adversarial -- --ignored`
 #[test]
-
 fn no_control_byte_may_survive_the_label_sanitizer() {
     for attack in [
         "line one\n\x1b]7501;state=done\x1b\\",

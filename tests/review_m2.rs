@@ -6,6 +6,8 @@
 //! OSC 7501 record can land in the middle of a CSI sequence. A cut CSI prints its
 //! tail (`17;200H`) as text on the screen.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::io::{Read as _, Write as _};

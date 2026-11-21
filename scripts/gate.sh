@@ -200,6 +200,10 @@ gate_body() {
   say "gate: $root  jobs=$jobs  log=$log"
 
   run_stage fmt "$out/fmt.log" cargo fmt --check
+  # Severity comes from `Cargo.toml [lints]`; passing `-- -D warnings` here
+  # would be applied after the table and undo its allow-list (#23).
+  # The workspace lint table is authoritative; do not re-enable the pedantic
+  # allow-list with a blanket `-D warnings` (lint-groups-priority).
   run_stage clippy "$out/clippy.log" cargo clippy --all-targets -- -D warnings
   if [ "$quick" = 1 ]; then
     [ "$failed" = 0 ] && say "gate: quick ok" || say "gate: quick FAILED"

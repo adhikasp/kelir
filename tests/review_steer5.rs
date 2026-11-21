@@ -3,6 +3,8 @@
 //! These are the reviewer's, not the implementer's. A test that fails here is a
 //! finding (see `docs/reviews/steer5-review.md`).
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::time::{Duration, Instant};

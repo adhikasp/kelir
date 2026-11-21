@@ -6,6 +6,8 @@
 //! thing that does. Today ownership is "a `commands/<id>/` directory or a `bg/<id>.status` file
 //! exists" — both of which that child can create itself.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};

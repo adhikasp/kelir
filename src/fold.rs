@@ -30,6 +30,7 @@ impl Folded {
     }
 }
 
+#[optimize(speed)]
 pub fn fold(events: &[LogEvent], session_dir: &Path) -> Result<Folded, String> {
     let mut folded = Folded::default();
     // The system message is frozen in `session_started` and never compacted

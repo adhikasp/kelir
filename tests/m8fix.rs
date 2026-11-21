@@ -3,6 +3,8 @@
 //!
 //! Every run goes through the `Sandbox` Drop-guard.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::Path;

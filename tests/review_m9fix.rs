@@ -2,6 +2,8 @@
 //! process goes through `Sandbox::guard`, the whole file is spawn-capped, and
 //! `clean()` asserts nothing of ours is left (AGENTS.md process rules).
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::time::{Duration, Instant};

@@ -85,7 +85,7 @@ impl Governor {
                 .truncate(false)
                 .open(&path)
                 .ok()?;
-            if try_lock(&file) {
+            if std::fs::File::try_lock(&file).is_ok() {
                 return Some(Slot {
                     _file: file,
                     index,
@@ -95,62 +95,6 @@ impl Governor {
         }
         None
     }
-}
-
-/// Take an exclusive advisory lock, or say it is held. `File::try_lock` would
-/// say the same thing but needs Rust 1.89 and the MSRV is 1.88, so the two
-/// platform calls are made directly — the same shape `ipc::lock` already uses
-/// for a session's log.
-#[cfg(unix)]
-fn try_lock(file: &File) -> bool {
-    use std::os::unix::io::AsRawFd as _;
-    // SAFETY: `file` owns a valid descriptor for the call's duration.
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
-}
-
-/// The same on Windows: `LockFileEx` with `FAIL_IMMEDIATELY`, on the whole
-/// file. The lock belongs to the handle, so closing it — or dying — frees it.
-#[cfg(windows)]
-fn try_lock(file: &File) -> bool {
-    use std::os::windows::io::AsRawHandle as _;
-    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, GetLastError};
-    use windows_sys::Win32::Storage::FileSystem::{
-        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-    };
-    use windows_sys::Win32::System::IO::OVERLAPPED;
-    // SAFETY: the handle is valid, and `overlapped` is a zeroed,
-    // correctly-sized structure the call may write to.
-    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-    let taken = unsafe {
-        LockFileEx(
-            file.as_raw_handle() as _,
-            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-            0,
-            u32::MAX,
-            u32::MAX,
-            &mut overlapped,
-        )
-    };
-    if taken != 0 {
-        return true;
-    }
-    // "Somebody else holds it" is the common answer; anything else (no rights,
-    // a bad handle) is treated the same way — the caller waits and tries again,
-    // which is the safe failure for a governor.
-    let error = unsafe { GetLastError() };
-    debug_assert!(
-        error == ERROR_LOCK_VIOLATION || error == 0,
-        "LockFileEx failed with {error}"
-    );
-    false
-}
-
-/// Platforms other than Unix and Windows: no advisory lock is ported here, so
-/// the governor refuses every slot and a session waits instead of running
-/// unmanaged. `#[cfg]`-ed out of the build on the two platforms kelir targets.
-#[cfg(not(any(unix, windows)))]
-fn try_lock(_file: &File) -> bool {
-    false
 }
 
 /// A provider name as a file name: letters, digits, `-`, `_`, `.`; anything

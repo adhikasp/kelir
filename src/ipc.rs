@@ -295,44 +295,46 @@ fn name(dir: &Path, id: &str) -> Result<Name<'static>, String> {
 /// On Unix `bind` unlinks a stale socket file before it listens, so two
 /// `resume`s started at the same moment can both pass the "already running"
 /// connect check and both bind: the check is connect-then-bind, not one atomic
-/// step (M3 review N3). An exclusive `flock` on `<session dir>/session.lock`
-/// is that step; the loser exits before it writes a byte. On Windows the named
-/// pipe's first-instance rule already makes `bind` the atomic test, so the
-/// guard carries no file there.
+/// step (M3 review N3). An exclusive `File::try_lock` on
+/// `<session dir>/session.lock` is that step; the loser exits before it writes a
+/// byte. On Windows the named pipe's first-instance rule already makes `bind`
+/// the atomic test, so the guard carries no file there.
 pub struct SessionLock {
     #[cfg(unix)]
     _file: std::fs::File,
 }
 
 /// Take the session's write lock, or say who else has it.
-#[cfg(unix)]
+///
+/// `File::try_lock` (1.89) is the same operation on Unix and Windows; only the
+/// Unix side keeps the file, because that is the platform where the lock is
+/// what makes exclusivity atomic.
 pub fn lock(dir: &Path) -> Result<SessionLock, String> {
-    use std::os::unix::io::AsRawFd as _;
-    let path = dir.join(LOCK_FILE);
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        // The lock file is empty; opening it must not truncate another
-        // process's lock while it holds one.
-        .truncate(false)
-        .open(&path)
-        .map_err(|error| {
-            format!(
-                "cannot open the lock file {}: {error}",
-                crate::util::path_string(&path)
-            )
-        })?;
-    // SAFETY: `file` owns a valid descriptor for as long as the guard lives.
-    let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if taken != 0 {
-        return Err("another process is writing its log".to_string());
+    #[cfg(unix)]
+    {
+        let path = dir.join(LOCK_FILE);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            // The lock file is empty; opening it must not truncate another
+            // process's lock while it holds one.
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| {
+                format!(
+                    "cannot open the lock file {}: {error}",
+                    crate::util::path_string(&path)
+                )
+            })?;
+        file.try_lock()
+            .map_err(|_| "another process is writing its log".to_string())?;
+        Ok(SessionLock { _file: file })
     }
-    Ok(SessionLock { _file: file })
-}
-
-#[cfg(not(unix))]
-pub fn lock(_dir: &Path) -> Result<SessionLock, String> {
-    Ok(SessionLock {})
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(SessionLock {})
+    }
 }
 
 /// Bind the listener. Done before `session_started` is recorded, so a client

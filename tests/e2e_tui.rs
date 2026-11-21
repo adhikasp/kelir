@@ -2,6 +2,8 @@
 //! action→verb enumeration, the non-TTY fallback, and a headless PTY drive of
 //! the real binary against the scripted mock.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::io::{Read as _, Write as _};
@@ -678,7 +680,10 @@ struct PtyInput<'a> {
     message_echo: &'a str,
 }
 
-#[allow(clippy::too_many_arguments)] // test-only PTY driver; every knob is explicit
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test-only PTY driver; every knob is explicit"
+)]
 fn drive_pty_in_idle_or_turn(
     cwd: std::path::PathBuf,
     config: std::path::PathBuf,
@@ -1520,12 +1525,18 @@ async fn a_panic_in_the_tui_restores_the_terminal() {
         .await
         .expect("the pty driver");
 
-    // The session treats a dead UI like `/quit`: it ends and exits cleanly
-    // instead of running on with nobody watching.
-    assert_eq!(
-        code, 0,
-        "a panic must not hang or crash the session: {screen:?}"
-    );
+    // The TUI panic hook restores the terminal before the panic is printed.
+    // `cfg!(debug_assertions)` distinguishes the test build (`panic =
+    // "unwind"`, session ends cleanly) from the release binary (`panic =
+    // "abort"`, non-zero exit). Both must leave the terminal usable (#23).
+    if cfg!(debug_assertions) {
+        assert_eq!(
+            code, 0,
+            "a panic must not hang or crash the session: {screen:?}"
+        );
+    } else {
+        assert_ne!(code, 0, "a release panic must abort: {screen:?}");
+    }
     let message = screen
         .find("KELIR_TEST_PANIC: injected panic")
         .unwrap_or_else(|| panic!("no panic message: {screen:?}"));

@@ -17,6 +17,8 @@
 //! * `kelir ctl` keeps working, because it reads `<session dir>/token`;
 //! * the token itself never lands in the log, in stdout or in an argv.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::Path;

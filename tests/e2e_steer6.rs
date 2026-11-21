@@ -9,6 +9,8 @@
 //! * **F4** `parallel_tool_calls` is set only for a model that advertises it;
 //! * **F5** `compact_at_tokens` compacts a big window early.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};

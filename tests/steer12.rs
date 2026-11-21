@@ -12,6 +12,8 @@
 //! Only processes started here are Python (no window, own process group) and
 //! each is waited for, so nothing survives the test (AGENTS.md hard rules).
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 

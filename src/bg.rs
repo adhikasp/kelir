@@ -657,34 +657,36 @@ pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> 
 
 /// Detach a job's shim from this process, this process group and (on Windows)
 /// any enclosing Job Object, so it outlives the session that started it.
-#[cfg(unix)]
+///
+/// `cfg_select!` (1.95) keeps the three platform bodies in one item; each branch
+/// is still compiled only on its target.
 pub fn detach(command: &mut tokio::process::Command) {
-    use std::os::unix::process::CommandExt as _;
-    // `setsid` fails if the caller already leads a group; the fork/exec child
-    // never does, so this is the spec's `setsid` and nothing else.
-    unsafe {
-        command.as_std_mut().pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
+    cfg_select! {
+        unix => {
+            use std::os::unix::process::CommandExt as _;
+            // `setsid` fails if the caller already leads a group; the fork/exec
+            // child never does, so this is the spec's `setsid` and nothing else.
+            unsafe {
+                command.as_std_mut().pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
             }
-            Ok(())
-        });
+        }
+        windows => {
+            use std::os::windows::process::CommandExt as _;
+            command.as_std_mut().creation_flags(
+                crate::proc::win::CREATE_NO_WINDOW
+                    | crate::proc::win::CREATE_NEW_PROCESS_GROUP
+                    | crate::proc::win::CREATE_BREAKAWAY_FROM_JOB,
+            );
+        }
+        _ => {
+            let _ = command;
+        }
     }
-}
-
-#[cfg(windows)]
-pub fn detach(command: &mut tokio::process::Command) {
-    use std::os::windows::process::CommandExt as _;
-    command.as_std_mut().creation_flags(
-        crate::proc::win::CREATE_NO_WINDOW
-            | crate::proc::win::CREATE_NEW_PROCESS_GROUP
-            | crate::proc::win::CREATE_BREAKAWAY_FROM_JOB,
-    );
-}
-
-#[cfg(not(any(unix, windows)))]
-pub fn detach(command: &mut tokio::process::Command) {
-    let _ = command;
 }
 
 /// What a `kelir bg run` inside a call asks its session to do on Windows: start
@@ -1518,36 +1520,36 @@ fn fail(dir: &Path, status: &Status, key: Option<&str>, message: &str) {
 }
 
 /// Take a tree down from inside the shim (the session died) or from `cancel`.
-#[cfg(unix)]
-fn kill_tree(pgid: u32, _job: &Option<String>) {
-    if pgid == 0 {
-        // `kill(0, …)` would signal the caller's own process group.
-        return;
-    }
-    // The shim leads the group; the command inherited it, so this is the whole
-    // tree — including the shim itself.
-    unsafe {
-        libc::killpg(pgid as libc::pid_t, libc::SIGKILL);
-        libc::kill(pgid as libc::pid_t, libc::SIGKILL);
-    }
-}
-
-#[cfg(windows)]
 fn kill_tree(pid: u32, job: &Option<String>) {
-    if let Some(name) = job
-        && let Some(job) = crate::proc::win::Job::open(name)
-    {
-        job.terminate_job();
-        return;
+    cfg_select! {
+        unix => {
+            let _ = job;
+            // The shim leads the group; the command inherited it, so this is the
+            // whole tree — including the shim itself. Never signal group 0: that
+            // would include the agents running the tests.
+            if pid == 0 {
+                return;
+            }
+            unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        windows => {
+            if let Some(name) = job
+                && let Some(job) = crate::proc::win::Job::open(name)
+            {
+                job.terminate_job();
+                return;
+            }
+            if pid != 0 {
+                crate::proc::win::terminate(pid);
+            }
+        }
+        _ => {
+            let _ = (pid, job);
+        }
     }
-    if pid != 0 {
-        crate::proc::win::terminate(pid);
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn kill_tree(pid: u32, _job: &Option<String>) {
-    let _ = pid;
 }
 
 // --------------------------------------------------------------------- the CLI

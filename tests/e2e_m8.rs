@@ -5,6 +5,8 @@
 //! through the `Sandbox` Drop-guard, so a gate that leaves a process behind
 //! fails the test that started it.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::{Path, PathBuf};

@@ -2,6 +2,8 @@
 //! app model (no process, no network). A failing test here is a finding; the
 //! report names it.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 use std::time::{Duration, Instant};
 
 use kelir::markdown::{self, Layout, Row, Stream};

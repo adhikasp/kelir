@@ -8,6 +8,8 @@
 //! `--check` need a checkout, and those tests point `KELIR_DOCS_ROOT` at a
 //! scratch copy so they never touch the repo's own files.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::{Path, PathBuf};

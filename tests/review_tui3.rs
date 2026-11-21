@@ -2,6 +2,8 @@
 //! facts row) probed at the app-model level. No process, no network. A failing
 //! test here is a finding; docs/reviews/tui3-review.md names it.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 use kelir::tui::{App, Phase, Status, UiEvent, facts_for_width, status_text};
 use serde_json::json;
 

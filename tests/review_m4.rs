@@ -4,6 +4,8 @@
 //! processes, real shims, no mocks of the OS. A failing test here is a real bug;
 //! each names its finding.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::Path;

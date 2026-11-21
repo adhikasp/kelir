@@ -1384,7 +1384,10 @@ mod tests {
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Holds the turn and, when the test ends, asserts no gate slot leaked.
-    struct Quiet(#[allow(dead_code)] tokio::sync::MutexGuard<'static, ()>);
+    struct Quiet(
+        #[expect(dead_code, reason = "the guard is held for its Drop, never read")]
+        tokio::sync::MutexGuard<'static, ()>,
+    );
 
     impl Drop for Quiet {
         fn drop(&mut self) {

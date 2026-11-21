@@ -10,6 +10,8 @@
 //! the boundary after the call and writing the file afterwards raced it.
 //! Every directory is a tempdir: nothing here reads or writes a real home.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::{Path, PathBuf};

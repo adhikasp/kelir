@@ -4,6 +4,8 @@
 //! `bg-spawn` still takes the caller's `kind`, `sock`, `token` and whole `env`. These tests ask what a
 //! token-holding tool child gets out of that. Each one is red while the weakness is open.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};

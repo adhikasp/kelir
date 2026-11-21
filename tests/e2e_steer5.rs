@@ -8,6 +8,8 @@
 //! requests the mock received, and that no response body ever leaks into a
 //! visible line.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::time::{Duration, Instant};
@@ -775,7 +777,7 @@ async fn an_interrupt_before_the_wait_begins_is_not_lost() {
                     late.push(elapsed);
                 }
             }
-            Err(_) => panic!(
+            _ => panic!(
                 "round {round}: the interrupt was lost; the turn never ended (seen: {:?}, \
                  stderr: {})",
                 session

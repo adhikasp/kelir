@@ -838,6 +838,7 @@ impl Renderer {
 /// last space in that window (dropping the space) or, when the window holds a
 /// single long word (a URL, a JSON blob), in the middle of it. Every character
 /// is written exactly once, in order: nothing is lost at a break.
+#[optimize(speed)]
 pub fn wrap_runs(first: &[Run], cont: &[Run], runs: &[Run], width: usize) -> Vec<Row> {
     let width = width.max(1);
     let first_width = prefix_width(first);

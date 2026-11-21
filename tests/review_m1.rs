@@ -3,6 +3,8 @@
 //! These try to break the verbs rather than mirror the implementation. Each test
 //! names the finding it proves; a failing test here is a real bug.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::time::{Duration, Instant};

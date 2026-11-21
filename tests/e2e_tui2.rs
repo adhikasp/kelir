@@ -5,6 +5,8 @@
 //! bodies the mock received (the cached prefix must stay byte-identical) and on
 //! the event log (the image is a tail `source`, never an edit).
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::Value;

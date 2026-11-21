@@ -4,6 +4,8 @@
 //! session, the two ways a shim is started, a dead shim, pid identity, cwd and
 //! pipes. Real processes, no mocks of the OS.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::Path;

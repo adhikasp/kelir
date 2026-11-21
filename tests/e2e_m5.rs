@@ -6,6 +6,8 @@
 //! check is the cache prefix: whatever arrives at the tail, the bytes the
 //! provider already cached are unchanged.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::Path;

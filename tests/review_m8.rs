@@ -2,6 +2,8 @@
 //! the scripted mock. Every run goes through `Sandbox` (Job Object Drop guard,
 //! no leaked process) and every misbehaving gate caps itself (`rev_gate.py`).
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::Path;

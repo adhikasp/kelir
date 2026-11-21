@@ -7,6 +7,8 @@
 //! on the flag, a repeated pause/resume chain, `--max-steps` on `resume`/`ask`,
 //! the cache prefix across a pause, and what a verb's `state` says after one.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};

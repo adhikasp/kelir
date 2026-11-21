@@ -249,7 +249,10 @@ impl Broker {
             return Err(CallError::Unavailable(format!("unknown server `{name}`")));
         };
         let mut slot = entry.slot.lock().await;
-        if let Some(client) = slot.client.clone()
+        let client = slot.client.clone();
+        // Hold the guard across the awaits below, then drop it before returning
+        // so the returned `Arc<Client>` is not tied to the lock's lifetime.
+        if let Some(client) = client
             && client.is_alive()
         {
             // The server said its tool list changed: read it again.
@@ -258,7 +261,9 @@ impl Broker {
             {
                 slot.tools = Some(tools);
             }
-            return Ok((client, slot.tools.clone().unwrap_or_default()));
+            let tools = slot.tools.clone().unwrap_or_default();
+            drop(slot);
+            return Ok((client, tools));
         }
         slot.client = None;
         slot.tools = None;

@@ -5,6 +5,8 @@
 //! request itself (`Mock::start_routed`): the first user message says whose
 //! turn it is, and the presence of a tool result says how far along it is.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::sync::Arc;
@@ -636,13 +638,14 @@ async fn a_brief_cannot_delegate_and_ls_lists_it_as_a_brief() {
                 .messages()
                 .last()
                 .is_some_and(|message| message["role"] == "tool");
-            return Some(match last_is_tool {
+            return Some(if last_is_tool {
+                say("brief done")
+            } else {
                 // The snapshot may carry an old instruction to delegate.
-                false => bash(
+                bash(
                     "call_try",
                     "\"$KELIR_BIN\" run --child \"CHILDT x\"; echo rc1=$?; \"$KELIR_BIN\" brief \"BRIEFQ nested\"; echo rc2=$?",
-                ),
-                true => say("brief done"),
+                )
             });
         }
         Some(match tool_results(request).len() {

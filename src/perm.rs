@@ -243,7 +243,7 @@ mod win {
         let ok = unsafe {
             GetAclInformation(
                 dacl,
-                &mut size as *mut ACL_SIZE_INFORMATION as *mut c_void,
+                std::ptr::from_mut(&mut size).cast::<c_void>(),
                 std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
                 AclSizeInformation,
             )

@@ -13,16 +13,20 @@ fn env_path(var: &str) -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
-/// The home directory, from `$HOME`/`%USERPROFILE%`.
+/// The home directory. `KELIR_HOME` wins; otherwise `std::env::home_dir` asks
+/// the OS (`$HOME` on Unix, with a `getpwuid_r` fallback; `%USERPROFILE%` or
+/// `%HOMEDRIVE%%HOMEPATH%` on Windows).
 ///
-/// `KELIR_HOME` overrides it: the tests point it at a scratch directory so a
-/// run never reads the machine's own `~/.claude/skills` (discovery must see the
-/// same inputs every time, and a person's home is not a test fixture).
+/// The override stays first so a run never reads the machine's own
+/// `~/.claude/skills`: discovery must see the same inputs every time, and a
+/// person's home is not a test fixture.
 pub fn home() -> PathBuf {
-    env_path("KELIR_HOME")
-        .or_else(|| env_path("HOME"))
-        .or_else(|| env_path("USERPROFILE"))
-        .unwrap_or_else(|| PathBuf::from("."))
+    env_path("KELIR_HOME").unwrap_or_else(|| {
+        // `std::env::home_dir` is un-deprecated (1.87) and has a Unix fallback
+        // (1.90): it is the OS's answer, not a hand-rolled env lookup. The
+        // override stays first so tests never read the machine's own home.
+        std::env::home_dir().unwrap_or_else(|| PathBuf::from("."))
+    })
 }
 
 /// Root of all kelir state (`sessions/<id>/…` lives below it).

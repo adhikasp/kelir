@@ -1,6 +1,8 @@
 //! STEER-7 round 4 fixes: no verb logs request args wholesale. A canary secret in any argument of
 //! any verb never appears in `events.jsonl`, the NDJSON stdout, `observe` output, or the answer.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};

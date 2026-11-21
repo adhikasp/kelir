@@ -8,6 +8,8 @@
 //! (S1 endpoint keying, N2 clock skew) now run: they are the regression tests
 //! for the fixes.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::PathBuf;

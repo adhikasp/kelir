@@ -12,6 +12,8 @@
 //!   resumed session reports.
 //! * `refusals_are_bounded` / `claimed_jobs_are_bounded`: flood checks.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};

@@ -6,6 +6,8 @@
 //! cap tests assert on the `paused` outcome in the log, on the NDJSON `result`,
 //! on the exit code and on the requests the mock received.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};

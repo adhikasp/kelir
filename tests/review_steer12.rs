@@ -2,6 +2,8 @@
 //! `cargo test --test review_steer12 -- --ignored`); the others pin behaviour the
 //! review relied on.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 

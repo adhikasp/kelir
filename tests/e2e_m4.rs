@@ -9,6 +9,8 @@
 //! Liveness is proven by the work itself (a file a background loop keeps
 //! writing) and, where a pid matters, by asking the OS about that pid.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::Path;

@@ -8,6 +8,8 @@
 //! answer. It also captures driver stderr on failure to make the r14 flake
 //! diagnosable.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 use std::path::PathBuf;
 use std::time::Duration;
 

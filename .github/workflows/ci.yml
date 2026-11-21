@@ -32,19 +32,29 @@ jobs:
           fi
           bash scripts/no-binary-check.sh range "$BASE_SHA" "${{ github.sha }}"
 
+      # `rust-toolchain.toml` is the single source of truth; installing from the
+      # file on all three OSes keeps the pin authoritative (#23).
       - name: Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
-          components: rustfmt, clippy
+          toolchain: nightly-2026-11-21
+          components: rustfmt, clippy, rust-src
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Format
         run: cargo fmt --check
 
+      # Cargo's own lint table is `warn`; CI is where warnings fail, so a local
+      # `cargo clippy` can still be iterative.
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: |
+          cargo nextest run --no-fail-fast -j 4
+          cargo test --doc

@@ -2,6 +2,8 @@
 //! changes (F2 long commands, F3 multi-hunk edit, F4 parallel calls, F5 soft
 //! compaction target). Written against the real binary and the scripted mock.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};

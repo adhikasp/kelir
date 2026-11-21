@@ -9,3 +9,13 @@
 # Linux keeps its default linker (lld there is a separate package).
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
+
+# Issue #23: the shipped binary is built from source std with the size feature,
+# which saves ~450 KB over the stable-flag binary on Linux (9.46 MB -> ~5.0 MB,
+# measured on the pinned nightly). It is a *release-only* setting, so tests and
+# the dev build keep the toolchain's normal std and `panic = "unwind"`: a test
+# must be able to catch a panic. `-Z` requires the pinned nightly, which
+# `rust-toolchain.toml` guarantees.
+#
+# An OS that cannot build std here still ships the stable-flag binary from
+# `[profile.release]`; `scripts/release-build.sh` falls back rather than failing.

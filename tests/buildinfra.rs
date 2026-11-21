@@ -6,6 +6,8 @@
 //! script and the `bash` children it is handed, and each is killed by exact pid
 //! when the test ends (AGENTS.md hard rules).
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};

@@ -5,6 +5,8 @@
 //! event log, on the headless progress line, on the request the mock received
 //! (schema and frozen prefix) and on the TUI's own line rendering.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use kelir::tools_view::CallLine;

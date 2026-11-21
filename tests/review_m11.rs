@@ -4,6 +4,8 @@
 //! cap plus a watchdog: see `watchdog` below. No test kills a process by image
 //! name and no test signals a process group it shares with the harness.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::fs;

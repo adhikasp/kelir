@@ -2600,7 +2600,7 @@ async fn wait_until(at: Option<Instant>) {
 }
 
 fn tail_rows(rows: Vec<Line<'static>>) -> Vec<Line<'static>> {
-    if rows.len() <= u16::MAX as usize {
+    if u16::try_from(rows.len()).is_ok() {
         return rows;
     }
     rows[rows.len() - u16::MAX as usize..].to_vec()

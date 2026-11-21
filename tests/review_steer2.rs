@@ -2,6 +2,8 @@
 //! `e2e_steer2.rs`). A fake `opencode` with scripted behaviour on the child's
 //! PATH; the endpoint is the in-process mock. No real credentials.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::{Path, PathBuf};

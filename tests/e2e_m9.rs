@@ -6,6 +6,8 @@
 //! whole file is capped at `SPAWN_CAP` spawned processes by a counter: an
 //! incident (about 1000 runaway `sh.exe` from a sibling job's tests) is why.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::Path;

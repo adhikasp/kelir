@@ -4,6 +4,8 @@
 //! over a pipe; the session verifies each record under the job's public key (kept in memory and,
 //! for a resume, in the log's `bg_started`). A tool child can write the file; it cannot sign it.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};

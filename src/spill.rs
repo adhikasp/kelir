@@ -232,6 +232,7 @@ impl Capture {
         self.line_head.clear();
     }
 
+    #[optimize(speed)]
     pub fn push(&mut self, chunk: &[u8]) {
         if chunk.is_empty() {
             return;

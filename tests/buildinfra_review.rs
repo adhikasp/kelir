@@ -6,6 +6,8 @@
 //! S1 pin and the deploy-config gates that make a leak or a known-bad value
 //! impossible to merge quietly.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 

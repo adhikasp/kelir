@@ -3,6 +3,8 @@
 //! Server: `tests/support/mcp_evil.py` (modes chosen by `MCP_EVIL`) and the
 //! shipped `mcp_server.py`. Every case drives the real binary.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use std::path::PathBuf;

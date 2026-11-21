@@ -3,6 +3,8 @@
 //! Assertions are on the event log, the NDJSON stdout, the request bodies and
 //! headers the mock received, and on files the tools left behind.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 mod support;
 
 use serde_json::{Value, json};
