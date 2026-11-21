@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="470" viewBox="0 0 880 470" role="img" aria-labelledby="t d">
+  <title id="t">How a kelir session is shaped</title>
+  <desc id="d">One session is one process and one append-only event log. People, scripts, schedulers and chat bridges drive it through verbs; the model acts through three tools; gates sit at six events; resume, attach and observe all read the same log.</desc>
+  <style>
+    .bg { fill: #fbf8f2; }
+    .ink { fill: #2a2622; }
+    .mute { fill: #6f675e; }
+    .accent { fill: #b4561c; }
+    .panel { fill: #ffffff; stroke: #d9d0c3; stroke-width: 1.2; }
+    .core { fill: #fff4e6; stroke: #b4561c; stroke-width: 1.6; }
+    .log { fill: #2a2622; }
+    .logtext { fill: #f6e7cf; }
+    .gate { fill: none; stroke: #b4561c; stroke-width: 1.2; stroke-dasharray: 5 4; }
+    .wire { stroke: #9a9086; stroke-width: 1.4; fill: none; }
+    .head { fill: #9a9086; }
+    text { font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #16130f; }
+      .ink { fill: #efe6d8; }
+      .mute { fill: #a59a8c; }
+      .accent { fill: #f08a4b; }
+      .panel { fill: #201c17; stroke: #3a332b; }
+      .core { fill: #2a1f15; stroke: #f08a4b; }
+      .log { fill: #f6e7cf; }
+      .logtext { fill: #2a2622; }
+      .gate { stroke: #f08a4b; }
+      .wire { stroke: #7d7368; }
+      .head { fill: #7d7368; }
+    }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="880" height="470" rx="14"/>
+
+  <!-- left: who drives -->
+  <text class="mute" x="28" y="40" font-size="12" letter-spacing="1.5">WHO DRIVES IT</text>
+  <g font-size="13">
+    <rect class="panel" x="24" y="56" width="214" height="46" rx="8"/>
+    <text class="ink" x="38" y="76" font-weight="600">You, in the TUI</text>
+    <text class="mute mono" x="38" y="93" font-size="11.5">kelir</text>
+
+    <rect class="panel" x="24" y="114" width="214" height="46" rx="8"/>
+    <text class="ink" x="38" y="134" font-weight="600">Another terminal or script</text>
+    <text class="mute mono" x="38" y="151" font-size="11.5">kelir ctl · attach --steer</text>
+
+    <rect class="panel" x="24" y="172" width="214" height="46" rx="8"/>
+    <text class="ink" x="38" y="192" font-weight="600">Another agent</text>
+    <text class="mute mono" x="38" y="209" font-size="11.5">kelir run --json · brief</text>
+
+    <rect class="panel" x="24" y="230" width="214" height="46" rx="8"/>
+    <text class="ink" x="38" y="250" font-weight="600">cron, systemd, Task Scheduler</text>
+    <text class="mute mono" x="38" y="267" font-size="11.5">kelir job run nightly</text>
+
+    <rect class="panel" x="24" y="288" width="214" height="46" rx="8"/>
+    <text class="ink" x="38" y="308" font-weight="600">A chat bridge (MCP)</text>
+    <text class="mute mono" x="38" y="325" font-size="11.5">kelir channel</text>
+  </g>
+
+  <!-- wires in -->
+  <g class="wire" marker-end="url(#a)">
+    <path d="M238,79 C270,79 270,170 300,170"/>
+    <path d="M238,137 C266,137 270,182 300,182"/>
+    <path d="M238,195 L300,195"/>
+    <path d="M238,253 C266,253 270,208 300,208"/>
+    <path d="M238,311 C270,311 270,220 300,220"/>
+  </g>
+  <text class="mute" x="250" y="362" font-size="11.5">verbs: say · stop · model · compact</text>
+  <text class="mute" x="250" y="377" font-size="11.5">land at named boundaries, never</text>
+  <text class="mute" x="250" y="392" font-size="11.5">between a tool call and its result</text>
+
+  <!-- gate ring + core -->
+  <rect class="gate" x="292" y="56" width="300" height="290" rx="16"/>
+  <text class="accent" x="306" y="76" font-size="11" font-weight="600">gates: your scripts at 6 events, allow · deny · rewrite</text>
+
+  <rect class="core" x="310" y="90" width="264" height="240" rx="12"/>
+  <text class="ink" x="330" y="120" font-size="17" font-weight="700">one session = one process</text>
+  <text class="mute" x="330" y="140" font-size="12.5">no daemon · no database · no approvals</text>
+
+  <rect class="log" x="330" y="158" width="224" height="62" rx="8"/>
+  <text class="logtext mono" x="344" y="182" font-size="13" font-weight="700">events.jsonl</text>
+  <text class="logtext" x="344" y="204" font-size="12">append-only · fsync'd · the truth</text>
+
+  <text class="ink" x="330" y="248" font-size="12.5" font-weight="600">frozen prompt · fixed tools · append</text>
+  <text class="mute" x="330" y="266" font-size="12.5">so the prompt cache keeps hitting</text>
+  <text class="ink" x="330" y="294" font-size="12.5" font-weight="600">crash → resume</text>
+  <text class="mute" x="330" y="312" font-size="12.5">an unfinished call is reported, never re-run</text>
+
+  <!-- wires out -->
+  <g class="wire" marker-end="url(#a)">
+    <path d="M592,150 C622,150 622,79 648,79"/>
+    <path d="M592,170 C622,170 626,137 648,137"/>
+    <path d="M592,195 L648,195"/>
+    <path d="M592,220 C622,220 626,253 648,253"/>
+    <path d="M592,240 C622,240 622,311 648,311"/>
+  </g>
+
+  <!-- right: what the model touches -->
+  <text class="mute" x="652" y="40" font-size="12" letter-spacing="1.5">WHAT THE MODEL USES</text>
+  <g font-size="13">
+    <rect class="panel" x="648" y="56" width="208" height="46" rx="8"/>
+    <text class="ink" x="662" y="76" font-weight="600">bash</text>
+    <text class="mute" x="662" y="93" font-size="11.5">your real shell, no sandbox</text>
+
+    <rect class="panel" x="648" y="114" width="208" height="46" rx="8"/>
+    <text class="ink" x="662" y="134" font-weight="600">edit · compact</text>
+    <text class="mute" x="662" y="151" font-size="11.5">that is the whole tool list</text>
+
+    <rect class="panel" x="648" y="172" width="208" height="46" rx="8"/>
+    <text class="ink" x="662" y="192" font-weight="600">Background jobs</text>
+    <text class="mute" x="662" y="209" font-size="11.5">outlive the session, wake it</text>
+
+    <rect class="panel" x="648" y="230" width="208" height="46" rx="8"/>
+    <text class="ink" x="662" y="250" font-weight="600">Child sessions</text>
+    <text class="mute mono" x="662" y="267" font-size="11.5">kelir run --child</text>
+
+    <rect class="panel" x="648" y="288" width="208" height="46" rx="8"/>
+    <text class="ink" x="662" y="308" font-weight="600">MCP servers, as a CLI</text>
+    <text class="mute mono" x="662" y="325" font-size="11.5">kelir mcp notes search</text>
+  </g>
+  <text class="mute" x="652" y="362" font-size="11.5">reached through bash, so they</text>
+  <text class="mute" x="652" y="377" font-size="11.5">cost no tool schema in the prompt</text>
+
+  <!-- bottom: readers -->
+  <line x1="24" y1="414" x2="856" y2="414" class="wire" stroke-dasharray="2 4"/>
+  <text class="ink" x="28" y="444" font-size="13" font-weight="600">Everything reads the same log:</text>
+  <text class="mute mono" x="250" y="444" font-size="12.5">kelir resume · kelir attach · kelir observe · kelir ls · jq</text>
+</svg>
