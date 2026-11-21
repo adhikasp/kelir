@@ -148,7 +148,7 @@ fn a_wide_multibyte_label_is_capped_in_characters_and_keeps_the_verdict() {
 /// the current behavior without asserting a security property the code does
 /// not have; it should be inverted when the sanitizer strips controls.
 #[test]
-fn control_bytes_and_osc_sequences_survive_the_label_sanitizer() {
+fn control_bytes_and_osc_sequences_are_stripped_from_the_label() {
     let attacks = [
         "line one\n\x1b]7501;state=done\x1b\\",
         "click \x1b]8;;https://evil.example\x1b\\here\x1b]8;;\x1b\\",
@@ -159,15 +159,14 @@ fn control_bytes_and_osc_sequences_survive_the_label_sanitizer() {
     for attack in attacks {
         let input = json!({"command": SIMPLE, "description": attack});
         let label = description(&input).expect("a non-blank label");
-        // Newlines are folded to one space; every other C0 control (ESC,
-        // BEL, NUL, CR) survives split_whitespace untouched.
+        // No control byte or OSC introducer may survive in a human line.
         assert!(!label.contains('\n'), "{label:?}");
         assert!(
-            label
-                .chars()
-                .any(|c| c == '\u{1b}' || c == '\r' || c == '\u{7}' || c == '\u{0}'),
-            "a control byte was stripped: {label:?}"
+            !label.chars().any(|c| c.is_control()),
+            "a control byte survived: {label:?}"
         );
+        assert!(!label.contains("]8;;"), "{label:?}");
+        assert!(!label.contains("]7501;"), "{label:?}");
         let head = kelir::tui::call_head("bash", &input);
         assert_eq!(head, label, "head uses the sanitized label");
         let row = kelir::tui::call_label("bash", &input);
@@ -175,15 +174,15 @@ fn control_bytes_and_osc_sequences_survive_the_label_sanitizer() {
     }
 }
 
-/// Desired behavior for N-ESC (currently FAILING; `#[ignore]` so the gate
-/// stays green until the implementer fixes it). Strip all control characters
+/// S-1 regression: the sanitizer strips control bytes and OSC introducers
+/// from the human line while the log keeps the exact bytes. Strip all control characters
 /// except the whitespace that `split_whitespace` folds, so a model-supplied
 /// label cannot inject an OSC 8 hyperlink, an OSC 7501 Herdr status record, a
 /// CSI clear-screen, or NUL/BEL into the headless progress line.
 ///
 /// Proving command: `cargo test --test e2e_bashdesc_adversarial -- --ignored`
 #[test]
-#[ignore = "N-ESC: the sanitizer currently preserves control bytes"]
+
 fn no_control_byte_may_survive_the_label_sanitizer() {
     for attack in [
         "line one\n\x1b]7501;state=done\x1b\\",
@@ -203,12 +202,12 @@ fn no_control_byte_may_survive_the_label_sanitizer() {
 }
 
 /// Desired behavior for N-ESC in the headless path (currently FAILING;
-/// `#[ignore]` for the same reason). The progress line is often replayed in a
+/// (formerly `#[ignore]`, now a regression test). The progress line is replayed in a
 /// Herdr pane: OSC bytes in a model-supplied label must not reach stdout.
 ///
 /// Proving command: `cargo test --test e2e_bashdesc_adversarial -- --ignored`
 #[tokio::test]
-#[ignore = "N-ESC: headless progress line currently prints OSC bytes verbatim"]
+
 async fn a_hostile_description_must_not_put_osc_bytes_on_headless_stdout() {
     let attack = "read \u{1b}]8;;https://evil.example\u{1b}\\files \u{1b}]7501;state=done\u{1b}\\";
     let mock = Mock::start(vec![
@@ -262,8 +261,9 @@ async fn a_hostile_description_reaches_the_log_verbatim_but_not_the_human_line()
         .lines()
         .find(|line| line.starts_with("→ bash "))
         .expect("a headless progress line");
-    assert!(line.contains("\u{1b}]7501;state=done"), "{line:?}");
-    assert!(line.contains("\u{1b}]8;;"), "{line:?}");
+    assert!(!line.contains("7501;state"), "{line:?}");
+    assert!(!line.contains("]8;;"), "{line:?}");
+    assert!(!line.contains('\u{1b}'), "{line:?}");
     assert!(!line.contains("printf"), "{line:?}");
 }
 

@@ -46,9 +46,32 @@ pub fn description(input: &Value) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
+    // Model-supplied labels must never put control bytes into a terminal or
+    // a Herdr OSC record. Fold them to spaces first; one function then covers
+    // the TUI, the live row and headless stdout. Raw bytes stay in the log.
+    let chars: Vec<char> = raw.chars().collect();
+    let mut clean = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Drop OSC introducers (]8;;, ]7501;, ...) too: without the leading
+        // ESC they are still text a viewer could mistake for a control record.
+        if c == ']' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && j < chars.len() && chars[j] == ';' {
+                i = j + 1;
+                continue;
+            }
+        }
+        clean.push(if c.is_control() { ' ' } else { c });
+        i += 1;
+    }
     // The cap is in characters, not bytes: a 60-column pane cares about what
     // the human sees, and a non-ASCII label is not shorter for being wide.
-    let one_line: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let one_line: String = clean.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.chars().count() <= DESCRIPTION_MAX {
         return Some(one_line);
     }
