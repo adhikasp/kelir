@@ -509,10 +509,14 @@ struct Session {
 /// A retry or slot wait in progress: ends at, status, attempt, is-a-slot-wait.
 type RetryWait = (Instant, Option<u16>, u32, bool);
 
-/// A compaction asked for by someone; it applies at the next `before_step`.
+/// A compaction asked for by someone. A `/compact` typed by a human runs as
+/// soon as it is safe — immediately when the session is idle, at the next
+/// `before_step` when a turn is running — so the next prompt can be queued
+/// while it works. A tool, resume or auto request keeps the next-boundary model.
 struct CompactRequest {
     by: &'static str,
     focus: Option<String>,
+    immediate: bool,
 }
 
 /// What a compaction did, for the UI line.
@@ -917,7 +921,6 @@ async fn drive(opts: Options) -> u8 {
                 "kelir · {} · {}",
                 session.provider_name, session.model
             )),
-            tui::BannerLine::plain(format!("session {}", session.id)),
             tui::BannerLine::plain(format!(
                 "cwd {}",
                 crate::util::path_string(&session.ctx.cwd)
@@ -968,6 +971,7 @@ async fn drive(opts: Options) -> u8 {
                 // The session dir is where a pasted image is saved, and where
                 // `attachments/…` in a prompt resolves.
                 handle.app.set_session_dir(session.dir.clone());
+                handle.app.set_session_id(session.id.clone());
                 session.ui = Some(to_tui.clone());
                 let task = tokio::spawn(handle.run());
                 // If the UI dies (a panic, a terminal error) the session ends
@@ -1497,7 +1501,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
             .await
             .unwrap_or_default()
     };
-    let mut system = render_system(&cfg, &cwd, probe.line.as_deref());
+    let mut system = render_system(&cfg, &cwd, probe.line.as_deref(), &id);
     system.warnings.extend(probe.note);
     // The address this session is expected to use; `drive` re-reads it after
     // `ipc::bind`, because Unix may fall back to a shorter socket path.
@@ -2029,7 +2033,11 @@ impl Session {
         if self.compact_request.is_none()
             && let Some(focus) = compact::queued_compaction(&self.events, &self.dir)
         {
-            self.compact_request = Some(CompactRequest { by: "agent", focus });
+            self.compact_request = Some(CompactRequest {
+                by: "agent",
+                focus,
+                immediate: false,
+            });
             self.emit(UiEvent::Info(
                 "kelir: resumed · a queued compaction is applied at the next step".to_string(),
             ));
@@ -3312,6 +3320,7 @@ impl Session {
                         self.compact_request = Some(CompactRequest {
                             by: "user",
                             focus: focus.clone(),
+                            immediate: true,
                         });
                     }
                 }
@@ -4419,6 +4428,7 @@ impl Session {
                     self.compact_request = Some(CompactRequest {
                         by: "auto",
                         focus: None,
+                        immediate: false,
                     });
                 }
             }
@@ -4426,7 +4436,19 @@ impl Session {
         let Some(request) = self.compact_request.take() else {
             return Ok(None);
         };
-        match self.compact(rx, &request).await {
+        self.run_compact(rx, &request).await
+    }
+
+    /// Run a requested compaction and report what it did. Shared by the turn
+    /// boundary and the idle path: an immediate `/compact` uses the same code,
+    /// so the UI line, the cost-control floor and the error event are identical.
+    /// `Some(end)` when a verb interrupted the summarising request.
+    async fn run_compact(
+        &mut self,
+        rx: &mut Inbox,
+        request: &CompactRequest,
+    ) -> Result<Option<TurnEnd>, String> {
+        match self.compact(rx, request).await {
             Ok(CompactRun::Applied(info)) => {
                 self.emit(UiEvent::Info(format!(
                     "» compacted through seq {}: ~{} → ~{} tokens ({} pinned) · cache restarts",
@@ -4885,12 +4907,33 @@ impl Session {
                 if let Some(pending) = pending {
                     if matches!(pending.verb, Verb::Stop { call: None, .. }) {
                         self.emit(UiEvent::Info("» stop: nothing is running".into()));
+                    } else if let Verb::Compact { focus } = &pending.verb {
+                        // A human asked to compact while idle: nothing is
+                        // running, so this is safe to do *now*. Setting the
+                        // request and running it here means the answer lands
+                        // before we wait again — the next prompt can already
+                        // be typed and queued while the summary is produced.
+                        self.emit(UiEvent::Info(match focus {
+                            Some(focus) => format!("» compact: {focus}"),
+                            None => "» compact".to_string(),
+                        }));
+                        self.compact_request = Some(CompactRequest {
+                            by: "user",
+                            focus: focus.clone(),
+                            immediate: true,
+                        });
                     } else {
-                        if matches!(pending.verb, Verb::Compact { .. }) {
-                            self.emit(UiEvent::Info("» compact: applies at the next step".into()));
-                        }
                         self.scheduler.push(pending);
                     }
+                }
+            }
+            // An immediate `/compact` runs here, at a point with no tool call
+            // in flight. Any message typed meanwhile stays in the inbox (or
+            // the scheduler) and opens its turn after this returns.
+            if self.compact_request.as_ref().is_some_and(|r| r.immediate) {
+                let request = self.compact_request.take().expect("checked above");
+                if let Err(message) = self.run_compact(rx, &request).await {
+                    self.emit(UiEvent::Info(format!("» compact failed: {message}")));
                 }
             }
             match self.take_turn_messages() {
@@ -5881,6 +5924,7 @@ impl Session {
                 self.compact_request = Some(CompactRequest {
                     by: "agent",
                     focus: focus.clone(),
+                    immediate: false,
                 });
                 Some(ToolOutcome::ok(compact_queued(&focus)))
             } else {
@@ -6368,7 +6412,12 @@ fn new_session_id() -> String {
 /// conventional ones; the base prompt is the config's, the machine
 /// `prompt.md`, or the embedded default (the project's `.kelir/prompt.md` wins
 /// inside [`crate::sources::render_system`]).
-fn render_system(cfg: &Config, cwd: &Path, herdr: Option<&str>) -> crate::sources::Rendered {
+fn render_system(
+    cfg: &Config,
+    cwd: &Path,
+    herdr: Option<&str>,
+    id: &str,
+) -> crate::sources::Rendered {
     let mut places =
         crate::sources::places(cwd, &cfg.skills_dirs, Some(crate::paths::config_dir()));
     places.memory_dir = cfg
@@ -6383,6 +6432,7 @@ fn render_system(cfg: &Config, cwd: &Path, herdr: Option<&str>) -> crate::source
         places: &places,
         cwd,
         date: &date,
+        session_id: Some(id),
     })
 }
 
@@ -6625,6 +6675,7 @@ mod tests {
             places: &crate::sources::Places::default(),
             cwd: Path::new("work"),
             date: "2026-11-19",
+            session_id: Some("ses_test"),
         });
         let text = system.text;
         assert!(text.starts_with("base\n"), "{text}");
@@ -6674,8 +6725,8 @@ mod tests {
             },
             notify: crate::notify::Config::default(),
         };
-        let a = render_system(&cfg, Path::new("tmp"), None);
-        let b = render_system(&cfg, Path::new("tmp"), None);
+        let a = render_system(&cfg, Path::new("tmp"), None, "ses_a");
+        let b = render_system(&cfg, Path::new("tmp"), None, "ses_a");
         assert_eq!(a, b);
     }
 

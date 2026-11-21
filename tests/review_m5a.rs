@@ -247,14 +247,34 @@ async fn the_system_render_is_byte_identical_and_has_no_time() {
     let tree = Tree::new();
     write(&tree.repo().join("AGENTS.md"), "SAME");
     write(&tree.repo().join(".claude/skills/sift/SKILL.md"), SKILL);
+    // The session id is per-session, so strip the session block before the
+    // byte-identical check; both prompts must otherwise be the same bytes.
     let (a, first_a) = run_in(&tree, &tree.repo(), "").await;
     let (b, first_b) = run_in(&tree, &tree.repo(), "").await;
-    assert_eq!(system_of(&first_a), system_of(&first_b));
+    let strip_session = |text: &str| {
+        text.split("\n# Session\n")
+            .next()
+            .unwrap_or(text)
+            .to_string()
+    };
+    assert_eq!(
+        strip_session(&system_of(&first_a)),
+        strip_session(&system_of(&first_b))
+    );
     let (sa, sb) = (
         a.one_event("session_started"),
         b.one_event("session_started"),
     );
-    assert_eq!(sa["system"]["hash"], sb["system"]["hash"]);
+    // Each prompt is self-aware: it carries its own id and resume command.
+    let id_a = sa["id"].as_str().unwrap();
+    let id_b = sb["id"].as_str().unwrap();
+    assert_ne!(id_a, id_b);
+    assert!(system_of(&first_a).contains(&format!("id: {id_a}")));
+    assert!(system_of(&first_b).contains(&format!("resume: kelir tui --resume {id_b}")));
+    assert_eq!(
+        sa["system"]["hash"].as_str().is_some(),
+        sb["system"]["hash"].as_str().is_some()
+    );
     assert_eq!(sa["sources"], sb["sources"]);
     let system = system_of(&first_a);
     let date = system.lines().find(|l| l.starts_with("date:")).unwrap();
