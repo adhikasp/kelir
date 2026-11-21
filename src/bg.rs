@@ -2579,11 +2579,18 @@ mod tests {
     fn a_status_is_matched_with_its_own_process_not_just_its_pid() {
         let me = std::process::id();
         let mine = start_time_text(me);
+        // Where the platform cannot report a start time (macOS) identity falls
+        // back to liveness: `NoPlatform`, never `Same`.
+        let recorded = if start_time_text(me).is_some() {
+            ShimIdentity::Same
+        } else {
+            ShimIdentity::NoPlatform
+        };
         let mut status = sample();
         status.shim = Some(me);
         status.started = crate::event::now_ts();
         status.shim_started = mine.clone();
-        assert_eq!(shim_identity(&status), ShimIdentity::Same);
+        assert_eq!(shim_identity(&status), recorded);
         assert_eq!(status.observed().state, STATE_RUNNING);
 
         // The process is ours, but the status does not say when it started.
@@ -2628,9 +2635,25 @@ mod tests {
         let mut status = sample();
         status.pid = Some(me);
         status.pid_started = start_time_text(me);
-        assert_eq!(pid_identity(&status), ShimIdentity::Same);
+        // macOS cannot report a process start time, so a live pid is only
+        // `NoPlatform` there; Windows and Linux still have to prove `Same`.
+        let recorded = if crate::proc::start_time(me).is_some() {
+            ShimIdentity::Same
+        } else {
+            ShimIdentity::NoPlatform
+        };
+        assert_eq!(pid_identity(&status), recorded);
         status.pid_started = Some("2020-01-01T00:00:00Z".into());
-        assert_eq!(pid_identity(&status), ShimIdentity::Different);
+        // A recorded start time that does not match the live pid is a
+        // recycled pid on every platform that can report start times.
+        assert_eq!(
+            pid_identity(&status),
+            if crate::proc::start_time(me).is_some() {
+                ShimIdentity::Different
+            } else {
+                ShimIdentity::NoPlatform
+            }
+        );
         status.pid_started = None;
         assert_eq!(pid_identity(&status), ShimIdentity::NoRecord);
         status.pid = Some(0);

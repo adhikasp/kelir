@@ -846,6 +846,17 @@ mod tests {
     async fn a_client_leaves_the_listener_path_alone() {
         let dir = temp_dir("client-unlink");
         let id = "ses_ipc_client";
+        // `bind` resolves this to `<dir>/sock`, whose path must fit in BSD's
+        // 104-byte `sun_path`. macOS temp dirs from CI are longer than Linux's,
+        // so use a short directory here; the production fallback (a short path
+        // recorded in `sock.path`) is covered by the next test.
+        let dir = if fits(&dir.join(SOCKET_FILE)) {
+            dir
+        } else {
+            let short = std::env::temp_dir().join(format!("k-{}", ulid::Ulid::new()));
+            std::fs::create_dir_all(&short).unwrap();
+            short
+        };
         let listener = bind(&dir, id).unwrap();
         let sock = dir.join(SOCKET_FILE);
         assert!(sock.exists(), "bind creates the socket file");

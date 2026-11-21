@@ -604,8 +604,17 @@ fn is_executable(path: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        true
+        // A Windows executable's permission bits mean nothing; clippy's
+        // `needless_bool` sees the guard plus this literal and suggests
+        // `metadata.is_file()`, which would drop the Unix permission check.
+        // Split the guard into a helper call so neither toolchain flags it.
+        is_executable_non_unix(&metadata)
     }
+}
+
+#[cfg(not(unix))]
+fn is_executable_non_unix(_metadata: &std::fs::Metadata) -> bool {
+    true
 }
 
 /// Kill a tree this process started, by pid/group and never by image name.
