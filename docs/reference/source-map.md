@@ -96,8 +96,8 @@ The tree is flat on purpose: a file is a subject.
 
 | file | owns |
 |---|---|
-| `src/docs/mod.rs` | `kelir docs`: topics, search, the generated blocks, `--check`/`--generate` |
-| `src/docs/tables.rs` | the verbs, config keys and event types the reference is generated from |
+| `src/docs/mod.rs` | `kelir docs`: topics, `--list`, `--search`, the embedded text |
+| `src/docs/tests.rs` | the drift test: code names against `docs/reference/` |
 | `src/docs/skill-kelir.md` | the builtin `kelir` skill |
 | `src/envs.rs` | every environment variable kelir reads or sets |
 | `docs/reference/` | the reference itself (these files) |

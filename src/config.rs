@@ -135,6 +135,54 @@ pub struct HintConfig {
     pub timeout: std::time::Duration,
 }
 
+/// Every top-level and per-provider key the config reader accepts, for the
+/// docs drift test. The test below checks it against the serde structs.
+pub const KEYS: &[&str] = &[
+    "provider",
+    "model",
+    "shell",
+    "spill_limit",
+    "max_steps",
+    "cache_ttl",
+    "prompt",
+    "providers",
+    "key",
+    "window",
+    "model_windows",
+    "auto_compact_at",
+    "compact_at_tokens",
+    "compact_prompt",
+    "compact_keep",
+    "skills_dirs",
+    "memory_dir",
+    "hint",
+    "promote_after",
+    "retry_base_ms",
+    "retry_cap_ms",
+    "retry_max_wait",
+    "retry_max_attempts",
+    "warn_prompt_tokens",
+    "max_child_depth",
+    "max_children",
+    "max_live_descendants",
+    "gates",
+    "trusted_projects",
+    "channel_max_active",
+    "channel_per_conversation_rpm",
+    "channel_global_rpm",
+    "channel_fallback",
+    "channel_spool_limit",
+    "notify",
+    "base_url",
+    "key_env",
+    "key_cmd",
+    "extra_headers",
+    "reasoning_field",
+    "reasoning_effort",
+    "session_header",
+    "max_concurrent_requests",
+];
+
 /// How long the scoring call may take by default.
 pub const HINT_TIMEOUT_MS: u64 = 2000;
 
@@ -914,6 +962,44 @@ fn on_path(program: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Field names of `struct RawConfig` / `RawProvider`, read from this file.
+    fn fields(src: &str, name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut inside = false;
+        for line in src.lines() {
+            if line.starts_with(&format!("struct {name} {{")) {
+                inside = true;
+            } else if inside && line == "}" {
+                break;
+            } else if inside {
+                let Some((field, _)) = line.trim().split_once(':') else {
+                    continue;
+                };
+                let field = field.trim();
+                if !field.starts_with("//") {
+                    out.push(field.to_string());
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn keys_track_the_config_structs() {
+        const SRC: &str = include_str!("config.rs");
+        let from_code: std::collections::BTreeSet<String> = fields(SRC, "RawConfig")
+            .into_iter()
+            .chain(fields(SRC, "RawProvider"))
+            .collect();
+        let listed: std::collections::BTreeSet<String> =
+            KEYS.iter().map(|key| (*key).to_string()).collect();
+        assert_eq!(
+            from_code, listed,
+            "`config::KEYS` drifted from the serde structs"
+        );
+    }
 
     fn temp_config(text: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kelir-config-{}", ulid::Ulid::generate()));

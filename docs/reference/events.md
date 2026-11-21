@@ -16,7 +16,6 @@ resume: `src/fold.rs` renders the frozen system message, then `user`,
 
 ## Types
 
-<!-- generated:events -->
 | type | fields | written by |
 |---|---|---|
 | `session_started` | `id`, `parent?`, `depth`, `cwd`, `os`, `kelir_version`, `provider`, `model`, `system{text,hash}`, `sources[]`, `tools[]`, `reasoning_effort?`, `key_origin?` | the first event of a session: the frozen request prefix |
@@ -43,7 +42,6 @@ resume: `src/fold.rs` renders the frozen system message, then `user`,
 | `error` | `where`, `message`, `retryable`, `status?`, `attempt?`, `retry_in_ms?` | provider errors, broken sources, refused verbs; never a response body and never a key |
 | `session_ended` | `reason` | the end of the session |
 | `session_title` | `title` | the first human prompt, as a deterministic one-line label (no model call) |
-<!-- /generated -->
 
 ## Payloads over 10 KB are never inline
 

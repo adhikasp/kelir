@@ -7,6 +7,13 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 ## [Unreleased]
 
+### Breaking
+
+- `kelir docs --find` is now `kelir docs --search`; it prints `topic:line: text` hits,
+  best-matching topic first. `kelir docs --generate` and `kelir docs --check` are removed:
+  `docs/reference/` is hand-maintained markdown and `cargo test --lib docs` is the one
+  drift check (code names must appear in the reference). `KELIR_DOCS_ROOT` is no longer read.
+
 ### Added (milestones M0 – M11, in landed order)
 
 - **M0** — the harness skeleton: the event log (`events.jsonl`), the `bash`

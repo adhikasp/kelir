@@ -791,6 +791,37 @@ pub struct LogEvent {
     pub body: EventBody,
 }
 
+impl EventBody {
+    /// Every event type the log writes, for the docs drift test. Checked
+    /// against `LogEvent::event_type` in the unit tests below.
+    pub const NAMES: &'static [&'static str] = &[
+        "session_started",
+        "user",
+        "source",
+        "step_started",
+        "assistant",
+        "usage",
+        "verb",
+        "tool_started",
+        "tool_settled",
+        "turn_ended",
+        "mcp_started",
+        "mcp_settled",
+        "bg_started",
+        "bg_settled",
+        "child_started",
+        "child_settled",
+        "compacted",
+        "resumed",
+        "error",
+        "session_ended",
+        "session_title",
+        "warning",
+        "gate",
+        "notify",
+    ];
+}
+
 impl LogEvent {
     pub fn new(seq: u64, body: EventBody) -> Self {
         Self {
@@ -981,6 +1012,47 @@ pub fn read_events(path: &Path) -> io::Result<LogRead> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The names the docs test reads must be what `event_type` really returns.
+    #[test]
+    fn names_track_the_event_type_match() {
+        const SRC: &str = include_str!("event.rs");
+        let mut arms = Vec::new();
+        let mut inside = false;
+        let mut depth = 0usize;
+        for line in SRC.lines() {
+            if line.trim_start().starts_with("pub fn event_type(") {
+                inside = true;
+                continue;
+            }
+            if !inside {
+                continue;
+            }
+            if line.trim() == "match self.body {" {
+                depth = 1;
+                continue;
+            }
+            if depth > 0 {
+                if line.trim_start().starts_with('}') {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                let Some((_, rest)) = line.trim().split_once("=> ") else {
+                    continue;
+                };
+                let name = rest.trim().trim_end_matches(',');
+                if let Some(name) = name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
+                    arms.push(name);
+                }
+            }
+        }
+        let mut listed = EventBody::NAMES.to_vec();
+        arms.sort_unstable();
+        listed.sort_unstable();
+        assert_eq!(arms, listed, "`EventBody::NAMES` drifted from `event_type`");
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

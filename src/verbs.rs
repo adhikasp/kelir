@@ -97,6 +97,12 @@ pub enum Verb {
 }
 
 impl Verb {
+    /// Every verb `parse` accepts, for the docs drift test.
+    pub const NAMES: &'static [&'static str] = &[
+        "say", "later", "stop", "model", "tools", "skills", "compact", "view", "bg", "cancel",
+        "brief", "status", "end",
+    ];
+
     /// Where the verb is meant to apply; this is what the `verb` event says.
     pub fn scope(&self) -> &'static str {
         match self {
@@ -924,6 +930,42 @@ mod tests {
     #[test]
     fn an_empty_say_from_the_cli_is_rejected() {
         assert!(cli_args("say", &[], &CliFlags::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod name_drift_tests {
+    use super::*;
+
+    /// Every name the docs list must be accepted by `parse` (with permissive
+    /// args), and an invented name must be refused.
+    #[test]
+    fn names_track_the_parse_match() {
+        use serde_json::json;
+        for name in Verb::NAMES {
+            let args = match *name {
+                "say" | "later" | "brief" => json!({"text": "x"}),
+                "model" => json!({"model": "provider/model"}),
+                "tools" => json!({"disable": "bash"}),
+                "skills" => json!({"name": "x", "text": "x"}),
+                "view" => json!({"path": "x.png"}),
+                "bg" => {
+                    json!({"id": "x", "state": "running", "started": "2026-01-01T00:00:00Z", "cmd": "x"})
+                }
+                "cancel" | "stop" | "end" | "status" | "compact" => json!({}),
+                other => panic!("no test args for verb `{other}`"),
+            };
+            let result = parse(name, &args);
+            // `cancel` and `bg` refuse a status/id that is not this session's
+            // own before parsing; an "unknown verb" error is the real drift.
+            if let Err(error) = result {
+                assert!(
+                    !error.contains("unknown verb"),
+                    "`{name}` is in Verb::NAMES but parse does not know it: {error}"
+                );
+            }
+        }
+        assert!(parse("no-such-verb", &json!({})).is_err());
     }
 }
 

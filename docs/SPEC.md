@@ -362,14 +362,13 @@ backlog and reply/fallback counts. See `docs/reference/channels.md`.
 
 Everything user-configurable is documented in `docs/reference/` (config keys with defaults, env overrides, flags, verbs,
 files, events, providers, troubleshooting) with pointers into the source. What a machine can know for certain is
-**generated**: `kelir docs --generate` rewrites the blocks between `<!-- generated:kind -->` markers (the CLI from clap,
-the verbs/config keys/event types from `src/docs/tables.rs`, the environment from `src/envs.rs`, which is the only place
-a variable is declared), and `kelir docs --check` fails when one is stale. The prose around the markers is hand-written.
-A **drift test** is stricter than `--check`: it reads the source as well as the files, so a verb, key, event type or
-variable that exists in one and not the other fails in **both** directions.
+**hand-maintained**: `docs/reference/` is the reference as written, with no generated blocks and no
+generator. A drift test (`cargo test --lib docs`) reads the code and fails when a verb, config key,
+event type or environment variable exists there but is missing from the reference; the reverse is
+caught at review. `src/envs.rs` holds the runtime accessor and the one list of environment names.
 
 The same text is embedded in the binary (`include_str!`) and readable by the agent, which is how a session with no
-checkout on disk learns to operate itself: `kelir docs [topic]`, `kelir docs --list`, `kelir docs --find <words>`.
+checkout on disk learns to operate itself: `kelir docs [topic]`, `kelir docs --list`, `kelir docs --search <words>`.
 A builtin skill `kelir` ("operate or configure kelir itself", `src/docs/skill-kelir.md`, no file on disk) is discovered
 like any other skill, so the pushed hint and steering rules can inject it. The base prompt carries one line that names
 `kelir docs`. Every milestone's definition of done includes updating `docs/reference/`; the drift test is what enforces it.

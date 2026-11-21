@@ -1,8 +1,8 @@
 # Environment variables
 
 **Summary:** every variable kelir reads, every one it sets for its children, and
-the test hooks it honours; the table is generated from `src/envs.rs`, which is
-the only place a variable is declared.
+the test hooks it honours; `src/envs.rs` is the runtime accessor and the one
+place a variable name is declared.
 **Read this when:** you are configuring a session without a config file,
 debugging "why did it pick that directory / model / colour", or adding a knob
 (`src/envs.rs`: `VARS`).
@@ -14,7 +14,6 @@ the value; `session_started.key_origin` records the same.
 
 ## The variables
 
-<!-- generated:env -->
 ### Read by kelir
 
 | variable | effect |
@@ -26,7 +25,6 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_MCP_CONFIG` | the machine `mcp.toml` to use instead of `<config dir>/mcp.toml` (the project's `.kelir/mcp.toml` still layers on top) |
 | `KELIR_STATE_DIR` | the state root (sessions, model caches, bg jobs, locks) |
 | `KELIR_HOME` | replaces `$HOME`/`USERPROFILE` only (user skills, `~`); it does NOT move state or config, set `KELIR_STATE_DIR` and `KELIR_CONFIG_DIR` for that |
-| `KELIR_DOCS_ROOT` | the `docs/reference` directory `kelir docs --generate` and `--check` read (a checkout, or a copy) |
 | `KELIR_BASE_URL` | overrides a provider's base URL (a proxy, or a test's mock server) |
 | `KELIR_PROMOTE_AFTER` | seconds before a still-running bash call becomes a background job (overrides `promote_after`) |
 | `KELIR_HERDR` | force Herdr status records on (`1`) or off (`0`) |
@@ -81,7 +79,6 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_TEST_PANIC` | panic once the TUI owns the terminal, to prove the restore path |
 | `KELIR_SHELL_RAW` | `cr`: send a POSIX script raw, keeping CRLF terminators |
 | `KELIR_IPC_LOCK_PROBE` | a session dir: a test child tries to take the lock there, to prove a second process is refused (the IPC tests) |
-<!-- /generated -->
 
 ## Notes
 

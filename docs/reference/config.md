@@ -21,7 +21,6 @@ keys come from the environment, `key_cmd`, or opencode's store.
 
 ## Keys
 
-<!-- generated:config -->
 ### Top level
 
 | key | type | default | override | effect | source |
@@ -75,7 +74,6 @@ keys come from the environment, `key_cmd`, or opencode's store.
 | `reasoning_effort` | string: `low`, `medium`, `high`, `none` | `medium` | — | how much hidden reasoning to ask for; `none` sends no field, and an explicit value reaches a model even when the provider's list says nothing | `src/config.rs:load` |
 | `session_header` | string | `x-opencode-session` for `opencode-go` | — | the header carrying the session id, for a provider that requires one | `src/config.rs:load` |
 | `max_concurrent_requests` | integer | unset: no limit | — | at most this many requests in flight to this provider across every local kelir process (`0`/unset = off) | `src/config.rs:load` |
-<!-- /generated -->
 
 ## What the two provider tables are, exactly
 

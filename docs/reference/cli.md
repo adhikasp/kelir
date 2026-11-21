@@ -8,9 +8,10 @@ text.
 `src/main.rs`).
 
 Every command takes clap's own `--help`, which is the same table one screen
-away; the block below is generated from clap so a flag cannot exist in one and
-not the other. Exit codes: `0` success, `1` a refusal or a failed run, `2` a
-usage error (a bad flag, an unreadable config, an unknown provider).
+away. The table below is written out by hand; the drift test (`cargo test --lib
+docs`) checks the names that matter. Exit codes: `0` success, `1` a refusal or
+a failed run, `2` a usage error (a bad flag, an unreadable config, an unknown
+provider).
 
 ## `kelir` (no subcommand), `kelir tui`
 
@@ -77,24 +78,18 @@ Which key each provider would use, and where it comes from: the source, never
 the secret. Exit 0 when every provider that matters has a usable key, 1 when the
 session's own provider (or an expired credential) does not.
 
-## `kelir docs [TOPIC] [--list] [--find <words>] [--generate] [--check]`
+## `kelir docs [TOPIC] [--list] [--search <words>]`
 
 The reference, embedded in this binary with `include_str!`, so it works in a
-session with no checkout on disk. `--list` names the topics; a bare `kelir docs`
-is the index; `kelir docs <topic>` prints one file; `--find <words>` is a
-ranked search over them.
+session with no checkout on disk. `--list` names the topics and their
+`**Summary:**` lines; a bare `kelir docs` is the index; `kelir docs <topic>`
+prints one file; `--search <words>` prints matching lines as
+`topic:line: text`, best-matching topic first. `--skill <name>` prints a
+builtin skill in full. Exit codes: `0` a read, `1` an unknown topic or a search
+with no hit (the message suggests a topic).
 
-`--generate` rewrites the blocks between `<!-- generated:kind -->` markers from
-the code, and `--check` fails when one is stale: those two are for a person
-with a checkout (`docs/reference/` under the current directory, or the
-directory `KELIR_DOCS_ROOT` names) and are the only part of `docs` that touches
-a file. Exit codes: `0` a read or a clean `--check`, `1` an unknown topic or a
-search with no hit (the message suggests a topic), `2` `--generate` together
-with `--check`.
+The whole surface:
 
-The whole surface, generated:
-
-<!-- generated:cli -->
 ### `kelir run`
 
 Run a task to completion
@@ -299,12 +294,9 @@ Read kelir's own reference (config, CLI, verbs, files, …)
 |---|---|---|
 | `<TOPIC>` | `<TOPIC>` | The topic: `config`, `cli`, `verbs`, `env`, `events`, `files`, … |
 | `--list` | nothing | List the topics and their one-line summaries |
-| `--find` | `<WORDS>` | Ranked search over every topic: which file mentions these words |
-| `--generate` | nothing | Rewrite the generated blocks (`cli`, `env`, `events`, `verbs`, `config`) from the code. Needs a checkout |
-| `--check` | nothing | Fail when a generated block is stale: CI and the drift test |
+| `--search` | `<WORDS>` | Case-insensitive search over all topics: `topic:line: text`, best topic first |
 | `--skill` | `<NAME>` | Print a builtin skill (`kelir`, `delegation`, `herdr`) in full: they are compiled in and have no file to read |
 
-<!-- /generated -->
 
 ## `kelir mcp …`
 
@@ -327,4 +319,4 @@ unavailable, 4 timeout (unknown outcome, never retried). The whole story —
 ## `kelir bg-shim`
 
 Internal (hidden): the detachable job shim. Not for humans, so it is not in the
-generated block above.
+table above.

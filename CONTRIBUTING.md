@@ -60,17 +60,18 @@ abort on purpose.
 ## Docs are part of done
 
 Any change to a config key, CLI flag, env var, verb, event, file location or
-TUI key must update `docs/reference/` in the same series of commits. New keys,
-verbs and events are rows in `src/docs/tables.rs`; new env vars are rows in
-`src/envs.rs`. Then run:
+TUI key must update `docs/reference/` in the same series of commits. The tables
+there are hand-maintained markdown: edit the row in the matching topic (`config.md`,
+`verbs.md`, `events.md`, `env.md`); a new env var also goes in `src/envs.rs`,
+which is the runtime accessor. Then run:
 
 ```sh
-kelir docs --generate
 cargo test --lib docs
 ```
 
-The drift test reads the code both ways and fails if anything is on one side
-only.
+The drift test reads the code and fails if a name exists there but is missing
+from the reference. `kelir docs --search <words>` finds a topic from inside a
+session with no checkout.
 
 ## Scrub check
 

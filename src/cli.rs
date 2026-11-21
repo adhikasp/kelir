@@ -436,16 +436,9 @@ pub struct DocsArgs {
     /// List the topics and their one-line summaries.
     #[arg(long)]
     pub list: bool,
-    /// Ranked search over every topic: which file mentions these words.
+    /// Case-insensitive search over all topics: `topic:line: text`.
     #[arg(long, value_name = "WORDS")]
-    pub find: Option<String>,
-    /// Rewrite the generated blocks (`cli`, `env`, `events`, `verbs`, `config`)
-    /// from the code. Needs a checkout.
-    #[arg(long)]
-    pub generate: bool,
-    /// Fail when a generated block is stale: CI and the drift test.
-    #[arg(long)]
-    pub check: bool,
+    pub search: Option<String>,
     /// Print a builtin skill (`kelir`, `delegation`, `herdr`) in full: they are compiled
     /// in and have no file to read.
     #[arg(long, value_name = "NAME")]

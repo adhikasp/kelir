@@ -11,7 +11,6 @@ applied at **one named boundary** — never between a tool call and its result.
 
 ## Verbs
 
-<!-- generated:verbs -->
 | verb | arguments | applies at | what it does |
 |---|---|---|---|
 | `say` | `<text>` or a JSON object with `text`; `--now` | `now` (with `--now`) or `queued` (the next boundary) | injects a user message (`user` event, `delivery` `now`/`next`); `--now` stops the running calls first |
@@ -27,7 +26,6 @@ applied at **one named boundary** — never between a tool call and its result.
 | `brief` | `<question>` or a JSON object with `text` | `now` | a side question as a child on a by-value snapshot of this session (the log up to                  the last settled tool batch, copied; `edit` and `compact` refused by result; the                  tool list and the provider cache key are the parent's, so the prefix hits its                  cache). The history is untouched; the answer is the reply's `result`. The tool                  call `kelir brief "<question>"` is the same thing |
 | `status` | none; `--json` prints the answer as one JSON line | `now` | read-only and never logged: answers at once, even mid-request or in a retry wait,                  with steps used/limit, turn, last prompt size and context %, cache hit ratio,                  tokens, last error, retry in progress, running calls,                  background jobs, children, and `mcp` (one `{name,state,tools,channel}` per configured MCP server; the state word only, never config or server output). `context.window` is `null` (with `context.window_source` `default`) until the model list answers or a window is configured, and `percent` stays `null` with it. Needs the session token like every verb |
 | `end` | none | `now` | ends the session (`session_ended`); running calls are stopped first |
-<!-- /generated -->
 
 ## The boundaries
 
@@ -60,8 +58,9 @@ running is an error with exit 1, not a queue: a message to a stopped session is 
 
 1. `Verb` gets the variant and `parse` its name and arguments (validate at parse
    time: `kelir ctl` should refuse a bad invocation itself).
-2. `Verb::scope` and `Verb::applies_at` say where it lands.
-3. The `docs/tables.rs` `VERBS` row says what a reader needs.
+2. Add the new name to `Verb::NAMES`; `Verb::scope` and `Verb::applies_at` say
+   where it lands.
+3. Add its row to this file: arguments, boundary and effect in prose.
 4. The apply arm in `src/session.rs` (`apply_verb`) writes the event and says how
    it landed.
-5. `cargo test --lib docs` proves the table and the parser agree.
+5. `cargo test --lib docs` proves the reference mentions the parser's names.

@@ -92,10 +92,6 @@ pub const VARS: &[Var] = &[
         "KELIR_HOME",
         "replaces `$HOME`/`USERPROFILE` only (user skills, `~`); it does NOT move state or config, set `KELIR_STATE_DIR` and `KELIR_CONFIG_DIR` for that",
     ),
-    read(
-        "KELIR_DOCS_ROOT",
-        "the `docs/reference` directory `kelir docs --generate` and `--check` read (a checkout, or a copy)",
-    ),
     // ------------------------------------------------------------ session knobs
     read(
         "KELIR_BASE_URL",

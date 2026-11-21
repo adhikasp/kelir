@@ -113,10 +113,9 @@ with N: <stderr>`, `timed out after N ms`, `not JSON (...)`, `output over ...`, 
 
 ## "The docs are stale"
 
-`kelir docs --check` fails when a generated block is stale; `kelir docs
---generate` rewrites it from the code. `cargo test --lib docs` is the stricter
-version: it also reads the code, so a key, flag, verb, variable or event that
-exists in one place and not the other fails there.
+There is no generator to run: `docs/reference/` is hand-maintained markdown.
+`cargo test --lib docs` reads the code and fails when a verb, config key, event
+type or environment variable exists there but is missing from the reference.
 
 ## "What will the model see?"
 
