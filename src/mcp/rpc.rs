@@ -6,18 +6,16 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use super::config::ServerConfig;
-use crate::proc::ProcessGroup;
 
 /// The protocol revision kelir asks for. A server may answer with another;
 /// the subset used here is the same in all of them.
@@ -68,9 +66,10 @@ pub struct Client {
     secrets: Arc<Vec<String>>,
     /// Set by the reader on `notifications/tools/list_changed`.
     tools_changed: Arc<AtomicBool>,
-    group: ProcessGroup,
+    /// The server and its tree; `group` kills the tree with the client.
+    group: crate::proc::ProcessGroup,
     // Held so `kill_on_drop` fires with the client.
-    _child: Mutex<Child>,
+    _child: Mutex<tokio::process::Child>,
 }
 
 impl Drop for Client {
@@ -101,59 +100,6 @@ pub fn resolve_command(command: &str) -> PathBuf {
     direct.to_path_buf()
 }
 
-/// Variables a server inherits from the session (matched without regard to case, since
-/// Windows has none). Everything else, `KELIR_*` and provider keys included, is withheld.
-const INHERITED: &[&str] = &[
-    "PATH",
-    "PATHEXT",
-    "HOME",
-    "USER",
-    "USERNAME",
-    "LOGNAME",
-    "SHELL",
-    "LANG",
-    "LANGUAGE",
-    "TERM",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "TZ",
-    "SYSTEMROOT",
-    "SYSTEMDRIVE",
-    "WINDIR",
-    "COMSPEC",
-    "USERPROFILE",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "PROGRAMDATA",
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "PROGRAMW6432",
-    "COMMONPROGRAMFILES",
-    "COMMONPROGRAMFILES(X86)",
-    "HOMEDRIVE",
-    "HOMEPATH",
-    "OS",
-    "PROCESSOR_ARCHITECTURE",
-    "NUMBER_OF_PROCESSORS",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_RUNTIME_DIR",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "NODE_EXTRA_CA_CERTS",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "ALL_PROXY",
-];
-
-pub(crate) fn inherited(key: &str) -> bool {
-    let upper = key.to_ascii_uppercase();
-    upper.starts_with("LC_") || INHERITED.contains(&upper.as_str())
-}
-
 impl Client {
     /// Start the server and complete the `initialize` handshake.
     pub async fn start(
@@ -171,71 +117,57 @@ impl Client {
                 config.name, config.command
             )));
         }
+        // The server runs under a tiny watcher (same process group) that kills the group when this process is
+        // gone, so a `kill -9` of the session leaves no server and no grandchild even if the server ignores
+        // signals. On Windows the same guarantee comes from the job object in `sys::runner`.
         #[cfg(unix)]
-        let mut command = {
-            // The server runs under a tiny watcher (same process group) that kills the group when this process is
-            // gone, so a `kill -9` of the session leaves no server and no grandchild even if the server ignores
-            let mut command = Command::new("sh");
-            command
-                .arg("-c")
-                .arg(UNIX_GUARD)
-                .arg("kelir-mcp")
-                .arg(&resolved);
-            command
-        };
+        let (program, args) = (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                UNIX_GUARD.to_string(),
+                "kelir-mcp".to_string(),
+                resolved.to_string_lossy().into_owned(),
+            ],
+        );
         #[cfg(not(unix))]
-        let mut command = Command::new(&resolved);
-        command
-            .args(&config.args)
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        // The server gets a small allow-list of the session's environment, not all of it: a third- party `npx`
-        // package must not receive the provider key (`KELIR_*`), the session's socket, or anything else
-        command.env_clear();
-        for (key, value) in crate::envs::all_os() {
-            if inherited(&key.to_string_lossy()) {
-                command.env(key, value);
-            }
-        }
-        for (key, value) in &config.env {
-            command.env(key, value);
-        }
-        let group = ProcessGroup::new();
-        #[cfg(windows)]
-        let group = {
-            let job = crate::proc::win::Job::create_named(label, true).ok_or_else(|| {
-                CallError::Unavailable(format!(
-                    "{}: cannot create a job object for the server",
-                    config.name
-                ))
-            })?;
-            group.with_job(job)
+        let (program, args) = (
+            resolved.to_string_lossy().into_owned(),
+            Vec::<String>::new(),
+        );
+        let mut args = args;
+        args.extend(config.args.iter().cloned());
+        let spec = crate::sys::runner::Spec {
+            cwd: Some(cwd.to_path_buf()),
+            env: crate::sys::runner::Env::Scrubbed {
+                extra: config
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            },
+            stdin: crate::sys::runner::Stdin::Piped,
+            timeout: None,
+            output_cap: 0,
+            stderr_cap: 0,
+            no_window: true,
+            job_name: Some(label.to_string()),
+            unix_guard: None,
+            ..crate::sys::runner::Spec::new(&program, args)
         };
-        #[cfg(not(windows))]
-        let _ = label;
-        group.configure(&mut command);
-        let mut child = command.spawn().map_err(|error| {
+        let running = crate::sys::runner::spawn(spec).map_err(|error| {
             CallError::Unavailable(format!(
                 "{}: cannot start `{}`: {error}",
                 config.name, config.command
             ))
         })?;
-        let Some(pid) = child.id() else {
-            return Err(CallError::Unavailable(format!(
-                "{}: the server exited at once",
-                config.name
-            )));
-        };
-        if let Err(error) = group.spawned(pid) {
-            let _ = child.kill().await;
-            return Err(CallError::Unavailable(format!("{}: {error}", config.name)));
-        }
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
+        let crate::sys::runner::Running {
+            child,
+            stdin: pipe,
+            stdout,
+            stderr,
+            group,
+        } = running;
 
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
@@ -250,7 +182,7 @@ impl Client {
         ));
         let client = Client {
             name: config.name.clone(),
-            stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
+            stdin: Arc::new(tokio::sync::Mutex::new(pipe)),
             pending: pending.clone(),
             next_id: AtomicU64::new(1),
             alive: alive.clone(),

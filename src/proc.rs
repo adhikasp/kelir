@@ -64,6 +64,86 @@ struct GroupState {
     job: Mutex<Option<win::Job>>,
 }
 
+/// A synchronous child's grouping (credential helpers): Unix process group, Windows job object.
+pub struct StdGroup {
+    pid: std::sync::atomic::AtomicU32,
+    #[cfg(windows)]
+    job: Option<win::Job>,
+}
+
+impl StdGroup {
+    pub fn new() -> Result<Self, String> {
+        #[cfg(windows)]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, Ordering::SeqCst);
+            let name = format!("kelir-helper-{}-{n}", std::process::id());
+            let job = win::Job::create_named(&name, true)
+                .ok_or_else(|| "cannot create a job object".to_string())?;
+            Ok(Self {
+                pid: std::sync::atomic::AtomicU32::new(0),
+                job: Some(job),
+            })
+        }
+        #[cfg(not(windows))]
+        Ok(Self {
+            pid: std::sync::atomic::AtomicU32::new(0),
+        })
+    }
+
+    pub fn configure(&self, command: &mut std::process::Command) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            let mut flags = win::CREATE_NO_WINDOW | win::CREATE_NEW_PROCESS_GROUP;
+            if !win::has_console() {
+                flags |= win::CREATE_NO_WINDOW;
+            }
+            command.creation_flags(flags);
+        }
+        #[cfg(not(any(unix, windows)))]
+        let _ = command;
+    }
+
+    pub fn spawned(&self, pid: u32) {
+        self.pid.store(pid, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(windows)]
+        if let Some(job) = &self.job
+            && let Err(_error) = job.assign(pid)
+        {
+            win::terminate(pid);
+        }
+        #[cfg(not(windows))]
+        let _ = pid;
+    }
+
+    pub fn kill(&self) {
+        #[cfg(unix)]
+        let pid = self.pid.load(std::sync::atomic::Ordering::SeqCst);
+        #[cfg(unix)]
+        {
+            // Safe: the child leads the group this runner created. Never group 0.
+            if pid != 0 {
+                unsafe {
+                    libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            job.terminate_job();
+        }
+        #[cfg(not(any(unix, windows)))]
+        let _ = pid;
+    }
+}
+
 impl ProcessGroup {
     pub fn new() -> Self {
         Self {
@@ -319,7 +399,7 @@ pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
     #[cfg(target_os = "macos")]
     {
         // macOS has no /proc.
-        let output = std::process::Command::new("ps")
+        let output = crate::sys::runner::std_command_name("ps")
             .args(["-p", &pid.to_string(), "-o", "lstart="])
             .output()
             .ok()?;
@@ -331,7 +411,7 @@ pub fn start_time(pid: u32) -> Option<std::time::SystemTime> {
             return None;
         }
         // `ps lstart` is local time.
-        let converted = std::process::Command::new("date")
+        let converted = crate::sys::runner::std_command_name("date")
             .args(["-j", "-f", "%a %b %e %T %Y", &text, "+%s"])
             .output()
             .ok()?;

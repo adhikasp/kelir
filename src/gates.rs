@@ -6,16 +6,11 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
-
-use crate::proc::ProcessGroup;
 
 /// Windows job names handed out by this process.
 #[cfg(windows)]
@@ -168,7 +163,7 @@ pub mod reap {
     /// links. Only pid/ppid are parsed (no command line, no environment).
     #[cfg(target_os = "macos")]
     fn process_table() -> Vec<(u32, u32)> {
-        let output = std::process::Command::new("ps")
+        let output = crate::sys::runner::std_command_name("ps")
             .args(["-ax", "-o", "pid=,ppid="])
             .output();
         let Ok(output) = output else {
@@ -191,7 +186,7 @@ pub mod reap {
     /// macOS: one `ps axww -E` gives both pids and their environments.
     #[cfg(target_os = "macos")]
     fn marked_pids(needle: &str) -> std::collections::BTreeSet<u32> {
-        let Ok(output) = std::process::Command::new("ps")
+        let Ok(output) = crate::sys::runner::std_command_name("ps")
             .args(["axww", "-E", "-o", "pid=,command="])
             .output()
         else {
@@ -247,22 +242,17 @@ pub mod reap {
     impl Reaper {
         /// `pid` is the gate shell (also its process group).
         pub fn start(pid: u32, token: &str, ttl: std::time::Duration) -> Self {
-            use std::os::unix::process::CommandExt as _;
-            let guard = crate::util::self_binary().ok().and_then(|exe| {
-                let mut command = std::process::Command::new(exe);
-                command
-                    .arg("gate-guard")
-                    .args(["--parent", &std::process::id().to_string()])
-                    .args(["--group", &pid.to_string()])
-                    .args(["--token", token])
-                    .args(["--ttl", &ttl.as_secs().to_string()])
-                    .env_clear()
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .process_group(0);
-                command.spawn().ok()
-            });
+            let guard = crate::sys::runner::start_guard(&[
+                "gate-guard".into(),
+                "--parent".into(),
+                std::process::id().to_string(),
+                "--group".into(),
+                pid.to_string(),
+                "--token".into(),
+                token.to_string(),
+                "--ttl".into(),
+                ttl.as_secs().to_string(),
+            ]);
             Self {
                 pid,
                 token: token.to_string(),
@@ -1128,69 +1118,62 @@ impl Runner {
         let dir = self.session_dir.join("gates");
         let line = adapt_for_shell(&def.command, program);
         let input = crate::shellcmd::input(&line, &shell_args, &dir, &format!("g{index}"))?;
-        let mut command = Command::new(program);
+        let mut gate_args = shell_args.clone();
         match &input {
             crate::shellcmd::ShellInput::Argument(text) => {
-                command.args(&shell_args).arg(text);
+                gate_args.push(text.clone());
             }
             crate::shellcmd::ShellInput::Script { path, keep_switch } => {
-                command.args(crate::shellcmd::script_args(
-                    &shell_args,
-                    keep_switch.as_deref(),
-                    path,
-                ));
+                let mut script_args =
+                    crate::shellcmd::script_args(&shell_args, keep_switch.as_deref(), path);
+                gate_args.append(&mut script_args);
             }
         }
-        command
-            .current_dir(&self.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
         let token = run_token();
-        self.scrub(&mut command, def, &token);
-
-        let group = ProcessGroup::new();
+        let mut extra: BTreeMap<String, String> = BTreeMap::new();
+        extra.insert(
+            "KELIR_SESSION_DIR".into(),
+            crate::util::path_string(&self.session_dir),
+        );
+        extra.insert("KELIR_GATE_EVENT".into(), def.event.name().into());
+        extra.insert("KELIR_GATE_NAME".into(), def.name.clone());
+        extra.insert(RUN_ENV.into(), token.clone());
+        extra.extend(def.env.iter().map(|(k, v)| (k.clone(), v.clone())));
         #[cfg(windows)]
-        let group = {
-            // Process-wide counter: a job name that is already taken would hand
-            // back the *other* job, and killing one gate would kill the other.
+        let job_name = {
             let n = JOBS.fetch_add(1, Ordering::SeqCst);
-            let name = crate::bg::job_name(
+            Some(crate::bg::job_name(
                 &self.session_id,
                 &format!("gate-{}-{n}", std::process::id()),
-            );
-            let job = crate::proc::win::Job::create_named(&name, true)
-                .ok_or_else(|| "cannot create a job object".to_string())?;
-            group.with_job(job)
+            ))
         };
-        group.configure(&mut command);
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("cannot start the gate: {error}"))?;
-        let Some(pid) = child.id() else {
-            return Err("the gate exited at once".into());
+        #[cfg(not(windows))]
+        let job_name = None;
+        let spec = crate::sys::runner::Spec {
+            cwd: Some(self.cwd.clone()),
+            env: crate::sys::runner::Env::Scrubbed { extra },
+            stdin: crate::sys::runner::Stdin::Bytes(stdin.as_bytes().to_vec()),
+            timeout: Some(self.timeout),
+            output_cap: OUTPUT_MAX,
+            stderr_cap: 8 * 1024,
+            no_window: true,
+            job_name,
+            unix_guard: None,
+            ..crate::sys::runner::Spec::new(program, gate_args)
         };
+        let (mut command, group) = crate::sys::runner::command(&spec)?;
+        let mut child = crate::sys::runner::start(&mut command, &group)?;
+        crate::sys::runner::feed_stdin(&spec, &mut child);
         #[cfg(unix)]
-        let mut reaper = reap::Reaper::start(pid, &token, self.timeout + Duration::from_secs(15));
-        if let Err(error) = group.spawned(pid) {
-            let _ = child.kill().await;
-            return Err(error);
-        }
-        let mut pipe = child.stdin.take();
+        let mut reaper = reap::Reaper::start(
+            child.id().ok_or("the gate exited at once")?,
+            &token,
+            self.timeout + Duration::from_secs(15),
+        );
         let stdout = child.stdout.take().ok_or("no stdout pipe")?;
         let stderr = child.stderr.take().ok_or("no stderr pipe")?;
-        let body = stdin.to_string();
-        // A gate that never reads stdin must not block the write: it runs in
-        // its own task, and a closed pipe is not an error.
-        tokio::spawn(async move {
-            if let Some(mut pipe) = pipe.take() {
-                let _ = pipe.write_all(body.as_bytes()).await;
-                let _ = pipe.shutdown().await;
-            }
-        });
-        let out_task = tokio::spawn(read_capped(stdout, OUTPUT_MAX));
-        let err_task = tokio::spawn(read_capped(stderr, 8 * 1024));
+        let out_task = tokio::spawn(crate::sys::runner::read_capped(stdout, OUTPUT_MAX));
+        let err_task = tokio::spawn(crate::sys::runner::read_capped(stderr, 8 * 1024));
 
         let limit = self.timeout;
         let waited = tokio::time::timeout(limit, child.wait()).await;
@@ -1211,16 +1194,8 @@ impl Runner {
                 return Err(format!("timed out after {} ms", limit.as_millis()));
             }
         };
-        let (out, overflow) = tokio::time::timeout(DRAIN, out_task)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
-        let (err, _) = tokio::time::timeout(DRAIN, err_task)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
+        let (out, overflow) = out_task.await.unwrap_or_default();
+        let (err, _) = err_task.await.unwrap_or_default();
         if !status.success() {
             let tail = String::from_utf8_lossy(&err);
             let tail = tail.trim();
@@ -1242,52 +1217,9 @@ impl Runner {
         }
         Ok(String::from_utf8_lossy(&out).into_owned())
     }
-
-    /// The gate's environment: the allow-list, kelir's three, then the gate's
-    /// own `env`. Nothing else is inherited.
-    fn scrub(&self, command: &mut Command, def: &GateDef, token: &str) {
-        command.env_clear();
-        for (key, value) in crate::envs::all_os() {
-            if allowed_env(&key.to_string_lossy()) {
-                command.env(key, value);
-            }
-        }
-        command.env("KELIR_SESSION_DIR", &self.session_dir);
-        command.env("KELIR_GATE_EVENT", def.event.name());
-        command.env("KELIR_GATE_NAME", &def.name);
-        command.env(RUN_ENV, token);
-        for (key, value) in &def.env {
-            command.env(key, value);
-        }
-    }
 }
 
-pub fn allowed_env(name: &str) -> bool {
-    crate::mcp::rpc::inherited(name) || name.eq_ignore_ascii_case("SSH_AUTH_SOCK")
-}
-
-/// Read to the end, keeping at most `max` bytes; the rest is read and thrown
-/// away so a chatty gate never blocks on a full pipe. The flag says it ran over.
-async fn read_capped<R: AsyncRead + Unpin>(mut reader: R, max: usize) -> (Vec<u8>, bool) {
-    let mut kept = Vec::new();
-    let mut over = false;
-    let mut chunk = [0u8; 8192];
-    loop {
-        match reader.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                if kept.len() < max {
-                    let room = (max - kept.len()).min(n);
-                    kept.extend_from_slice(&chunk[..room]);
-                    over |= room < n;
-                } else {
-                    over = true;
-                }
-            }
-        }
-    }
-    (kept, over)
-}
+pub use crate::sys::runner::allowed_env;
 
 // ----------------------------------------------------------------- describe
 

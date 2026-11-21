@@ -566,7 +566,7 @@ pub struct Host {
 pub async fn spawn_host(handoff: &Handoff, stderr_to: &Path) -> Result<Host, String> {
     use tokio::io::AsyncWriteExt as _;
     let binary = crate::util::self_binary()?;
-    let mut command = tokio::process::Command::new(binary);
+    let mut command = crate::sys::runner::tokio_command(binary);
     command
         .arg("child-host")
         .current_dir(&handoff.cwd)
@@ -593,17 +593,11 @@ pub async fn spawn_host(handoff: &Handoff, stderr_to: &Path) -> Result<Host, Str
             command.stderr(std::process::Stdio::null());
         }
     }
-    let group = crate::proc::ProcessGroup::new();
     #[cfg(windows)]
-    let group = {
-        let job =
-            crate::proc::win::Job::create_named(&format!("kelir-child-{}", handoff.child_id), true)
-                .ok_or_else(|| "cannot create a job object for the child".to_string())?;
-        group.with_job(job)
-    };
-    group.configure(&mut command);
-    let mut child = command
-        .spawn()
+    let group = crate::sys::runner::job(&format!("kelir-child-{}", handoff.child_id))?;
+    #[cfg(not(windows))]
+    let group = crate::sys::runner::job("")?;
+    let mut child = crate::sys::runner::start_with_group(&mut command, &group)
         .map_err(|error| format!("cannot start the child: {error}"))?;
     let Some(pid) = child.id() else {
         return Err("the child exited at once".into());

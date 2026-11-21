@@ -477,7 +477,7 @@ pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> 
     // Resolve with a PATH fallback: `current_exe` goes stale when the binary is replaced
     // under a live session, and a self-spawn must still find a runnable path.
     let binary = crate::util::self_binary()?;
-    let mut command = tokio::process::Command::new(binary);
+    let mut command = crate::sys::runner::tokio_command(binary);
     if let Some(env) = &launch.env {
         command.env_clear();
         command.envs(env.iter().map(|(name, value)| (name, value)));
@@ -1018,7 +1018,7 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
             }
         },
     };
-    let mut command = tokio::process::Command::new(&argv[0]);
+    let mut command = crate::sys::runner::tokio_command(&argv[0]);
     match &shell_input {
         crate::shellcmd::ShellInput::Argument(cmd) => {
             command.args(&argv[1..]).arg(cmd);

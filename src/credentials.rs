@@ -365,27 +365,21 @@ fn run_command_bounded(
         find_program(&program).ok_or_else(|| format!("`{program}` was not found on PATH"))?;
     let mut command = process_command(&path);
     command.args(&args);
+    // A helper gets the same allow-list as a gate or server, never a provider key or token:
+    // it prints a credential, it has no reason to inherit one.
+    command.env_clear();
+    for (key, value) in crate::sys::runner::scrubbed_env([]) {
+        command.env(key, value);
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        const CREATE_NO_WINDOW: u32 = crate::proc::win::CREATE_NO_WINDOW;
-        const CREATE_NEW_PROCESS_GROUP: u32 = crate::proc::win::CREATE_NEW_PROCESS_GROUP;
-        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
-    }
+    let group = crate::proc::StdGroup::new()?;
+    group.configure(&mut command);
     let started = Instant::now();
-    let mut child = command
-        .spawn()
+    let mut child = crate::sys::runner::start_std(&mut command, &group)
         .map_err(|error| format!("cannot start `{program}`: {error}"))?;
-    let pid = child.id();
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
     // Set by the reader when the helper outran the bound: the child is then
@@ -419,13 +413,13 @@ fn run_command_bounded(
             Ok(Some(status)) => break Some(status),
             Ok(None) => {}
             Err(error) => {
-                kill_tree(pid);
+                group.kill();
                 let _ = child.wait();
                 return Err(format!("`{program}`: cannot read its status: {error}"));
             }
         }
         if overran.load(Ordering::Relaxed) || started.elapsed() >= timeout {
-            kill_tree(pid);
+            group.kill();
             let _ = child.wait();
             break None;
         }
@@ -437,7 +431,7 @@ fn run_command_bounded(
         // Reading stopped at the bound, so the helper may still be writing into a pipe nobody drains: it must
         // not outlive the read.
         if matches!(child.try_wait(), Ok(None)) {
-            kill_tree(pid);
+            group.kill();
             let _ = child.wait();
         }
         return Err(format!(
@@ -458,27 +452,9 @@ fn run_command_bounded(
     }
 }
 
-/// The `Command` for a program: a `.cmd`/`.bat` shim on Windows is not an executable, so it runs
-/// through `cmd.exe /C` (the npm-style `opencode.cmd` that most installs have); everything else starts
+/// The `Command` for a program, from the one process runner.
 fn process_command(path: &Path) -> std::process::Command {
-    #[cfg(windows)]
-    {
-        let extension = path
-            .extension()
-            .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default();
-        if extension == "cmd" || extension == "bat" {
-            use std::os::windows::process::CommandExt as _;
-            let shell = crate::envs::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
-            let mut command = std::process::Command::new(shell);
-            command.arg("/C");
-            // `raw_arg` so the program's own quoting survives: `cmd /C` treats a quoted first word as the whole
-            // command line, so the doubled quotes are the documented spelling for a path with a space in it.
-            command.raw_arg(format!("\"{}\"", path.display()));
-            return command;
-        }
-    }
-    std::process::Command::new(path)
+    crate::sys::runner::std_command(path)
 }
 
 /// Find a program the way a shell would: `<name>` on Unix (executable bit) and
@@ -538,26 +514,6 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable_non_unix(_metadata: &std::fs::Metadata) -> bool {
     true
-}
-
-/// Kill a tree this process started, by pid/group and never by image name.
-fn kill_tree(pid: u32) {
-    if pid == 0 {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        // Safe: the child leads the group this read created (`process_group(0)`),
-        // so the signal reaches only it and its own children. Never group 0.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-    }
-    #[cfg(windows)]
-    {
-        crate::proc::terminate_tree(pid);
-        crate::proc::win::terminate(pid);
-    }
 }
 
 #[cfg(test)]
@@ -1058,6 +1014,22 @@ mod tests {
                 started.elapsed()
             );
         }
+    }
+
+    /// A key helper gets the one allow-list: a provider key or a session token set in the
+    /// parent cannot reach it, even when another command asks for a key.
+    #[test]
+    fn a_helper_gets_no_provider_key_or_session_token() {
+        let env = crate::sys::runner::scrubbed_env([]);
+        for secret in [
+            "OPENROUTER_API_KEY",
+            "KELIR_GO_API_KEY",
+            "KELIR_TOKEN",
+            "KELIR_SOCK",
+        ] {
+            assert!(!env.contains_key(secret), "{secret} reaches a key helper");
+        }
+        assert!(env.contains_key("PATH"));
     }
 
     /// Nit 6: a helper that streams far past a credential is stopped at the

@@ -137,6 +137,7 @@ pub mod sources;
 pub mod spill;
 pub mod sse;
 pub mod stream;
+pub mod sys;
 pub mod tail;
 pub mod theme;
 pub mod tools;

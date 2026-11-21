@@ -827,7 +827,7 @@ mod tests {
                 }
             }
             let first = first.unwrap_or_else(|| panic!("round {round}: cannot take the lock"));
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
+            let status = crate::sys::runner::std_command(&std::env::current_exe().unwrap())
                 .args(["--exact", "ipc::tests::lock_probe", "--nocapture"])
                 .env("KELIR_IPC_LOCK_PROBE", &dir)
                 .stdout(std::process::Stdio::null())

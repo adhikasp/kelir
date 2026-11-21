@@ -5,12 +5,7 @@
 //! outcome.
 
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
-
-use tokio::process::Command;
-
-use crate::proc::ProcessGroup;
 
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// How much of a failing hook's stderr is kept.
@@ -22,19 +17,6 @@ fn timeout() -> Duration {
         .filter(|ms| *ms > 0)
         .map(Duration::from_millis)
         .unwrap_or(TIMEOUT)
-}
-
-/// The hook's environment: the allow-list, then the job's own variables.
-pub fn scrubbed(command: &mut Command, job_env: &[(&str, &str)]) {
-    command.env_clear();
-    for (key, value) in crate::envs::all_os() {
-        if crate::gates::allowed_env(&key.to_string_lossy()) {
-            command.env(key, value);
-        }
-    }
-    for (key, value) in job_env {
-        command.env(key, value);
-    }
 }
 
 /// Run every hook, in order. Returns one line per failure.
@@ -71,92 +53,62 @@ async fn run_one(
     let scripts = dir.join("notify");
     std::fs::create_dir_all(&scripts).map_err(|error| error.to_string())?;
     let input = crate::shellcmd::input(&line, &shell_args, &scripts, &format!("n{index}"))?;
-    let mut command = Command::new(program);
+    let mut hook_args = shell_args.clone();
     match &input {
         crate::shellcmd::ShellInput::Argument(text) => {
-            command.args(&shell_args).arg(text);
+            hook_args.push(text.clone());
         }
         crate::shellcmd::ShellInput::Script { path, keep_switch } => {
-            command.args(crate::shellcmd::script_args(
-                &shell_args,
-                keep_switch.as_deref(),
-                path,
-            ));
+            let mut script_args =
+                crate::shellcmd::script_args(&shell_args, keep_switch.as_deref(), path);
+            hook_args.append(&mut script_args);
         }
     }
-    command
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    scrubbed(&mut command, job_env);
-
-    let group = ProcessGroup::new();
-    #[cfg(windows)]
-    let group = {
-        let name = crate::bg::job_name(
-            "notify",
-            &format!(
-                "{}-{}",
-                std::process::id(),
-                ulid::Ulid::generate().to_string().to_lowercase()
-            ),
-        );
-        let job = crate::proc::win::Job::create_named(&name, true)
-            .ok_or_else(|| "cannot create a job object".to_string())?;
-        group.with_job(job)
-    };
-    group.configure(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("cannot start it: {error}"))?;
-    let Some(pid) = child.id() else {
-        return Err("it exited at once".into());
-    };
-    if let Err(error) = group.spawned(pid) {
-        let _ = child.kill().await;
-        return Err(error);
-    }
-    let stderr = child.stderr.take();
-    let reader = tokio::spawn(async move {
-        use tokio::io::AsyncReadExt as _;
-        let mut kept = Vec::new();
-        if let Some(mut stderr) = stderr {
-            let mut chunk = [0u8; 4096];
-            while let Ok(n) = stderr.read(&mut chunk).await {
-                if n == 0 {
-                    break;
-                }
-                if kept.len() < 4096 {
-                    kept.extend_from_slice(&chunk[..n.min(4096 - kept.len())]);
-                }
+    let spec = crate::sys::runner::Spec {
+        cwd: Some(cwd.to_path_buf()),
+        env: crate::sys::runner::Env::Scrubbed {
+            extra: job_env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        },
+        stdin: crate::sys::runner::Stdin::Null,
+        timeout: Some(timeout()),
+        output_cap: 0,
+        stderr_cap: 4096,
+        no_window: true,
+        job_name: {
+            #[cfg(windows)]
+            {
+                Some(crate::bg::job_name(
+                    "notify",
+                    &format!(
+                        "{}-{}",
+                        std::process::id(),
+                        ulid::Ulid::generate().to_string().to_lowercase()
+                    ),
+                ))
             }
-        }
-        kept
-    });
-    let limit = timeout();
-    let waited = tokio::time::timeout(limit, child.wait()).await;
-    // The tree goes with the hook whatever happened.
-    group.kill();
-    let status = match waited {
-        Ok(Ok(status)) => status,
-        Ok(Err(error)) => return Err(format!("cannot wait for it: {error}")),
-        Err(_) => {
-            let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-            reader.abort();
-            return Err(format!("timed out after {} ms", limit.as_millis()));
-        }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        },
+        unix_guard: None,
+        ..crate::sys::runner::Spec::new(program, hook_args)
     };
-    let tail = tokio::time::timeout(Duration::from_secs(2), reader)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default();
+    let limit = timeout();
+    let finished = crate::sys::runner::run(spec).await?;
+    if finished.timed_out {
+        return Err(format!("timed out after {} ms", limit.as_millis()));
+    }
+    let Some(status) = finished.status else {
+        return Err("it did not finish".into());
+    };
     if status.success() {
         return Ok(());
     }
-    let tail = String::from_utf8_lossy(&tail);
+    let tail = String::from_utf8_lossy(&finished.stderr);
     let tail = tail.trim().replace(['\r', '\n'], " ");
     let code = status
         .code()
