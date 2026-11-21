@@ -275,7 +275,7 @@ pub mod reap {
         /// shell, not its children.
         pub fn start(pid: u32, token: &str, ttl: std::time::Duration) -> Self {
             use std::os::unix::process::CommandExt as _;
-            let guard = std::env::current_exe().ok().and_then(|exe| {
+            let guard = crate::util::self_binary().ok().and_then(|exe| {
                 let mut command = std::process::Command::new(exe);
                 command
                     .arg("gate-guard")

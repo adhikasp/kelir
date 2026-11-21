@@ -22,6 +22,13 @@ pub enum Key {
     End,
     /// Ctrl-K: cut from the cursor to the end of the line.
     KillToEnd,
+    /// Ctrl-Backspace: delete the word before the cursor (GUI convention).
+    KillPrevWord,
+    /// Ctrl-Delete (and Alt-Backspace): delete the word after the cursor.
+    KillNextWord,
+    /// Alt-Left / Alt-Right: move by one word.
+    WordLeft,
+    WordRight,
     /// Ctrl-U: clear the whole buffer.
     Clear,
     /// A bracketed paste, newlines and all.
@@ -51,7 +58,8 @@ pub enum Outcome {
     /// The key means nothing here (or the buffer was empty on Enter).
     Ignored,
     /// A chip was removed: the caller deletes its file (nothing else referred to
-    /// it yet).
+    /// it yet). Returned by Backspace on a chip and by word deletes that swallow
+    /// a chip label, so a chip is always one atomic element.
     ChipRemoved(Chip),
 }
 
@@ -105,6 +113,20 @@ pub struct Editor {
     browsing: Option<usize>,
     /// The buffer as it was before browsing started.
     draft: Option<Vec<String>>,
+    /// Width of the terminal, in columns, for visual (wrapped) rows.
+    width: usize,
+}
+
+/// One painted row of the editor. `logical` is the buffer line it came
+/// from; `start..end` is the half-open range of *characters* on that line
+/// that this row shows. `first` marks the first visual row of logical line
+/// 0, which is the only row that gets the prompt glyph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisualRow {
+    pub logical: usize,
+    pub start: usize,
+    pub end: usize,
+    pub first: bool,
 }
 
 impl Default for Editor {
@@ -117,6 +139,7 @@ impl Default for Editor {
             history: Vec::new(),
             browsing: None,
             draft: None,
+            width: 80,
         }
     }
 }
@@ -136,24 +159,6 @@ impl Editor {
 
     pub fn cursor(&self) -> (usize, usize) {
         (self.row, self.col)
-    }
-
-    /// The cursor as the renderer needs it: `(row, display column)`, the prompt
-    /// included and every character measured by its terminal width (a chip's
-    /// label is ordinary text, so it counts its own width).
-    pub fn cursor_display(&self) -> (usize, usize) {
-        use unicode_width::UnicodeWidthChar as _;
-        let before: usize = self
-            .lines
-            .get(self.row)
-            .map(|line| {
-                line.chars()
-                    .take(self.col)
-                    .map(|c| c.width().unwrap_or(0))
-                    .sum()
-            })
-            .unwrap_or(0);
-        (self.row, crate::tui::PROMPT_WIDTH + before)
     }
 
     pub fn history(&self) -> &[String] {
@@ -291,19 +296,105 @@ impl Editor {
         Some(chip)
     }
 
-    /// The window of buffer rows to draw when only `rows` fit: the buffer is
-    /// scrolled just enough to keep the cursor visible.
-    pub fn window(&self, rows: usize) -> (usize, usize) {
-        let rows = rows.max(1);
-        if self.lines.len() <= rows {
-            return (0, self.lines.len().max(1));
+    /// Tell the editor how wide the terminal is, so visual rows (wrapping)
+    /// and the cursor's display position can be computed. Called by the
+    /// renderer on every paint (a resize changes it).
+    pub fn set_width(&mut self, width: usize) {
+        self.width = width.max(1);
+    }
+
+    /// Split the buffer into visual rows no wider than the terminal. Wrapping
+    /// is by display column (wide characters count two) and never breaks in
+    /// the middle of a character, so the cursor math stays exact. Characters
+    /// are never dropped: on a narrow terminal the text spans more rows and
+    /// the window scrolls to keep the cursor visible.
+    pub fn visual_rows(&self) -> Vec<VisualRow> {
+        use unicode_width::UnicodeWidthChar as _;
+        let text_width = self.width.saturating_sub(crate::tui::PROMPT_WIDTH).max(1);
+        let mut rows = Vec::new();
+        for (logical, line) in self.lines.iter().enumerate() {
+            let mut start = 0usize;
+            let mut columns = 0usize;
+            for (index, c) in line.chars().enumerate() {
+                let cw = c.width().unwrap_or(0);
+                if columns + cw > text_width && index > start {
+                    rows.push(VisualRow {
+                        logical,
+                        start,
+                        end: index,
+                        first: logical == 0 && rows.is_empty(),
+                    });
+                    start = index;
+                    columns = 0;
+                }
+                columns += cw;
+            }
+            rows.push(VisualRow {
+                logical,
+                start,
+                end: line.chars().count(),
+                first: logical == 0 && rows.is_empty(),
+            });
         }
-        let first = if self.row < rows {
+        rows
+    }
+
+    /// The window of *visual* rows to draw when only `rows` fit: it scrolls
+    /// just enough to keep the cursor's wrapped row visible.
+    pub fn display_window(&self, rows: usize) -> (usize, usize) {
+        let rows = rows.max(1);
+        let total = self.visual_rows().len();
+        if total <= rows {
+            return (0, total.max(1));
+        }
+        let (cursor_row, _) = self.cursor_display();
+        let first = if cursor_row < rows {
             0
         } else {
-            (self.row + 1).saturating_sub(rows)
+            (cursor_row + 1).saturating_sub(rows)
         };
         (first, rows)
+    }
+
+    /// The cursor as the renderer needs it on the *wrapped* view:
+    /// `(visual row, display column)`, the prompt width included. Every
+    /// character is measured by its terminal width (a chip label is ordinary
+    /// text, so it counts its own width).
+    pub fn cursor_display(&self) -> (usize, usize) {
+        use unicode_width::UnicodeWidthChar as _;
+        let (visual, _) = self.cursor_visual();
+        let line = &self.lines[self.row];
+        let before: usize = line
+            .chars()
+            .take(self.col)
+            .map(|c| c.width().unwrap_or(0))
+            .sum();
+        let row_start_col: usize = line
+            .chars()
+            .take(self.visual_rows()[visual].start)
+            .map(|c| c.width().unwrap_or(0))
+            .sum();
+        (visual, crate::tui::PROMPT_WIDTH + before - row_start_col)
+    }
+
+    /// Which visual row the cursor is on, and its index among all rows. A
+    /// cursor exactly at a wrap boundary belongs to the *next* row (the
+    /// character after it is on that row); only the very end of a line stays
+    /// on its last row.
+    fn cursor_visual(&self) -> (usize, usize) {
+        let rows = self.visual_rows();
+        let candidates: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.logical == self.row)
+            .map(|(index, _)| index)
+            .collect();
+        for &index in &candidates {
+            if self.col < rows[index].end {
+                return (index, rows.len());
+            }
+        }
+        (candidates.last().copied().unwrap_or(0), rows.len())
     }
 
     /// Apply one key.
@@ -447,11 +538,29 @@ impl Editor {
                 }
             }
             Key::Home => {
-                self.col = 0;
+                // GUI Home goes to the start of the visual (wrapped) row,
+                // then to the very start on a second press.
+                let rows = self.visual_rows();
+                let visual = self.cursor_visual().0;
+                let start = rows[visual].start;
+                self.col = if self.col == start && start > 0 {
+                    0
+                } else {
+                    start
+                };
                 Outcome::Edited
             }
             Key::End => {
-                self.col = self.lines[self.row].chars().count();
+                // Mirror of Home: end of the visual row, then the logical end.
+                let rows = self.visual_rows();
+                let visual = self.cursor_visual().0;
+                let end = rows[visual].end;
+                let logical_end = self.lines[self.row].chars().count();
+                self.col = if self.col == end && end < logical_end {
+                    logical_end
+                } else {
+                    end
+                };
                 Outcome::Edited
             }
             Key::KillToEnd => {
@@ -461,6 +570,38 @@ impl Editor {
                 self.lines[row].truncate(at);
                 Outcome::Edited
             }
+            Key::KillPrevWord => {
+                self.stop_browsing();
+                let (start, end) = self.word_before_cursor();
+                if start == end {
+                    return self.handle(Key::Backspace);
+                }
+                match self.remove_range(start, end) {
+                    Some(chip) => Outcome::ChipRemoved(chip),
+                    None => Outcome::Edited,
+                }
+            }
+            Key::KillNextWord => {
+                self.stop_browsing();
+                let (start, end) = self.word_after_cursor();
+                if start == end {
+                    return self.handle(Key::Delete);
+                }
+                match self.remove_range(start, end) {
+                    Some(chip) => Outcome::ChipRemoved(chip),
+                    None => Outcome::Edited,
+                }
+            }
+            Key::WordLeft => {
+                let col = self.word_left_start();
+                self.col = col;
+                Outcome::Edited
+            }
+            Key::WordRight => {
+                let col = self.word_right_start();
+                self.col = col;
+                Outcome::Edited
+            }
             Key::Clear => {
                 self.reset();
                 Outcome::Edited
@@ -468,6 +609,110 @@ impl Editor {
             Key::HistoryPrev => self.history_prev(),
             Key::HistoryNext => self.history_next(),
         }
+    }
+
+    /// The character range of the word immediately before the cursor, in the
+    /// current line, including the whitespace run between it and the cursor.
+    /// Follows the GUI convention: one press removes the word and the gap it
+    /// left. At the start of a line it removes just the leading whitespace.
+    fn word_before_cursor(&self) -> (usize, usize) {
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        let col = self.col.min(chars.len());
+        let mut end = col;
+        while end > 0 && chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+        if end == 0 {
+            return (0, col);
+        }
+        let mut start = end;
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        // Extend back over the whitespace run before the word, so one press
+        // removes the word and the gap it left, like a GUI text field.
+        while start > 0 && chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        (start, col)
+    }
+
+    /// Word left for navigation: the start of the word before the cursor,
+    /// skipping the whitespace in between (Ctrl-Left lands on the word, not
+    /// on the space after it).
+    fn word_left_start(&self) -> usize {
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        let mut col = self.col.min(chars.len());
+        while col > 0 && chars[col - 1].is_whitespace() {
+            col -= 1;
+        }
+        while col > 0 && !chars[col - 1].is_whitespace() {
+            col -= 1;
+        }
+        col
+    }
+
+    /// Where Ctrl-Right lands: the start of the next word. Skip the rest of
+    /// the current word, then any whitespace, and stop at the first character
+    /// of the following word (or the end of the line).
+    fn word_right_start(&self) -> usize {
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        let mut col = self.col.min(chars.len());
+        while col < chars.len() && !chars[col].is_whitespace() {
+            col += 1;
+        }
+        while col < chars.len() && chars[col].is_whitespace() {
+            col += 1;
+        }
+        col
+    }
+
+    /// The character range of the word immediately after the cursor, in the
+    /// current line. Skips leading spaces, then takes the run of non-space
+    /// characters and the whitespace that follows, so a delete leaves no gap.
+    fn word_after_cursor(&self) -> (usize, usize) {
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        let col = self.col.min(chars.len());
+        let mut start = col;
+        while start < chars.len() && chars[start].is_whitespace() {
+            start += 1;
+        }
+        let mut end = start;
+        while end < chars.len() && !chars[end].is_whitespace() {
+            end += 1;
+        }
+        while end < chars.len() && chars[end].is_whitespace() {
+            end += 1;
+        }
+        (col, end)
+    }
+
+    /// Remove `start..end` (character indices) from the cursor's line and put
+    /// the cursor at `start`. A chip label is one atomic element: if the range
+    /// eats any part of one, the whole label goes and the chip is returned so
+    /// the caller deletes its file. At most one chip per word delete.
+    fn remove_range(&mut self, start: usize, end: usize) -> Option<Chip> {
+        let row = self.row;
+        let line = self.lines[row].clone();
+        let hit = self.chips.iter().position(|chip| {
+            let mut from = 0usize;
+            while let Some(found) = line[from..].find(&chip.label) {
+                let cs: usize = line[..from + found].chars().count();
+                let ce = cs + chip.label.chars().count();
+                // Overlap with [start, end).
+                if cs < end && ce > start {
+                    return true;
+                }
+                from = from + found + chip.label.len();
+            }
+            false
+        });
+        let removed = hit.map(|index| self.chips.remove(index));
+        let from = self.char_to_byte(row, start);
+        let to = self.char_to_byte(row, end);
+        self.lines[row].replace_range(from..to, "");
+        self.col = start;
+        removed
     }
 
     // ----------------------------------------------------------- internals
@@ -714,12 +959,104 @@ mod tests {
             type_text(&mut editor, &index.to_string());
         }
         assert_eq!(editor.lines().len(), 10);
-        assert_eq!(editor.window(3), (7, 3));
+        assert_eq!(editor.display_window(3), (7, 3));
         editor.handle(Key::HistoryPrev);
-        assert_eq!(editor.window(3), (7, 3));
+        assert_eq!(editor.display_window(3), (7, 3));
         let mut short = Editor::default();
         type_text(&mut short, "x");
-        assert_eq!(short.window(3), (0, 1));
+        assert_eq!(short.display_window(3), (0, 1));
+    }
+
+    #[test]
+    fn a_long_line_wraps_into_visual_rows_without_losing_characters() {
+        let mut editor = Editor::default();
+        editor.set_width(12); // PROMPT_WIDTH (2) + 10 text columns
+        type_text(&mut editor, "abcdefghijklmnopqrstuvwxyz");
+        let rows = editor.visual_rows();
+        assert_eq!(rows.len(), 3);
+        assert_eq!((rows[0].start, rows[0].end, rows[0].first), (0, 10, true));
+        assert_eq!((rows[1].start, rows[1].end, rows[1].first), (10, 20, false));
+        assert_eq!((rows[2].start, rows[2].end, rows[2].first), (20, 26, false));
+        // Reassembled, the rows are exactly the buffer.
+        let joined: String = rows
+            .iter()
+            .map(|r| editor.lines()[r.logical][r.start..r.end].to_string())
+            .collect();
+        assert_eq!(joined, "abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn the_cursor_column_wraps_and_the_window_follows_it() {
+        let mut editor = Editor::default();
+        editor.set_width(12);
+        type_text(&mut editor, "abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(editor.cursor_display(), (2, 8));
+        assert_eq!(editor.display_window(2), (1, 2));
+        editor.handle(Key::Home);
+        // Cursor was at the end of row 2, so Home goes to that row's start.
+        assert_eq!(editor.cursor_display(), (2, 2));
+        editor.handle(Key::Home);
+        assert_eq!(editor.cursor_display(), (0, 2));
+    }
+
+    #[test]
+    fn a_wide_character_counts_two_columns_when_wrapping() {
+        let mut editor = Editor::default();
+        editor.set_width(12); // 10 text columns
+        type_text(&mut editor, "日本abcde"); // 2+2+5 = 9 columns
+        let rows = editor.visual_rows();
+        assert_eq!(rows.len(), 1, "9 columns fit in 10: {rows:?}");
+        type_text(&mut editor, "fg"); // 11 columns now: wraps after 'f'
+        let rows = editor.visual_rows();
+        assert_eq!(rows.len(), 2);
+        // 日本 (4 cols) + abcdef (6 cols) = 10 fills the row; g starts the next.
+        assert_eq!((rows[0].start, rows[0].end), (0, 8));
+        assert_eq!((rows[1].start, rows[1].end), (8, 9));
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_the_previous_word() {
+        let mut editor = Editor::default();
+        type_text(&mut editor, "hello  world");
+        editor.handle(Key::KillPrevWord);
+        assert_eq!(editor.text(), "hello");
+        editor.handle(Key::KillPrevWord);
+        assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn ctrl_delete_deletes_the_next_word() {
+        let mut editor = Editor::default();
+        type_text(&mut editor, "one two three");
+        editor.handle(Key::Home);
+        editor.handle(Key::KillNextWord);
+        assert_eq!(editor.text(), "two three");
+        editor.handle(Key::KillNextWord);
+        assert_eq!(editor.text(), "three");
+        editor.handle(Key::KillNextWord);
+        assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn alt_word_navigation_moves_by_word() {
+        let mut editor = Editor::default();
+        type_text(&mut editor, "one two three");
+        editor.handle(Key::WordLeft);
+        assert_eq!(editor.cursor(), (0, 8));
+        editor.handle(Key::WordLeft);
+        assert_eq!(editor.cursor(), (0, 4));
+        editor.handle(Key::WordRight);
+        assert_eq!(editor.cursor(), (0, 8));
+    }
+
+    #[test]
+    fn backspace_on_an_empty_line_joins_with_the_previous_one() {
+        let mut editor = Editor::default();
+        type_text(&mut editor, "abc");
+        editor.handle(Key::Newline);
+        editor.handle(Key::Backspace);
+        assert_eq!(editor.text(), "abc");
+        assert_eq!(editor.cursor(), (0, 3));
     }
 
     #[test]

@@ -1741,19 +1741,38 @@ pub fn translate(key: KeyEvent) -> Option<Press> {
         KeyCode::Char('j') if ctrl => Some(Press::Edit(Key::Newline)),
         KeyCode::Char('k') if ctrl => Some(Press::Edit(Key::KillToEnd)),
         KeyCode::Char('u') if ctrl => Some(Press::Edit(Key::Clear)),
+        // Ctrl-Backspace arrives as raw 0x08 in a legacy terminal, which
+        // crossterm decodes as Char('h')+CONTROL (0x08 = Ctrl-H).
+        KeyCode::Char('h') if ctrl && !alt => Some(Press::Edit(Key::KillPrevWord)),
         KeyCode::Char(c) if !ctrl && !alt => Some(Press::Edit(Key::Char(c))),
+        KeyCode::Char(c) if alt && !ctrl => {
+            // Alt-Left/Alt-Right are the GUI word-jump keys, but some terminals
+            // send them as Alt-h / Alt-l (readline muscle memory).
+            match c {
+                'h' => Some(Press::Edit(Key::WordLeft)),
+                'l' => Some(Press::Edit(Key::WordRight)),
+                'd' => Some(Press::Edit(Key::KillNextWord)),
+                _ => None,
+            }
+        }
         KeyCode::Esc => Some(Press::Stop),
-        // Enter sends; Alt-Enter (and Shift-Enter where the terminal reports
-        // it) starts a new line instead.
+        // Enter sends; Shift-Enter / Alt-Enter (and Ctrl-J) start a new line.
+        // Ghostty sends Shift-Enter as CSI-u `ESC[13;2u`, which crossterm
+        // decodes to Enter+SHIFT; terminals without that protocol send a bare
+        // Enter, which keeps the send behaviour.
         KeyCode::Enter if alt || shift => Some(Press::Edit(Key::Newline)),
         KeyCode::Enter => Some(Press::Edit(Key::Enter)),
-        // Backspace belongs to the chip when the cursor is on one: STEER-10
-        // req. 3 and the docs say one Backspace removes the whole chip. The
-        // editor ignores `RemoveChip` when no chip is at the cursor and the TUI
-        // then falls back to a plain Backspace, so a chip never costs a
-        // keystroke and typed text never loses one.
+        // Ctrl-Backspace deletes a word. In a legacy terminal it arrives as
+        // 0x08 (Backspace with no CONTROL bit); with the kitty keyboard
+        // protocol it is Backspace+CONTROL. Both mean "delete previous word".
+        // Alt-Backspace deletes the word *after* the cursor on most GUIs.
+        KeyCode::Backspace if ctrl => Some(Press::Edit(Key::KillPrevWord)),
+        KeyCode::Backspace if alt => Some(Press::Edit(Key::KillNextWord)),
         KeyCode::Backspace => Some(Press::Backspace),
+        KeyCode::Delete if ctrl => Some(Press::Edit(Key::KillNextWord)),
         KeyCode::Delete => Some(Press::Edit(Key::Delete)),
+        KeyCode::Left if alt || ctrl => Some(Press::Edit(Key::WordLeft)),
+        KeyCode::Right if alt || ctrl => Some(Press::Edit(Key::WordRight)),
         KeyCode::Left => Some(Press::Edit(Key::Left)),
         KeyCode::Right => Some(Press::Edit(Key::Right)),
         KeyCode::Up => Some(Press::Edit(Key::Up)),
@@ -1864,7 +1883,7 @@ fn render_live(app: &App, frame: &mut Frame, area: Rect) {
 /// The editor: the window of rows that keeps the cursor visible, the prompt
 /// dimmed while the agent works, the image chips reversed, and the cursor
 /// itself counted in display columns.
-fn render_editor(app: &App, frame: &mut Frame, screen: Rect, area: Rect) {
+fn render_editor(app: &mut App, frame: &mut Frame, screen: Rect, area: Rect) {
     if area.height == 0 {
         return;
     }
@@ -1874,17 +1893,25 @@ fn render_editor(app: &App, frame: &mut Frame, screen: Rect, area: Rect) {
     } else {
         theme.user()
     };
-    let (first, visible) = app.editor.window(area.height as usize);
-    let lines = app.editor.lines();
+    // Wrap to the editor's actual width; the buffer's own width follows the
+    // screen so the cursor math and the painted rows agree after a resize.
+    app.editor.set_width(area.width as usize);
+    let (first, visible) = app.editor.display_window(area.height as usize);
+    let visual = app.editor.visual_rows();
     let mut text: Vec<Line<'static>> = Vec::new();
-    for (index, line) in lines.iter().enumerate().skip(first).take(visible) {
-        let prefix = if index == 0 {
+    for row in visual.iter().skip(first).take(visible) {
+        let prefix = if row.first {
             theme.glyphs.prompt()
         } else {
             theme.glyphs.prompt_pad()
         };
         let mut spans = vec![Span::styled(prefix.to_string(), prompt_style)];
-        spans.extend(chip_spans(app, line, theme));
+        let line: String = app.editor.lines()[row.logical]
+            .chars()
+            .skip(row.start)
+            .take(row.end - row.start)
+            .collect();
+        spans.extend(chip_spans(app, &line, theme));
         text.push(Line::from(spans));
     }
     frame.render_widget(Paragraph::new(text), area);
@@ -3702,6 +3729,39 @@ mod tests {
         assert_eq!(
             translate(key(KeyCode::Enter, KeyModifiers::NONE)),
             Some(Press::Edit(Key::Enter))
+        );
+        // Ghostty sends Shift-Enter as CSI-u `ESC[13;2u`, decoded by crossterm
+        // as Enter+SHIFT: a newline, never a submit.
+        assert_eq!(
+            translate(key(KeyCode::Enter, KeyModifiers::SHIFT)),
+            Some(Press::Edit(Key::Newline))
+        );
+        assert_eq!(
+            translate(key(KeyCode::Enter, KeyModifiers::ALT)),
+            Some(Press::Edit(Key::Newline))
+        );
+        // Ctrl-Backspace deletes a word; kitty sends Backspace+CONTROL, legacy
+        // terminals send 0x08 which crossterm decodes as a bare Backspace.
+        assert_eq!(
+            translate(key(KeyCode::Backspace, KeyModifiers::CONTROL)),
+            Some(Press::Edit(Key::KillPrevWord))
+        );
+        // Legacy terminal: 0x08 is decoded as Ctrl-H by crossterm.
+        assert_eq!(
+            translate(key(KeyCode::Char('h'), KeyModifiers::CONTROL)),
+            Some(Press::Edit(Key::KillPrevWord))
+        );
+        assert_eq!(
+            translate(key(KeyCode::Backspace, KeyModifiers::NONE)),
+            Some(Press::Backspace)
+        );
+        assert_eq!(
+            translate(key(KeyCode::Delete, KeyModifiers::CONTROL)),
+            Some(Press::Edit(Key::KillNextWord))
+        );
+        assert_eq!(
+            translate(key(KeyCode::Left, KeyModifiers::ALT)),
+            Some(Press::Edit(Key::WordLeft))
         );
         let mut release = key(KeyCode::Char('a'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;

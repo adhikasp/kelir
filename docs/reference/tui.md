@@ -19,7 +19,7 @@ image chips).
 |---|---|
 | live (3) | the tail of the streaming answer (markdown) or the open tool group |
 | state (1) | `● idle · ready`, `⠹ thinking 12s · waiting for the provider · esc stops`, … |
-| editor (3) | `› your message` in the user colour (cyan); the prompt dims while the agent works |
+| editor (3) | `› your message` in the user colour (cyan); the prompt dims while the agent works. Long prompts wrap onto the next editor row (prompt only on the first row); the window scrolls to keep the cursor visible |
 | facts (1) | `kelir working · model · 1.5k tok` — steps, cache and cost are not ambient |
 
 A shorter terminal gives rows up in this order: the facts row, live rows, the
@@ -86,12 +86,16 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | key | does |
 |---|---|
 | Enter | send; while working it is a `say` (the prompt dims to say so) |
-| Alt-Enter, Shift-Enter, Ctrl-J | newline |
+| Alt-Enter, Shift-Enter, Ctrl-J | newline (Shift-Enter needs the terminal to report the modifier, e.g. kitty keyboard protocol) |
 | Esc | stop the turn (only while working) |
 | Ctrl-C once | stop the turn; twice within 1 s quits |
 | Ctrl-O | the last tool call's output tail (`Esc`/`Ctrl-O` closes) |
 | Ctrl-L | redraw |
 | Ctrl-K / Ctrl-U | cut to end of line / clear |
+| Ctrl-Backspace | delete the word before the cursor (a chip is one element) |
+| Ctrl-Delete, Alt-Backspace | delete the word after the cursor |
+| Alt-← / Alt-→ | move by one word |
+| Home / End | start/end of the visual (wrapped) row, then of the whole line on a second press |
 | ↑ / ↓ | history (first line ↑, last line ↓) |
 | Backspace on an image chip | removes the whole chip and deletes its file (a plain Backspace on text still deletes one character) |
 

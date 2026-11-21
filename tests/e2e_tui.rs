@@ -301,10 +301,10 @@ fn snapshot_the_output_tail_view() {
     assert!(snapshot(&mut app).contains('›'));
 }
 
-/// A long line in the editor is clipped by the row, not wrapped into the
-/// facts row.
+/// A long line in the editor wraps across the editor's rows: text is never
+/// clipped or spilled into the facts row, and the prompt appears only once.
 #[test]
-fn snapshot_a_long_editor_line_stays_on_its_row() {
+fn snapshot_a_long_editor_line_wraps_across_its_rows() {
     let mut app = new_app();
     for c in "x".repeat(80).chars() {
         app.press(tui::Press::Edit(kelir::editor::Key::Char(c)));
@@ -312,7 +312,13 @@ fn snapshot_a_long_editor_line_stays_on_its_row() {
     let screen = snapshot(&mut app);
     let rows: Vec<&str> = screen.lines().collect();
     assert_eq!(rows.len(), 8);
+    // Editor rows are 4, 5, 6; each holds the 2-column prompt plus 58 columns
+    // of text (60 - 2). 80 characters wrap to 58 on the first row and 22 on
+    // the second; the third editor row is blank.
+    assert!(rows[4].starts_with("› "), "row 4: {:?}", rows[4]);
+    assert!(rows[5].starts_with("  "), "row 5: {:?}", rows[5]);
     assert_eq!(rows[4].chars().count(), 60, "{}", rows[4]);
+    assert_eq!(rows[5].trim_end().chars().count(), 24, "{}", rows[5]);
     assert!(rows[7].starts_with("kelir idle"), "{}", rows[7]);
     // The live rows above are untouched.
     assert!(rows[0..3].iter().all(|row| row.is_empty()), "{screen:?}");

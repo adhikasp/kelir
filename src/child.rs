@@ -603,8 +603,7 @@ pub struct Host {
 /// takes it down. No secret goes through argv or the environment.
 pub async fn spawn_host(handoff: &Handoff, stderr_to: &Path) -> Result<Host, String> {
     use tokio::io::AsyncWriteExt as _;
-    let binary = std::env::current_exe()
-        .map_err(|error| format!("cannot find the kelir binary: {error}"))?;
+    let binary = crate::util::self_binary()?;
     let mut command = tokio::process::Command::new(binary);
     command
         .arg("child-host")
