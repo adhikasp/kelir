@@ -336,34 +336,21 @@ fn steer5_provider_exhaustion_reads_paused_with_the_reason() {
 // ----------------------------------------------------------------------- S6
 
 #[tokio::test]
-async fn s6_collapse_and_expand_are_idempotent_and_directional() {
+async fn s6_collapse_and_bare_expand_are_not_commands() {
     let mut app = app(80);
+    // There is no output policy to toggle: every call keeps its own line.
+    // The old `/collapse` and bare `/expand` commands were removed.
     app.submit("/collapse");
-    app.submit("/collapse");
-    let rows = scroll(&mut app);
-    assert!(rows.iter().all(|r| !r.contains("full")), "{rows:#?}");
-    app.submit("/expand");
     app.submit("/expand");
     let rows = scroll(&mut app);
-    assert!(
-        rows.iter().filter(|r| r.contains("full")).count() >= 1,
-        "{rows:#?}"
-    );
-    app.submit("/collapse");
-    let rows = scroll(&mut app);
-    assert!(rows.iter().any(|r| r.contains("collapsed")), "{rows:#?}");
-    // and a call in full mode is not folded to a single line
-    app.submit("/expand");
-    scroll(&mut app);
+    assert!(rows.iter().all(|r| !r.contains("tool output")), "{rows:#?}");
+    // A call is still one line each, whatever the old commands said.
     turn(&mut app);
     app.apply(started("echo hi"));
     app.apply(settled("echo hi", 0));
-    app.apply(UiEvent::TurnEnded {
-        outcome: "done".into(),
-        final_text: String::new(),
-    });
     let rows = scroll(&mut app);
     assert!(rows.iter().any(|r| r.contains("echo hi")), "{rows:#?}");
+    assert!(rows.iter().all(|r| !r.contains("call")), "{rows:#?}");
 }
 
 // ----------------------------------------------------------------------- S7

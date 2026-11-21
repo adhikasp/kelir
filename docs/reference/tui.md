@@ -105,19 +105,20 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | `/model <p/m>` | swap provider/model for the rest of the session |
 | `/tools off\|on <name>` | disable or enable `bash`/`edit` |
 | `/compact [focus]` | summarise the earlier context |
-| `/expand` | from the next call on, print each call's output too |
-| `/expand [n\|last]` | append call `n`'s output here (a committed line cannot be unfolded) |
-| `/collapse` | one line per tool call from the next call on |
+| `/expand n\|last` | append call `n`'s output here (a committed line cannot be unfolded) |
 | `/help` (`/?`) | the list |
 | `/quit` (`/exit`) | end the session |
 
-Each of the three is idempotent and has one direction: `/collapse` never
-expands, and saying either one twice changes nothing.
+Calls always print one line each: there is no output policy to toggle, so
+`/collapse` and bare `/expand` are not commands. Only `/expand n|last` appends
+a call's output.
 
 ## Spacing
 
-A prompt echo, a tool group, prose and the outcome line (paused, stopped,
-error) are separate blocks with **one** blank row between them and never two.
+A prompt echo, a run of tool lines, prose and the outcome line (paused,
+stopped, error) are separate blocks with **one** blank row between them and
+never two. A reasoning-only step (empty assistant text between tool calls) is
+not prose: it does not split a run of calls with a blank row.
 The human's own words in the scrollback are cyan, so a long session can be
 scanned for what was asked. Cyan is the terminal's ANSI 6: a terminal whose
 palette remaps it light loses contrast on a light background. Change the
@@ -128,28 +129,20 @@ palette, not the transcript.
 A settled call is one dim line with a right-aligned verdict:
 `  $ cargo test            ✗ exit 101 · 4.1 KB` (no duration: the transcript
 is not a profiler). A failure is red, keeps its line and gains one dim tail
-line with the last output line. One or two calls in a group (a run of calls
-between two pieces of prose) keep one line each. A `bash` call's optional
-`description` (one line, <= 120 chars) is its head in every view; otherwise
-`$ <command>`. The command stays in the log.
-
-Three or more calls collapse into one checked line, and that line names what
-it does **not** stand in for:
+line with the last output line. A stopped call reads `⏹ cancelled`. A clean
+call shows only its output size — no `ok` word: the line and its dim weight
+already say it ran. Every call keeps its own line; there is no folding.
 
 ```
-  ✓ 2 calls · 1 failed · 1 stopped
-    $ cargo test                    ✗ exit 101 · 4.1 KB
+  $ cargo test                    ✗ exit 101 · 4.1 KB
     error[E0432]: unresolved import `foo`
-    $ sleep 20                      ⏹ cancelled
-    edit src/lib.rs                 ok · 1.2 KB
+  $ sleep 20                      ⏹ cancelled
+  edit src/lib.rs                   1.2 KB
 ```
 
-The checked count covers only cleanly finished calls the fold hides. A failure,
-a stopped call (Esc) and a file change keep their own line — a stopped call is
-never counted, and the count adds up (`2 calls · 1 failed · 1 stopped`), so a
-reader can trust it. `edit` (and any non-`bash` tool) never folds away: which
-file an agent touched is what a reader wants. With nothing cleanly finished
-there is no `✓` line. Prose is the only default-weight text.
+A `bash` call's optional `description` (one line, <= 120 chars) is its head in
+every view; otherwise `$ <command>`. The command stays in the log. Prose is
+the only default-weight text.
 
 ## Markdown
 

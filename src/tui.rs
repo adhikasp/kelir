@@ -48,7 +48,7 @@ use crate::theme::Theme;
 
 /// The editor prompt's width (`› `), which the cursor's column includes.
 pub const PROMPT_WIDTH: usize = 2;
-use crate::tools_view::{self, CallLine, Group, Policy};
+use crate::tools_view::{self, CallLine};
 
 /// Rows the inline viewport occupies: three live rows, the state row, three
 /// editor rows and the facts row.
@@ -500,8 +500,8 @@ struct Block {
 ///   a long fence, list or table streams into the scrollback instead of
 ///   becoming a three-row ticker (`S1b`), why the previous block's rows cannot
 ///   vanish while a later one streams (`S1`), and why prose can never be
-///   written before the tool lines that preceded it (`B1`: the group closes
-///   first).
+///   written before the tool lines that preceded it (`B1`: calls commit as
+///   they settle).
 /// - **A loose list item keeps its continuation inside it** (`S7`): a block that
 ///   a following, indented block continues is joined to it and rendered as one,
 ///   exactly as the one-shot render reads the same text.
@@ -736,10 +736,6 @@ pub struct App {
     /// The output tail view (Ctrl-O).
     pub tail: VecDeque<String>,
     pub show_tail: bool,
-    /// The open group of settled calls.
-    pub group: Group,
-    /// Whether settled calls print their output too.
-    pub policy: Policy,
     /// The session-wide call ordinal: what `/expand n` names.
     pub call_ordinal: u64,
     /// Every settled call of this session, by ordinal, for `/expand`.
@@ -798,8 +794,6 @@ impl App {
             stream: markdown::Stream::new(),
             tail: VecDeque::new(),
             show_tail: false,
-            group: Group::default(),
-            policy: Policy::default(),
             call_ordinal: 0,
             calls: HashMap::new(),
             turn_steps: 0,
@@ -882,8 +876,7 @@ impl App {
         &self.note
     }
 
-    /// The live rows: what is still open. With nothing streaming that is the
-    /// open tool group (below); otherwise it is the tail of the message — every
+    /// The live rows: the tail of the message — every
     /// row the streamed text has produced that is not in the scrollback yet,
     /// trimmed to the live area's height.
     pub fn live_view(&self) -> Vec<Row> {
@@ -908,18 +901,13 @@ impl App {
         rows
     }
 
-    /// The live area as ratatui lines: the open call group (when nothing is
-    /// streaming) or the tail of the streamed message.
+    /// The live area as ratatui lines: the tail of the streamed message.
     pub fn live_lines(&self) -> Vec<Line<'static>> {
         let theme = self.theme;
         let rows = self.live_view();
-        if !rows.is_empty() {
-            return rows
-                .iter()
-                .map(|row| row.line(theme, &NoHighlight))
-                .collect();
-        }
-        self.group.preview(theme, self.width, self.live_height())
+        rows.iter()
+            .map(|row| row.line(theme, &NoHighlight))
+            .collect()
     }
 
     /// Queue plain text for the scrollback (banner, notes, verb replies).
@@ -982,15 +970,15 @@ impl App {
         self.queue_rows(rows);
     }
 
-    /// Prose is starting: the tool group that preceded it closes, and the first
-    /// block of the message gets one blank row above it (the echo is its own
-    /// block, review N-echo).
-    fn begin_prose(&mut self) {
-        let closed = self.close_group();
-        if !self.committed_any() {
+    /// Prose is starting: the first block of the message gets one blank row
+    /// above it (the echo is its own block, review N-echo). An empty assistant
+    /// turn (a reasoning-only step between tool calls) is not prose: it must
+    /// not put a blank row into a run of calls.
+    fn begin_prose(&mut self, has_text: bool) {
+        if !has_text || !self.committed_any() {
             return;
         }
-        if closed || !self.committed_message {
+        if !self.committed_message {
             self.separate();
         }
     }
@@ -1069,17 +1057,6 @@ impl App {
         self.turn_tokens = 0;
     }
 
-    /// Close the open tool group, if any: its rows go to the scrollback.
-    /// Returns whether there was one.
-    fn close_group(&mut self) -> bool {
-        if self.group.is_empty() {
-            return false;
-        }
-        let lines = self.group.close(self.theme, self.width);
-        self.scroll.extend(lines);
-        true
-    }
-
     /// One blank row between two visual blocks, and never more than one (the
     /// design note's spacing rule, review N1): a prompt echo starts its own
     /// block, as does prose after tool lines. Nothing is written at the top of
@@ -1129,10 +1106,8 @@ impl App {
                 self.retry_deadline = None;
             }
             UiEvent::Paused { steps } => {
-                // A notice is prose: the calls that ran before it are finished
-                // history and go out first, or the notice lands between two
-                // tool lines of the group that came before it (`B1` again).
-                self.close_group();
+                // A notice is prose: the call lines that ran before it are
+                // already committed, in event order (`B1`).
                 self.status.phase = Phase::Paused;
                 self.status.running = 0;
                 self.status.turn_steps = steps;
@@ -1146,14 +1121,14 @@ impl App {
                 ));
             }
             UiEvent::Delta(text) => {
-                // Prose follows tool lines: the open group closes before the
-                // first row of it is queued, so the transcript's order is the
-                // order the events happened in (`B1`), with one blank row
-                // between the two blocks. A group of calls settled without
-                // prose between them stays open here, so consecutive calls
-                // still fold. (The stream was flushed when the call started:
-                // see `interrupt_prose`.)
-                self.begin_prose();
+                // Prose follows call lines: the first row of it gets one blank
+                // row above it, and the transcript's order is the order the
+                // events happened in (`B1`). An empty delta (a step whose only
+                // output was reasoning or a tool call) is not prose: seeing
+                // one between calls must not split them with a blank row.
+                // (The stream was flushed when the call started: see
+                // `interrupt_prose`.)
+                self.begin_prose(!text.trim().is_empty());
                 self.status.phase = Phase::Working;
                 self.activity.text(now, text.chars().count());
                 // Every closed block carries its own separator row
@@ -1181,9 +1156,10 @@ impl App {
                 self.turn_tokens += prompt + completion;
             }
             UiEvent::Assistant { text } => {
-                // The group closes first: its lines describe calls that ran
-                // before this message (`B1`).
-                self.begin_prose();
+                // A reasoning-only step ends with an empty assistant text: it
+                // is not prose and must not split a run of calls. Real text
+                // gets its blank row before the first block.
+                self.begin_prose(!text.trim().is_empty());
                 self.commit_live(&text);
             }
             UiEvent::ToolStarted { name, input } => {
@@ -1232,40 +1208,27 @@ impl App {
                 };
                 self.last_out = Some(out_path).filter(|path| !path.is_empty());
                 self.calls.insert(call.ordinal, call.clone());
-                match self.policy {
-                    Policy::Collapsed => self.group.push(call),
-                    Policy::Full => {
-                        // Every call prints its output block too.
-                        let mut lines = self.group.close(self.theme, self.width);
-                        lines.push(call.line(self.theme, self.width));
-                        if call.failed()
-                            && let Some(tail) = call.tail_line(self.theme, self.width)
-                        {
-                            lines.push(tail);
-                        }
-                        lines.extend(call.expanded(
-                            self.theme,
-                            self.width,
-                            &self.read_output(&call),
-                            tools_view::EXPAND_ROWS,
-                        ));
-                        self.scroll.extend(lines);
-                    }
+                // One dim line per call, the moment it settles: the
+                // transcript's order is the events' order. `/expand` appends a
+                // call's output later; the line itself is never folded away.
+                self.scroll.push(call.line(self.theme, self.width));
+                if call.failed()
+                    && let Some(tail) = call.tail_line(self.theme, self.width)
+                {
+                    self.scroll.push(tail);
                 }
             }
             UiEvent::Attachment { rel, bytes } => {
                 // An image that arrived at the tail is its own block: the row
                 // says where it went and how big it is, dimmed.
-                self.close_group();
                 self.push_lines(vec![Line::from(Span::styled(
                     format!("  view {rel} · {}", attachments::bytes_label(bytes)),
                     self.theme.dim(),
                 ))]);
             }
             UiEvent::Info(text) => {
-                // A notice is prose: what settled before it goes out first, or
-                // it lands between two tool lines of the older group (`B1`).
-                self.close_group();
+                // A notice is prose: the call lines before it are already out,
+                // in event order (`B1`).
                 // A wait's own line is the CLI's sentence, and in this pane
                 // `stop` typed is a `say` the model receives: the scrollback
                 // names the key that works here too (`R5`, the same rule the
@@ -1315,9 +1278,8 @@ impl App {
                 self.activity.retry_done(now);
             }
             UiEvent::Error(text) => {
-                // Same rule: what settled before the failure is written first,
+                // Same rule: what settled before the failure is already out,
                 // so the notice reads after the last tool line.
-                self.close_group();
                 self.status.phase = Phase::Error;
                 self.activity.failed(now, &one_line(&text));
                 self.push_text(&format!("kelir: {text}"));
@@ -1347,7 +1309,6 @@ impl App {
                 outcome,
                 final_text,
             } => {
-                self.close_group();
                 self.commit_live("");
                 self.activity.turn_ended(now, &outcome);
                 // A provider pause ends a retry wait, and the wait's own reason
@@ -1550,8 +1511,6 @@ impl App {
         text = self.absorb_image_paths(&text);
         match commands::parse(&text) {
             Ok(Parsed::Action(action)) => {
-                self.close_group();
-                self.group = Group::default();
                 // The echo starts a block of its own (spacing rule).
                 self.separate();
                 match &action {
@@ -1564,11 +1523,7 @@ impl App {
             }
             Ok(Parsed::Note(note)) => self.push_text(&note),
             Ok(Parsed::View(view)) => match view {
-                commands::View::Full => self.set_policy(Policy::Full),
                 commands::View::Expand(ordinal) => self.expand(ordinal),
-                // A command named `/collapse` collapses; it never expands
-                // (`S6`). Applying it twice changes nothing.
-                commands::View::Collapse => self.set_policy(Policy::Collapsed),
             },
             Err(message) => {
                 if !message.is_empty() {
@@ -1700,13 +1655,6 @@ impl App {
         let lines = call.expanded(self.theme, self.width, &text, tools_view::EXPAND_ROWS);
         self.scroll.extend(lines);
         self.push_text("  (a committed line cannot unfold: /expand appends the output instead)");
-    }
-
-    /// `/collapse` and `/expand`: the policy for *future* calls. A committed
-    /// line stays as it is.
-    pub fn set_policy(&mut self, policy: Policy) {
-        self.policy = policy;
-        self.push_text(&format!("» tool output: {}", policy.word()));
     }
 
     /// Advance the spinner while a working state lasts. Returns whether a
@@ -2937,7 +2885,7 @@ mod tests {
             "event order, not paragraph order: {rows:?}"
         );
 
-        // Calls between two prose blocks, then a fold: still ordered.
+        // Several calls between two prose blocks: every line stays, in order.
         let mut app = app_of_width(80);
         for c in ["a", "b", "c"] {
             app.apply(tool_settled(c));
@@ -2947,9 +2895,10 @@ mod tests {
             text: "Done.".into(),
         });
         let rows: Vec<String> = app.take_scroll().iter().map(line_text).collect();
-        let fold = rows.iter().position(|r| r.contains("3 calls")).unwrap();
+        let last_call = rows.iter().rposition(|r| r.contains("$ c")).unwrap();
         let prose = rows.iter().position(|r| r.contains("Done.")).unwrap();
-        assert!(fold < prose, "{rows:?}");
+        assert!(last_call < prose, "{rows:?}");
+        assert!(!rows.iter().any(|r| r.contains("3 calls")), "{rows:?}");
     }
 
     /// The spacing rules hold across a *paint*, not only inside one buffer
@@ -3160,9 +3109,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_calls_are_one_dim_line_each_and_three_fold_when_the_group_closes() {
+    fn every_tool_call_commits_its_own_line_immediately() {
         let mut app = app_of_width(80);
-        for i in 0..2 {
+        for i in 0..3 {
             app.apply(UiEvent::ToolSettled {
                 name: "bash".into(),
                 input: json!({"command": format!("cmd{i}")}),
@@ -3176,33 +3125,37 @@ mod tests {
                 tail: String::new(),
             });
         }
-        // The open group lives in the live area until it closes; nothing is
-        // committed yet.
-        assert!(app.take_scroll().is_empty());
-        let live: Vec<String> = app.live_lines().iter().map(line_text).collect();
-        assert!(
-            live.iter().any(|row| row.contains("$ cmd0")),
-            "the open group is visible: {live:?}"
-        );
-        // The third call and a prose start close the group as a fold.
-        app.apply(UiEvent::ToolSettled {
-            name: "bash".into(),
-            input: json!({"command": "cmd2"}),
-            outcome: "ok".into(),
-            exit_code: Some(0),
-            elapsed_ms: 100,
-            bytes: 10,
-            lines: 1,
-            spilled: false,
-            out_path: String::new(),
-            tail: String::new(),
-        });
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert!(texts[0].contains("$ cmd0"), "{texts:?}");
+        assert!(texts[1].contains("$ cmd1"), "{texts:?}");
+        assert!(texts[2].contains("$ cmd2"), "{texts:?}");
+        assert!(!texts.iter().any(|r| r.contains("calls")), "{texts:?}");
+        assert!(!texts.iter().any(|r| r.contains(" ok")), "{texts:?}");
+    }
+
+    /// A step whose model message is empty — it only thought, then called a
+    /// tool — is not prose. The two calls stay one contiguous block: no blank
+    /// row, no split in the transcript.
+    #[test]
+    fn calls_interleaved_with_empty_assistant_text_stay_contiguous() {
+        let mut app = app_of_width(80);
+        app.apply(tool_settled("first"));
+        app.apply(UiEvent::Delta(String::new()));
         app.apply(UiEvent::Assistant {
-            text: "done".into(),
+            text: String::new(),
         });
-        let rows = app.take_scroll();
-        let texts: Vec<String> = rows.iter().map(line_text).collect();
-        assert!(texts.iter().any(|row| row.contains("3 calls")), "{texts:?}");
+        app.apply(tool_settled("second"));
+        app.apply(UiEvent::Delta("  ".into()));
+        app.apply(UiEvent::Assistant { text: "  ".into() });
+        app.apply(tool_settled("third"));
+        let rows: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        let first = rows.iter().position(|r| r.contains("$ first")).unwrap();
+        let second = rows.iter().position(|r| r.contains("$ second")).unwrap();
+        let third = rows.iter().position(|r| r.contains("$ third")).unwrap();
+        assert!(rows[first + 1].contains("$ second"), "{rows:?}");
+        assert!(rows[second + 1].contains("$ third"), "{rows:?}");
+        assert!(first < second && second < third, "{rows:?}");
     }
 
     #[test]
@@ -3242,7 +3195,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_appends_output_and_the_two_commands_set_the_policy_each_in_one_direction() {
+    fn expand_appends_only_with_an_ordinal_and_bad_ordinals_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out");
         std::fs::write(&out, "line one\nline two\n").unwrap();
@@ -3278,23 +3231,13 @@ mod tests {
             texts.iter().any(|row| row.contains("no call #9")),
             "{texts:?}"
         );
-        // The policy changes what future calls do, and each command has one
-        // direction: `/expand` never collapses and `/collapse` never expands,
-        // however often either is said (S6).
-        app.set_policy(Policy::Full);
-        assert_eq!(app.policy, Policy::Full);
-        app.submit("/expand");
-        assert_eq!(app.policy, Policy::Full);
-        app.submit("/collapse");
-        assert_eq!(app.policy, Policy::Collapsed);
-        app.submit("/collapse");
-        assert_eq!(app.policy, Policy::Collapsed, "idempotent");
-        app.submit("/expand");
-        assert_eq!(app.policy, Policy::Full, "and it does expand");
-        app.submit("/expand");
-        assert_eq!(app.policy, Policy::Full, "idempotent the other way");
-        app.submit("/expand last");
-        assert_eq!(app.policy, Policy::Full, "naming a call only appends");
+        // `/expand` with no ordinal is no longer a command; only an ordinal
+        // (or `last`) appends output, and a bad one is refused.
+        let texts: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+        assert!(
+            !texts.iter().any(|r| r.contains("one line per call")),
+            "{texts:?}"
+        );
     }
 
     #[test]

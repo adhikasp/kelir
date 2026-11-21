@@ -122,6 +122,4 @@ built-in reference.
 
 ## License
 
-The license is pending the maintainer's choice between MIT and Apache-2.0.
-Both texts are present as `LICENSE-MIT` and `LICENSE-APACHE`; exactly one will
-be selected before publication. See `docs/PUBLISH.md`.
+MIT. See [LICENSE-MIT](LICENSE-MIT).
