@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::cli::{ResumeArgs as ResumeCliArgs, RunArgs as RunCliArgs};
@@ -327,25 +328,25 @@ impl Spool {
         crate::paths::create_private_dir(&dir)
             .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
         let path = dir.join(format!("{server}.jsonl"));
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let text = std::fs::read(&path).unwrap_or_default();
         let mut seen = BTreeSet::new();
         let mut done = BTreeSet::new();
         let mut pending = Vec::new();
         let mut seq = 0u64;
-        let mut good = String::new();
-        for line in text.lines() {
-            if line.len() > MAX_SPOOL_LINE {
+        let mut good: Vec<u8> = Vec::new();
+        for line in text.split(|byte| *byte == b'\n') {
+            if line.is_empty() || line.len() > MAX_SPOOL_LINE {
                 break;
             }
-            let Ok(record) = serde_json::from_str::<Record>(line) else {
+            let Ok(record) = serde_json::from_slice::<Record>(line) else {
                 break;
             };
             if record.seq != seq + 1 {
                 break;
             }
             seq = record.seq;
-            good.push_str(line);
-            good.push('\n');
+            good.extend_from_slice(line);
+            good.push(b'\n');
             match record.op.as_str() {
                 "inbound" => {
                     if let Some(message) = record.message.clone()
@@ -357,6 +358,8 @@ impl Spool {
                 "claimed" | "compacted" => {}
                 "done" => {
                     done.insert(record.id.clone());
+                    // A compacted spool keeps only `done`: the id is still seen.
+                    seen.insert(record.id.clone());
                     pending.retain(|message| message.id != record.id);
                 }
                 _ => break,
@@ -526,9 +529,13 @@ impl Spool {
 /// permission-relay capability would be a lie to the bridge.
 pub fn forbidden_capability(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
-    FORBIDDEN_CAPABILITIES
-        .iter()
-        .any(|forbidden| lower == *forbidden || lower.starts_with(&format!("{forbidden}/")))
+    // Any spelling of a permission/approval relay: match on the words, not an
+    // exact path, so `permission_relay` or `permission/relay` cannot slip by.
+    lower.contains("permission")
+        || lower.contains("approval")
+        || FORBIDDEN_CAPABILITIES
+            .iter()
+            .any(|forbidden| lower == *forbidden || lower.starts_with(&format!("{forbidden}/")))
 }
 
 /// Capabilities a channel server declared in `mcp.toml`, or the default. A
@@ -579,7 +586,7 @@ pub struct Status {
 
 /// Read the channel status file written by the running `kelir channel` process.
 pub fn read_status(state: &Path) -> Option<Status> {
-    let path = state.join("channel-status.json");
+    let path = state.join("channel-status").join("status.json");
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -616,18 +623,19 @@ pub fn outcome(events: &[crate::event::LogEvent]) -> Outcome {
             other => Outcome::Failed(format!("turn {other}: {text}")),
         };
     }
-    let denied = events.iter().rev().find_map(|event| {
-        if let crate::event::EventBody::Gate {
-            decision, reason, ..
-        } = &event.body
-            && decision == "deny"
-        {
-            Some(reason.clone())
-        } else {
-            None
+    // No `turn_ended`: a gate deny counts only when no `user` event follows
+    // it. A deny logged before the newest user event belongs to an earlier
+    // turn of this resumed session and must not colour this one.
+    for event in events.iter().rev() {
+        match &event.body {
+            crate::event::EventBody::User { .. } => break,
+            crate::event::EventBody::Gate {
+                decision, reason, ..
+            } if decision == "deny" => return Outcome::Gated(reason.clone()),
+            _ => {}
         }
-    });
-    Outcome::Gated(denied.unwrap_or_default())
+    }
+    Outcome::Failed("turn did not finish".into())
 }
 
 /// Rewrite `/stop` in a channel message to the `stop` verb, for the envelope
@@ -736,7 +744,7 @@ pub async fn reply(
         "conversation_id": message.conversation,
         "text": text,
         "message_id": message.id,
-        "reply_to": message.id,
+        "reply_to": message.reply_to.as_deref().unwrap_or(&message.id),
     });
     let output = broker
         .call(
@@ -770,7 +778,6 @@ pub async fn turn_done(broker: &Broker, server: &str, conversation: &str) {
 /// The work item kept after handing a message to a session.
 #[derive(Debug, Clone)]
 struct Active {
-    message: Message,
     session: String,
     start_seq: u64,
 }
@@ -794,9 +801,8 @@ fn reply_tool(broker: &Broker, server: &str) -> String {
 /// untrusted-data envelope (never a session verb).
 async fn start_turn(
     common: &crate::cli::CommonArgs,
-    active: &mut BTreeMap<String, Active>,
     message: Message,
-) -> Result<(), String> {
+) -> Result<Option<Active>, String> {
     let name = message.session_name();
     // A channel conversation is a named session (M9), but its task is a
     // remote user message, not a job's: `from: channel` on the user event and
@@ -806,9 +812,6 @@ async fn start_turn(
         crate::names::Target::Resume(id) => (id, true),
         crate::names::Target::New(id) => (id, false),
     };
-    if !resume {
-        crate::jobs::set_next_id(session.clone());
-    }
     let dir = crate::paths::session_dir(&session);
     // `/stop` from chat maps to the `stop` verb (never a prompt): only the
     // session's own token, read from its dir, authorises it (STEER-7).
@@ -829,7 +832,7 @@ async fn start_turn(
             crate::child::FOREGROUND_WAIT,
         )
         .await;
-        return Ok(());
+        return Ok(None);
     }
     let start_seq = crate::event::read_events(&dir.join("events.jsonl"))
         .map(|read| read.events.len() as u64)
@@ -839,6 +842,7 @@ async fn start_turn(
     if !pointers.is_empty() {
         text.push_str(&format!("\n[attachments {}]\n", pointers.join(" ")));
     }
+    let started = session.clone();
     let code = if resume {
         crate::session::resume(ResumeCliArgs {
             common: common.clone(),
@@ -849,7 +853,7 @@ async fn start_turn(
         })
         .await
     } else {
-        crate::session::run(RunCliArgs {
+        let task = RunCliArgs {
             common: common.clone(),
             task: vec![text],
             json: false,
@@ -857,22 +861,17 @@ async fn start_turn(
             resume: None,
             child: false,
             background: false,
-            name: Some(name),
-        })
-        .await
+            // No `name`: that installs the process-wide plan, which only one
+            // run per process may do. The name is already bound above and the
+            // id travels in the turn's own task-local slot.
+            name: None,
+        };
+        crate::jobs::with_next_id(started, crate::session::run(task)).await
     };
     if code != 0 {
         return Err(format!("session {session} exited {code}"));
     }
-    active.insert(
-        message.conversation.clone(),
-        Active {
-            message,
-            session,
-            start_seq,
-        },
-    );
-    Ok(())
+    Ok(Some(Active { session, start_seq }))
 }
 
 /// Read the events appended by the turn that just ended.
@@ -1042,96 +1041,161 @@ fn write_status(state: &Path, status: &Status) {
     let _ = crate::atomic::write_atomic(&dir.join("status.json"), &bytes);
 }
 
-/// Translate one inbound message into spool records, an optional session turn
-/// and exactly one reply/fallback. `claimed` is written before the session
-/// starts; `done` is written after the reply. A crash between the reply and
-/// `done` replays the message, but the reply tool is idempotent by message id.
-struct ProcessCtx<'a> {
-    common: &'a crate::cli::CommonArgs,
-    broker: &'a Broker,
-    cfg: &'a Config,
-    state: &'a Path,
-    spools: &'a mut BTreeMap<String, Spool>,
-    active: &'a mut BTreeMap<String, Active>,
-    counters: &'a mut Counters,
-    herdr: &'a mut Option<crate::herdr::Herdr>,
+/// Everything the concurrent turns share. One thread (a `LocalSet`), so plain
+/// `RefCell`s; no borrow is ever held across an `.await`.
+struct Shared {
+    common: crate::cli::CommonArgs,
+    broker: Broker,
+    cfg: Config,
+    state: PathBuf,
+    spools: std::cell::RefCell<BTreeMap<String, Spool>>,
+    counters: std::cell::RefCell<Counters>,
+    herdr: std::cell::RefCell<Option<crate::herdr::Herdr>>,
+    dispatcher: std::cell::RefCell<Dispatcher>,
+    inflight: std::cell::Cell<usize>,
 }
 
-async fn process(message: Message, ctx: &mut ProcessCtx<'_>) {
-    let ProcessCtx {
-        common,
-        broker,
-        cfg,
-        state,
-        spools,
-        active,
-        counters,
-        herdr,
-    } = ctx;
+impl Shared {
+    fn snapshot(&self) -> Status {
+        let dispatcher = self.dispatcher.borrow();
+        let counters = self.counters.borrow();
+        Status {
+            conversations: dispatcher.size(),
+            queue_depth: dispatcher.queued(),
+            active: dispatcher.active(),
+            spool_backlog: self
+                .spools
+                .borrow()
+                .iter()
+                .map(|(server, spool)| (server.clone(), spool.replay().len()))
+                .collect(),
+            replies: counters.replies,
+            fallbacks: counters.fallbacks,
+            runtime: "channel".into(),
+        }
+    }
 
+    fn report(&self, state: crate::herdr::State) {
+        if let Some(writer) = self.herdr.borrow_mut().as_mut() {
+            writer.report(state);
+        }
+    }
+}
+
+/// The text of the one fallback reply. A configured text wins for every case;
+/// the default text is refined so a policy block, a pause and a timeout read
+/// differently from a provider failure.
+fn fallback_text(cfg: &Config, outcome: &Outcome) -> String {
+    if cfg.fallback != DEFAULT_FALLBACK {
+        return cfg.fallback.clone();
+    }
+    match outcome {
+        Outcome::Gated(_) => GATED_FALLBACK.into(),
+        Outcome::Failed(reason) if reason.starts_with("turn paused") => PAUSED_FALLBACK.into(),
+        Outcome::Failed(reason)
+            if reason.starts_with("turn timeout") || reason.starts_with("turn timed") =>
+        {
+            TIMEOUT_FALLBACK.into()
+        }
+        _ => DEFAULT_FALLBACK.into(),
+    }
+}
+
+/// One inbound message: `claimed`, a turn, one reply, then `done` (always,
+/// including a handled `/stop`). A crash between the reply and `done` replays
+/// the message, and the reply tool is idempotent by message id. The dispatcher
+/// slot is freed here whatever happens.
+async fn process(message: Message, shared: Rc<Shared>) {
+    let conversation = message.conversation.clone();
+    process_turn(message, &shared).await;
+    shared.dispatcher.borrow_mut().finish(&conversation);
+    if shared.dispatcher.borrow().active() == 0 {
+        shared.report(crate::herdr::State::Idle);
+    }
+    write_status(&shared.state, &shared.snapshot());
+}
+
+async fn process_turn(message: Message, shared: &Shared) {
     let server = message.server.clone();
-    let tool = reply_tool(broker, &server);
-    let Some(spool) = spools.get_mut(&server) else {
-        return;
-    };
-    if let Err(error) = spool.claim(&message.id) {
-        eprintln!("kelir channel: spool claim: {error}");
-        return;
+    let tool = reply_tool(&shared.broker, &server);
+    {
+        let mut spools = shared.spools.borrow_mut();
+        let Some(spool) = spools.get_mut(&server) else {
+            return;
+        };
+        if let Err(error) = spool.claim(&message.id) {
+            eprintln!("kelir channel: spool claim: {error}");
+            return;
+        }
     }
-    if let Some(writer) = herdr.as_mut() {
-        writer.report(crate::herdr::State::Working);
-    }
-    let turn = start_turn(common, active, message.clone()).await;
+    shared.report(crate::herdr::State::Working);
+    let turn = start_turn(&shared.common, message.clone()).await;
     let final_outcome = match &turn {
         Err(error) => Outcome::Failed(error.clone()),
-        Ok(()) if stop_command(&message.text).is_some() => Outcome::Done("stopped".into()),
-        Ok(()) => {
-            if let Some(item) = active.get(&message.conversation) {
-                let events = turn_events(item);
-                outcome(&events)
-            } else {
-                Outcome::Failed("turn did not start".into())
-            }
-        }
+        Ok(None) => Outcome::Done("stopped".into()),
+        Ok(Some(item)) => outcome(&turn_events(item)),
     };
-    let conversation = message.conversation.clone();
     let text = match &final_outcome {
         Outcome::Done(text) => text.clone(),
-        Outcome::Gated(_) => cfg.fallback.clone(),
-        Outcome::Failed(_reason) => cfg.fallback.clone(),
+        other => fallback_text(&shared.cfg, other),
     };
-    let sent = reply(broker, &server, &tool, &message, &text).await;
+    let sent = reply(&shared.broker, &server, &tool, &message, &text).await;
     match sent {
-        Ok(()) => counters.replies += 1,
+        Ok(()) => shared.counters.borrow_mut().replies += 1,
         Err(error) => {
-            counters.fallbacks += 1;
+            shared.counters.borrow_mut().fallbacks += 1;
             eprintln!("kelir channel: {error}");
         }
     }
-    turn_done(broker, &server, &conversation).await;
-    if let Some(item) = active.remove(&conversation) {
-        let mut spool = spools
-            .remove(&server)
-            .unwrap_or_else(|| Spool::open(state, &server).expect("open spool for finalize"));
-        if let Err(error) = spool.done(&item.message.id) {
+    turn_done(&shared.broker, &server, &message.conversation).await;
+    let mut spools = shared.spools.borrow_mut();
+    if let Some(spool) = spools.get_mut(&server) {
+        if let Err(error) = spool.done(&message.id) {
             eprintln!("kelir channel: spool done: {error}");
         }
-        if let Ok(true) = spool.compact(cfg.spool_limit, &crate::event::now_ts()) {
-            // The compaction rewrite is durable; the file handle still points
-            // at the same path but the offset must follow the new file.
-            spool = Spool::open(state, &server).unwrap_or(spool);
+        if let Ok(true) = spool.compact(shared.cfg.spool_limit, &crate::event::now_ts())
+            && let Ok(fresh) = Spool::open(&shared.state, &server)
+        {
+            // The compaction rewrite is durable; reopen so the handle follows
+            // the new file.
+            *spool = fresh;
         }
-        spools.insert(server.clone(), spool);
-    }
-    if active.is_empty()
-        && let Some(writer) = herdr.as_mut()
-    {
-        writer.report(crate::herdr::State::Idle);
     }
 }
 
 /// `kelir channel`: run all configured channel servers until interrupted.
 pub async fn run(args: crate::cli::ChannelArgs) -> u8 {
+    // Turns run concurrently on one thread (their futures are not `Send`), hence
+    // a `LocalSet`. Whole sessions are polled inline there, so that thread gets
+    // a big stack of its own instead of the process's main thread.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("kelir-channel".into())
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            let code = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(16 * 1024 * 1024)
+                .build()
+            {
+                Ok(runtime) => {
+                    runtime.block_on(tokio::task::LocalSet::new().run_until(drive(args)))
+                }
+                Err(error) => {
+                    eprintln!("kelir channel: cannot start the runtime: {error}");
+                    1
+                }
+            };
+            let _ = tx.send(code);
+        });
+    if let Err(error) = spawned {
+        eprintln!("kelir channel: cannot start the driver thread: {error}");
+        return 1;
+    }
+    rx.await.unwrap_or(1)
+}
+
+async fn drive(args: crate::cli::ChannelArgs) -> u8 {
     crate::signals::install();
     let cfg = match crate::config::load(args.common.config.as_deref()) {
         Ok(cfg) => cfg,
@@ -1205,15 +1269,24 @@ pub async fn run(args: crate::cli::ChannelArgs) -> u8 {
             );
         }
     }
-    let mut counters = Counters::default();
-    let mut active: BTreeMap<String, Active> = BTreeMap::new();
-    let mut dispatcher = Dispatcher::new(cfg.channel.max_active);
+    let shared = Rc::new(Shared {
+        common: args.common.clone(),
+        broker: broker.clone(),
+        dispatcher: std::cell::RefCell::new(Dispatcher::new(cfg.channel.max_active)),
+        cfg: cfg.channel.clone(),
+        state: state.clone(),
+        spools: std::cell::RefCell::new(spools),
+        counters: std::cell::RefCell::new(Counters::default()),
+        herdr: std::cell::RefCell::new(herdr),
+        inflight: std::cell::Cell::new(0),
+    });
     let mut limits = RateLimits::new(
         cfg.channel.per_conversation_rpm,
         cfg.channel.global_rpm,
         Duration::from_secs(60),
     );
     let mut answered = 0u32;
+    let mut logged_drops: BTreeSet<String> = BTreeSet::new();
     let mut checked = tokio::time::interval(Duration::from_millis(100));
     let status = Status {
         runtime: "channel".into(),
@@ -1231,16 +1304,15 @@ pub async fn run(args: crate::cli::ChannelArgs) -> u8 {
                     Ok(message) => message,
                     Err(Drop::Other) => continue,
                     Err(reason) => {
-                        // One line per dropped shape, never the payload: a
-                        // bridge can send text containing secrets or control
-                        // characters (STEER-7).
-                        eprintln!("kelir channel: {MALFORMED_NOTE} ({reason:?})");
+                        // Once per dropped shape, never the payload: a bridge
+                        // can send text containing secrets (STEER-7).
+                        if logged_drops.insert(format!("{reason:?}")) {
+                            eprintln!("kelir channel: {MALFORMED_NOTE} ({reason:?})");
+                        }
                         continue;
                     }
                 };
-                if !spools.contains_key(&message.server) {
-                    continue;
-                }
+                let mut spools = shared.spools.borrow_mut();
                 let Some(spool) = spools.get_mut(&message.server) else { continue };
                 match spool.inbound(message.clone()) {
                     Ok(true) => {}
@@ -1250,77 +1322,59 @@ pub async fn run(args: crate::cli::ChannelArgs) -> u8 {
                         continue;
                     }
                 }
-                if !limits.allow(&message.conversation) || !dispatcher.push(message) {
-                    // Rate-limited and busy messages stay in the spool and are
-                    // retried by the tick below, never answered in parallel.
+                drop(spools);
+                // Rate-limited messages stay in the spool and are retried by
+                // the replay below, never answered in parallel.
+                if limits.allow(&message.conversation) {
+                    shared.dispatcher.borrow_mut().push(message);
                 }
             }
             _ = checked.tick() => {}
             _ = crate::signals::interrupted() => break,
         }
-        // Replay unfinished messages, then drain what the limiter allows.
-        let mut pending: Vec<Message> = spools
+        // Replay unfinished messages, then start what the caps allow.
+        let mut pending: Vec<Message> = shared
+            .spools
+            .borrow()
             .values()
             .flat_map(|spool| spool.replay().iter().cloned())
             .collect();
         pending.sort_by(|a, b| a.id.cmp(&b.id));
-        for message in pending {
-            let entry = dispatcher
-                .conversations
-                .entry(message.conversation.clone())
-                .or_default();
-            if entry.running || entry.queue.contains(&message) {
-                continue;
+        {
+            let mut dispatcher = shared.dispatcher.borrow_mut();
+            for message in pending {
+                let entry = dispatcher
+                    .conversations
+                    .entry(message.conversation.clone())
+                    .or_default();
+                if entry.running || entry.queue.contains(&message) {
+                    continue;
+                }
+                if !limits.allow(&message.conversation) {
+                    continue;
+                }
+                entry.queue.push_back(message);
             }
-            if !limits.allow(&message.conversation) {
-                continue;
-            }
-            entry.queue.push_back(message);
         }
-        while let Some(message) = dispatcher.take_next() {
-            if args.max_messages.is_some_and(|max| answered >= max) {
+        while !args.max_messages.is_some_and(|max| answered >= max) {
+            let Some(message) = shared.dispatcher.borrow_mut().take_next() else {
                 break;
-            }
+            };
             answered += 1;
-            let conversation = message.conversation.clone();
-            process(
-                message,
-                &mut ProcessCtx {
-                    common: &args.common,
-                    broker: &broker,
-                    cfg: &cfg.channel,
-                    state: &state,
-                    spools: &mut spools,
-                    active: &mut active,
-                    counters: &mut counters,
-                    herdr: &mut herdr,
-                },
-            )
-            .await;
-            dispatcher.finish(&conversation);
-            write_status(
-                &state,
-                &Status {
-                    conversations: dispatcher.size(),
-                    queue_depth: dispatcher.queued(),
-                    active: dispatcher.active(),
-                    spool_backlog: spools
-                        .iter()
-                        .map(|(server, spool)| (server.clone(), spool.replay().len()))
-                        .collect(),
-                    replies: counters.replies,
-                    fallbacks: counters.fallbacks,
-                    runtime: "channel".into(),
-                },
-            );
-            if args.max_messages.is_some_and(|max| answered >= max) {
-                return 0;
-            }
+            shared.inflight.set(shared.inflight.get() + 1);
+            let task_shared = shared.clone();
+            tokio::task::spawn_local(async move {
+                process(message, task_shared.clone()).await;
+                task_shared
+                    .inflight
+                    .set(task_shared.inflight.get().saturating_sub(1));
+            });
+        }
+        if args.max_messages.is_some_and(|max| answered >= max) && shared.inflight.get() == 0 {
+            return 0;
         }
     }
-    if let Some(writer) = herdr.as_mut() {
-        writer.report(crate::herdr::State::Idle);
-    }
+    shared.report(crate::herdr::State::Idle);
     0
 }
 
@@ -1581,6 +1635,52 @@ mod tests {
         again.inbound(message("next")).unwrap();
         let again = Spool::open(&dir, "demo").unwrap();
         assert_eq!(again.replay().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fallback_text_names_the_cause_unless_configured() {
+        let mut cfg = Config {
+            max_active: 4,
+            per_conversation_rpm: 20,
+            global_rpm: 120,
+            fallback: DEFAULT_FALLBACK.into(),
+            spool_limit: 1,
+        };
+        assert_eq!(
+            fallback_text(&cfg, &Outcome::Gated(String::new())),
+            GATED_FALLBACK
+        );
+        assert_eq!(
+            fallback_text(&cfg, &Outcome::Failed("turn paused: x".into())),
+            PAUSED_FALLBACK
+        );
+        assert_eq!(
+            fallback_text(&cfg, &Outcome::Failed("turn timeout: x".into())),
+            TIMEOUT_FALLBACK
+        );
+        cfg.fallback = "custom".into();
+        assert_eq!(
+            fallback_text(&cfg, &Outcome::Gated(String::new())),
+            "custom"
+        );
+    }
+
+    #[test]
+    fn a_torn_tail_states_survive_and_a_compacted_id_stays_deduped_across_restarts() {
+        let dir = temp("states");
+        let mut spool = Spool::open(&dir, "demo").unwrap();
+        spool.inbound(message("a")).unwrap(); // killed after the spool write
+        spool.inbound(message("b")).unwrap();
+        spool.claim("b").unwrap(); // killed mid-turn
+        spool.inbound(message("c")).unwrap();
+        spool.claim("c").unwrap();
+        spool.done("c").unwrap(); // killed after the reply and done
+        drop(spool);
+        let spool = Spool::open(&dir, "demo").unwrap();
+        let ids: Vec<&str> = spool.replay().iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(spool.is_done("c"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

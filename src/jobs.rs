@@ -70,18 +70,26 @@ static PLAN: OnceLock<Plan> = OnceLock::new();
 /// chat user, not a job. Set once by `kelir channel`; a CLI run never sets it.
 static CHANNEL_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether this process is `kelir channel`.
+pub fn channel_mode() -> bool {
+    CHANNEL_MODE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub fn set_channel_mode() {
     CHANNEL_MODE.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// The id of the next session a channel turn starts. Sessions in the channel
-/// driver run one at a time, so a single slot is enough; `planned_id` takes it.
-static NEXT_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+tokio::task_local! {
+    /// The id of the session a channel turn is starting, scoped to that turn's
+    /// task so concurrent conversations cannot take each other's id.
+    static NEXT_ID: std::cell::RefCell<Option<String>>;
+}
 
-pub fn set_next_id(id: String) {
-    if let Ok(mut slot) = NEXT_ID.lock() {
-        *slot = Some(id);
-    }
+/// Run `future` (a session start) with `id` as the id `planned_id` hands out.
+pub async fn with_next_id<F: std::future::Future>(id: String, future: F) -> F::Output {
+    NEXT_ID
+        .scope(std::cell::RefCell::new(Some(id)), future)
+        .await
 }
 
 /// Install the plan. `false` if one was installed already (one run per process).
@@ -98,7 +106,10 @@ pub fn planned_id() -> Option<String> {
     if let Some(id) = plan().and_then(|plan| plan.planned_id.clone()) {
         return Some(id);
     }
-    NEXT_ID.lock().ok().and_then(|mut slot| slot.take())
+    NEXT_ID
+        .try_with(|slot| slot.borrow_mut().take())
+        .ok()
+        .flatten()
 }
 
 /// The run was stopped by its deadline.

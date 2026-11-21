@@ -16,14 +16,16 @@ credentials and infrastructure. No token or path to one is stored in this repo.
 
 At session start the channel server is connected and `initialize` declares the
 capabilities in `[servers.<name>] declare_capabilities` (default
-`claude/channel`). Permission-relay capabilities are refused: kelir has no
-approvals. Inbound messages arrive as `notifications/claude/channel` with
+`claude/channel`). Any capability whose name contains `permission` or
+`approval` (any case, any separator) is refused in `mcp.toml` and filtered at
+`initialize`: kelir has no approvals. Inbound messages arrive as `notifications/claude/channel` with
 `message_id`, `conversation_id`, `sender`, `content`/`text`, optional
 `attachments` and `reply_to`. Unknown, malformed and oversized notifications
-are dropped and logged once — never echoed into a file or a log verbatim.
+are dropped and logged once per shape — never echoed into a file or a log verbatim.
 
 The answer is one tool call on the same server (`reply_tool`, default `reply`)
-with `conversation_id`, `text`, `message_id` and `reply_to`; a bridge that
+with `conversation_id`, `text`, `message_id` and `reply_to` (the inbound
+message's `reply_to` when it had one, else its own `message_id`); a bridge that
 supports idempotency keys should use `message_id` so a replay cannot send twice.
 When a turn ends kelir sends `notifications/claude/channel/turn_done` so a
 typing indicator stops. `/stop` in a chat message maps to the `stop` verb and is
@@ -36,7 +38,7 @@ anything else happens to it. Records are append-only: `inbound`, `claimed`,
 `done`. A restart replays unfinished messages, deduped by message id; a turn
 whose user event was already logged is not re-run. The file is compacted when it
 passes `channel_spool_limit`, keeping unfinished messages and one `done` record
-per id. A torn tail is repaired on open and kept beside the spool.
+per id; a `done` id stays deduped after compaction and restart. A torn tail is repaired on open and kept beside the spool.
 
 ## Trust
 

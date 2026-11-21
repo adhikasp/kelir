@@ -243,3 +243,24 @@ available: the Go path was not live-verified (unchanged from prior milestones).
 - `scripts/live/m10_review_channel.sh` — Herdr live-drive script.
 
 All commits are `M10-review: …` with explicit paths; no product code touched.
+
+## Fix status (m10fix)
+
+All 7 blockers and 4 should-fix addressed on `job/m10fix`; the 10 failing reviewer
+tests in `tests/review_m10.rs` now pass unchanged.
+
+- B1 fixed: spool opens as bytes, torn UTF-8 tail cut and kept in `.torn`.
+- B2 fixed: a `done` record also marks the id seen, so a compacted id is still deduped.
+- B3 fixed: `forbidden_capability` refuses any name containing `permission`/`approval`.
+- B4 fixed: turns run concurrently up to `max_active` (LocalSet on a large-stack thread).
+  This also fixed a latent bug the review did not name: every `run --name` installed the
+  process-wide plan, so a second NEW conversation in one process failed.
+- B5 fixed: `done` is written for every processed message, including `/stop`.
+- B6 fixed: reply uses the message's `reply_to`, else its id.
+- B7 fixed: a gate deny followed by a later `user` event is not the outcome of that turn.
+- S1 fixed: `read_status` reads `channel-status/status.json`.
+- S2 fixed: default fallback text is chosen per cause; a configured text wins.
+- S3 fixed: a malformed shape is logged once.
+- S4 partly: spool-state kill tests added (after write / mid-turn / after done); an
+  automated kill -9 of the driver at each of the five points is still open (DEVIATIONS).
+- N1/N2: orchestrator items, unchanged.
