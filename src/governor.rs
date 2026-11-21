@@ -217,7 +217,16 @@ mod tests {
         assert!(governor.try_acquire().is_none(), "the fourth must wait");
         drop(held);
         assert_eq!(governor.slots(), 3);
-        assert!(governor.try_acquire().is_some());
+        // macOS can still report the just-released flocks as held briefly.
+        let mut again = None;
+        for _ in 0..50 {
+            again = governor.try_acquire();
+            if again.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(again.is_some(), "a slot must be free after drop");
     }
 
     #[test]
