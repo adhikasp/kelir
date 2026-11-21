@@ -127,7 +127,7 @@ pub mod reap {
 
     /// Kill the gate's descendants (by parent links) and every process that
     /// carries the run's token in its environment, until none is left. The
-    /// token scan reads `/proc` on Linux and one `ps axww -e` on macOS; on
+    /// token scan reads `/proc` on Linux and one `ps axww -E` on macOS; on
     /// other Unix systems the caller only signals the process group. No
     /// process outside the tree (and never this one) is signalled.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -209,14 +209,14 @@ pub mod reap {
             .collect()
     }
 
-    /// macOS: one `ps axww -e` gives both pids and their environments. Match
+    /// macOS: one `ps axww -E` gives both pids and their environments. Match
     /// the one exact `KELIR_GATE_RUN=<token>` entry and never print or log the
     /// output: the token is a secret for this run only. A whole-entry match
     /// avoids a false hit on a different token with the same prefix.
     #[cfg(target_os = "macos")]
     fn marked_pids(needle: &str) -> std::collections::BTreeSet<u32> {
         let Ok(output) = std::process::Command::new("ps")
-            .args(["axww", "-e", "-o", "pid=,command="])
+            .args(["axww", "-E", "-o", "pid=,command="])
             .output()
         else {
             return std::collections::BTreeSet::new();

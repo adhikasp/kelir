@@ -546,6 +546,10 @@ Body.
     command
         .args(["run", "--json", "go"])
         .env("KELIR_TRUST_PROJECT", "1")
+        // A shared CI runner (PowerShell cold start + concurrent OS jobs) can
+        // exceed the 30 s default gate timeout; the test proves a .ps1 gate
+        // RUNS from a console-less parent, not that it finishes in 30 s.
+        .env("KELIR_GATE_TIMEOUT_MS", "120000")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let child = sandbox
