@@ -30,7 +30,7 @@ leak-timeout = { period = "100ms", result = "fail" }
 max-threads = 2
 
 [[profile.default.overrides]]
-filter = 'binary(e2e_tui)'
+filter = 'test(/^tui::/)'
 test-group = 'pty'
 
 # The three process-heavy suites whose *existing* flakes (STEER-9) are the ones
@@ -43,5 +43,5 @@ test-group = 'pty'
 max-threads = 2
 
 [[profile.default.overrides]]
-filter = 'binary(e2e_m4) | binary(review_m4b) | binary(review_m4)'
+filter = 'test(/^bg::/) | test(/^tools::review_m4b::/) | test(/^tools::review_m4::/) | test(/^resume::m8fix::/) | test(/^resume::review_m8::/) | test(/^gates::/)'
 test-group = 'process-heavy'

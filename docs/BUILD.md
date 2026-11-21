@@ -201,8 +201,8 @@ those suites are the ones that feel it. `.config/nextest.toml` caps them:
 
 | group | filter | cap | why |
 |---|---|---|---|
-| `pty` | `binary(e2e_tui)` | 2 | 17 tests each driving a real terminal |
-| `process-heavy` | `binary(e2e_m4) \| binary(review_m4b) \| binary(review_m4)` | 2 | each kills a session and scans for surviving pids |
+| `pty` | `test(/^tui::/)` | 2 | the tests driving a real terminal |
+| `process-heavy` | `test(/^bg::/)` and the process-heavy gate/review modules | 2 | tests that kill a session and scan for surviving pids |
 
 Measured over repeated full runs at `-j 4`:
 
