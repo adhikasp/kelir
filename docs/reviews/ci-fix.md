@@ -125,5 +125,20 @@ behaviour and the Linux `/proc` path are unchanged.
 
 ## Gate evidence
 
-Recorded in this file after the full `bash scripts/gate.sh --linux=the maintainer` run
-(Windows + Linux) and the targeted tests; see the final commit for counts.
+Full gate `bash scripts/gate.sh --linux=the maintainer` at HEAD `17da1ae`, exit 0,
+`gate: PASS`. Logs: `/c/Users/the maintainer/kelir-scratch/gate-job-ci-fix2-20261121T085925Z/`.
+
+- Windows: fmt ok, clippy ok, nextest 1433 passed / 6 skipped (230.5 s),
+  doctest ok.
+- Linux (`the maintainer`): fmt ok, clippy ok, nextest 1435 passed / 3 skipped
+  (123.8 s), doctest ok.
+- Targeted: `cargo test --lib docs::tests` 24 passed;
+  `cargo test --lib sources::tests` 25 passed;
+  `cargo test --lib bg` identity tests 2 passed;
+  `cargo test --lib gates::tests` 28 passed (Linux);
+  `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean.
+
+The macOS-only tree-kill path was compile-checked by temporarily swapping the
+target cfg so the macOS functions were compiled on this Windows host (then
+restored); the Linux gate compiles the Linux path. A pure parser unit test for
+the macOS `ps e` sweep is included in `src/gates.rs`.
