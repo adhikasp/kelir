@@ -58,7 +58,7 @@ async fn start_job(session: &LiveSession, command: &str) -> String {
 }
 
 fn status_path(session: &LiveSession, id: &str) -> std::path::PathBuf {
-    session.session_dir.join("bg").join(format!("{id}.status"))
+    job_status_path(&session.session_dir, id)
 }
 
 fn full_env(session: &LiveSession, token: &str) -> Vec<(String, String)> {
@@ -85,7 +85,7 @@ fn shell_of(_session: &LiveSession, _id: &str) -> Value {
 }
 
 fn spawn_args(session: &LiveSession, shell: &Value, cmd: &str, extra: Value) -> Value {
-    let bg = session.session_dir.join("bg");
+    let bg = job_root(&session.session_dir);
     let mut args = json!({"dir": kelir::util::path_string(&bg), "out": "", "cmd": cmd,
                           "shell": shell, "kind": "job"});
     for (key, value) in extra.as_object().unwrap() {
@@ -445,7 +445,9 @@ async fn a_fifo_planted_as_the_final_sidecar_does_not_hang_the_session() {
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     session.wait_for("turn_ended").await;
     let id = start_job(&session, long_command()).await;
-    let fifo = session.session_dir.join("bg").join(format!("{id}.final"));
+    let fifo = job_root(&session.session_dir)
+        .join(&id)
+        .join(format!("{id}.final"));
     let made = std::process::Command::new("mkfifo").arg(&fifo).status();
     let answered =
         tokio::time::timeout(CEILING, session.ctl(&["tools", "--disable", "bash"])).await;

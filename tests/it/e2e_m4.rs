@@ -209,7 +209,7 @@ async fn a_call_past_the_limit_is_promoted_and_wakes_the_model_when_it_settles()
     );
 
     // The output file holds what the job printed, and `kelir bg out` reads it.
-    let status = live.session_dir.join("bg").join(format!("{id}.status"));
+    let status = job_status_path(&live.session_dir, &id);
     let status_text = std::fs::read_to_string(&status).expect("a status file");
     assert!(
         status_text.contains("\"state\":\"exited\""),
@@ -252,7 +252,7 @@ async fn a_promoted_job_survives_a_killed_session_and_resume_folds_it_in() {
     let id = promoted_id(&settled);
     live.wait_for("turn_ended").await;
 
-    let status_file = live.session_dir.join("bg").join(format!("{id}.status"));
+    let status_file = job_status_path(&live.session_dir, &id);
     let status: Value = serde_json::from_str(&std::fs::read_to_string(&status_file).unwrap())
         .expect("the status file is JSON");
     let pid = status["pid"].as_u64().expect("the job's pid") as u32;
@@ -589,7 +589,7 @@ async fn a_bg_run_inside_a_call_outlives_a_killed_session() {
         .to_string();
     assert!(id.starts_with("bg_"), "{settled}");
 
-    let status_file = live.session_dir.join("bg").join(format!("{id}.status"));
+    let status_file = job_status_path(&live.session_dir, &id);
     wait_until("the job to start", CEILING, || {
         std::fs::read_to_string(&status_file)
             .ok()
@@ -660,7 +660,7 @@ async fn a_job_whose_shim_is_killed_settles_as_lost_and_wakes_the_model() {
     live.wait_for("call_started").await;
     live.wait_for("turn_ended").await;
 
-    let status_file = live.session_dir.join("bg").join(format!("{id}.status"));
+    let status_file = job_status_path(&live.session_dir, &id);
     let status: Value =
         serde_json::from_str(&std::fs::read_to_string(&status_file).unwrap()).unwrap();
     let shim = status["shim"].as_u64().expect("the shim's pid") as u32;
@@ -736,7 +736,7 @@ async fn a_job_started_from_a_console_less_parent_runs_and_leaves_nothing_behind
 
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     let sandbox = Sandbox::new("");
-    let bg = sandbox.state.join("bg");
+    let bg = global_job_root(&sandbox.state);
     let mut started = Vec::new();
     for _ in 0..5 {
         let mut command = sandbox.kelir_command("http://127.0.0.1:9/v1");

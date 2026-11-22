@@ -29,6 +29,43 @@ pub fn hold_then(rest: &str) -> String {
     format!("{HOLD}; {rest}")
 }
 
+/// A session-less `bg run` job's root, `<state>/bg/`.
+pub fn global_job_root(state: &Path) -> PathBuf {
+    state.join("bg")
+}
+
+/// A session job's status file: the job owns `<session>/calls/<id>/`.
+pub fn job_status_path(session_dir: &Path, id: &str) -> PathBuf {
+    kelir::bg::status_path(&kelir::paths::calls_dir(session_dir), id)
+}
+
+/// A session job's output file.
+pub fn job_out_path(session_dir: &Path, id: &str) -> PathBuf {
+    kelir::bg::out_path(&kelir::paths::calls_dir(session_dir), id)
+}
+
+/// A session job's root, `<session>/calls/`.
+pub fn job_root(session_dir: &Path) -> PathBuf {
+    kelir::paths::calls_dir(session_dir)
+}
+
+/// Every status file under a job root. Each job owns `<root>/<id>/<id>.status`.
+pub fn status_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let file = path.join(format!("{name}.status"));
+        if file.is_file() {
+            out.push(file);
+        }
+    }
+    out
+}
+
 /// Poll `check` (cheap, synchronous) until it returns true; panic with `what`,
 /// the ceiling and the `diagnostics()` text when it never does. The one
 /// replacement for "sleep N and hope": a wait that ends on the condition.
@@ -1504,20 +1541,17 @@ impl Sandbox {
     }
 
     /// Wait until every process the session `id` recorded for its calls (the
-    /// shim and the command, from `bg/*.status`) is gone. A crashed session's
+    /// shim and the command, from each job's `<id>.status`) is gone. A crashed session's
     /// shim notices its dead owner and takes the tree down, but on a loaded box
     /// that takes longer than any fixed sleep the tests used to guess (STEER-9).
     /// Returns false if something recorded is still alive at the ceiling (a
     /// recycled pid, say); the caller's own assertions then speak.
     pub async fn trees_gone(&self, id: &str) -> bool {
-        let bg = self.session_dir(id).join("bg");
+        let bg = kelir::paths::calls_dir(&self.session_dir(id));
         let pids = || -> Vec<u32> {
             let mut out = Vec::new();
-            for entry in std::fs::read_dir(&bg).into_iter().flatten().flatten() {
-                if entry.path().extension().and_then(|e| e.to_str()) != Some("status") {
-                    continue;
-                }
-                let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            for entry in status_files(&bg) {
+                let Ok(text) = std::fs::read_to_string(&entry) else {
                     continue;
                 };
                 let Ok(value) = serde_json::from_str::<Value>(&text) else {

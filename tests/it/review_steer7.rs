@@ -78,16 +78,20 @@ async fn a_child_cannot_invent_a_job_by_dropping_a_status_file() {
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     session.wait_for("turn_ended").await;
     let token = kelir::trust::read_token(&session.session_dir).unwrap();
-    let bg = session.session_dir.join("bg");
+    let bg = job_root(&session.session_dir);
+    let out = job_out_path(&session.session_dir, "bg_fake_status");
+    std::fs::create_dir_all(out.parent().unwrap()).unwrap();
     let status = json!({"id": "bg_fake_status", "state": "exited", "exit_code": 7,
         "started": "2026-01-01T00:00:00Z", "finished": "2026-01-01T00:00:01Z", "cmd": "forged",
-        "out": kelir::util::path_string(&bg.join("bg_fake_status.out")), "kind": "job"});
-    std::fs::write(bg.join("bg_fake_status.status"), status.to_string()).unwrap();
-    let _ = raw(
-        &session,
-        forged("bg_fake_status", &bg.join("bg_fake_status.out"), &token),
-    )
-    .await;
+        "out": kelir::util::path_string(&out), "kind": "job"});
+    let path = kelir::bg::status_path(&bg, "bg_fake_status");
+    std::fs::write(&path, status.to_string()).unwrap();
+    // The watcher reads `calls/<id>/<id>.status`; a flat fixture would test nothing.
+    assert!(
+        path.is_file() && path.starts_with(job_root(&session.session_dir).join("bg_fake_status")),
+        "the forged status is not at the path the watcher reads"
+    );
+    let _ = raw(&session, forged("bg_fake_status", &out, &token)).await;
     let log = settle_and_collect(&session).await;
     let bad = impersonated(&log, "bg_fake_status");
     let _ = session.end().await;

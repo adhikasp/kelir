@@ -40,7 +40,7 @@ as an unknown outcome and **never re-run**.
 
 ## "A background job I started is gone"
 
-A job outlives the session on purpose: its shim writes `bg/<id>.status`,
+A job outlives the session on purpose: its shim writes `calls/<id>/<id>.status`,
 nothing wakes a stopped session. `kelir bg ls` (inside a session) and
 `kelir bg out <id>` read it; the next `resume` folds the settled job into the log
 as `call_settled{kind:"bg"}` plus the wake-up message. A job killed with the machine is the

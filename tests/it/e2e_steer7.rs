@@ -171,7 +171,7 @@ async fn a_bg_spawn_outside_the_sessions_bg_dir_is_refused() {
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     session.wait_for("turn_ended").await;
     let token = token_of(&session);
-    let other = session.state.join("other-session").join("bg");
+    let other = kelir::paths::calls_dir(&session.state.join("other-session"));
 
     let spawn = json!({
         "verb": "bg-spawn",
@@ -195,8 +195,9 @@ async fn a_bg_spawn_outside_the_sessions_bg_dir_is_refused() {
             .contains("not inside this session"),
         "{answer}"
     );
-    // Nothing was started: no status file appeared anywhere.
-    assert!(!other.join("bg_1.status").exists());
+    // Nothing was started: neither the nested status nor the nested out file appeared.
+    assert!(!kelir::bg::status_path(&other, "bg_1").exists());
+    assert!(!kelir::bg::out_path(&other, "bg_1").exists());
     let refused = verb_events(&session)
         .into_iter()
         .find(|event| event["name"] == "bg-spawn")
@@ -440,7 +441,7 @@ async fn a_child_of_one_session_cannot_cancel_another_sessions_job() {
     );
 
     // The job is untouched: its status still says running.
-    let status = std::fs::read_to_string(other.session_dir.join("bg").join(format!("{id}.status")))
+    let status = std::fs::read_to_string(job_status_path(&other.session_dir, &id))
         .expect("the job's status file");
     let status: Value = serde_json::from_str(&status).unwrap();
     assert_eq!(status["state"], "running", "{status}");
@@ -553,7 +554,7 @@ async fn a_settled_report_replayed_fifty_times_wakes_the_model_once() {
     );
     session.wait_for("call_settled").await;
 
-    let out = session.session_dir.join("bg").join(format!("{id}.out"));
+    let out = job_out_path(&session.session_dir, &id);
     for _ in 0..50 {
         let answer = raw(
             &session,

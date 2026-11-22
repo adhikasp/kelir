@@ -350,9 +350,10 @@ impl Session {
         self.sync();
         // Now that the batch's results are all in the log, a promoted call's job can be recorded
         for dir in promoted {
-            if let Some(status) =
-                crate::bg::Status::read(&crate::bg::status_path(&self.log.dir.join("bg"), &dir))
-            {
+            if let Some(status) = crate::bg::Status::read(&crate::bg::status_path(
+                &crate::paths::calls_dir(&self.log.dir),
+                &dir,
+            )) {
                 let _ = self.note_bg(&status);
             }
         }

@@ -311,7 +311,7 @@ impl Session {
             }
         }
         let mut woke = false;
-        for status in crate::bg::list(&self.log.dir.join("bg")) {
+        for status in crate::bg::list(&crate::paths::calls_dir(&self.log.dir)) {
             if !status.is_job() {
                 continue;
             }

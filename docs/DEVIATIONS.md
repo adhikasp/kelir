@@ -36,10 +36,11 @@ permissions in `src/perm.rs`, and the two are wired in `src/ipc.rs` (the socket)
   `take_turn_messages` used to take everything, and the idle loop applies a pending `cancel`
   itself, so a `cancel` against an idle `--keep` session kills the job instead of waiting for a
   boundary that never comes.
-- **A job id is `owns`-checked against three things**: the in-memory registry (what this process
-  started), `bg/<id>.status` in this session's own `bg/`, and `commands/<id>/` (a promoted
-  call's id is its output dir name). The `bg/` directory is created at session start, so an
-  empty session has an empty registry rather than a missing directory.
+- **A job id is `owns`-checked against the in-memory registry** (what this process started).
+  A file is never registration on its own; the historical `bg/<id>.status` and `commands/<id>/`
+  checks were removed (see the trust boundary note below). Session jobs now live in
+  `calls/<id>/`, session-less jobs in `<state>/bg/<id>/`; the `calls/` directory is created at
+  session start, so an empty session has an empty registry rather than a missing directory.
 - **Reachability, not identity, is what the token proves.** Documented rather than defended
   against (see `docs/SPEC.md`, *Who may drive a session*): a process that can read this session's
   environment or token file runs as the user, in the session, and is trusted. The token stops a
@@ -834,7 +835,7 @@ can start in a test.
   *tails* that file for the inline result (`commands/<dir>/out`, same path, same
   `Capture`, the same tool result as M0's pipes). A pipe the session read would
   block the job once the session died.
-- **`bg/<id>.status` is the job's whole state, written only by its shim.** The
+- **`calls/<id>/<id>.status` is the job's whole state, written only by its shim.** The
   spec's `state`, `pid`, `exit_code`, `started`, `finished` plus the fields the
   machinery needs: `shim` (the shim's pid: the process group on Unix, the process
   whose job holds the tree on Windows), `shim_started` and `pid_started` (when
@@ -869,7 +870,7 @@ can start in a test.
   a safety net.** `kelir bg run` sends one `bg` request (the status file as
   `args`, `from: "job"`) to the address in `KELIR_SOCK`; the session records
   `bg_started` at its next boundary (at once when idle). Independently the
-  session watches `bg/*.status` every 250 ms, so a report the socket never
+  session watches `calls/*/*<id>.status` every 250 ms, so a report the socket never
   carried (a session that was busy, a dead socket, a status written by a previous
   process) still reaches the log. Both paths record through the same `note_bg`,
   which dedupes against the log: `bg_started` once per id, `bg_settled` once per
@@ -898,7 +899,7 @@ can start in a test.
   from `exit_code`. A wake that follows a promoted `tool_settled` is written
   after the whole batch's results, never between them: a call's results must stay
   contiguous for the next request (M4 review N5).
-- **`resume` folds `bg/*.status` into the log** after the unknown-result block:
+- **`resume` folds `calls/<id>/<id>.status` into the log** after the unknown-result block:
   for every job or promoted call, `bg_started` if the log lacks it, and
   `bg_settled` + the wake message if it settled while nothing was running. A
   wake found this way sets `has_task`, so a bare `kelir resume <id>` runs the turn
@@ -1335,11 +1336,11 @@ this differs from the spec text, or needed a call the brief left open:
 - **The session socket's trust boundary is the token, a per-job capability, and a signature on
   every status record.** SPEC said a request must carry the session token and that the session
   answers `bg`/`cancel`/`bg-spawn` only for jobs "it started or registered", where a
-  `bg/<id>.status` file or a `commands/<id>/` directory counted as registration. That is not a
+  `calls/<id>/<id>.status` file or a `commands/<id>/` directory counted as registration. That is not a
   boundary: every bash child holds the token by design (`KELIR_TOKEN`), and it can create either
   path itself (M5-A retro F8, STEER-7 review B1). Round 1 closed the socket (random ids, an
   in-memory registry, a capability per job); round 2 (steer7b review B1') found that the
-  session's own `bg/` watcher still folded any `bg/<id>.status` for a registered id into the log,
+  session's own `calls/` watcher still folded any `calls/<id>/<id>.status` for a registered id into the log,
   so a child could forge `bg_started`/`bg_settled` and a wake message from `job`, and could name
   any file in `out`. The earlier claims "files are never evidence" and "the model's own tools
   cannot impersonate a shim" were false and are withdrawn. Now **a status file is believed only if
@@ -1348,17 +1349,17 @@ this differs from the spec text, or needed a call the brief left open:
   pipe (the capability and key are no longer in the shim's environment, which a same-user process
   reads: steer7b S-A), and records the public half in `bg_started.pubkey`. A bash call's id is
   `<seq>-<step>-<n>`, not a random id (steer7b S-B2): two sessions share those names, which is
-  harmless because each session has its own `bg/`, registry and keys.
+  harmless because each session has its own `calls/`, registry and keys.
 - **No secret ever leaves the session or the job's own shim (steer7fix3, steer7c review B1/B2).**
   Round 2 handed the per-job capability and signing key to the process that claimed the job, and
   `bg-spawn` for an existing id answered any token holder with them; both let a tool child sign
   records the session believed. Now the session starts every job's shim itself (`bg-spawn`, with
   the client's environment, cwd and command), gives it the key and capability on its stdin pipe
   and answers with the id only; `bg-spawn` naming an id is refused, `bg-claim` returns an
-  acknowledgement, and `out` must be inside `bg/`. Costs: a job started by `kelir bg run` is
+  acknowledgement, and `out` must be inside this session's own `calls/` directory. Costs: a job started by `kelir bg run` is
   parented to the session (not the tool child), and the shim reports itself (it holds the
   capability). Signed records carry a monotonic sequence number and a final copy in
-  `bg/<id>.final`, which beats a replayed older record. The Windows shim also closes its process to
+  `calls/<id>/<id>.final`, which beats a replayed older record. The Windows shim also closes its process to
   same-user memory reads (Owner Rights DACL) and clears the key on exit; an elevated administrator
   with `SeDebugPrivilege`, or root, is still outside the boundary. Per-id refusal budgets
   (review nit) are not done: the budget stays shared (32 events per session).

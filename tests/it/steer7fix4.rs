@@ -30,7 +30,7 @@ async fn a_canary_in_any_argument_of_any_verb_is_never_logged_or_echoed() {
     session.wait_for("turn_ended").await;
     let token = kelir::trust::read_token(&session.session_dir).unwrap();
     let canary = "CANARY-VERB-SECRET-7e-91c2d";
-    let bg = kelir::util::path_string(&session.session_dir.join("bg"));
+    let bg = kelir::util::path_string(&job_root(&session.session_dir));
     let mut answers = Vec::new();
     for (verb, from) in [
         ("say", "ctl"),

@@ -243,16 +243,22 @@ pub fn new_id() -> String {
     format!("bg_{}", ulid::Ulid::generate().to_string().to_lowercase())
 }
 
-/// Where jobs live: this session's `bg/` inside a bash call, otherwise the
-/// state dir's own `bg/`.
+/// Where jobs live: this session's `calls/` inside a bash call, otherwise the
+/// state dir's own `bg/` for a job with no session.
 pub fn root() -> PathBuf {
     if let Some(dir) = crate::envs::var_os("KELIR_SESSION_DIR")
         .map(PathBuf::from)
         .filter(|dir| !dir.as_os_str().is_empty())
     {
-        return dir.join("bg");
+        return crate::paths::calls_dir(&dir);
     }
     crate::paths::state_dir().join("bg")
+}
+
+/// Every job owns exactly one directory: `<root>/<id>/`. Its status, output,
+/// cancel marker and command script all live there. No reader looks anywhere else.
+pub fn job_dir(root: &Path, id: &str) -> PathBuf {
+    root.join(id)
 }
 
 /// Where a job's final record is also kept: `<id>.final`, written by the shim
@@ -262,15 +268,15 @@ pub fn final_path(dir: &Path, id: &str) -> PathBuf {
 }
 
 pub fn status_path(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{id}.status"))
+    job_dir(dir, id).join(format!("{id}.status"))
 }
 
 pub fn out_path(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{id}.out"))
+    job_dir(dir, id).join(format!("{id}.out"))
 }
 
 pub fn promote_path(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{id}.promote"))
+    job_dir(dir, id).join(format!("{id}.promote"))
 }
 
 /// How long a `cancel` marker is believed. A cancel takes at most
@@ -279,7 +285,7 @@ pub const CANCEL_MARKER_TTL: Duration = Duration::from_secs(30);
 
 /// The marker a `cancel` writes before it kills anything.
 pub fn cancel_path(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{id}.cancel"))
+    job_dir(dir, id).join(format!("{id}.cancel"))
 }
 
 /// Is a `cancel` in flight for this job?
@@ -295,7 +301,7 @@ pub fn cancelling(dir: &Path, id: &str) -> bool {
     }
 }
 
-/// A status as a reader should understand it, given the `bg/` directory it was read from:
+/// A status as a reader should understand it, given the job root it was read from:
 /// [`Status::observed`], except that a job whose `cancel` marker is present is still `running` (it is
 pub fn observed_in(dir: &Path, status: &Status) -> Status {
     if status.state == STATE_RUNNING && cancelling(dir, &status.id) {
@@ -329,15 +335,18 @@ pub fn list(dir: &Path) -> Vec<Status> {
         .flatten()
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("status"))
-        .filter_map(|path| Status::read(&path))
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            let id = path.file_name()?.to_str()?.to_string();
+            Status::read(&status_path(dir, &id))
+        })
         .map(|status| observed_in(dir, &status))
         .collect();
     out.sort_by(|a, b| b.started.cmp(&a.started).then(a.id.cmp(&b.id)));
     out
 }
 
-/// Find a job by id: the session's own `bg/` first, then any session's (so
+/// Find a job by id: this session's calls root first, then any session's (so
 /// `kelir bg out <id>` works after kelir exited, with no session env at all).
 pub fn find(id: &str) -> Option<(PathBuf, Status)> {
     let id = id.trim();
@@ -349,7 +358,7 @@ pub fn find(id: &str) -> Option<(PathBuf, Status)> {
         return Some((dir, status));
     }
     for session in crate::paths::sessions_newest_first() {
-        let dir = crate::paths::session_dir(&session).join("bg");
+        let dir = crate::paths::calls_dir(&crate::paths::session_dir(&session));
         if let Some(status) = Status::read(&status_path(&dir, id)) {
             return Some((dir, status));
         }
@@ -359,7 +368,7 @@ pub fn find(id: &str) -> Option<(PathBuf, Status)> {
 
 /// Ask for a promotion: an empty marker file the shim polls for.
 pub fn mark_promoted(dir: &Path, id: &str) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
+    std::fs::create_dir_all(job_dir(dir, id))?;
     std::fs::write(promote_path(dir, id), b"promoted\n")
 }
 
@@ -367,7 +376,7 @@ pub fn mark_promoted(dir: &Path, id: &str) -> std::io::Result<()> {
 
 /// What the session (or `kelir bg run`) tells the shim.
 pub struct Launch<'a> {
-    /// The `bg/` directory the status file lives in.
+    /// The job root (`calls/` or the global `bg/`) the status file lives under.
     pub dir: PathBuf,
     /// The job id (the call's output dir name, or `bg_<ulid>`).
     pub id: String,
@@ -387,6 +396,8 @@ pub struct Launch<'a> {
     pub job: Option<String>,
     /// The session socket, exported to the command as `KELIR_SOCK`.
     pub sock: Option<String>,
+    /// The owning session dir, when the job root is not under one (a session-less job).
+    pub session_dir: Option<PathBuf>,
     /// The session's socket token, exported to the command as `KELIR_TOKEN`
     /// : a job that reports itself over the socket must carry it.
     pub token: Option<String>,
@@ -443,6 +454,9 @@ pub fn shim_command(launch: &Launch) -> Result<tokio::process::Command, String> 
     }
     if let Some(sock) = &launch.sock {
         command.arg("--sock").arg(sock);
+    }
+    if let Some(session_dir) = &launch.session_dir {
+        command.arg("--session-dir").arg(session_dir);
     }
     // The token goes through the environment, never the argv: a command line is world-readable on Linux
     // (`/proc/<pid>/cmdline`) and a token in it would be a token anyone could read.
@@ -576,6 +590,7 @@ impl SpawnRequest {
             call: self.call.clone(),
             job: self.job.clone(),
             sock: self.sock.clone(),
+            session_dir: None,
             token: self.token.clone(),
             env: Some(self.env.clone()),
             cwd: self.cwd.as_ref().map(PathBuf::from),
@@ -683,7 +698,9 @@ pub fn spawn_shim_for_client(
     let id = trust.claim(spawn.call.as_deref())?;
     let dir = trust.bg_dir();
     let shell_args: Vec<String> = spawn.shell.iter().skip(1).cloned().collect();
-    let cmd_file = match crate::shellcmd::input(&spawn.cmd, &shell_args, &dir, &id) {
+    // A job owns exactly one directory: its script goes there with its status and output.
+    let script_dir = job_dir(&dir, &id);
+    let cmd_file = match crate::shellcmd::input(&spawn.cmd, &shell_args, &script_dir, &id) {
         Ok(crate::shellcmd::ShellInput::Argument(_)) => None,
         Ok(crate::shellcmd::ShellInput::Script { path, .. }) => Some(path),
         Err(error) => {
@@ -794,14 +811,17 @@ pub fn promoted_text(
 /// `kelir bg-shim`: spawn the command, write the status file, and stay alive
 /// until the command exits (or the tree is killed).
 pub async fn shim_main(args: BgShimArgs) -> u8 {
+    // `--dir` is the root (`calls/` or the global `bg/`); this job owns exactly one
+    // directory below it. All of this shim's files go there and nowhere else.
     let dir = args.dir.clone();
+    let job = job_dir(&dir, &args.id);
     // The shim holds the session token for as long as the job lives: close the process to its own
     // user's ordinary memory reads (Windows; on Unix `/proc/<pid>/mem` is closed to a sibling).
     if let Err(error) = harden_process() {
         eprintln!("kelir bg-shim: {error}");
     }
-    if let Err(error) = std::fs::create_dir_all(&dir) {
-        eprintln!("kelir bg-shim: cannot create {}: {error}", dir.display());
+    if let Err(error) = std::fs::create_dir_all(&job) {
+        eprintln!("kelir bg-shim: cannot create {}: {error}", job.display());
         return 1;
     }
     // A command that came as a file (it is too long for an argument list) is
@@ -879,7 +899,7 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
         .out
         .parent()
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| dir.clone());
+        .unwrap_or_else(|| job.clone());
     // A caller that already wrote the script (the bash call, which had to keep the shim's own
     // argv short) decided it; otherwise the shim decides from the command and the shell.
     let shell_input = match &script {
@@ -918,8 +938,9 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(out_file))
         .stderr(std::process::Stdio::from(out_for_err));
-    // A bash call's children must find `kelir bg` and their own call id.
-    if let Some(session_dir) = dir.parent() {
+    // A bash call's children must find `kelir bg` and their own call id. A session job's
+    // root is `<session>/calls/`; a session-less job gets the dir explicitly from its launcher.
+    if let Some(session_dir) = args.session_dir.as_deref().or_else(|| args.dir.parent()) {
         command.env("KELIR_SESSION_DIR", session_dir);
     }
     if let Ok(binary) = crate::util::self_binary() {
@@ -1257,7 +1278,8 @@ async fn run(args: BgRunArgs) -> u8 {
         let id = new_id();
         let out = out_path(&dir, &id);
         let shell_args: Vec<String> = shell.iter().skip(1).cloned().collect();
-        let cmd_file = match crate::shellcmd::input(&command, &shell_args, &dir, &id) {
+        let script_dir = job_dir(&dir, &id);
+        let cmd_file = match crate::shellcmd::input(&command, &shell_args, &script_dir, &id) {
             Ok(crate::shellcmd::ShellInput::Argument(_)) => None,
             Ok(crate::shellcmd::ShellInput::Script { path, .. }) => Some(path),
             Err(error) => {
@@ -1278,6 +1300,10 @@ async fn run(args: BgRunArgs) -> u8 {
             call: None,
             job: Some(job_name("job", &id)),
             sock: None,
+            // No session: the global `bg/` is not under one, so pass any session dir explicitly.
+            session_dir: crate::envs::var_os("KELIR_SESSION_DIR")
+                .map(PathBuf::from)
+                .filter(|dir| !dir.as_os_str().is_empty()),
             token: None,
             env: None,
             cwd: std::env::current_dir().ok(),
@@ -1587,7 +1613,7 @@ impl CancelOut for Console {
     }
 }
 
-/// The kill itself, for one job in one `bg/` directory.
+/// The kill itself, for one job in one job root.
 async fn cancel_at(dir: &Path, id: &str, out: &mut dyn CancelOut) -> u8 {
     let Some(status) = Status::read(&status_path(dir, id)) else {
         out.fail(format!("no background job `{id}`"));
@@ -1661,6 +1687,7 @@ struct CancelMarker {
 impl CancelMarker {
     fn write(dir: &Path, id: &str) -> Self {
         let path = cancel_path(dir, id);
+        let _ = std::fs::create_dir_all(path.parent().expect("a job dir"));
         let _ = std::fs::write(&path, b"cancelling\n");
         Self { path }
     }
@@ -1924,6 +1951,7 @@ mod tests {
     fn a_torn_or_missing_status_file_is_skipped_not_fatal() {
         let dir = temp_dir("torn");
         let path = status_path(&dir, "bg_torn");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{\"id\": \"bg_torn\", \"state\": \"run").unwrap();
         assert!(Status::read(&path).is_none());
         // The listing skips it, and skips a leftover temp file too.
@@ -1972,6 +2000,7 @@ mod tests {
     fn the_wake_text_names_the_job_its_state_and_its_output() {
         let dir = temp_dir("wake");
         let out = out_path(&dir, "bg_1");
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
         std::fs::write(&out, "hello from the job\n").unwrap();
         let mut status = sample();
         status.id = "bg_1".into();

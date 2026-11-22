@@ -108,7 +108,7 @@ fn family(shell_args: &[String]) -> Option<Family> {
 }
 
 /// The name of the script a command is written to, by shell, for a call (whose directory is its own) or
-/// a job (`bg/<id>.cmd.sh`, so two jobs running at once cannot overwrite each other's script).
+/// a job (`<job-dir>/<id>.sh`, so two jobs running at once cannot overwrite each other's script).
 pub fn script_name(shell_args: &[String], stem: &str) -> String {
     let ext = match family(shell_args) {
         Some(Family::CmdExe) => SCRIPT_EXT_CMD,

@@ -139,13 +139,11 @@ fn promoted_id(settled: &Value) -> String {
 
 /// The `shim` pid of the status file whose id is `id` (or any status, when `id` is empty).
 fn shim_of(bg: &Path, id: &str) -> Option<u32> {
-    for entry in std::fs::read_dir(bg).ok()?.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.ends_with(".status") || (!id.is_empty() && name != format!("{id}.status")) {
+    for entry in status_files(bg) {
+        if !id.is_empty() && entry.file_name()?.to_str()? != format!("{id}.status") {
             continue;
         }
-        let value: Value =
-            serde_json::from_str(&std::fs::read_to_string(entry.path()).ok()?).ok()?;
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(entry).ok()?).ok()?;
         if let Some(shim) = value["shim"].as_u64() {
             return Some(shim as u32);
         }
@@ -263,7 +261,7 @@ async fn b3_an_unpromoted_call_whose_shim_is_killed_settles_and_its_tree_goes() 
     .await;
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     live.wait_for("call_started").await;
-    let bg = live.session_dir.join("bg");
+    let bg = job_root(&live.session_dir);
     wait_until("the call's status", CEILING, || {
         shim_of(&bg, "").is_some() && count_with(&markers) >= 2
     })
@@ -299,15 +297,24 @@ async fn b4_cancel_does_not_kill_a_pid_recycled_within_the_tolerance() {
     let started = (time::OffsetDateTime::now_utc() - time::Duration::seconds(45))
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap();
-    let bg = sandbox.state.join("bg");
-    std::fs::create_dir_all(&bg).unwrap();
+    let bg = global_job_root(&sandbox.state);
+    let status = kelir::bg::status_path(&bg, "bg_stale45");
+    std::fs::create_dir_all(status.parent().unwrap()).unwrap();
     let stale = json!({
         "id": "bg_stale45", "state": "running", "pid": pid, "shim": pid,
         "started": started, "cmd": "long gone",
-        "out": bg.join("bg_stale45.out").to_str().unwrap().replace('\\', "/"),
+        "out": kelir::bg::out_path(&bg, "bg_stale45").to_str().unwrap().replace('\\', "/"),
         "kind": "job"
     });
-    std::fs::write(bg.join("bg_stale45.status"), stale.to_string()).unwrap();
+    std::fs::write(&status, stale.to_string()).unwrap();
+    // A fixture the reader cannot see would make this guard vacuous.
+    assert!(
+        status == kelir::bg::status_path(&bg, "bg_stale45")
+            && status.is_file()
+            && kelir::bg::Status::read(&status)
+                .is_some_and(|s| s.id == "bg_stale45" && !s.settled()),
+        "the cancel path cannot see the fixture; its guard would be vacuous"
+    );
     let cancelled = sandbox
         .kelir(NO_PROVIDER, &["bg", "cancel", "bg_stale45"], &[])
         .await;
@@ -402,7 +409,7 @@ async fn b7_a_lost_promoted_job_can_still_be_cancelled() {
     let settled = live.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "promoted", "{settled}");
     let id = promoted_id(&settled);
-    let bg = live.session_dir.join("bg");
+    let bg = job_root(&live.session_dir);
     wait_until("the grandchildren", CEILING, || count_with(&markers) >= 2).await;
     live.kill().await;
     tokio::time::sleep(Duration::from_millis(500)).await;

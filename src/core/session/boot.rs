@@ -92,7 +92,7 @@ pub(crate) async fn drive(opts: Options) -> u8 {
     ipc::serve(listener, trust.clone(), tx.clone());
     // Background jobs: `kelir bg run` reports itself over the socket, and this watcher is the safety net
     // that also catches a promoted call settling while the session runs.
-    watch_bg(session.log.dir.join("bg"), tx.clone());
+    watch_bg(crate::paths::calls_dir(&session.log.dir), tx.clone());
     // MCP: broker tasks report back through the same channel, and channel
     // servers connect now.
     session.inbox = Some(tx.clone());

@@ -81,7 +81,9 @@ fn id_of(output: &Output) -> String {
 }
 
 fn status_of(sandbox: &Sandbox, id: &str) -> Value {
-    let path = sandbox.state.join("bg").join(format!("{id}.status"));
+    let path = global_job_root(&sandbox.state)
+        .join(id)
+        .join(format!("{id}.status"));
     serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_default())
         .unwrap_or_else(|_| panic!("no readable status at {}", path.display()))
 }
@@ -259,18 +261,33 @@ async fn r5_cancel_does_not_kill_an_unrelated_process_with_a_recycled_pid() {
         .spawn()
         .expect("spawn the victim");
     let pid = victim.id();
-    let bg = sandbox.state.join("bg");
-    std::fs::create_dir_all(&bg).unwrap();
+    let bg = global_job_root(&sandbox.state);
+    let status = kelir::bg::status_path(&bg, "bg_stale");
+    std::fs::create_dir_all(status.parent().unwrap()).unwrap();
     let stale = json!({
         "id": "bg_stale", "state": "running", "pid": pid, "shim": pid,
         "started": "2026-01-01T00:00:00Z", "cmd": "long gone",
-        "out": bg.join("bg_stale.out").to_str().unwrap().replace('\\', "/"),
+        "out": kelir::bg::out_path(&bg, "bg_stale").to_str().unwrap().replace('\\', "/"),
         "kind": "job"
     });
-    std::fs::write(bg.join("bg_stale.status"), stale.to_string()).unwrap();
+    std::fs::write(&status, stale.to_string()).unwrap();
+    // A fixture the reader cannot see would make this guard vacuous.
+    assert!(
+        status == kelir::bg::status_path(&bg, "bg_stale")
+            && status.is_file()
+            && kelir::bg::Status::read(&status).is_some_and(|s| s.id == "bg_stale" && !s.settled()),
+        "the cancel path cannot see the fixture; its guard would be vacuous"
+    );
     let cancelled = sandbox
         .kelir(NO_PROVIDER, &["bg", "cancel", "bg_stale"], &[])
         .await;
+    assert!(
+        cancelled.code != 99,
+        "R5 cancel: code={} out={:?} err={:?}",
+        cancelled.code,
+        cancelled.stdout,
+        cancelled.stderr
+    );
     tokio::time::sleep(Duration::from_millis(300)).await;
     let alive = victim.try_wait().unwrap().is_none();
     let _ = victim.kill();
@@ -311,10 +328,10 @@ async fn r6_a_hundred_quick_jobs() {
     unique.sort();
     unique.dedup();
     assert_eq!(unique.len(), 100, "ids collided");
-    let bg = sandbox.state.join("bg");
+    let bg = global_job_root(&sandbox.state);
     wait_until("every job to settle", Duration::from_secs(60), || {
         handles.iter().all(|id| {
-            std::fs::read_to_string(bg.join(format!("{id}.status")))
+            std::fs::read_to_string(bg.join(id).join(format!("{id}.status")))
                 .ok()
                 .and_then(|text| serde_json::from_str::<Value>(&text).ok())
                 .map(|status| status["state"] == "exited" && status["exit_code"] == 0)
@@ -354,7 +371,9 @@ async fn r7_a_job_writing_a_lot_of_output() {
         .kelir(NO_PROVIDER, &["bg", "wait", &id, "--timeout", "120"], &[])
         .await;
     assert_eq!(waited.code, 0, "{}", waited.stderr);
-    let out_file = sandbox.state.join("bg").join(format!("{id}.out"));
+    let out_file = global_job_root(&sandbox.state)
+        .join(&id)
+        .join(format!("{id}.out"));
     assert_eq!(bytes_len(&out_file), 120_000_000);
     let began = Instant::now();
     let mut follow = tokio::process::Command::new(env!("CARGO_BIN_EXE_kelir"));
@@ -566,7 +585,7 @@ async fn r12_a_graceful_exit_leaves_a_promoted_job_running() {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap();
     let status: Value = serde_json::from_str(
-        &std::fs::read_to_string(live.session_dir.join("bg").join(format!("{id}.status"))).unwrap(),
+        &std::fs::read_to_string(job_status_path(&live.session_dir, &id)).unwrap(),
     )
     .unwrap();
     let pid = status["pid"].as_u64().expect("job pid") as u32;
@@ -654,13 +673,46 @@ async fn r14_run_json_does_not_hold_the_pipe_open_for_a_background_child() {
 #[tokio::test]
 async fn r15_garbage_in_the_bg_directory_is_survivable() {
     let sandbox = Sandbox::new("");
-    let bg = sandbox.state.join("bg");
-    std::fs::create_dir_all(&bg).unwrap();
-    std::fs::write(bg.join("torn.status"), "{\"id\":\"torn\",\"sta").unwrap();
-    std::fs::write(bg.join("empty.status"), "").unwrap();
-    std::fs::write(bg.join("binary.status"), [0xffu8, 0xfe, 0x00, 0x01]).unwrap();
-    std::fs::write(bg.join("wrongtype.status"), "[1,2,3]").unwrap();
-    std::fs::write(bg.join("nulls.status"), "{\"id\":null,\"state\":5}").unwrap();
+    let bg = global_job_root(&sandbox.state);
+    // One job dir per fixture, with the nested path the real reader opens. Keeping the
+    // fixtures flat would let `list` skip them and this test prove nothing.
+    for (id, bytes) in [
+        ("torn", &b"{\"id\":\"torn\",\"sta"[..]),
+        ("empty", &b""[..]),
+        ("binary", &[0xffu8, 0xfe, 0x00, 0x01][..]),
+        ("wrongtype", &b"[1,2,3]"[..]),
+        ("nulls", &b"{\"id\":null,\"state\":5}"[..]),
+    ] {
+        let path = kelir::bg::status_path(&bg, id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    // Each malformed file must sit at the path the reader opens: a flat fixture would be
+    // skipped without the parser ever seeing it, and this test would prove nothing.
+    for id in ["torn", "empty", "binary", "wrongtype", "nulls"] {
+        assert!(
+            kelir::bg::status_path(&bg, id).is_file(),
+            "the {id} fixture is not at a path the reader opens"
+        );
+    }
+    // One well-formed job beside the garbage: `list` must see exactly that one.
+    let good = kelir::bg::Status::new(
+        "bg_good",
+        kelir::bg::KIND_JOB,
+        "echo ok",
+        &kelir::bg::out_path(&bg, "bg_good"),
+    );
+    let good_path = kelir::bg::status_path(&bg, "bg_good");
+    std::fs::create_dir_all(good_path.parent().unwrap()).unwrap();
+    good.write(&good_path).unwrap();
+    assert_eq!(
+        kelir::bg::list(&bg)
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["bg_good"],
+        "the malformed fixtures were not at paths the reader opens"
+    );
     let listed = sandbox.kelir(NO_PROVIDER, &["bg", "ls"], &[]).await;
     assert_eq!(listed.code, 0, "{}", listed.stderr);
     for id in [
@@ -716,7 +768,7 @@ async fn r16_a_torn_or_deleted_status_mid_job_does_not_break_the_session() {
         .and_then(|dir| dir.file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap();
-    let status_file = live.session_dir.join("bg").join(format!("{id}.status"));
+    let status_file = job_status_path(&live.session_dir, &id);
     // Torn, then (a moment later) gone: the watcher polls every 250 ms.
     std::fs::write(&status_file, "{\"id\":\"").unwrap();
     tokio::time::sleep(Duration::from_millis(600)).await;

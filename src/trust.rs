@@ -294,10 +294,8 @@ impl Trust {
 
     /// A trust state with a fresh token, written to the session dir.
     pub fn create(dir: PathBuf) -> Result<Self, String> {
-        let bg = dir.join("bg");
-        std::fs::create_dir_all(&bg)
-            .map_err(|error| format!("cannot create {}: {error}", bg.display()))?;
-        let _ = restrict_dir_to_owner(&bg);
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
         let token = new_token();
         if token.is_empty() {
             return Err("cannot generate a session token".to_string());
@@ -310,9 +308,9 @@ impl Trust {
         &self.token
     }
 
-    /// The session's own `bg/`, where its jobs' status files live.
+    /// The one root for this session's jobs: `calls/`. Each job owns a directory below it.
     pub fn bg_dir(&self) -> PathBuf {
-        self.dir.join("bg")
+        crate::paths::calls_dir(&self.dir)
     }
 
     /// Drop the token file: the session is ending, and a token nobody serves is only something to
@@ -481,7 +479,7 @@ impl Trust {
         }
     }
 
-    /// The `bg/` a spawn names must be this session's own, canonicalised.
+    /// The call root a spawn names must be this session's own, canonicalised.
     fn check_spawn_dir(&self, spawn: &crate::bg::SpawnRequest) -> Result<(), String> {
         let ours = self.bg_dir();
         let base = std::fs::canonicalize(&ours)
@@ -559,15 +557,15 @@ impl Trust {
     }
 
     fn check_job_path(&self, candidate: &str, field: &str) -> Result<(), String> {
-        for base in [self.bg_dir(), crate::paths::calls_dir(&self.dir)] {
-            if resolve_inside(&base, candidate).is_ok() {
-                return Ok(());
-            }
+        let base = self.bg_dir();
+        if resolve_inside(&base, candidate).is_ok() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{field}: `{}` is not inside this session's own calls/ directory",
+                candidate.trim()
+            ))
         }
-        Err(format!(
-            "{field}: `{}` is not inside this session's own bg/ or calls/ directories",
-            candidate.trim()
-        ))
     }
 }
 
@@ -839,7 +837,7 @@ mod tests {
     #[test]
     fn a_spawn_into_another_directory_is_refused() {
         let dir = temp_dir("spawn");
-        let bg = dir.join("bg");
+        let bg = crate::paths::calls_dir(&dir);
         std::fs::create_dir_all(&bg).unwrap();
         let other = temp_dir("spawn-other");
         let trust = Trust::new(dir.clone(), "t".into());
@@ -856,7 +854,7 @@ mod tests {
         };
         let ok = Request::new(
             "bg-spawn",
-            spawn(&bg, &bg.join(format!("{id}.out")), &id),
+            spawn(&bg, &crate::bg::out_path(&bg, &id), &id),
             "job",
         );
         // A spawn may never name a job the session owns: a token holder must not
@@ -867,13 +865,13 @@ mod tests {
         // and it is still not this session's job.
         let made_up = Request::new(
             "bg-spawn",
-            spawn(&bg, &bg.join("bg_picked.out"), "bg_picked"),
+            spawn(&bg, &crate::bg::out_path(&bg, "bg_picked"), "bg_picked"),
             "job",
         );
         let error = trust.check_spawn(&made_up).unwrap_err();
         assert!(error.contains("cannot name a job id"), "{error}");
         // No id at all: the session mints one when it answers.
-        let mut args = spawn(&bg, &bg.join("bg_new.out"), &id);
+        let mut args = spawn(&bg, &crate::bg::out_path(&bg, "bg_new"), &id);
         args.as_object_mut().unwrap().remove("id");
         assert!(
             trust
@@ -882,7 +880,11 @@ mod tests {
         );
         let foreign = Request::new(
             "bg-spawn",
-            spawn(&other.join("bg"), &other.join("bg").join("bg_1.out"), &id),
+            spawn(
+                &crate::paths::calls_dir(&other),
+                &crate::bg::out_path(&crate::paths::calls_dir(&other), &id),
+                &id,
+            ),
             "job",
         );
         let error = trust.check_spawn(&foreign).unwrap_err();
@@ -894,9 +896,10 @@ mod tests {
     #[test]
     fn a_foreign_report_is_refused_and_a_path_out_of_the_session_is_refused() {
         let dir = temp_dir("check-job");
-        std::fs::create_dir_all(dir.join("bg")).unwrap();
+        let calls = crate::paths::calls_dir(&dir);
+        std::fs::create_dir_all(&calls).unwrap();
         let trust = Trust::new(dir.clone(), "t".into());
-        let out = crate::util::path_string(&dir.join("bg").join("bg_1.out"));
+        let out = crate::util::path_string(&crate::bg::out_path(&calls, "bg_1"));
         let report = json!({
             "id": "bg_1", "state": "running", "started": "2026-01-01T00:00:00Z",
             "out": out, "kind": "job"
@@ -907,7 +910,7 @@ mod tests {
 
         // The id is the session's own: the token is enough, since every tool child has it.
         let id = trust.mint("bg").unwrap();
-        let out = crate::util::path_string(&dir.join("bg").join(format!("{id}.out")));
+        let out = crate::util::path_string(&crate::bg::out_path(&calls, &id));
         let report = json!({
             "id": id, "state": "running", "started": "2026-01-01T00:00:00Z",
             "out": out.clone(), "kind": "job"
@@ -943,11 +946,14 @@ mod tests {
     #[test]
     fn status_ownership_is_the_registry_not_the_file() {
         let dir = temp_dir("status-owns");
-        std::fs::create_dir_all(dir.join("bg")).unwrap();
+        let calls = crate::paths::calls_dir(&dir);
+        std::fs::create_dir_all(&calls).unwrap();
         let trust = Trust::new(dir.clone(), "t".into());
         let id = trust.mint("bg").unwrap();
         // A status file with the right id is still not evidence of ownership.
-        std::fs::write(dir.join("bg").join(format!("{id}.status")), "{}").unwrap();
+        let path = crate::bg::status_path(&calls, &id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "{}").unwrap();
         let fresh = Trust::new(dir.clone(), "other".into());
         assert!(!fresh.owns(&id));
         assert!(trust.owns(&id));

@@ -69,7 +69,7 @@ The model does not have to look: that is the point of the pointer.
 ## `kelir bg run|ls|out|wait|cancel`
 
 Background jobs (`docs/reference/verbs.md` has the events). A job outlives the
-session on purpose: its shim writes `bg/<id>.status`, and the next `resume`
+session on purpose: its shim writes `calls/<id>/<id>.status`, and the next `resume`
 folds a job that settled meanwhile into the log.
 
 ## `kelir doctor [--json] [--provider <name>]`
@@ -316,4 +316,6 @@ unavailable, 4 timeout (unknown outcome, never retried). The whole story —
 ## `kelir bg-shim`
 
 Internal (hidden): the detachable job shim. Not for humans, so it is not in the
-table above.
+table above. `--dir` is the job root (`calls/` or the global `bg/`); the job owns
+`<root>/<id>/`. `--session-dir` names the owning session for a session-less
+`bg run` job, so its command can still reach `kelir bg`.

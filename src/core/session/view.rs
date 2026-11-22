@@ -66,7 +66,7 @@ impl Session {
             return Ok(false);
         }
         // The file is the truth as of now, the argument is a snapshot from when the report was made.
-        let dir = self.trust.bg_dir();
+        let dir = crate::paths::calls_dir(&self.log.dir);
         let file = crate::bg::Status::read(&crate::bg::status_path(&dir, &id));
         // A final record is terminal: the shim keeps it beside the status file so a running record
         // put back later cannot un-settle a job.

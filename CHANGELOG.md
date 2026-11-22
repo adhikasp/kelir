@@ -9,6 +9,11 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 ### Breaking — rewrite P4B state layout
 
+- A background job now owns exactly one directory: session jobs live under
+  `<session>/calls/<id>/` (status, output, markers), jobs started outside a session
+  under `<state>/bg/<id>/`. There is no second location, no dual-dir reader and no
+  compatibility path; direct readers must use the new location.
+
 - Tool and MCP call output directories moved from `<session>/commands/` to
   `<session>/calls/`. Direct readers of the old path must switch; existing sessions
   are not migrated (no compatibility readers).

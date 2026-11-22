@@ -1,7 +1,7 @@
 //! `bash`: run a command in the configured shell.
 //! Every call runs under `kelir bg-shim` (this same binary,).
 //! The shim is the call's process owner: it spawns the shell, hands it the output file directly,
-//! and writes `bg/<dir>.status` (running, then exited).
+//! and writes `calls/<dir>/<dir>.status` (running, then exited).
 //! This module only tails that file for the inline result and waits for the shim.
 
 use std::path::{Path, PathBuf};
@@ -26,7 +26,8 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
         return ToolOutcome::error("no shell configured");
     }
 
-    let bg_dir = ctx.session_dir.join("bg");
+    // All of this call's bg files live in its own directory below the session's `calls/`.
+    let bg_dir = crate::paths::calls_dir(&ctx.session_dir);
     // The command goes to a file *here*, before the shim exists (on Windows always, on Unix when it is
     // long): the file is what the shell runs (`cmd.sh`), it keeps a 40 KB command off the shim's own
     let shell_args: Vec<String> = ctx.shell.iter().skip(1).cloned().collect();
@@ -47,6 +48,7 @@ pub async fn run(command: &str, ctx: &Ctx, dir: &str, call_id: &str) -> ToolOutc
         call: Some(call_id.to_string()),
         job: Some(bg::job_name(&ctx.session_id, dir)),
         sock: Some(ctx.sock.clone()),
+        session_dir: None,
         token: Some(ctx.token.clone()).filter(|token| !token.is_empty()),
         env: None,
         // The call runs where the session (or `--cwd`, or a resumed session's log) says, not in

@@ -20,11 +20,11 @@ that appends an event; the loop applies verbs at named boundaries.
   events.jsonl            # append-only, fsync'd per batch, monotonic seq; the only source of truth
   calls/<call-id>/out     # one dir per tool/MCP/child call; the `out` file holds the full
                           #   tool output, never truncated, and is also the >10 KB spill file
-  bg/<bg-id>.status       # written by the bg shim; survives kelir exiting; the dir is 0700
+  calls/<bg-id>/<bg-id>.status  # written by the bg shim; one dir per job; survives kelir exiting
   sock                    # the session socket (a named pipe on Windows)
   token                   # this session's secret, owner-only (0600), removed when the session ends;
                           # `kelir ctl` reads it while it lives
-  bg/<bg-id>.cancel       # exists only while a `cancel` is in flight (so a reader says
+  calls/<bg-id>/<bg-id>.cancel  # exists only while a `cancel` is in flight (so a reader says
                           # "running", not "lost", between the kill and the status write)
 ```
 
@@ -45,7 +45,7 @@ that appends an event; the loop applies verbs at named boundaries.
   as `stop`. Background jobs are the exception (they are detached on purpose, below). Picking a
   session up again is `kelir resume <id>`.
 - **A bg job that finishes while its session is not running** is only recorded: its shim writes
-  `bg/<id>.status`, and the next `resume` folds it into the log as a `call_settled` with `kind: "bg"`. Nothing wakes a
+  `calls/<id>/<id>.status`, and the next `resume` folds it into the log as a `call_settled` with `kind: "bg"`. Nothing wakes a
   stopped session.
 - **Children are separate OS processes** the model starts from `bash` (`kelir run --child`,
   `kelir brief`; there is no spawn tool), each owning its own session dir. They live inside the parent's process group (Unix) or Job Object (Windows), so
@@ -72,13 +72,13 @@ so a check against same-user code cannot hold.
   from the log on resume. `bg` reports, `cancel` and `bg-spawn` are refused when they name an id
   this session did not start, and the refusal is a `verb` event with boundary `rejected` (at most
   `32` per session). A settled job is accepted **once**: later reports for that id write no second
-  `call_settled{kind:"bg"}` event and wake the model no second time. A final record in `bg/<id>.final` wins over
+  `call_settled{kind:"bg"}` event and wake the model no second time. A final record in `calls/<id>/<id>.final` wins over
   the status file, so an older `running` record written back later cannot un-settle a job. A child
   holding the token can report on a job this session owns; that is the same-user trust boundary.
 - **Other checks that still apply.** A `bg-spawn` honours only `cmd`, `shell`, `cwd` and `env`
   (filtered, without `KELIR_TOKEN`/`KELIR_SOCK`); the session mints the id and pins the shim's kind
   and socket. It refuses a request that names an id, every job/status/out path must resolve inside
-  this session's own `calls/` or `bg/` (canonicalised: `..`, symlinks out, UNC and other drives
+  this session's own `calls/` (canonicalised: `..`, symlinks out, UNC and other drives
   refused), and one session mints at most `256` ids on request. No verb writes its request wholesale
   to the log. Tool children do not inherit `OPENROUTER_API_KEY` or `KELIR_GO_API_KEY` unless the
   user names a custom `key_env`.
@@ -155,7 +155,7 @@ diagnostic notes are `note`.
 | `step_usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `allowance?`, `kind?` | a provider request with no assistant event (compaction, gate scoring) |
 | `call_started` | `id`, `kind`, `info{name, input?, dir?, session?, parent?, depth?, background?, model?}` | intent for any call; `dir` is the call's own `calls/<dir>` name, so a resume adopts it from the log |
 | `call_settled` | `id`, `kind`, `outcome`, `exit_code?`, `bytes?`, `lines?`, `out_path?`, `spilled?`, `result?`, `state?` | one commit; `result` is what the model sees (≤10 KB or the spill notice) |
-| `verb` | `name`, `args`, `from`, `boundary`, `error?` | every verb received, applied or not; `boundary: "rejected"` is a refusal (a foreign job id, a path outside the session's own `calls/`, a path outside the session's own `bg/`, an unparsable verb), with `error` saying why |
+| `verb` | `name`, `args`, `from`, `boundary`, `error?` | every verb received, applied or not; `boundary: "rejected"` is a refusal (a foreign job id, a path outside the session's own `calls/`, an unparsable verb), with `error` saying why |
 | `gate` | `gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?` | every gate run, including fail-open ones |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by` (`user`, `agent`, `auto`), `tokens_before`, `tokens_after` | the fold replaces everything up to `through_seq` except the pins |
 | `turn_ended` | `outcome` (`done`, `stopped`, `paused`, `error`), `final_text`, `reason?` | `paused` covers two cases, distinguished by `reason`: `steps` (an explicit `max_steps` cap) and `provider` (the retry budget was exhausted). Neither is a failure: `--keep` stays alive and the next message opens a new turn |
@@ -393,7 +393,7 @@ snapshot of the parent's context, `edit`/`compact` refused, history untouched. D
 ## Background
 
 `kelir bg run|ls|out|wait|cancel`. A job runs under a small shim (`kelir bg-shim`, the same
-binary) that waits for the command, tees its output and writes `bg/<id>.status`, so it outlives
+binary) that waits for the command, tees its output and writes `calls/<id>/<id>.status`, so it outlives
 the session. Completion while the session runs appends `call_settled{kind:"bg"}` and admits a message at the
 next boundary so the agent wakes; while it does not, see *Process model*.
 

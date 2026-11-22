@@ -355,7 +355,9 @@ async fn a_long_bg_job_command_runs_from_a_file() {
         .to_string();
     assert!(id.starts_with("bg_"), "{}", job.stdout);
 
-    let status = sandbox.state.join("bg").join(format!("{id}.status"));
+    let status = global_job_root(&sandbox.state)
+        .join(&id)
+        .join(format!("{id}.status"));
     let mut waited = 0;
     let settled = loop {
         let text = std::fs::read_to_string(&status).unwrap_or_default();

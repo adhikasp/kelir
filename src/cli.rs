@@ -517,7 +517,7 @@ pub struct GateGuardArgs {
 /// self-contained, detachable process.
 #[derive(Debug, Args, Clone)]
 pub struct BgShimArgs {
-    /// The `bg/` directory the status file lives in.
+    /// The root (`calls/` or the global `bg/`); this job owns one directory below it.
     #[arg(long, value_name = "DIR")]
     pub dir: PathBuf,
     /// The job id (also the status file's stem).
@@ -562,6 +562,9 @@ pub struct BgShimArgs {
     /// The session socket, exported to the command as `KELIR_SOCK`.
     #[arg(long, value_name = "ADDRESS")]
     pub sock: Option<String>,
+    /// The owning session dir, for a job whose root is not below a session.
+    #[arg(long, value_name = "DIR")]
+    pub session_dir: Option<std::path::PathBuf>,
 }
 
 #[cfg(test)]
@@ -742,7 +745,7 @@ mod tests {
             "kelir",
             "bg-shim",
             "--dir",
-            "s/ses_1/bg",
+            "s/ses_1/calls",
             "--id",
             "11-2-1",
             "--out",
