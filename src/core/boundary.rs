@@ -19,7 +19,7 @@ use crate::event::{EventBody, LogEvent};
 pub struct Cx<'a> {
     pub(crate) writer: &'a mut crate::event::EventLog,
     pub(crate) blobs: &'a mut crate::event::Blobs,
-    pub(crate) events: &'a Vec<LogEvent>,
+    pub(crate) events: &'a mut Vec<LogEvent>,
     pub(crate) ui: &'a Option<mpsc::UnboundedSender<crate::tui::UiEvent>>,
     pub(crate) cfg: &'a crate::config::Config,
     pub(crate) dir: &'a PathBuf,
@@ -58,6 +58,7 @@ impl<'a> Cx<'a> {
             let _ = lock.flush();
         }
         self.tally.observe(event.seq, &event.body);
+        self.events.push(event.clone());
         Ok(event)
     }
 
@@ -96,6 +97,12 @@ pub trait Feature: Send {
     /// Before each step: apply queued work (model fetch result, source changes, mcp results).
     async fn before_step(&mut self, cx: &mut Cx<'_>) {
         let _ = cx;
+    }
+
+    /// Check on-disk sources at the point after compaction where the core used
+    /// to call `Session::check_sources`. A feature without sources does nothing.
+    fn check_sources(&mut self, _cx: &mut Cx<'_>) -> Result<(), String> {
+        Ok(())
     }
 
     /// A verb this feature owns; `None` = not mine.

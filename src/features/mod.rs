@@ -2,11 +2,13 @@
 //! boundary; it never names a member. Dispatch is static, in the documented order.
 
 pub mod models;
+pub mod sources;
 
 use crate::core::boundary::{Cx, Feature};
 
 pub(crate) struct Features {
     pub(crate) models: models::Models,
+    pub(crate) sources: sources::Sources,
 }
 
 impl Features {
@@ -14,7 +16,15 @@ impl Features {
         Feature::before_step(&mut self.models, cx).await;
     }
 
+    /// Sources are checked after compaction, before the request: a `source`
+    /// change lands at the tail and must not be folded into the summary.
+    pub(crate) fn check_sources(&mut self, cx: &mut Cx<'_>) -> Result<(), String> {
+        let sources = &mut self.sources;
+        Feature::check_sources(sources, cx)
+    }
+
     pub(crate) fn status(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
         Feature::status(&self.models, out);
+        Feature::status(&self.sources, out);
     }
 }
