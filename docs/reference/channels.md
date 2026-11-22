@@ -52,5 +52,5 @@ M8 `prompt_submit` gates run on the envelope. Nothing from an MCP server's
 
 While any turn runs, the process reports OSC 7501 `working`, otherwise `idle`.
 `kelir channel --status-once` prints a JSON status line at startup; the live
-snapshot is in the state dir at `channel-status/status.json` (conversations,
+snapshot is in the state dir at `spool/status.json` (conversations,
 queue depth, active turns, spool backlog, reply/fallback counts).

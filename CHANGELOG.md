@@ -11,12 +11,18 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 - A background job now owns exactly one directory: session jobs live under
   `<session>/calls/<id>/` (status, output, markers), jobs started outside a session
-  under `<state>/bg/<id>/`. There is no second location, no dual-dir reader and no
+  `<state>/calls/<id>/`. There is no second location, no dual-dir reader and no
   compatibility path; direct readers must use the new location.
 
 - Tool and MCP call output directories moved from `<session>/commands/` to
   `<session>/calls/`. Direct readers of the old path must switch; existing sessions
   are not migrated (no compatibility readers).
+
+- Global call artefacts follow the same one-directory-per-call rule: session-less
+  background jobs moved from `<state>/bg/<id>/` to `<state>/calls/<id>/`, one-shot
+  MCP output from `<state>/mcp/<id>/` to `<state>/calls/mcp_<id>/`. The channel
+  status snapshot moved from `<state>/channel-status/status.json` to
+  `<state>/spool/status.json`, beside the spool it describes. No old path is read.
 
 ### Breaking
 

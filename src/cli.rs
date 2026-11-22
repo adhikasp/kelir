@@ -434,7 +434,7 @@ pub struct McpArgs {
 }
 
 /// `kelir bg …` inside a bash call (or standalone): jobs live in the session's
-/// `bg/` when `KELIR_SESSION_DIR` is set, else in the state dir.
+/// `calls/` when `KELIR_SESSION_DIR` is set, else in the state's global `calls/`.
 #[derive(Debug, Args, Clone)]
 pub struct BgArgs {
     #[command(subcommand)]

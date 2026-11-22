@@ -244,7 +244,7 @@ pub fn new_id() -> String {
 }
 
 /// Where jobs live: this session's `calls/` inside a bash call, otherwise the
-/// state dir's own `bg/` for a job with no session.
+/// global `calls/` for a job with no session. Both are one directory per call.
 pub fn root() -> PathBuf {
     if let Some(dir) = crate::envs::var_os("KELIR_SESSION_DIR")
         .map(PathBuf::from)
@@ -252,7 +252,7 @@ pub fn root() -> PathBuf {
     {
         return crate::paths::calls_dir(&dir);
     }
-    crate::paths::state_dir().join("bg")
+    crate::paths::global_calls_dir()
 }
 
 /// Every job owns exactly one directory: `<root>/<id>/`. Its status, output,

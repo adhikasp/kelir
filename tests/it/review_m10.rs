@@ -241,13 +241,19 @@ fn r7_status_snapshot_path_matches_docs() {
     };
     // The driver's writer is private; `read_status` is the public reader and
     // must agree with the documented path.
-    let documented = state.join("channel-status").join("status.json");
+    let documented = state.join("spool").join("status.json");
     std::fs::create_dir_all(documented.parent().unwrap()).unwrap();
     std::fs::write(&documented, serde_json::to_vec(&status).unwrap()).unwrap();
     assert!(
         kelir::channel::read_status(&state).is_some(),
-        "read_status must agree with docs/reference/channels.md: channel-status/status.json"
+        "read_status must agree with docs/reference/channels.md: spool/status.json"
     );
+    // The old, separate root is not a fallback reader: only one location is read.
+    std::fs::remove_file(&documented).unwrap();
+    let stale = state.join("channel-status").join("status.json");
+    std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    std::fs::write(&stale, serde_json::to_vec(&status).unwrap()).unwrap();
+    assert!(kelir::channel::read_status(&state).is_none());
 }
 
 /// R8: the drop reason for a malformed notification must be shape-only: no

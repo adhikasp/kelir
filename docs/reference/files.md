@@ -61,12 +61,12 @@ Session ids are ULIDs, so the directory names sort into creation order and
 <state>/
   sessions/<id>/…         # above
   names/<name>            # a named session: {"session","created","updated"} (owner-only dir)
-  spool/<server>.jsonl    # channel mode's fsync'd, append-only inbound queue (src/channel.rs)
-  channel-status/status.json # live channel driver status snapshot
+  spool/<server>.jsonl     # channel mode's fsync'd, append-only inbound queue (src/channel.rs)
+  spool/status.json       # live channel driver status snapshot, beside its spool
   models-<endpoint>.json  # one endpoint's model list, cached for a day, written temp-then-rename
   locks/<provider>-<slot> # the concurrency governor's advisory locks
-  bg/<bg-id>/<bg-id>.*    # jobs started outside a session (kelir bg run from a plain shell)
-  mcp/<ulid>/             # one-shot `kelir mcp` call's decoded files outside a session
+  calls/<bg-id>/<bg-id>.* # jobs started outside a session (kelir bg run from a plain shell)
+  calls/mcp_<ulid>/       # one-shot `kelir mcp` call's decoded files outside a session
 ```
 
 `locks/` holds OS file locks, not pid files: a kelir that crashes leaks nothing
@@ -104,8 +104,7 @@ name (`docs/reference/mcp.md`).
 | `models-*.json` | `src/models.rs` | the provider's model metadata |
 | `locks/` | `src/governor.rs` | at most N requests in flight per provider |
 | `names/` | `src/names.rs` | named sessions; the session `owner` file |
-| `spool/` | `src/channel.rs` | channel mode's durable inbound queue, one file per server |
-| `channel-status/` | `src/channel.rs` | the live `kelir channel` status snapshot |
+| `spool/` | `src/channel.rs` | channel mode's inbound queue and the live `kelir channel` status snapshot (`spool/status.json`) |
 | `names/<name>.*` | `src/namedrun.rs`, `src/names.rs` | name binding, single-flight lock, STATUS |
 
 ## Cleaning up, safely

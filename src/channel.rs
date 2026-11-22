@@ -571,8 +571,7 @@ pub struct Status {
 
 /// Read the channel status file written by the running `kelir channel` process.
 pub fn read_status(state: &Path) -> Option<Status> {
-    let path = state.join("channel-status").join("status.json");
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = std::fs::read_to_string(crate::paths::channel_status_path_in(state)).ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -1005,12 +1004,12 @@ struct Counters {
 /// Write the status snapshot. One small atomic file; `kelir ctl status` and
 /// tests read it. Never holds a secret (server names and counts only).
 fn write_status(state: &Path, status: &Status) {
-    let dir = state.join("channel-status");
+    let dir = state.join("spool");
     if crate::paths::create_private_dir(&dir).is_err() {
         return;
     }
     let bytes = serde_json::to_vec(status).unwrap_or_default();
-    let _ = crate::atomic::write_atomic(&dir.join("status.json"), &bytes);
+    let _ = crate::atomic::write_atomic(&crate::paths::channel_status_path_in(state), &bytes);
 }
 
 /// Everything the concurrent turns share. One thread (a `LocalSet`), so plain

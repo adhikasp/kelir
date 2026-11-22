@@ -89,7 +89,7 @@ kelir mcp <server> <tool> [k=v …] [--json '{…}'] [--schema] [--envelope]
 - stdout is `structuredContent` as compact JSON when the tool sent it, else the
   text blocks joined by newlines. `--envelope` prints the whole result object.
 - Images, audio and binary resources are decoded to files (`calls/mcp_…/` in
-  a session, `<state>/mcp/<id>/` outside one) and the paths are printed — on
+  a session, `<state>/calls/mcp_<id>/` outside one) and the paths are printed — on
   stdout after the text, or on stderr when stdout is JSON that a pipe will parse.
 - A tool that answers `isError` prints its text on **stderr** and exits 1, so
   `| jq` never reads an error as data.

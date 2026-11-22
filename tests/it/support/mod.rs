@@ -31,7 +31,7 @@ pub fn hold_then(rest: &str) -> String {
 
 /// A session-less `bg run` job's root, `<state>/bg/`.
 pub fn global_job_root(state: &Path) -> PathBuf {
-    state.join("bg")
+    state.join("calls")
 }
 
 /// A session job's status file: the job owns `<session>/calls/<id>/`.

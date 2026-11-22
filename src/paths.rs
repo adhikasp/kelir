@@ -70,6 +70,28 @@ pub fn sessions_dir() -> PathBuf {
     state_dir().join("sessions")
 }
 
+/// Directory for calls that have no session: `kelir bg run` from a plain shell and
+/// one-shot `kelir mcp`. Session calls use [`calls_dir`] instead, so both kinds of
+/// call have exactly one directory per call, with the same shape.
+pub fn global_calls_dir() -> PathBuf {
+    state_dir().join(CALLS)
+}
+
+/// The directory of one session-less call (`bg_<ulid>` or `mcp_<ulid>`).
+pub fn global_call_dir(id: &str) -> PathBuf {
+    global_calls_dir().join(id)
+}
+
+/// Where the running channel driver writes its live status snapshot: beside its
+/// documented `spool/`, in the one channel directory. `kelir ctl status` reads it.
+pub fn channel_status_path_in(state: &Path) -> PathBuf {
+    state.join("spool").join("status.json")
+}
+
+pub fn channel_status_path() -> PathBuf {
+    channel_status_path_in(&state_dir())
+}
+
 /// `<state>/sessions/<id>`.
 pub fn session_dir(id: &str) -> PathBuf {
     sessions_dir().join(id)

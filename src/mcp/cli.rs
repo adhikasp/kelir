@@ -254,9 +254,10 @@ impl Backend {
             .get(server)
             .cloned()
             .ok_or_else(|| shot.unknown(server))?;
-        let out_dir = crate::paths::state_dir()
-            .join("mcp")
-            .join(ulid::Ulid::generate().to_string());
+        let out_dir = crate::paths::global_call_dir(&format!(
+            "mcp_{}",
+            ulid::Ulid::generate().to_string().to_lowercase()
+        ));
         Ok(run_call(&client, &config, tool, arguments, envelope, &out_dir, false).await)
     }
 
