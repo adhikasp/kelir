@@ -189,6 +189,44 @@ async fn each_of_the_six_events_fires_with_its_document() {
 
 // ------------------------------------------------------------------- fail open
 
+// A gate's `context` is a source at the tail, through the same append path
+// the built-in hint uses. The user message comes first so the cached prefix
+// is untouched.
+#[tokio::test]
+async fn an_external_gates_context_becomes_a_hint_source() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
+    let probe = Probe::new(json!({
+        "prompt_submit": {
+            "mode": "context",
+            "text": "might be relevant: sift - read the log",
+            "kind": "hint",
+        }
+    }));
+    let config = probe.config(&[("prompt_submit", None)]);
+    let done = drive(&mock, &config, "check the gates", &[]).await;
+    assert_eq!(done.out.code, 0, "{}", done.out.stderr);
+    let user = done
+        .log
+        .iter()
+        .position(|event| event["type"] == "user")
+        .expect("the user message");
+    let source = done
+        .log
+        .iter()
+        .position(|event| event["type"] == "source" && event["kind"] == "hint")
+        .expect("the gate's context");
+    assert!(source > user, "the context lands after the user message");
+    assert_eq!(
+        done.log[source]["text"],
+        "might be relevant: sift - read the log"
+    );
+    let request = &mock.requests()[0];
+    assert!(
+        request.body.to_string().contains("might be relevant: sift"),
+        "the hint reaches the model"
+    );
+}
+
 #[tokio::test]
 async fn crashing_garbage_and_silent_gates_fail_open() {
     let mock = Mock::start(one_call_then("done", "echo still-ran")).await;

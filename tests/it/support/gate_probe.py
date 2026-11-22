@@ -5,7 +5,7 @@ Records what it was given (`<dir>/<event>.jsonl`: the stdin document, one per
 line; `<dir>/env-<event>.json`: its environment) and then does what
 `<dir>/plan.json` says for the event: {"<event>": {"mode": ..., ...}}.
 Modes: allow (default), deny{reason}, rewrite{input}, crash, garbage, empty,
-hang{flag}: sleep for a minute after starting a child that would write `flag`
+context{text,kind}, hang{flag}: sleep for a minute after starting a child that would write `flag`
 after 3 s (so a surviving child is visible).
 """
 import json
@@ -34,6 +34,12 @@ if mode == "deny":
     print(json.dumps({"decision": "deny", "reason": step.get("reason", "")}))
 elif mode == "rewrite":
     print(json.dumps({"decision": "rewrite", "reason": step.get("reason", ""), "input": step["input"]}))
+elif mode == "context":
+    print(json.dumps({
+        "decision": "allow",
+        "context": step.get("text", ""),
+        "kind": step.get("kind", "gate"),
+    }))
 elif mode == "crash":
     sys.stderr.write("probe crashed on purpose\n")
     sys.exit(3)

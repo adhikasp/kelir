@@ -1879,3 +1879,21 @@ socket request, owner-only state directories and socket/pipe creation, an owned-
 returns an empty token/id: `Trust::create` and `Trust::mint_for` then refuse cleanly, so no
 predictable fallback is ever used and an entropy-less platform fails to start instead of
 minting a session. The emptiness guards in `src/trust.rs` are live on that path.
+## Built-in gates (rewrite P2B)
+
+- The pushed hint moved out of `Session` into `src/gates/builtin/hint.rs`; the
+  core keeps only the generic gate `context` path. `hint` is a Rust built-in
+  behind the same `GateInput`/`GateAnswer` interface external gates use, with
+  one instance per session held in the gate runner (state: the scored prompt
+  seq and the resolved scorer).
+- `prompt_submit` gates run before the human message is recorded, so the built-in
+  takes its prompt from the gate input rather than the event log; the answer is
+  held until that message exists and then appended through the same `source`
+  append function as an external gate's `context`. Seq-based dedupe applies only
+  when a matching user event exists (a gate run has no seq yet).
+- A built-in's non-streaming scorer call uses its own `reqwest::Client` (the
+  session client's stream future is `!Send`). `endpoint` overrides the base URL
+  before the scorer is built; a foreign origin drops the key, as before.
+- The hint catalogue scores skills only. MCP servers are named in the base
+  prompt for the model to pull with `kelir mcp`; they are not candidates for
+  the built-in scorer (this narrows the issue #13 wording "skills + MCP").

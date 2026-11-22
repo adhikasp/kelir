@@ -381,6 +381,8 @@ struct Reopened {
 struct Session {
     id: String,
     dir: PathBuf,
+    /// Machine config dir, passed to built-in gates for machine-level skills.
+    config_dir: PathBuf,
     writer: EventLog,
     blobs: Blobs,
     events: Vec<LogEvent>,
@@ -473,12 +475,6 @@ struct Session {
     /// Body fields a provider refused with a 400 during this session, by the field name: the retry leaves
     /// them out and the session remembers, so the same 400 is not paid twice.
     refused_fields: BTreeSet<String>,
-    /// The seq of the newest human prompt already scored (or skipped) for the
-    /// pushed hint; a later one is scored at the next `before_step`.
-    hint_seen: u64,
-    /// The hint scorer, built on first use: `None` outer is "not tried yet",
-    /// `None` inner is "unavailable" (a note was already written).
-    hint_scorer: Option<Option<std::sync::Arc<dyn crate::hint::Scorer>>>,
     /// The sources in this context, re-checked at every boundary: an edit on
     /// disk becomes a `source` message, never a system rewrite.
     watch: crate::sources::Watch,
@@ -509,6 +505,9 @@ struct Session {
     /// Whether a `session_title` event has been written (or was present on
     /// resume). The first human prompt names the session; later ones do not.
     titled: bool,
+    /// `context` a gate contributed before its user message was recorded:
+    /// appended once that message exists, through the shared append path.
+    pending_gate_context: Vec<crate::gates::Context>,
     /// Problems found while reading gate declarations; logged once at start.
     gate_notes: Vec<String>,
 }
@@ -1759,6 +1758,7 @@ impl Session {
         let mut session = Session {
             id: prepared.id.clone(),
             dir: prepared.dir.clone(),
+            config_dir: crate::paths::config_dir(),
             writer,
             blobs: Blobs::new(&prepared.dir),
             events: prepared
@@ -1798,8 +1798,6 @@ impl Session {
             mcp_pending: std::collections::HashMap::new(),
             mcp_channel_queue: Vec::new(),
             refused_fields: BTreeSet::new(),
-            hint_seen: 0,
-            hint_scorer: None,
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
             compact_request: None,
@@ -1839,6 +1837,7 @@ impl Session {
             turn_blocked: false,
             turn_tool_calls: 0,
             initial_task: None,
+            pending_gate_context: Vec::new(),
             gate_notes: Vec::new(),
         };
         if session.kids.root.is_some() {
@@ -1851,15 +1850,6 @@ impl Session {
         // from the log's `sources[]` *and* the `source` events it already carries, so a source the verb added
         if let Some(read) = prepared.resume {
             session.watch = crate::sources::Watch::rebuild(&read.events, &session.dir);
-            // Prompts the log already holds were handled by the process that
-            // wrote them.
-            session.hint_seen = read
-                .events
-                .iter()
-                .filter(|event| matches!(event.body, EventBody::User { .. }))
-                .map(|event| event.seq)
-                .max()
-                .unwrap_or(0);
             // A turn that was in flight continues without a new task.
             session.has_task |= read.in_flight;
             session.reopen(read)?;
@@ -2207,10 +2197,80 @@ impl Session {
         if !gates.has(event, tool) {
             return Ok(crate::gates::Verdict::Allow);
         }
-        let chain = gates.run_event(event, tool, self.turn, payload).await;
+        let chain = gates
+            .run_event(event, tool, self.turn, payload, Some(&self.gate_ctx()))
+            .await;
         self.record_gate_runs(&chain.runs)?;
+        for note in gates.take_notes() {
+            let _ = self.record(EventBody::Error {
+                location: "gate".into(),
+                message: note,
+                retryable: false,
+                status: None,
+                attempt: None,
+                retry_in_ms: None,
+            });
+        }
+        for usage in &chain.usages {
+            let _ = self.record(EventBody::Usage {
+                step: 0,
+                prompt_tokens: usage.1.prompt_tokens,
+                completion_tokens: usage.1.completion_tokens,
+                cached_tokens: usage.1.cached_tokens,
+                cache_write_tokens: usage.1.cache_write_tokens,
+                allowance: None,
+                kind: Some(usage.0.clone()),
+            });
+        }
+        // A gate's `context` is one shared append path for both external and
+        // built-in gates. It lands after the user message, at the tail, so the
+        // cached prefix is untouched. At `prompt_submit` the user message is
+        // recorded after the gate, so hold the context until that is done.
+        if event == crate::gates::Event::PromptSubmit {
+            self.pending_gate_context.extend(chain.contexts);
+        } else {
+            self.record_gate_context(&chain.contexts);
+        }
         self.sync();
         Ok(chain.verdict)
+    }
+
+    /// The one place a gate's `context` becomes a `source` event, shared by
+    /// external and built-in gates.
+    fn record_gate_context(&mut self, contexts: &[crate::gates::Context]) {
+        for context in contexts {
+            let _ = self.record(EventBody::Source {
+                kind: context.kind.clone(),
+                name: context.kind.clone(),
+                text: Some(Payload::text(context.text.clone())),
+                path: None,
+            });
+        }
+    }
+
+    /// Append contexts held back until the user message they belong to exists.
+    fn flush_gate_context(&mut self) {
+        let pending = std::mem::take(&mut self.pending_gate_context);
+        self.record_gate_context(&pending);
+        self.sync();
+    }
+
+    /// The read-only view a built-in gate gets of this session.
+    fn gate_ctx(&self) -> crate::gates::GateCtx<'_> {
+        // The built-in hint must see machine-level skills, just as the old
+        // core hint did (`places(&ctx.cwd, &cfg.skills_dirs, Some(config_dir()))`).
+        crate::gates::GateCtx {
+            client: &self.client,
+            provider: &self.active_provider,
+            config: &self.cfg,
+            provider_name: &self.provider_name,
+            note: &|_message| {},
+            events: &self.events,
+            dir: &self.dir,
+            skills_dirs: &self.cfg.skills_dirs,
+            config_dir: Some(&self.config_dir),
+            cwd: &self.ctx.cwd,
+        }
     }
 
     /// Problems found reading gate declarations: logged once, never fatal.
@@ -2306,6 +2366,7 @@ impl Session {
                     delivery: delivery.to_string(),
                     attachments: Vec::new(),
                 });
+                self.flush_gate_context();
                 self.sync();
                 true
             }
@@ -3192,6 +3253,7 @@ impl Session {
                         delivery: if now { "now" } else { "next" }.to_string(),
                         attachments,
                     })?;
+                    self.flush_gate_context();
                     applied.messages += 1;
                 }
                 // Due only at a turn end, where `take_turn_messages` gets it.
@@ -3880,144 +3942,6 @@ impl Session {
         Ok(count)
     }
 
-    /// The pushed hint: one scoring call for the newest human prompt, answered as a `source` message (kind
-    /// `hint`) at the tail.
-    async fn maybe_hint(&mut self) {
-        let Some(config) = self.cfg.hint.clone() else {
-            return;
-        };
-        // The newest human prompt not scored yet. A job's wake-up is not a
-        // prompt, and a prompt is scored once however many steps it takes.
-        let Some((seq, prompt)) = self
-            .events
-            .iter()
-            .rev()
-            .find_map(|event| match &event.body {
-                EventBody::User { text, from, .. } if from != "job" => {
-                    Some((event.seq, text.resolve_text(&self.dir).unwrap_or_default()))
-                }
-                _ => None,
-            })
-        else {
-            return;
-        };
-        if seq <= self.hint_seen {
-            return;
-        }
-        self.hint_seen = seq;
-        if self.hint_scorer.is_none() {
-            let built = self.build_scorer(&config).await;
-            self.hint_scorer = Some(match built {
-                Ok(scorer) => Some(scorer),
-                Err(why) => {
-                    self.hint_note(&format!("hint: off for this session ({why})"));
-                    None
-                }
-            });
-        }
-        let Some(Some(scorer)) = self.hint_scorer.clone() else {
-            return;
-        };
-        let mut places = crate::sources::places(
-            &self.ctx.cwd,
-            &self.cfg.skills_dirs,
-            Some(crate::paths::config_dir()),
-        );
-        places.memory_dir = None;
-        let candidates = crate::hint::catalogue(&places);
-        match crate::hint::hint_for(scorer.as_ref(), &prompt, &candidates, config.timeout).await {
-            Ok(Some(text)) => {
-                self.record_hint_usage(scorer.as_ref());
-                let recorded = self.record(EventBody::Source {
-                    kind: crate::hint::SOURCE_KIND.to_string(),
-                    name: crate::hint::SOURCE_NAME.to_string(),
-                    text: Some(Payload::text(text)),
-                    path: None,
-                });
-                if recorded.is_ok() {
-                    self.sync();
-                }
-            }
-            Ok(None) => self.record_hint_usage(scorer.as_ref()),
-            Err(why) => {
-                self.record_hint_usage(scorer.as_ref());
-                self.hint_note(&format!("hint: skipped ({why})"));
-            }
-        }
-    }
-
-    /// The scoring call's own tokens, as a `usage` event of kind `hint`: it counts in `ctl
-    /// status`, and the cache ratio (which reads `kind: None`) stays about the main request.
-    fn record_hint_usage(&mut self, scorer: &dyn crate::hint::Scorer) {
-        let Some(usage) = scorer.take_usage() else {
-            return;
-        };
-        let _ = self.record(EventBody::Usage {
-            step: 0,
-            prompt_tokens: usage.prompt_tokens,
-            completion_tokens: usage.completion_tokens,
-            cached_tokens: usage.cached_tokens,
-            cache_write_tokens: usage.cache_write_tokens,
-            allowance: None,
-            kind: Some("hint".into()),
-        });
-        self.note_warnings();
-    }
-
-    fn hint_note(&mut self, message: &str) {
-        let _ = self.record(EventBody::Error {
-            location: "source".into(),
-            message: message.to_string(),
-            retryable: false,
-            status: None,
-            attempt: None,
-            retry_in_ms: None,
-        });
-    }
-
-    /// The scorer for `[hint]`: the named provider's base URL (or the configured `endpoint`) and
-    /// key. The key is resolved off the async thread and held in memory only.
-    async fn build_scorer(
-        &self,
-        config: &crate::config::HintConfig,
-    ) -> Result<std::sync::Arc<dyn crate::hint::Scorer>, String> {
-        let mut provider = self
-            .cfg
-            .provider(&config.provider)
-            .map_err(|error| error.to_string())?;
-        if config.provider == self.provider_name {
-            provider.key = self.active_provider.key.clone();
-        } else {
-            let resolved = tokio::task::spawn_blocking(move || {
-                let mut provider = provider;
-                let outcome = crate::credentials::resolve(&mut provider);
-                (provider, outcome)
-            })
-            .await
-            .map_err(|_| "the key lookup failed".to_string())?;
-            provider = resolved.0;
-            if let Err(why) = resolved.1
-                && config.endpoint.is_none()
-            {
-                return Err(why);
-            }
-        }
-        let base = config
-            .endpoint
-            .clone()
-            .unwrap_or_else(|| provider.base_url.clone());
-        // A provider's key goes to that provider's origin only: a `[hint] endpoint` on another
-        // host is called without a key, as the docs say for a local server, never with the session's key.
-        if config.endpoint.is_some() && !crate::hint::same_origin(&base, &provider.base_url) {
-            provider.key = None;
-        }
-        if provider.key.is_none() && config.endpoint.is_none() {
-            return Err("no API key".to_string());
-        }
-        let chat = crate::hint::Chat::new(&base, provider.key.clone(), &config.model)?;
-        Ok(std::sync::Arc::new(chat))
-    }
-
     async fn record_messages(&mut self, messages: Vec<Message>) -> Result<(), String> {
         for mut message in messages {
             let Some(text) = self.gate_prompt(message.text, &message.from).await? else {
@@ -4042,6 +3966,7 @@ impl Session {
                 delivery: message.delivery.to_string(),
                 attachments,
             })?;
+            self.flush_gate_context();
         }
         self.sync();
         Ok(())
@@ -4679,7 +4604,6 @@ impl Session {
             // Sources edited on disk while the turn ran: one `source` message
             // each, at the tail. Never a system rewrite.
             self.check_sources()?;
-            self.maybe_hint().await;
             // A key that is within two minutes of its expiry is re-read before the request: opencode refreshes its
             // token whenever it runs, so a copied-out one goes stale before its own `expires` does
             self.refresh_expiring_key();
@@ -5833,7 +5757,7 @@ async fn gated_mcp_call(
     if let Some(gates) = gates.filter(|gates| gates.has(Event::BeforeTool, Some(&name))) {
         let payload = json!({"tool": name, "call_id": mcp_id, "input": arguments});
         let chain = gates
-            .run_event(Event::BeforeTool, Some(&name), turn, payload)
+            .run_event(Event::BeforeTool, Some(&name), turn, payload, None)
             .await;
         runs.extend(chain.runs);
         match chain.verdict {
@@ -5864,7 +5788,7 @@ async fn gated_mcp_call(
             "exit_code": output.exit_code,
         });
         let chain = gates
-            .run_event(Event::AfterTool, Some(&name), turn, payload)
+            .run_event(Event::AfterTool, Some(&name), turn, payload, None)
             .await;
         runs.extend(chain.runs);
         if let Verdict::Rewrite(value) = chain.verdict
@@ -6027,6 +5951,22 @@ mod tests {
         );
     }
 
+    /// Regression: the ported hint must see the same skill layers as the old
+    /// core hint, including `<config>/skills` (issue #13 review).
+    #[test]
+    fn gate_ctx_offers_the_machine_config_dir() {
+        let session = test_session("test/model");
+        let ctx = session.gate_ctx();
+        assert_eq!(ctx.config_dir, Some(crate::paths::config_dir().as_path()));
+        let places =
+            crate::sources::places(ctx.cwd, ctx.skills_dirs, ctx.config_dir.map(PathBuf::from));
+        assert!(
+            places
+                .skills_directories()
+                .contains(&crate::paths::config_dir().join("skills"))
+        );
+    }
+
     #[test]
     fn a_pause_says_what_happened_and_how_to_go_on() {
         let report = PauseReport {
@@ -6102,6 +6042,7 @@ mod tests {
         Session {
             id: "ses_1".into(),
             dir: dir.clone(),
+            config_dir: crate::paths::config_dir(),
             writer,
             blobs: Blobs::new(&dir),
             events: Vec::new(),
@@ -6123,7 +6064,6 @@ mod tests {
                 skills_dirs: vec![],
                 compact_keep: 0,
                 memory_dir: None,
-                hint: None,
                 promote_after: std::time::Duration::from_secs(0),
                 retry: crate::retry::Policy::default(),
                 warn_prompt_tokens: Some(crate::usage::DEFAULT_WARN_PROMPT_TOKENS),
@@ -6168,8 +6108,6 @@ mod tests {
             mcp_pending: std::collections::HashMap::new(),
             mcp_channel_queue: Vec::new(),
             refused_fields: BTreeSet::new(),
-            hint_seen: 0,
-            hint_scorer: None,
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
             compact_request: None,
@@ -6200,6 +6138,7 @@ mod tests {
             turn_blocked: false,
             turn_tool_calls: 0,
             initial_task: None,
+            pending_gate_context: Vec::new(),
             titled: false,
             gate_notes: Vec::new(),
             kids: children::Kids::new("ses_1", Default::default(), None),
@@ -6252,7 +6191,6 @@ mod tests {
             skills_dirs: vec![],
             compact_keep: 0,
             memory_dir: None,
-            hint: None,
             promote_after: std::time::Duration::from_secs(0),
             retry: crate::retry::Policy::default(),
             warn_prompt_tokens: Some(crate::usage::DEFAULT_WARN_PROMPT_TOKENS),

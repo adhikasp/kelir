@@ -261,7 +261,9 @@ fn scorer_reply(names: &[&str]) -> Reply {
     )
 }
 
-const HINT: &str = "[hint]\nmodel = \"scorer/model\"\n";
+const HINT: &str = "[gates.hint]\nbuiltin = 'hint'\nmodel = 'scorer/model'\n";
+const HINT_TIMEOUT: &str =
+    "[gates.hint]\nbuiltin = 'hint'\nmodel = 'scorer/model'\ntimeout_ms = 400\n";
 
 #[tokio::test]
 async fn the_hint_is_off_unless_configured() {
@@ -282,7 +284,11 @@ async fn the_hint_is_off_unless_configured() {
     )
     .await;
     assert_eq!(run.code, 0, "{}", run.stderr);
-    assert_eq!(mock.request_count(), 1, "no scoring call without [hint]");
+    assert_eq!(
+        mock.request_count(),
+        1,
+        "no scoring call without a hint gate"
+    );
     assert!(run.events_of("source").is_empty());
 }
 
@@ -341,6 +347,50 @@ async fn a_hint_is_one_scoring_call_and_a_name_with_a_description_never_a_body()
         .filter(|event| event["kind"] == "hint")
         .collect();
     assert_eq!(hints.len(), 1);
+}
+
+/// The built-in hint must see machine-level skills, i.e. `<config>/skills`,
+/// just like the old core hint did (issue #13 review). The sandbox's own temp
+/// dir holds the fake config, so the test never touches a real config dir.
+#[tokio::test]
+async fn the_hint_scores_machine_level_skills_from_the_config_dir() {
+    let sandbox = Sandbox::new(HINT);
+    let config_dir = sandbox.state.join("machine-config");
+    let skill = config_dir.join("skills").join("machine-only");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: machine-only\ndescription: use when a machine config skill matters\n---\n\nBODY-SECRET\n",
+    )
+    .unwrap();
+    let config_dir = toml_path(&config_dir);
+    let mock = Mock::start(vec![
+        scorer_reply(&["machine-only"]),
+        Reply::Sse(sse(&text_turn("ok", 0))),
+    ])
+    .await;
+    let run = sandbox
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "this log is too long"],
+            &[("KELIR_CONFIG_DIR", &config_dir)],
+        )
+        .await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 2, "one scoring call, one step");
+    let scorer_body = requests[0].body.to_string();
+    assert!(
+        scorer_body.contains("use when a machine config skill matters"),
+        "the machine-level skill must be in the scorer catalogue: {scorer_body}"
+    );
+    let last = requests[1].messages().last().unwrap();
+    assert!(
+        last["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("might be relevant: machine-only")
+    );
 }
 
 #[tokio::test]
@@ -408,7 +458,7 @@ async fn a_scorer_that_fails_leaves_no_hint_and_does_not_stop_the_turn() {
             ],
             &[],
             None,
-            "[hint]\nmodel = \"scorer/model\"\ntimeout_ms = 400\n",
+            HINT_TIMEOUT,
         )
         .await;
         assert_eq!(run.code, 0, "{}", run.stderr);
@@ -439,10 +489,7 @@ async fn an_unreachable_scorer_endpoint_fails_open() {
         ],
         &[],
         None,
-        "[hint]
-model = \"scorer/model\"
-endpoint = \"http://127.0.0.1:1/v1\"
-",
+        "[gates.hint]\nbuiltin = 'hint'\nmodel = 'scorer/model'\nendpoint = 'http://127.0.0.1:1/v1'\n",
     )
     .await;
     assert_eq!(run.code, 0, "{}", run.stderr);

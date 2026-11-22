@@ -1,14 +1,18 @@
-//! The pushed hint: "might be relevant: name - description".
+//! The built-in `hint` gate: "might be relevant: name - description".
 //! Skills are *pulled*: the base prompt names the directories and carries no listing.
-//! The pushed hint is the other half.
-//! When a human prompt arrives and a scorer is configured, kelir makes **one** cheap scoring call
-//! that is shown the prompt and a catalogue of `name - description` lines (skills now, MCP servers
+//! The pushed hint is the other half. It is a gate now: the same scoring model is configured
+//! as a gate provider, and its scoring call is bounded by the gate timeout.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+
+use super::super::BuiltinGate;
+use super::{GateAnswer, GateCtx, GateDef, GateInput};
+use crate::gates::Event;
+use crate::sources::Places;
 
 pub const MAX_NAMES: usize = 3;
 /// The most characters of a description shown to the scorer and in the hint.
@@ -20,9 +24,188 @@ pub const SOURCE_NAME: &str = "hint";
 /// The `kind` of the `source` event.
 pub const SOURCE_KIND: &str = "hint";
 
+/// The built-in hint, with its own state: the scorer is built once and each
+/// human prompt is scored once, keyed by the event `seq`.
+pub struct Hint {
+    model: String,
+    provider_name: String,
+    endpoint: Option<String>,
+    timeout: Duration,
+    max_names: usize,
+    scorer: Option<Option<std::sync::Arc<dyn Scorer>>>,
+    seen: u64,
+}
+
+impl Hint {
+    pub fn new(def: &GateDef) -> Result<Hint, String> {
+        let option = |key: &str| def.options.get(key).and_then(toml::Value::as_str);
+        let model = option("model")
+            .ok_or_else(|| "a built-in `hint` needs a `model`".to_string())?
+            .to_string();
+        let timeout = def
+            .options
+            .get("timeout")
+            .or_else(|| def.options.get("timeout_ms"))
+            .and_then(toml::Value::as_integer)
+            .map(|ms| Duration::from_millis(ms as u64))
+            .unwrap_or(Duration::from_secs(2));
+        let max_names = def
+            .options
+            .get("max_names")
+            .and_then(toml::Value::as_integer)
+            .map_or(MAX_NAMES, |n| n as usize);
+        Ok(Hint {
+            model,
+            provider_name: option("provider").unwrap_or("openrouter").to_string(),
+            endpoint: option("endpoint").map(str::to_string),
+            timeout,
+            max_names,
+            scorer: None,
+            seen: 0,
+        })
+    }
+
+    async fn scorer(&mut self, ctx: &GateCtx<'_>) -> Option<std::sync::Arc<dyn Scorer>> {
+        if let Some(scorer) = &self.scorer {
+            return scorer.clone();
+        }
+        let built = self.build_scorer(ctx).await;
+        if let Err(why) = &built {
+            (ctx.note)(&format!("hint: off for this session ({why})"));
+        }
+        let scorer = built.ok();
+        self.scorer = Some(scorer.clone());
+        scorer
+    }
+
+    async fn build_scorer(&self, ctx: &GateCtx<'_>) -> Result<std::sync::Arc<dyn Scorer>, String> {
+        let mut provider = ctx
+            .config
+            .provider(&self.provider_name)
+            .map_err(|error| error.to_string())?;
+        if self.provider_name == ctx.provider_name {
+            provider.key = ctx.provider.key.clone();
+        } else {
+            let resolved = tokio::task::spawn_blocking(move || {
+                let mut provider = provider;
+                let outcome = crate::credentials::resolve(&mut provider);
+                (provider, outcome)
+            })
+            .await
+            .map_err(|_| "the key lookup failed".to_string())?;
+            provider = resolved.0;
+            if let Err(why) = resolved.1
+                && self.endpoint.is_none()
+            {
+                return Err(why);
+            }
+        }
+        let base = self
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| provider.base_url.clone());
+        if self.endpoint.is_some() && !same_origin(&base, &provider.base_url) {
+            provider.key = None;
+        }
+        if provider.key.is_none() && self.endpoint.is_none() {
+            return Err("no API key".into());
+        }
+        let mut scorer_provider = provider.clone();
+        scorer_provider.base_url = base;
+        Ok(std::sync::Arc::new(ProviderScorer::new(
+            ctx.client,
+            &scorer_provider,
+            &self.model,
+        )))
+    }
+}
+
+impl BuiltinGate for Hint {
+    fn events(&self) -> &[Event] {
+        &[Event::PromptSubmit]
+    }
+
+    fn run<'a>(
+        &'a mut self,
+        input: &'a GateInput,
+        ctx: &'a GateCtx<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<GateAnswer, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            // At `prompt_submit` the text is on the gate input: the human
+            // message is recorded only after gates have had their say, so the
+            // event log cannot be the sole source. The seq dedupes a prompt
+            // the gate is asked about twice; before the message exists there
+            // is no seq, and one gate call is one prompt.
+            let prompt = input.text().unwrap_or_default().to_string();
+            if prompt.trim().is_empty() {
+                return Ok(GateAnswer::allow());
+            }
+            if let Some((seq, _)) = newest_prompt(ctx.events).filter(|(_, seen)| seen == &prompt)
+                && seq <= self.seen
+            {
+                return Ok(GateAnswer::allow());
+            }
+            if let Some((seq, _)) = newest_prompt(ctx.events).filter(|(_, seen)| seen == &prompt) {
+                self.seen = seq;
+            }
+            let Some(scorer) = self.scorer(ctx).await else {
+                return Ok(GateAnswer::allow());
+            };
+            let mut places = Places {
+                cwd: ctx.cwd.to_path_buf(),
+                skills_dirs: ctx.skills_dirs.to_vec(),
+                config_dir: ctx.config_dir.map(std::path::PathBuf::from),
+                ..Default::default()
+            };
+            places.memory_dir = None;
+            let mut candidates = catalogue(&places);
+            candidates.truncate(MAX_CANDIDATES);
+            let text = match hint_for(
+                scorer.as_ref(),
+                &prompt,
+                &candidates,
+                self.max_names,
+                self.timeout,
+            )
+            .await
+            {
+                Ok(text) => text,
+                Err(why) => {
+                    (ctx.note)(&format!("hint: skipped ({why})"));
+                    None
+                }
+            };
+            let usage = scorer.take_usage();
+            let mut answer = GateAnswer::allow();
+            if let Some(text) = text {
+                answer.context = Some(crate::gates::Context {
+                    text,
+                    kind: SOURCE_KIND.to_string(),
+                });
+            }
+            answer.usage = usage;
+            Ok(answer)
+        })
+    }
+}
+
+/// The newest human prompt not written by a job or a gate, with its seq.
+fn newest_prompt(events: &[crate::event::LogEvent]) -> Option<(u64, String)> {
+    events.iter().rev().find_map(|event| match &event.body {
+        crate::event::EventBody::User { text, from, .. } if from != "job" => Some((
+            event.seq,
+            text.resolve_text(std::path::Path::new("."))
+                .unwrap_or_default(),
+        )),
+        _ => None,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
-    /// `skill` (or, from, `mcp`).
+    /// `skill`: the only kind of catalogue candidate today (MCP servers are
+    /// pulled by name in the base prompt, not scored by the hint).
     pub kind: &'static str,
     pub name: String,
     pub description: String,
@@ -126,9 +309,13 @@ fn names_of(value: &Value) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// Keep only the names the catalogue offered, once each, at most
-/// [`MAX_NAMES`], in the scorer's order.
-pub fn select<'a>(names: &[String], candidates: &'a [Candidate]) -> Vec<&'a Candidate> {
+/// Keep only the names the catalogue offered, once each, at most `max_names`,
+/// in the scorer's order.
+pub fn select<'a>(
+    names: &[String],
+    candidates: &'a [Candidate],
+    max_names: usize,
+) -> Vec<&'a Candidate> {
     let mut out: Vec<&Candidate> = Vec::new();
     for name in names {
         let name = name.trim();
@@ -136,7 +323,7 @@ pub fn select<'a>(names: &[String], candidates: &'a [Candidate]) -> Vec<&'a Cand
             && !out.iter().any(|seen| seen.name == candidate.name)
         {
             out.push(candidate);
-            if out.len() >= MAX_NAMES {
+            if out.len() >= max_names {
                 break;
             }
         }
@@ -171,6 +358,7 @@ pub async fn hint_for(
     scorer: &dyn Scorer,
     prompt: &str,
     candidates: &[Candidate],
+    max_names: usize,
     timeout: Duration,
 ) -> Result<Option<String>, String> {
     if candidates.is_empty() || prompt.trim().is_empty() {
@@ -182,7 +370,7 @@ pub async fn hint_for(
         Ok(Err(why)) => return Err(why),
         Err(_) => return Err(format!("timed out after {} ms", timeout.as_millis())),
     };
-    Ok(render(&select(&names, candidates)))
+    Ok(render(&select(&names, candidates, max_names)))
 }
 
 /// Whether two base URLs name the same scheme, host and port. A key that was
@@ -198,90 +386,98 @@ pub fn same_origin(a: &str, b: &str) -> bool {
 
 // ---------------------------------------------------------------- the real one
 
-pub struct Chat {
-    http: reqwest::Client,
-    url: String,
-    key: Option<String>,
-    model: String,
-    usage: std::sync::Mutex<Option<crate::stream::Usage>>,
-}
-
 /// Room for a reasoning model to think and still answer: the answer itself is a few names,
 /// but a reasoning scorer spent 39-111 tokens on thinking against the old cap of 120.
 pub const SCORER_MAX_TOKENS: u64 = 600;
 
-impl Chat {
-    /// `base_url` is the provider's (or the configured `endpoint`); `key` is
-    /// sent as a bearer token, in memory only.
-    pub fn new(base_url: &str, key: Option<String>, model: &str) -> Result<Chat, String> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .build()
-            .map_err(|error| format!("http client: {error}"))?;
-        Ok(Chat {
-            http,
-            url: crate::provider::chat_completions_url(base_url),
-            key: key.filter(|key| !key.is_empty()),
+/// The request body. Public so a test can see exactly what the scorer is
+/// shown: the prompt and `name - description` lines, never a skill body.
+pub fn body(model: &str, prompt: &str, candidates: &[Candidate]) -> Value {
+    let mut catalogue = String::new();
+    for candidate in candidates {
+        catalogue.push_str(&format!(
+            "- {} ({}): {}\n",
+            candidate.name, candidate.kind, candidate.description
+        ));
+    }
+    json!({
+        "model": model,
+        "stream": false,
+        "temperature": 0,
+        "max_tokens": SCORER_MAX_TOKENS,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You pick which of the listed skills could help with the user's message. \
+                            Answer with a JSON array of at most 3 names from the list, best first, \
+                            and nothing else. Answer [] when none clearly helps."
+            },
+            {
+                "role": "user",
+                "content": format!("Skills:\n{catalogue}\nMessage:\n{prompt}")
+            }
+        ]
+    })
+}
+
+/// The real scorer: one non-streaming chat call on the configured endpoint.
+/// Kept separate from the session client because that client's stream future is
+/// deliberately !Send; a gate runs on the multi-threaded runtime.
+pub struct ProviderScorer {
+    http: reqwest::Client,
+    url: String,
+    headers: Vec<(String, String)>,
+    model: String,
+    usage: std::sync::Mutex<Option<crate::stream::Usage>>,
+}
+
+impl ProviderScorer {
+    pub fn new(
+        _client: &crate::provider::Client,
+        provider: &crate::config::ProviderConfig,
+        model: &str,
+    ) -> ProviderScorer {
+        let mut headers = vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            (
+                "user-agent".to_string(),
+                format!("kelir/{}", crate::VERSION),
+            ),
+        ];
+        if let Some(key) = provider.key.as_deref().filter(|key| !key.is_empty()) {
+            headers.push(("authorization".to_string(), format!("Bearer {key}")));
+        }
+        ProviderScorer {
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            url: crate::provider::chat_completions_url(&provider.base_url),
+            headers,
             model: model.to_string(),
             usage: std::sync::Mutex::new(None),
-        })
-    }
-
-    /// The request body. Public so a test can see exactly what the scorer is
-    /// shown: the prompt and `name - description` lines, never a skill body.
-    pub fn body(model: &str, prompt: &str, candidates: &[Candidate]) -> Value {
-        let mut catalogue = String::new();
-        for candidate in candidates {
-            catalogue.push_str(&format!(
-                "- {} ({}): {}\n",
-                candidate.name, candidate.kind, candidate.description
-            ));
         }
-        json!({
-            "model": model,
-            "stream": false,
-            "temperature": 0,
-            "max_tokens": SCORER_MAX_TOKENS,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You pick which of the listed skills could help with the user's message. \
-                                Answer with a JSON array of at most 3 names from the list, best first, \
-                                and nothing else. Answer [] when none clearly helps."
-                },
-                {
-                    "role": "user",
-                    "content": format!("Skills:\n{catalogue}\nMessage:\n{prompt}")
-                }
-            ]
-        })
     }
 }
 
-impl Scorer for Chat {
+impl Scorer for ProviderScorer {
     fn score<'a>(
         &'a self,
         prompt: &'a str,
         candidates: &'a [Candidate],
     ) -> BoxFuture<'a, Result<Vec<String>, String>> {
         Box::pin(async move {
-            let mut request = self
-                .http
-                .post(&self.url)
-                .header("content-type", "application/json")
-                .header("user-agent", format!("kelir/{}", crate::VERSION))
-                .json(&Self::body(&self.model, prompt, candidates));
-            if let Some(key) = &self.key {
-                request = request.bearer_auth(key);
+            let mut request = self.http.post(&self.url);
+            for (name, value) in &self.headers {
+                request = request.header(name.as_str(), value.as_str());
             }
             let response = request
+                .json(&body(&self.model, prompt, candidates))
                 .send()
                 .await
                 .map_err(|_| "the scorer could not be reached".to_string())?;
             let status = response.status();
             if !status.is_success() {
-                // The body is not read into a message: a gateway may quote the
-                // request, and the request carried a key.
                 return Err(format!("the scorer answered http {}", status.as_u16()));
             }
             let text = response
@@ -384,18 +580,18 @@ mod tests {
             .iter()
             .map(|name| name.to_string())
             .collect();
-        let chosen = select(&names, &candidates);
+        let chosen = select(&names, &candidates, MAX_NAMES);
         let got: Vec<&str> = chosen.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(got, ["sift", "lathe", "kelir"]);
         let many: Vec<Candidate> = (0..10).map(|i| cand(&format!("s{i}"), "d")).collect();
         let all: Vec<String> = many.iter().map(|c| c.name.clone()).collect();
-        assert_eq!(select(&all, &many).len(), MAX_NAMES);
+        assert_eq!(select(&all, &many, MAX_NAMES).len(), MAX_NAMES);
     }
 
     #[test]
     fn the_hint_is_name_and_description_never_a_body() {
         let candidates = catalogue_of_three();
-        let chosen = select(&["sift".to_string()], &candidates);
+        let chosen = select(&["sift".to_string()], &candidates, MAX_NAMES);
         assert_eq!(
             render(&chosen).unwrap(),
             "might be relevant: sift - find the needle in a haystack of logs"
@@ -407,7 +603,7 @@ mod tests {
 
     #[test]
     fn the_scorer_is_shown_names_and_descriptions_only() {
-        let body = Chat::body("m", "find the error in my log", &catalogue_of_three());
+        let body = body("m", "find the error in my log", &catalogue_of_three());
         let user = body["messages"][1]["content"].as_str().unwrap();
         assert!(user.contains("- sift (skill): find the needle"));
         assert!(user.contains("find the error in my log"));
@@ -434,7 +630,7 @@ mod tests {
             ("how do I change the config key", Some("kelir")),
             ("what is two plus two", None),
         ] {
-            let got = hint_for(&scorer, prompt, &candidates, timeout)
+            let got = hint_for(&scorer, prompt, &candidates, MAX_NAMES, timeout)
                 .await
                 .unwrap();
             match want {
@@ -448,7 +644,7 @@ mod tests {
             }
         }
         assert!(
-            hint_for(&scorer, "boom", &candidates, timeout)
+            hint_for(&scorer, "boom", &candidates, MAX_NAMES, timeout)
                 .await
                 .is_err()
         );
@@ -471,7 +667,7 @@ mod tests {
 
     #[test]
     fn the_scorer_cap_leaves_room_to_think() {
-        let body = Chat::body("m", "p", &catalogue_of_three());
+        let body = body("m", "p", &catalogue_of_three());
         assert_eq!(body["max_tokens"], SCORER_MAX_TOKENS);
         const { assert!(SCORER_MAX_TOKENS >= 400) };
     }
@@ -483,15 +679,23 @@ mod tests {
             delay: Some(Duration::from_secs(5)),
         };
         let started = std::time::Instant::now();
-        let got = hint_for(&slow, "x", &catalogue_of_three(), Duration::from_millis(50)).await;
+        let got = hint_for(
+            &slow,
+            "x",
+            &catalogue_of_three(),
+            MAX_NAMES,
+            Duration::from_millis(50),
+        )
+        .await;
         assert!(got.unwrap_err().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(2));
-        let got = hint_for(&slow, "x", &[], Duration::from_millis(50)).await;
+        let got = hint_for(&slow, "x", &[], MAX_NAMES, Duration::from_millis(50)).await;
         assert_eq!(got, Ok(None));
         let got = hint_for(
             &slow,
             "   ",
             &catalogue_of_three(),
+            MAX_NAMES,
             Duration::from_millis(50),
         )
         .await;

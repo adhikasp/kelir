@@ -112,7 +112,6 @@ pub mod gates;
 pub mod governor;
 pub mod herdr;
 pub mod herdr_ctx;
-pub mod hint;
 pub mod ipc;
 pub mod joblock;
 pub mod markdown;

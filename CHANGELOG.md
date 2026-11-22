@@ -14,6 +14,15 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
   `docs/reference/` is hand-maintained markdown and `cargo test --lib docs` is the one
   drift check (code names must appear in the reference). `KELIR_DOCS_ROOT` is no longer read.
 
+- `[hint]` is gone; the pushed hint is now the built-in `hint` gate declared with
+  `[gates.hint] builtin = "hint"` and a `model`. A config that still has `[hint]`
+  gets the ordinary unread-key treatment.
+- Gates may answer with `context` (and `kind`): built-in and external gates
+  share the append path into a `source` event at the tail. A built-in's own
+  provider spend is a `usage` event named after the gate (`kind: "hint"`).
+  A failed built-in's note is an `error` event with `where: "gate"` (the old
+  core hint used `where: "source"`).
+
 ### Added (milestones M0 – M11, in landed order)
 
 - **M0** — the harness skeleton: the event log (`events.jsonl`), the `bash`

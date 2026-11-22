@@ -1,8 +1,10 @@
 //! Gates: the only way a veto or a nudge enters the core.
-//! A gate is an executable the session runs at one of six named events.
-//! It gets the event as JSON on stdin and may answer `allow`, `deny` or `rewrite` as JSON on
-//! stdout.
+//! A gate is an executable or a built-in Rust gate the session runs at one of six named events.
+//! It gets the event as JSON and may answer `allow`, `deny` or `rewrite` as JSON on stdout (built-ins
+//! return the same types in process).
 //! Opinions ("verify before you claim", "check the note you edited") live in gates, never in the
+
+pub mod builtin;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -390,7 +392,12 @@ impl Event {
 pub struct GateDef {
     pub name: String,
     pub event: Event,
+    /// Empty for a built-in gate, which runs in this process instead of a shell.
     pub command: String,
+    /// `Some(name)` selects a Rust built-in (`hint` is the first one).
+    pub builtin: Option<String>,
+    /// The built-in's own options, from its gate table.
+    pub options: toml::Table,
     /// `before_tool`/`after_tool` only: the tool names this gate sees (empty is every tool).
     /// `mcp:<server>` covers every tool of a server and a trailing `*` is a prefix match.
     pub tools: Vec<String>,
@@ -426,29 +433,101 @@ fn tool_matches(pattern: &str, tool: &str) -> bool {
 // ------------------------------------------------------------------- config
 
 /// Read the `[gates]` table: each key an event name, each value a command string, a table, or
-/// a list of those.
+/// a list of those. A table with `builtin = "<name>"` declares a built-in gate.
 pub fn from_toml(value: &toml::Value) -> Result<Vec<GateDef>, String> {
     let table = value
         .as_table()
         .ok_or_else(|| "`gates` must be a table of event names".to_string())?;
     let mut defs: Vec<GateDef> = Vec::new();
     for (key, entry) in table {
-        let event = Event::parse(key).ok_or_else(|| {
-            format!(
+        if let Some(name) = Event::parse(key) {
+            let items: Vec<&toml::Value> = match entry {
+                toml::Value::Array(items) => items.iter().collect(),
+                other => vec![other],
+            };
+            for item in items {
+                let def = one_from_toml(name, item)?;
+                push_unique(&mut defs, def);
+            }
+        } else if let toml::Value::Table(options) = entry
+            && options.contains_key("builtin")
+        {
+            // `[gates.<name>]` declares one named gate; its event and options
+            // live in the same table.
+            let def = builtin_from_toml(key, options)?;
+            push_unique(&mut defs, def);
+        } else {
+            return Err(format!(
                 "[gates]: `{key}` is not an event (the six are {})",
                 Event::ALL.map(Event::name).join(", ")
-            )
-        })?;
-        let items: Vec<&toml::Value> = match entry {
-            toml::Value::Array(items) => items.iter().collect(),
-            other => vec![other],
-        };
-        for item in items {
-            let def = one_from_toml(event, item)?;
-            push_unique(&mut defs, def);
+            ));
         }
     }
     Ok(defs)
+}
+
+fn builtin_from_toml(name: &str, options: &toml::Table) -> Result<GateDef, String> {
+    let at = format!("[gates].{name}");
+    if !valid_name(name) {
+        return Err(format!("{at}: `name` is letters, digits, `-`, `_`, `.`"));
+    }
+    let builtin = options
+        .get("builtin")
+        .and_then(toml::Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| format!("{at}: `builtin` needs a name"))?;
+    if !builtin::is_known(builtin) {
+        return Err(format!(
+            "{at}: unknown builtin `{builtin}` (the known ones are {})",
+            builtin::NAMES.join(", ")
+        ));
+    }
+    let event_name = options
+        .get("event")
+        .and_then(toml::Value::as_str)
+        .unwrap_or(builtin::default_event(builtin));
+    let event = Event::parse(event_name).ok_or_else(|| {
+        format!(
+            "{at}: `{event_name}` is not an event (the six are {})",
+            Event::ALL.map(Event::name).join(", ")
+        )
+    })?;
+    if !builtin::supports_event(builtin, event) {
+        return Err(format!(
+            "{at}: the built-in `{builtin}` supports only {}",
+            builtin::supported_events(builtin)
+        ));
+    }
+    builtin::validate_options(builtin, options, &at)?;
+    let mut tools = Vec::new();
+    if let Some(value) = options.get("tools").or_else(|| options.get("tool")) {
+        match value {
+            toml::Value::String(tool) => tools.push(tool.clone()),
+            toml::Value::Array(list) => {
+                for tool in list {
+                    tools.push(
+                        tool.as_str()
+                            .ok_or_else(|| format!("{at}: `tools` holds strings"))?
+                            .to_string(),
+                    );
+                }
+            }
+            _ => return Err(format!("{at}: `tools` is a string or a list")),
+        }
+    }
+    if !tools.is_empty() && !matches!(event, Event::BeforeTool | Event::AfterTool) {
+        return Err(format!("{at}: `tools` applies to before_tool/after_tool"));
+    }
+    Ok(GateDef {
+        name: name.to_string(),
+        event,
+        command: String::new(),
+        builtin: Some(builtin.to_string()),
+        options: options.clone(),
+        tools,
+        env: BTreeMap::new(),
+        origin: "config".into(),
+    })
 }
 
 fn one_from_toml(event: Event, item: &toml::Value) -> Result<GateDef, String> {
@@ -462,6 +541,8 @@ fn one_from_toml(event: Event, item: &toml::Value) -> Result<GateDef, String> {
                 name: name_from_command(command),
                 event,
                 command: command.clone(),
+                builtin: None,
+                options: toml::Table::new(),
                 tools: Vec::new(),
                 env: BTreeMap::new(),
                 origin: "config".into(),
@@ -530,6 +611,8 @@ fn one_from_toml(event: Event, item: &toml::Value) -> Result<GateDef, String> {
                 name,
                 event,
                 command: command.to_string(),
+                builtin: None,
+                options: toml::Table::new(),
                 tools,
                 env,
                 origin: "config".into(),
@@ -656,6 +739,8 @@ pub fn from_skills(found: &[crate::sources::Found], notes: &mut Vec<String>) -> 
                         name: format!("{}.{}", skill.name, event.name()),
                         event,
                         command: script_command(&path),
+                        builtin: None,
+                        options: toml::Table::new(),
                         tools: Vec::new(),
                         env: BTreeMap::new(),
                         origin: if source.layer == crate::sources::Layer::Project {
@@ -801,9 +886,66 @@ pub fn python() -> &'static str {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Parsed {
-    Allow { reason: String },
-    Deny { reason: String },
-    Rewrite { reason: String, input: Value },
+    Allow {
+        reason: String,
+        context: Option<Context>,
+        usage: Option<crate::stream::Usage>,
+    },
+    Deny {
+        reason: String,
+        context: Option<Context>,
+        usage: Option<crate::stream::Usage>,
+    },
+    Rewrite {
+        reason: String,
+        input: Value,
+        context: Option<Context>,
+        usage: Option<crate::stream::Usage>,
+    },
+}
+
+/// The longest `context` a gate may contribute, in characters.
+pub const CONTEXT_MAX: usize = 32 * 1024;
+
+/// The most the `context` field of a gate answer may add to the tail.
+///
+/// Extra context a gate contributes: appended as a `source` event at the tail,
+/// after the user message, so the cached prefix is untouched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Context {
+    pub text: String,
+    pub kind: String,
+}
+
+/// Take the shared fields out of a parsed decision so the runner can record
+/// `context`/`usage` before it matches on the decision-specific fields.
+fn split_answer(parsed: &mut Parsed) -> (Option<Context>, Option<crate::stream::Usage>) {
+    match parsed {
+        Parsed::Allow { context, usage, .. }
+        | Parsed::Deny { context, usage, .. }
+        | Parsed::Rewrite { context, usage, .. } => (context.take(), usage.take()),
+    }
+}
+
+/// Parse the optional `context` field shared by external and built-in gates.
+fn answer_context(object: &serde_json::Map<String, Value>) -> Result<Option<Context>, String> {
+    let Some(value) = object.get("context").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let text = value
+        .as_str()
+        .ok_or_else(|| "`context` is not a string".to_string())?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or("gate");
+    let kind = crate::util::truncate_chars(kind, 64);
+    let text = crate::util::truncate_chars(text, CONTEXT_MAX);
+    Ok(Some(Context { text, kind }))
 }
 
 /// Parse a gate's stdout. Empty is `allow` (a gate that only has side effects prints
@@ -813,6 +955,8 @@ pub fn parse_decision(stdout: &str) -> Result<Parsed, String> {
     if text.is_empty() {
         return Ok(Parsed::Allow {
             reason: String::new(),
+            context: None,
+            usage: None,
         });
     }
     if text.len() > OUTPUT_MAX {
@@ -836,9 +980,25 @@ pub fn parse_decision(stdout: &str) -> Result<Parsed, String> {
         Some(Value::String(reason)) => crate::util::truncate_chars(reason, REASON_MAX),
         Some(_) => return Err("`reason` is not a string".into()),
     };
+    let context = answer_context(object)?;
+    let usage = match object.get("usage").filter(|usage| !usage.is_null()) {
+        Some(Value::Object(usage)) => {
+            Some(crate::stream::parse_usage(&Value::Object(usage.clone())))
+        }
+        Some(_) => return Err("`usage` is not an object".into()),
+        None => None,
+    };
     match decision {
-        "allow" => Ok(Parsed::Allow { reason }),
-        "deny" => Ok(Parsed::Deny { reason }),
+        "allow" => Ok(Parsed::Allow {
+            reason,
+            context,
+            usage,
+        }),
+        "deny" => Ok(Parsed::Deny {
+            reason,
+            context,
+            usage,
+        }),
         "rewrite" => {
             let input = object
                 .get("input")
@@ -847,6 +1007,8 @@ pub fn parse_decision(stdout: &str) -> Result<Parsed, String> {
             Ok(Parsed::Rewrite {
                 reason,
                 input: input.clone(),
+                context,
+                usage,
             })
         }
         other => Err(format!(
@@ -885,6 +1047,10 @@ pub enum Verdict {
 pub struct Chain {
     pub runs: Vec<Run>,
     pub verdict: Verdict,
+    /// `context` from every gate that answered with one, in declaration order.
+    pub contexts: Vec<Context>,
+    /// Token usage a built-in reported from its own provider call.
+    pub usages: Vec<(String, crate::stream::Usage)>,
 }
 
 impl Chain {
@@ -892,6 +1058,8 @@ impl Chain {
         Chain {
             runs: Vec::new(),
             verdict: Verdict::Allow,
+            contexts: Vec::new(),
+            usages: Vec::new(),
         }
     }
 }
@@ -957,11 +1125,120 @@ pub fn apply_rewrite(
     }
 }
 
+/// The event document a gate sees. The JSON shape is the same for an external
+/// gate reading stdin and a built-in reading its context: the six common keys
+/// plus the event's own fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateInput(pub Value);
+
+impl GateInput {
+    pub fn new(
+        event: Event,
+        turn: u32,
+        payload: &Value,
+        session: &str,
+        session_dir: &Path,
+        cwd: &Path,
+    ) -> GateInput {
+        let mut object = serde_json::Map::new();
+        object.insert("event".into(), json!(event.name()));
+        object.insert("session".into(), json!(session));
+        object.insert(
+            "session_dir".into(),
+            json!(crate::util::path_string(session_dir)),
+        );
+        object.insert(
+            "log".into(),
+            json!(crate::util::path_string(&session_dir.join("events.jsonl"))),
+        );
+        object.insert("cwd".into(), json!(crate::util::path_string(cwd)));
+        object.insert("turn".into(), json!(turn));
+        if let Some(fields) = payload.as_object() {
+            for (key, value) in fields {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+        GateInput(Value::Object(object))
+    }
+
+    pub fn as_value(&self) -> &Value {
+        &self.0
+    }
+
+    pub fn text(&self) -> Option<&str> {
+        self.0.get("text").and_then(Value::as_str)
+    }
+
+    pub fn from(&self) -> Option<&str> {
+        self.0.get("from").and_then(Value::as_str)
+    }
+
+    pub fn event_name(&self) -> Option<&str> {
+        self.0.get("event").and_then(Value::as_str)
+    }
+}
+
+/// What a built-in may use that an external gate cannot: a provider client for
+/// its own call, the log so far (read-only) and the session directory.
+pub struct GateCtx<'a> {
+    pub client: &'a crate::provider::Client,
+    pub provider: &'a crate::config::ProviderConfig,
+    pub config: &'a crate::config::Config,
+    pub provider_name: &'a str,
+    /// A line to record in the session log (a note from this built-in).
+    pub note: &'a (dyn Fn(&str) + Sync),
+    pub events: &'a [crate::event::LogEvent],
+    pub dir: &'a Path,
+    /// Where skills are discovered, from the session's config.
+    pub skills_dirs: &'a [std::path::PathBuf],
+    /// The machine config dir, for machine-level skills.
+    pub config_dir: Option<&'a Path>,
+    /// The session's cwd (also on `GateInput`, but typed here).
+    pub cwd: &'a Path,
+}
+
+/// One built-in gate's answer. The same three fields the external runner parses
+/// from JSON, plus a usage event the built-in's own provider call reported.
+pub struct GateAnswer {
+    pub reason: String,
+    pub decision: &'static str,
+    pub input: Option<Value>,
+    pub context: Option<Context>,
+    pub usage: Option<crate::stream::Usage>,
+}
+
+impl GateAnswer {
+    pub fn allow() -> GateAnswer {
+        GateAnswer {
+            reason: String::new(),
+            decision: "allow",
+            input: None,
+            context: None,
+            usage: None,
+        }
+    }
+}
+
+/// A built-in implemented in Rust. `run` is bounded by the gate timeout by the
+/// runner, just like an external gate.
+pub trait BuiltinGate: Send + Sync {
+    fn events(&self) -> &[Event];
+    fn run<'a>(
+        &'a mut self,
+        input: &'a GateInput,
+        ctx: &'a GateCtx<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<GateAnswer, String>> + Send + 'a>>;
+}
+
 // ------------------------------------------------------------------- runner
 
 /// The session's gates and what a run needs to know about the session.
 pub struct Runner {
     defs: Vec<GateDef>,
+    /// One stateful instance per built-in gate, kept across events.
+    builtins: tokio::sync::Mutex<Vec<(String, Box<dyn BuiltinGate>)>>,
+    /// Notes a built-in wrote while the session was borrowed.
+    notes: std::sync::Mutex<Vec<String>>,
     shell: Vec<String>,
     cwd: PathBuf,
     session_id: String,
@@ -970,6 +1247,11 @@ pub struct Runner {
 }
 
 impl Runner {
+    /// Take the notes a built-in left for the session to record.
+    pub fn take_notes(&self) -> Vec<String> {
+        std::mem::take(&mut self.notes.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
     pub fn new(
         defs: Vec<GateDef>,
         shell: Vec<String>,
@@ -979,6 +1261,8 @@ impl Runner {
     ) -> Runner {
         Runner {
             defs,
+            builtins: tokio::sync::Mutex::new(Vec::new()),
+            notes: std::sync::Mutex::new(Vec::new()),
             shell,
             cwd,
             session_id,
@@ -1007,12 +1291,14 @@ impl Runner {
 
     /// Run every gate bound to `event` (for `tool`), in declaration order. A rewrite is seen by
     /// the gates after it; the first `deny` ends the chain (where `deny` means something).
+    /// External and built-in gates meet here: both produce the same decision object.
     pub async fn run_event(
         &self,
         event: Event,
         tool: Option<&str>,
         turn: u32,
         mut payload: Value,
+        ctx: Option<&GateCtx<'_>>,
     ) -> Chain {
         let mut chain = Chain::allow();
         let mut rewritten: Option<Value> = None;
@@ -1020,20 +1306,104 @@ impl Runner {
             if def.event != event || !def.matches(tool) {
                 continue;
             }
-            let stdin = self.stdin_for(event, turn, &payload);
+            let input = GateInput::new(
+                event,
+                turn,
+                &payload,
+                &self.session_id,
+                &self.session_dir,
+                &self.cwd,
+            );
             let started = Instant::now();
-            let outcome = self.execute(index, def, &stdin).await;
-            let ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-            let mut run = Run {
-                gate: def.name.clone(),
-                event: event.name().into(),
-                decision: "allow".into(),
-                reason: String::new(),
-                ms,
-                rewritten: false,
-                error: None,
+            let outcome = if let Some(name) = def.builtin.as_deref() {
+                let slot = match Slot::take() {
+                    Ok(slot) => slot,
+                    Err(error) => {
+                        let mut run = Self::empty_run(def, event, started, 0);
+                        run.error = Some(error);
+                        chain.runs.push(run);
+                        continue;
+                    }
+                };
+                let answer = {
+                    let mut slots = self.builtins.lock().await;
+                    let index = if let Some(index) = slots.iter().position(|(n, _)| n == name) {
+                        index
+                    } else {
+                        let gate: Box<dyn BuiltinGate> = match name {
+                            "hint" => match builtin::hint::Hint::new(def) {
+                                Ok(hint) => Box::new(hint),
+                                Err(why) => {
+                                    drop(slots);
+                                    let mut run = Self::empty_run(def, event, started, 0);
+                                    run.error = Some(why);
+                                    chain.runs.push(run);
+                                    continue;
+                                }
+                            },
+                            _ => {
+                                drop(slots);
+                                let mut run = Self::empty_run(def, event, started, 0);
+                                run.error = Some(format!("unknown built-in `{name}`"));
+                                chain.runs.push(run);
+                                continue;
+                            }
+                        };
+                        slots.push((name.to_string(), gate));
+                        slots.len() - 1
+                    };
+                    let gate = &mut slots[index].1;
+                    let note_sink = &self.notes;
+                    let note: &(dyn Fn(&str) + Sync) = &|message| {
+                        note_sink
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(message.to_string());
+                    };
+                    let ctx_with_notes = ctx.map(|ctx| crate::gates::GateCtx { note, ..*ctx });
+                    match ctx_with_notes.as_ref() {
+                        Some(ctx) => {
+                            tokio::time::timeout(self.timeout, gate.run(&input, ctx)).await
+                        }
+                        None => {
+                            drop(slots);
+                            drop(slot);
+                            let mut run = Self::empty_run(def, event, started, 0);
+                            run.error = Some("a built-in gate needs a session context".into());
+                            chain.runs.push(run);
+                            continue;
+                        }
+                    }
+                };
+                drop(slot);
+                match answer {
+                    Ok(Ok(answer)) => Ok((builtin::to_stdout(&answer), None)),
+                    Ok(Err(why)) => Err((why, None)),
+                    Err(_) => Err((
+                        format!("timed out after {} ms", self.timeout.as_millis()),
+                        None,
+                    )),
+                }
+            } else {
+                match self.execute(index, def, &input.0.to_string()).await {
+                    Ok(stdout) => Ok((stdout, None)),
+                    Err(error) => Err((error, None)),
+                }
             };
-            let parsed = match outcome.and_then(|stdout| parse_decision(&stdout)) {
+            let ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            let mut run = Self::empty_run(def, event, started, ms);
+            let (stdout, usage) = match outcome {
+                Ok(value) => value,
+                Err((error, usage)) => {
+                    if let Some(usage) = usage {
+                        chain.usages.push((def.name.clone(), usage));
+                    }
+                    run.error = Some(error);
+                    chain.runs.push(run);
+                    continue;
+                }
+            };
+            let mut parsed = match parse_decision(&stdout) {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     run.error = Some(error);
@@ -1041,9 +1411,19 @@ impl Runner {
                     continue;
                 }
             };
+            if let Some(usage) = usage {
+                chain.usages.push((def.name.clone(), usage));
+            }
+            let (context, parsed_usage) = split_answer(&mut parsed);
+            if let Some(context) = context {
+                chain.contexts.push(context);
+            }
+            if let Some(usage) = parsed_usage {
+                chain.usages.push((def.name.clone(), usage));
+            }
             match parsed {
-                Parsed::Allow { reason } => run.reason = reason,
-                Parsed::Deny { reason } => {
+                Parsed::Allow { reason, .. } => run.reason = reason,
+                Parsed::Deny { reason, .. } => {
                     run.decision = "deny".into();
                     run.reason = reason.clone();
                     if event.can_deny() {
@@ -1057,7 +1437,7 @@ impl Runner {
                     run.reason =
                         format!("{reason} (ignored: deny means nothing at {})", event.name());
                 }
-                Parsed::Rewrite { reason, input } => {
+                Parsed::Rewrite { reason, input, .. } => {
                     run.reason = reason;
                     if !event.can_rewrite() {
                         run.error = Some(format!("rewrite means nothing at {}", event.name()));
@@ -1079,6 +1459,18 @@ impl Runner {
             chain.verdict = Verdict::Rewrite(value);
         }
         chain
+    }
+
+    fn empty_run(def: &GateDef, event: Event, _started: Instant, ms: u64) -> Run {
+        Run {
+            gate: def.name.clone(),
+            event: event.name().into(),
+            decision: "allow".into(),
+            reason: String::new(),
+            ms,
+            rewritten: false,
+            error: None,
+        }
     }
 
     /// The JSON a gate reads on stdin: the session's fields, then the event's.
@@ -1232,6 +1624,7 @@ pub fn describe(defs: &[GateDef]) -> Vec<Value> {
                 "name": def.name,
                 "event": def.event.name(),
                 "origin": def.origin,
+                "builtin": def.builtin,
                 "command": crate::util::truncate_chars(&def.command, 200),
                 "tools": def.tools,
                 "env": def.env.keys().collect::<Vec<_>>(),
@@ -1266,6 +1659,8 @@ mod tests {
             name: name_from_command(command),
             event,
             command: command.to_string(),
+            builtin: None,
+            options: toml::Table::new(),
             tools: Vec::new(),
             env: BTreeMap::new(),
             origin: "test".into(),
@@ -1291,20 +1686,37 @@ mod tests {
         assert_eq!(
             parse_decision(r#"{"decision":"allow"}"#),
             Ok(Parsed::Allow {
-                reason: String::new()
+                reason: String::new(),
+                context: None,
+                usage: None,
             })
         );
         assert_eq!(
             parse_decision(r#" {"decision":"deny","reason":"no"} "#),
             Ok(Parsed::Deny {
-                reason: "no".into()
+                reason: "no".into(),
+                context: None,
+                usage: None,
             })
         );
         assert_eq!(
             parse_decision(r#"{"decision":"rewrite","input":{"text":"x"}}"#),
             Ok(Parsed::Rewrite {
                 reason: String::new(),
-                input: json!({"text": "x"})
+                input: json!({"text": "x"}),
+                context: None,
+                usage: None,
+            })
+        );
+        assert_eq!(
+            parse_decision(r#"{"decision":"allow","context":"a note","kind":"hint"}"#),
+            Ok(Parsed::Allow {
+                reason: String::new(),
+                context: Some(Context {
+                    text: "a note".into(),
+                    kind: "hint".into()
+                }),
+                usage: None,
             })
         );
     }
@@ -1338,7 +1750,7 @@ mod tests {
         assert!(parse_decision(&huge).is_err());
         let long = format!(r#"{{"decision":"deny","reason":"{}"}}"#, "y".repeat(10_000));
         match parse_decision(&long).unwrap() {
-            Parsed::Deny { reason } => assert!(reason.chars().count() <= REASON_MAX + 1),
+            Parsed::Deny { reason, .. } => assert!(reason.chars().count() <= REASON_MAX + 1),
             other => panic!("{other:?}"),
         }
     }
@@ -1362,6 +1774,91 @@ session_end = { command = "git push" }
         let named = defs.iter().find(|d| d.name == "no-rm").unwrap();
         assert_eq!(named.tools, vec!["bash"]);
         assert_eq!(named.env.get("A").map(String::as_str), Some("b"));
+    }
+
+    #[test]
+    fn a_builtin_gate_is_declared_by_table_with_its_own_options() {
+        let value: toml::Value = toml::from_str(
+            r#"
+hint = { builtin = "hint", model = "cheap/model", timeout_ms = 400, max_names = 2 }
+"#,
+        )
+        .unwrap();
+        let defs = from_toml(&value).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "hint");
+        assert_eq!(defs[0].event, Event::PromptSubmit);
+        assert_eq!(defs[0].builtin.as_deref(), Some("hint"));
+        assert!(defs[0].command.is_empty());
+        assert_eq!(defs[0].options["model"].as_str(), Some("cheap/model"));
+    }
+
+    #[test]
+    fn builtin_integer_options_cannot_be_strings() {
+        for (text, key) in [
+            (
+                "hint = { builtin = 'hint', model = 'm', max_names = \"3\" }",
+                "max_names",
+            ),
+            (
+                "hint = { builtin = 'hint', model = 'm', timeout_ms = \"400\" }",
+                "timeout_ms",
+            ),
+            (
+                "hint = { builtin = 'hint', model = 'm', timeout = 0 }",
+                "timeout",
+            ),
+            (
+                "hint = { builtin = 'hint', model = 'm', max_names = -1 }",
+                "max_names",
+            ),
+        ] {
+            let value: toml::Value = toml::from_str(text).unwrap();
+            let error = from_toml(&value).unwrap_err();
+            assert!(error.contains(key), "{text}: {error}");
+            assert!(error.contains("positive integer"), "{text}: {error}");
+        }
+        let value: toml::Value =
+            toml::from_str("hint = { builtin = 'hint', model = 'm', max_names = 10 }").unwrap();
+        assert!(from_toml(&value).is_ok());
+    }
+
+    /// The note location is part of the event contract: keep the reference in
+    /// step with the `gate` location every gate failure records.
+    #[test]
+    fn the_reference_documents_the_builtin_note_location() {
+        let reference = include_str!("../docs/reference/sources-and-skills.md");
+        assert!(
+            reference.contains("(`gate` location"),
+            "the hint failure note's `where` must be documented as `gate`"
+        );
+        assert!(
+            !reference.contains("(`source` location"),
+            "stale `source` note-location claim"
+        );
+    }
+
+    #[test]
+    fn a_bad_builtin_declaration_says_what_is_wrong() {
+        for (text, needle) in [
+            (
+                "nope = { builtin = 'missing' }",
+                "unknown builtin `missing`",
+            ),
+            ("hint = { builtin = 'hint' }", "needs a `model`"),
+            (
+                "hint = { builtin = 'hint', model = 'm', event = 'turn_end' }",
+                "supports only prompt_submit",
+            ),
+            (
+                "hint = { builtin = 'hint', model = 'm', bogus = 1 }",
+                "unknown key `bogus`",
+            ),
+        ] {
+            let value: toml::Value = toml::from_str(text).unwrap();
+            let error = from_toml(&value).unwrap_err();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
     }
 
     #[test]
@@ -1645,7 +2142,7 @@ session_end = { command = "git push" }
             ],
         );
         let chain = runner
-            .run_event(Event::PromptSubmit, None, 1, json!({"text": "first"}))
+            .run_event(Event::PromptSubmit, None, 1, json!({"text": "first"}), None)
             .await;
         assert_eq!(chain.runs.len(), 2, "{:?}", chain.runs);
         assert_eq!(chain.runs[0].decision, "rewrite");
@@ -1688,6 +2185,7 @@ session_end = { command = "git push" }
                 Some("bash"),
                 1,
                 json!({"tool":"bash","input":{}}),
+                None,
             )
             .await;
         assert_eq!(chain.verdict, Verdict::Allow);
@@ -1726,7 +2224,7 @@ session_end = { command = "git push" }
             vec![def(Event::SessionEnd, &deny), def(Event::AfterTool, &deny)],
         );
         let chain = runner
-            .run_event(Event::SessionEnd, None, 1, json!({}))
+            .run_event(Event::SessionEnd, None, 1, json!({}), None)
             .await;
         assert_eq!(chain.verdict, Verdict::Allow);
         assert!(
@@ -1735,7 +2233,13 @@ session_end = { command = "git push" }
             chain.runs[0]
         );
         let chain = runner
-            .run_event(Event::AfterTool, Some("bash"), 1, json!({"result": "r"}))
+            .run_event(
+                Event::AfterTool,
+                Some("bash"),
+                1,
+                json!({"result": "r"}),
+                None,
+            )
             .await;
         assert_eq!(chain.verdict, Verdict::Allow);
     }
@@ -1755,7 +2259,7 @@ session_end = { command = "git push" }
             .with_timeout(Duration::from_millis(800));
         let started = Instant::now();
         let chain = runner
-            .run_event(Event::TurnEnd, None, 1, json!({"final_text": "x"}))
+            .run_event(Event::TurnEnd, None, 1, json!({"final_text": "x"}), None)
             .await;
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -1790,7 +2294,7 @@ session_end = { command = "git push" }
         );
         let runner = runner(temp.path(), vec![def(Event::SessionEnd, &leaves)]);
         let chain = runner
-            .run_event(Event::SessionEnd, None, 1, json!({}))
+            .run_event(Event::SessionEnd, None, 1, json!({}), None)
             .await;
         assert_eq!(chain.runs[0].error, None, "{:?}", chain.runs[0]);
         tokio::time::sleep(Duration::from_secs(4)).await;
@@ -1811,7 +2315,7 @@ session_end = { command = "git push" }
         );
         let runner = runner(temp.path(), vec![def(Event::SessionStart, &chatty)]);
         let chain = runner
-            .run_event(Event::SessionStart, None, 1, json!({}))
+            .run_event(Event::SessionStart, None, 1, json!({}), None)
             .await;
         assert!(
             chain.runs[0]
@@ -1868,7 +2372,7 @@ session_end = { command = "git push" }
             let runner = runner.clone();
             tasks.push(tokio::spawn(async move {
                 runner
-                    .run_event(Event::SessionEnd, None, 1, json!({}))
+                    .run_event(Event::SessionEnd, None, 1, json!({}), None)
                     .await
             }));
         }
@@ -1910,7 +2414,7 @@ sleep 1
         gate.env.insert("DEPTH".into(), "0".into());
         let runner = runner(temp.path(), vec![gate]).with_timeout(Duration::from_millis(600));
         let chain = runner
-            .run_event(Event::SessionEnd, None, 1, json!({}))
+            .run_event(Event::SessionEnd, None, 1, json!({}), None)
             .await;
         assert_eq!(chain.runs.len(), 1);
         assert_eq!(live(), 0);

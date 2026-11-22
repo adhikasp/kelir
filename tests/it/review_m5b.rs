@@ -50,7 +50,7 @@ fn scorer_reply(names: &[&str]) -> Reply {
     )
 }
 
-const HINT: &str = "[hint]\nmodel = \"scorer/model\"\n";
+const HINT: &str = "[gates.hint]\nbuiltin = 'hint'\nmodel = 'scorer/model'\n";
 
 /// A directory holding a fake `hc` of the given flavour, and the PATH that finds it first.
 struct FakeHc {
@@ -296,7 +296,7 @@ async fn a_slow_scorer_costs_about_two_seconds_and_no_hint() {
     let notes: Vec<_> = run
         .events_of("error")
         .into_iter()
-        .filter(|e| e["where"] == "source")
+        .filter(|e| e["where"] == "gate")
         .collect();
     assert_eq!(notes.len(), 1, "{notes:?}");
 }
@@ -310,7 +310,7 @@ async fn the_session_key_is_not_sent_to_a_different_hint_endpoint() {
     let other = Mock::start(vec![scorer_reply(&["sift"])]).await;
     let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
     let config = format!(
-        "[hint]\nmodel = \"scorer/model\"\nendpoint = \"{}\"\n",
+        "[gates.hint]\nbuiltin = 'hint'\nmodel = 'scorer/model'\nendpoint = \"{}\"\n",
         other.base_url()
     );
     let run = run_task(

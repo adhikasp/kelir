@@ -1,9 +1,10 @@
 # Gates: allow, deny or rewrite at six events
 
-**Summary:** a gate is an executable kelir runs at a named event; it reads the
-event as JSON on stdin and may answer `allow`, `deny` or `rewrite` as JSON on
-stdout. How to declare one, what each event sends and accepts, the fail-open
-rule, the environment a gate gets, and the five example gates.
+**Summary:** a gate is an executable or built-in Rust gate kelir runs at a
+named event; it reads the event as JSON on stdin (built-ins get the same input)
+and may answer `allow`, `deny` or `rewrite` as JSON on stdout. How to declare
+one, what each event sends and accepts, the fail-open rule, the environment a
+gate gets, and the five example gates.
 **Read this when:** you want a veto, a nudge or a side effect (pull, commit,
 check a file) around a session, or a `gate` event in a log needs explaining
 (`src/gates.rs`; the hooks are in `src/session.rs`: `gate`, `gate_prompt`,
@@ -64,6 +65,28 @@ is ignored with a warning).
 
 3. **An inline command string**: the string form of (1).
 
+4. **A built-in gate**: a named table in `[gates]` with `builtin = "<name>"` in
+   place of a command. The built-in runs in-process through the same runner and
+   produces the same `gate` event; only its options live in the same table. The
+   known built-ins are `hint` (default event `prompt_submit`); an unknown name is
+   a config error that lists the known ones.
+
+   ```toml
+   [gates.hint]
+   builtin = "hint"
+   # event = "prompt_submit"   # the only event hint supports; omit for the default
+   model = "some/cheap-model"  # required
+   # provider = "openrouter"  # default: the session's provider
+   # endpoint = "http://127.0.0.1:8080/v1"
+   # timeout_ms = 2000  # positive integer; `timeout` is an alias, not documented
+   # max_names = 3      # positive integer
+   ```
+
+   Built-ins fail open like external gates: an error or timeout is logged and
+   treated as `allow`. A built-in may use the session's provider client and
+   read-only event log (a `GateCtx`) and reports its own token usage as a
+   `usage` event whose `kind` is the gate's name.
+
 ## The six events
 
 | event | stdin carries (besides the session fields) | `deny` means | `rewrite` replaces (`input`) |
@@ -89,10 +112,18 @@ path of `events.jsonl`), `cwd` and `turn`.
 ## The answer
 
 One JSON object on stdout: `{"decision": "allow|deny|rewrite", "reason": "…",
-"input": {…}}`. Empty output is `allow` (a side-effect gate prints nothing).
-`reason` is kept to 2000 characters. Several gates at one event run in
-declaration order; each sees the previous rewrite; the first `deny` (where deny
-means something) ends the chain.
+"input": {…}, "context": "…", "kind": "…"}`. Empty output is `allow` (a
+side-effect gate prints nothing). `reason` is kept to 2000 characters. Several
+gates at one event run in declaration order; each sees the previous rewrite;
+the first `deny` (where deny means something) ends the chain.
+
+`context` (optional, at most 32 KiB) is extra text the gate contributes: kelir
+appends it as a `source` event of kind `kind` (default `gate`) **after** the
+user message at `prompt_submit`, and at the tail otherwise, so the cached
+prefix is unchanged. The built-in hint uses this path; an external gate gets
+the same one. `usage` (optional object with `prompt_tokens`,
+`completion_tokens`, `cached_tokens`, `cache_write_tokens`) is recorded as a
+`usage` event of the gate's name, for a gate that made its own provider call.
 
 ## Fail open
 

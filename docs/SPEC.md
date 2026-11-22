@@ -289,10 +289,12 @@ backlog and reply/fallback counts. See `docs/reference/channels.md`.
   `.claude/skills`, read-only).
 - **Skills** use the [Agent Skills](https://agentskills.io/specification) format; the
   `description` is the "when". **Pull:** the model reads a skill with bash; the base prompt names
-  the skills directories and `kelir mcp ls`, and carries no listing. **Pushed hint:** one
-  Decisions API call per user prompt scores skills and MCP
-  servers; kelir appends "might be relevant: name — description" (never a body) as a `source`
-  message. It fails open on a missing key or a timeout.
+  the skills directories and `kelir mcp ls`, and carries no listing. **Pushed hint:** the built-in
+  `hint` gate (off unless declared in `[gates]`) makes one scoring call per user prompt over
+discovered skills (not MCP servers: those are named in the base prompt and pulled by the model);
+  kelir appends "might be relevant: name — description" (never a body) as a
+  `source` message through the gates' shared `context` path. It fails open on a missing key or a
+  timeout.
 - **Herdr awareness (source, M5)**: herdr-core sets `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET` and `HC_SCOPE` in every
   pane it creates (`TERM_PROGRAM` is `ghostty` there and unusable). If `HC_TERMINAL_ID` is set, kelir renders
   **one line** at `session_start` into the frozen system sources: the pane's address, space, tab and `where` label,
@@ -349,7 +351,11 @@ as an inline command string.
 | `session_end` | nothing (side effects only, e.g. commit and push) | — |
 
 The event goes to the gate as JSON on stdin (with the session dir and log path); the gate answers
-`{"decision":"allow|deny|rewrite","reason":"…","input":{…}}` on stdout. **Timeout 30 s.** A gate
+`{"decision":"allow|deny|rewrite","reason":"…","input":{…},"context":"…","kind":"…"}` on stdout.
+A gate's `context` is appended as a `source` event at the tail (`prompt_submit`: after the user
+message), the same path for external and built-in gates. A built-in gate is declared as
+`[gates.<name>] builtin = "<name>"` in the same table and runs in Rust with the gate interface;
+`hint` is the first one. **Timeout 30 s.** A gate
 that crashes, times out or prints garbage is logged and treated as `allow` (fail open). Every run
 is a `gate` event, so `observe` shows what fired.
 

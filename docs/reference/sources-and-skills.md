@@ -154,26 +154,32 @@ boundary. The system prefix is never rewritten.
 
 ## The pushed hint
 
-Skills are pulled; the hint is the push. With a `[hint]` table that names a
-`model` (otherwise the hint is **off**), each human prompt triggers **one**
-scoring call: a non-streaming Chat Completions request that shows the prompt and a
-catalogue of `name (skill): description` lines (never a body) and asks for a JSON
-array of at most three names. The answer is appended as a `source` message of kind
-`hint`: `might be relevant: name - description`. It lands at the tail after the
-prompt, so every earlier byte of the next request is unchanged and the cache hit
-ratio is not disturbed.
+Skills are pulled; the hint is the push. It is the built-in `hint` gate, off
+unless a `[gates.hint]` table declares it with a `model`:
 
 ```toml
-[hint]
+[gates.hint]
+builtin = "hint"
 model = "openai/gpt-4o-mini"   # required: this turns it on
+# event = "prompt_submit"     # default and only supported event
 # provider = "openrouter"      # default: the session's provider
 # endpoint = "http://127.0.0.1:8080/v1"   # instead of the provider's base URL
 # timeout_ms = 2000
+# max_names = 3
 ```
+
+Each human prompt triggers **one** scoring call (the gate's own state keys the
+prompt by its log seq): a non-streaming Chat Completions request that shows the
+prompt and a catalogue of `name (skill): description` lines (never a body) and
+asks for a JSON array of at most three names. The answer comes back as the
+gate's `context` and is appended as a `source` message of kind `hint`:
+`might be relevant: name - description`. It lands at the tail after the
+prompt, so every earlier byte of the next request is unchanged and the cache
+hit ratio is not disturbed. An external gate's `context` takes the same path.
 
 It fails open: no key (for a provider endpoint), a timeout, a non-2xx, garbage, or
 names that are not in the catalogue mean no hint and at most one `error` note
-(`source` location). Names the scorer invents are dropped. The key is held in
+(`gate` location, like every gate failure, built-in or external). Names the scorer invents are dropped. The key is held in
 memory only, like the session's, and goes **only to the provider's own origin**:
 with an `endpoint` on a different scheme, host or port the call is made without a
 key (fine for a local server). The failure note is an `error` event, so the hint

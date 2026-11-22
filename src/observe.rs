@@ -219,7 +219,7 @@ fn last_hint(events: &[LogEvent], dir: &Path) -> Option<String> {
             kind,
             text: Some(text),
             ..
-        } if kind == crate::hint::SOURCE_KIND => text.resolve_text(dir).ok(),
+        } if kind == "hint" => text.resolve_text(dir).ok(),
         _ => None,
     })
 }
