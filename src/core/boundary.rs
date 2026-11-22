@@ -1,9 +1,9 @@
 //! The boundary a feature uses to reach the core. The core knows no feature by name:
 //! features are dispatched through [`Feature`] in the fixed order documented on
-//! [`Features`](crate::features::Features).
+//! `Features` (crate::features::Features).
 //!
 //! Only the core implements `Feature`; a feature never holds the log writer. Every append
-//! goes through [`Cx::record`], the core's single writer.
+//! goes through `Cx::record`, the core's single writer.
 
 use std::path::PathBuf;
 
@@ -37,8 +37,12 @@ pub struct Cx<'a> {
 
 #[allow(dead_code)]
 impl<'a> Cx<'a> {
-    /// Append one event through the core's single writer. Oversized payloads go to
-    /// `blobs/` first, named by the seq the event is about to get.
+    /// Append one feature-owned event through the core's single writer. Oversized
+    /// payloads go to `blobs/` first, named by the seq the event is about to get.
+    /// The event is also pushed into `cx.events`, so a feature that reads the fold
+    /// sees what it just wrote. Core-owned side effects (naming the session from
+    /// the first human prompt) stay in `Session::record`: features must not record
+    /// `EventBody::User` events.
     pub(crate) fn record(&mut self, body: EventBody) -> Result<LogEvent, String> {
         let seq = self.writer.next_seq();
         let body = crate::event::spill_payloads(body, self.blobs, seq)?;
@@ -62,7 +66,8 @@ impl<'a> Cx<'a> {
         Ok(event)
     }
 
-    /// Send a UI event; a dead UI never fails a turn.
+    /// Send an informational UI event; a dead UI never fails a turn. Retry events
+    /// carry core state (`retry_wait`) and must go through `Session::emit`, not here.
     pub(crate) fn emit(&self, event: crate::tui::UiEvent) {
         if let Some(ui) = self.ui {
             let _ = ui.send(event);

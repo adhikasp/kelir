@@ -1,6 +1,7 @@
 //! The feature registry. The core owns one `Features` and calls its hooks by name of
 //! boundary; it never names a member. Dispatch is static, in the documented order.
 
+pub mod gates;
 pub mod mcp;
 pub mod models;
 pub mod sources;
@@ -10,6 +11,7 @@ use crate::core::boundary::{Cx, Feature};
 pub(crate) struct Features {
     pub(crate) models: models::Models,
     pub(crate) mcp: Option<mcp::Mcp>,
+    pub(crate) gates: Option<gates::Gates>,
     pub(crate) sources: sources::Sources,
 }
 

@@ -463,24 +463,9 @@ struct Session {
     /// The retry or slot wait in progress, for `status`: when it ends, the status and attempt, and whether
     /// it is a slot wait.
     retry_wait: std::cell::Cell<Option<RetryWait>>,
-    /// The gates for this session (`[gates]` plus skills bound with
-    /// `kelir-gate`), `None` when there are none, which is the default.
-    gates: Option<Arc<crate::gates::Runner>>,
-    /// A `turn_end` gate already blocked this turn: it blocks at most once.
-    turn_blocked: bool,
-    /// Tool calls the turn has started, given to `turn_end` gates.
-    turn_tool_calls: u32,
-    /// The command-line task, held back until `session_start` gates ran and
-    /// `prompt_submit` gates saw it: (text, delivery).
-    initial_task: Option<(String, &'static str, &'static str)>,
     /// Whether a `session_title` event has been written (or was present on
     /// resume). The first human prompt names the session; later ones do not.
     titled: bool,
-    /// `context` a gate contributed before its user message was recorded:
-    /// appended once that message exists, through the shared append path.
-    pending_gate_context: Vec<crate::gates::Context>,
-    /// Problems found while reading gate declarations; logged once at start.
-    gate_notes: Vec<String>,
 }
 
 /// A retry or slot wait in progress: ends at, status, attempt, is-a-slot-wait.
@@ -1468,9 +1453,6 @@ impl crate::features::mcp::McpCore for Session {
     fn sync(&mut self) {
         Session::sync(self);
     }
-    fn record_gate_runs(&mut self, runs: &[crate::gates::Run]) -> Result<(), String> {
-        Session::record_gate_runs(self, runs)
-    }
     fn disabled(&self) -> &BTreeSet<String> {
         &self.disabled
     }
@@ -1481,15 +1463,55 @@ impl crate::features::mcp::McpCore for Session {
         self.turn
     }
     fn gates(&self) -> Option<Arc<crate::gates::Runner>> {
-        self.gates.clone()
+        self.features.gates.as_ref().and_then(|g| g.runner())
     }
     fn inbox(&self) -> Option<mpsc::UnboundedSender<Incoming>> {
         self.inbox.clone()
     }
 }
 
+impl crate::features::gates::GatesCore for Session {
+    fn record(&mut self, body: EventBody) -> Result<LogEvent, String> {
+        Session::record(self, body)
+    }
+    fn sync(&mut self) {
+        Session::sync(self);
+    }
+    fn emit(&self, event: UiEvent) {
+        Session::emit(self, event);
+    }
+    fn turn(&self) -> u32 {
+        self.turn
+    }
+    fn tui(&self) -> bool {
+        self.tui
+    }
+    fn task_from(&self) -> &'static str {
+        Session::task_from(self)
+    }
+    fn gate_ctx(&self) -> crate::gates::GateCtx<'_> {
+        Session::gate_ctx(self)
+    }
+    fn gates_config(&self) -> crate::features::gates::GatesConfig<'_> {
+        crate::features::gates::GatesConfig {
+            gates: &self.cfg.gates,
+            project_gates: &self.cfg.project_gates,
+            skills_dirs: &self.cfg.skills_dirs,
+            trusted_projects: &self.cfg.trusted_projects,
+            config_dir: Some(&self.config_dir),
+            cwd: &self.ctx.cwd,
+            shell: &self.cfg.shell,
+            id: &self.id,
+            dir: &self.dir,
+        }
+    }
+    fn events(&self) -> &[LogEvent] {
+        &self.events
+    }
+}
+
 impl Session {
-    /// Lend the MCP feature and the core to one operation without overlapping mutable
+    /// Lend the MCP feature and the core to one operation without overlapping
     /// borrows: the feature is moved out for the duration and put straight back.
     fn mcp_do<R>(
         &mut self,
@@ -1499,6 +1521,54 @@ impl Session {
         let result = f(&mut mcp, self);
         self.features.mcp = Some(mcp);
         result
+    }
+
+    /// Same borrow split for the gates feature as [`Session::mcp_do`].
+    fn gates_do<R>(
+        &mut self,
+        f: impl FnOnce(&mut crate::features::gates::Gates, &mut Session) -> R,
+    ) -> R {
+        let mut gates = self.features.gates.take().expect("gates feature");
+        let result = f(&mut gates, self);
+        self.features.gates = Some(gates);
+        result
+    }
+
+    /// Async counterpart to [`Session::gates_do`]: a closure returning a future
+    /// that borrows its arguments cannot be named here, so call the feature
+    /// method directly while it is taken out.
+    async fn gates_prompt(&mut self, text: String, from: &str) -> Result<Option<String>, String> {
+        let mut gates = self.features.gates.take().expect("gates feature");
+        let result = gates.prompt(self, text, from).await;
+        self.features.gates = Some(gates);
+        result
+    }
+
+    async fn gates_call(
+        &mut self,
+        event: crate::gates::Event,
+        tool: Option<&str>,
+        payload: Value,
+    ) -> Result<crate::gates::Verdict, String> {
+        let mut gates = self.features.gates.take().expect("gates feature");
+        let result = gates.gate(self, event, tool, payload).await;
+        self.features.gates = Some(gates);
+        result
+    }
+
+    async fn gates_start(&mut self) -> bool {
+        let (provider, model, resumed) =
+            (self.provider_name.clone(), self.model.clone(), self.resumed);
+        let mut gates = self.features.gates.take().expect("gates feature");
+        let result = gates.start(self, &provider, &model, resumed).await;
+        self.features.gates = Some(gates);
+        result
+    }
+
+    async fn gates_end(&mut self, reason: &str) {
+        let mut gates = self.features.gates.take().expect("gates feature");
+        gates.end(self, reason).await;
+        self.features.gates = Some(gates);
     }
 
     /// The date the session's frozen system prompt was rendered with (the
@@ -1684,6 +1754,7 @@ impl Session {
                         prepared.id.clone(),
                     ),
                 )),
+                gates: Some(crate::features::gates::Gates::new()),
                 sources: crate::features::sources::Sources::new(crate::sources::Watch::default()),
             },
             governor: prepared.governor,
@@ -1691,17 +1762,11 @@ impl Session {
             tally: crate::usage::Tally::default(),
             kids: children::Kids::new(&prepared.id, prepared.cfg.children, prepared.child.as_ref()),
             retry_wait: std::cell::Cell::new(None),
-            gates: None,
-            turn_blocked: false,
-            turn_tool_calls: 0,
-            initial_task: None,
-            pending_gate_context: Vec::new(),
-            gate_notes: Vec::new(),
         };
         if session.kids.root.is_some() {
             crate::gates::limit_for_child();
         }
-        session.gates = session.build_gates();
+        session.gates_do(|gates, session| gates.build(session));
         crate::child::set_lineage(session.kids.lineage.clone());
         session.tally = crate::usage::Tally::from_events(&session.events, session.warn());
         // The watcher re-checks the sources the frozen system was rendered from; on a resume it is rebuilt
@@ -1754,7 +1819,9 @@ impl Session {
         }
         if session.has_task {
             session.record_plan_sources(false)?;
-            session.submit_task(prepared.task.clone(), "now")?;
+            session.gates_do(|gates, session| {
+                gates.submit_task(session, prepared.task.clone(), "now")
+            })?;
         }
         session.sync();
         Ok(session)
@@ -1914,7 +1981,8 @@ impl Session {
         if !self.pending_task.trim().is_empty() {
             // `kelir resume <id> <task>`: a new message on the existing log.
             let delivery = if read.in_flight { "next" } else { "now" };
-            self.submit_task(self.pending_task.clone(), delivery)?;
+            let task = self.pending_task.clone();
+            self.gates_do(|gates, session| gates.submit_task(session, task, delivery))?;
         } else {
             self.continue_a_turn_that_ends_on_an_answer()?;
         }
@@ -1984,140 +2052,8 @@ impl Session {
         Some((crate::util::path_string(&out), partial.bytes, partial.lines))
     }
 
-    // --------------------------------------------------------------- gates
-
-    /// Gates from `[gates]` and from skills bound with `kelir-gate`; `None`
-    /// when there are none (the default), so nothing below costs a thing.
-    fn build_gates(&mut self) -> Option<Arc<crate::gates::Runner>> {
-        // A kelir that a gate started runs no gates: a gate never triggers gates.
-        if crate::gates::started_by_a_gate(crate::envs::var("KELIR_GATE_EVENT").as_deref()) {
-            return None;
-        }
-        let mut defs = self.cfg.gates.clone();
-        for def in self.cfg.project_gates.clone() {
-            crate::gates::push_unique(&mut defs, def);
-        }
-        let places = crate::sources::places(
-            &self.ctx.cwd,
-            &self.cfg.skills_dirs,
-            Some(crate::paths::config_dir()),
-        );
-        let found = crate::sources::discover(&places);
-        let mut notes = Vec::new();
-        for def in crate::gates::from_skills(&found, &mut notes) {
-            crate::gates::push_unique(&mut defs, def);
-        }
-        let trusted = crate::gates::project_trusted(&self.ctx.cwd, &self.cfg.trusted_projects);
-        let defs = crate::gates::apply_trust(defs, trusted, &mut notes);
-        self.gate_notes = notes;
-        if defs.is_empty() {
-            return None;
-        }
-        Some(Arc::new(crate::gates::Runner::new(
-            defs,
-            self.ctx.shell.clone(),
-            self.ctx.cwd.clone(),
-            self.id.clone(),
-            self.dir.clone(),
-        )))
-    }
-
-    /// Whether any gate would run at `event` for `tool`.
-    fn gated(&self, event: crate::gates::Event, tool: Option<&str>) -> bool {
-        self.gates
-            .as_ref()
-            .is_some_and(|gates| gates.has(event, tool))
-    }
-
-    /// Log what the gate runner ran, one `gate` event each.
-    fn record_gate_runs(&mut self, runs: &[crate::gates::Run]) -> Result<(), String> {
-        for run in runs {
-            self.record(EventBody::Gate {
-                gate: run.gate.clone(),
-                event: run.event.clone(),
-                decision: run.decision.clone(),
-                reason: run.reason.clone(),
-                ms: run.ms,
-                rewritten: run.rewritten,
-                error: run.error.clone(),
-            })?;
-        }
-        Ok(())
-    }
-
-    /// Run the gates of one event and log every run. A session without gates
-    /// answers `Allow` without looking at the payload.
-    async fn gate(
-        &mut self,
-        event: crate::gates::Event,
-        tool: Option<&str>,
-        payload: Value,
-    ) -> Result<crate::gates::Verdict, String> {
-        let Some(gates) = self.gates.clone() else {
-            return Ok(crate::gates::Verdict::Allow);
-        };
-        if !gates.has(event, tool) {
-            return Ok(crate::gates::Verdict::Allow);
-        }
-        let chain = gates
-            .run_event(event, tool, self.turn, payload, Some(&self.gate_ctx()))
-            .await;
-        self.record_gate_runs(&chain.runs)?;
-        for note in gates.take_notes() {
-            let _ = self.record(EventBody::Error {
-                location: "gate".into(),
-                message: note,
-                retryable: false,
-                status: None,
-                attempt: None,
-                retry_in_ms: None,
-            });
-        }
-        for usage in &chain.usages {
-            let _ = self.record(EventBody::Usage {
-                step: 0,
-                prompt_tokens: usage.1.prompt_tokens,
-                completion_tokens: usage.1.completion_tokens,
-                cached_tokens: usage.1.cached_tokens,
-                cache_write_tokens: usage.1.cache_write_tokens,
-                allowance: None,
-                kind: Some(usage.0.clone()),
-            });
-        }
-        // A gate's `context` is one shared append path for both external and
-        // built-in gates. It lands after the user message, at the tail, so the
-        // cached prefix is untouched. At `prompt_submit` the user message is
-        // recorded after the gate, so hold the context until that is done.
-        if event == crate::gates::Event::PromptSubmit {
-            self.pending_gate_context.extend(chain.contexts);
-        } else {
-            self.record_gate_context(&chain.contexts);
-        }
-        self.sync();
-        Ok(chain.verdict)
-    }
-
-    /// The one place a gate's `context` becomes a `source` event, shared by
-    /// external and built-in gates.
-    fn record_gate_context(&mut self, contexts: &[crate::gates::Context]) {
-        for context in contexts {
-            let _ = self.record(EventBody::Source {
-                kind: context.kind.clone(),
-                name: context.kind.clone(),
-                text: Some(Payload::text(context.text.clone())),
-                path: None,
-            });
-        }
-    }
-
-    /// Append contexts held back until the user message they belong to exists.
-    fn flush_gate_context(&mut self) {
-        let pending = std::mem::take(&mut self.pending_gate_context);
-        self.record_gate_context(&pending);
-        self.sync();
-    }
-
-    /// The read-only view a built-in gate gets of this session.
+    /// The read-only view a built-in gate gets of this session. Kept in the core
+    /// because it borrows the provider client, config and fold.
     fn gate_ctx(&self) -> crate::gates::GateCtx<'_> {
         // The built-in hint must see machine-level skills, just as the old
         // core hint did (`places(&ctx.cwd, &cfg.skills_dirs, Some(config_dir()))`).
@@ -2133,118 +2069,6 @@ impl Session {
             config_dir: Some(&self.config_dir),
             cwd: &self.ctx.cwd,
         }
-    }
-
-    /// Problems found reading gate declarations: logged once, never fatal.
-    fn flush_gate_notes(&mut self) {
-        for note in std::mem::take(&mut self.gate_notes) {
-            let _ = self.record(EventBody::Error {
-                location: "gate".into(),
-                message: note,
-                retryable: false,
-                status: None,
-                attempt: None,
-                retry_in_ms: None,
-            });
-        }
-    }
-
-    /// The command-line task: written at once, or held back for the gates
-    /// (`session_start`, then `prompt_submit`) when there are any.
-    fn submit_task(&mut self, text: String, delivery: &'static str) -> Result<(), String> {
-        if self.gated(crate::gates::Event::PromptSubmit, None) {
-            self.initial_task = Some((text, delivery, self.task_from()));
-            return Ok(());
-        }
-        self.record(EventBody::User {
-            text: text.into(),
-            from: self.task_from().into(),
-            delivery: delivery.to_string(),
-            attachments: Vec::new(),
-        })?;
-        Ok(())
-    }
-
-    /// A human prompt through the `prompt_submit` gates: the text to record,
-    /// or `None` when a gate dropped it (the person is told why).
-    async fn gate_prompt(&mut self, text: String, from: &str) -> Result<Option<String>, String> {
-        if matches!(from, "job" | "gate" | "parent" | "brief" | "child")
-            || !self.gated(crate::gates::Event::PromptSubmit, None)
-        {
-            return Ok(Some(text));
-        }
-        let payload = json!({"text": text, "from": from});
-        match self
-            .gate(crate::gates::Event::PromptSubmit, None, payload)
-            .await?
-        {
-            crate::gates::Verdict::Allow => Ok(Some(text)),
-            crate::gates::Verdict::Rewrite(value) => Ok(Some(
-                value
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&text)
-                    .to_string(),
-            )),
-            crate::gates::Verdict::Deny { gate, reason } => {
-                let message = format!(
-                    "prompt dropped by gate {gate}{}",
-                    if reason.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {reason}")
-                    }
-                );
-                // stderr even under `--json` (stdout stays NDJSON), like a pause.
-                if !self.tui {
-                    eprintln!("kelir: {message}");
-                }
-                self.emit(UiEvent::Info(format!("» {message}")));
-                Ok(None)
-            }
-        }
-    }
-
-    /// `session_start` gates, then the held-back command-line task through
-    /// `prompt_submit`. `false` means a gate dropped the task.
-    async fn start_gates(&mut self) -> bool {
-        self.flush_gate_notes();
-        let payload = json!({
-            "provider": self.provider_name,
-            "model": self.model,
-            "resumed": self.resumed,
-        });
-        let _ = self
-            .gate(crate::gates::Event::SessionStart, None, payload)
-            .await;
-        let Some((text, delivery, from)) = self.initial_task.take() else {
-            return true;
-        };
-        match self.gate_prompt(text, from).await {
-            Ok(Some(text)) => {
-                let _ = self.record(EventBody::User {
-                    text: text.into(),
-                    from: from.into(),
-                    delivery: delivery.to_string(),
-                    attachments: Vec::new(),
-                });
-                self.flush_gate_context();
-                self.sync();
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// `session_end` gates (side effects only), just before `session_ended`.
-    async fn end_gates(&mut self, reason: &str) {
-        let _ = self
-            .gate(
-                crate::gates::Event::SessionEnd,
-                None,
-                json!({"reason": reason}),
-            )
-            .await;
     }
 
     /// Append one event. Oversized payloads go to `blobs/` first, named by the
@@ -2314,38 +2138,6 @@ impl Session {
         }
     }
 
-    /// The `status` answer, built on the spot from the tally and the live fields. Read-only: it
-    /// is never queued or logged.
-    fn gates_status(&self) -> Value {
-        let (mut runs, mut denied, mut rewritten, mut failed_open) = (0u64, 0u64, 0u64, 0u64);
-        let mut last = Value::Null;
-        for event in &self.events {
-            if let EventBody::Gate {
-                gate,
-                event: at,
-                decision,
-                rewritten: rewrote,
-                error,
-                ..
-            } = &event.body
-            {
-                runs += 1;
-                denied += u64::from(decision == "deny");
-                rewritten += u64::from(*rewrote);
-                failed_open += u64::from(error.is_some());
-                last = json!({"gate": gate, "event": at, "decision": decision});
-            }
-        }
-        json!({
-            "declared": self.gates.as_ref().map_or(0, |g| g.defs().len()),
-            "runs": runs,
-            "denied": denied,
-            "rewritten": rewritten,
-            "failed_open": failed_open,
-            "last": last,
-        })
-    }
-
     fn status_answer(&self) -> Response {
         let retry =
             self.retry_wait
@@ -2397,7 +2189,12 @@ impl Session {
             })
             .collect();
         state["mcp"] = Value::Array(mcp);
-        state["gates"] = self.gates_status();
+        state["gates"] = self
+            .features
+            .gates
+            .as_ref()
+            .expect("gates feature")
+            .status(self);
         state["children"] = json!(self.live_children());
         state["child_list"] = self.child_list();
         Response::ok("status", 0, "now", state)
@@ -2856,7 +2653,8 @@ impl Session {
         {
             match pending.verb {
                 Verb::Say { text, now } => {
-                    let Some(text) = self.gate_prompt(text, &pending.from).await? else {
+                    let from = pending.from.to_string();
+                    let Some(text) = self.gates_prompt(text, &from).await? else {
                         return Ok(());
                     };
                     // A message from anywhere but this UI gets echoed, so a
@@ -2879,7 +2677,7 @@ impl Session {
                         delivery: if now { "now" } else { "next" }.to_string(),
                         attachments,
                     })?;
-                    self.flush_gate_context();
+                    self.gates_do(|gates, session| gates.flush_context(session));
                     applied.messages += 1;
                 }
                 // Due only at a turn end, where `take_turn_messages` gets it.
@@ -3315,7 +3113,8 @@ impl Session {
     /// the context becomes one `source` message.
     async fn record_messages(&mut self, messages: Vec<Message>) -> Result<(), String> {
         for mut message in messages {
-            let Some(text) = self.gate_prompt(message.text, &message.from).await? else {
+            let from = message.from.clone();
+            let Some(text) = self.gates_prompt(message.text, &from).await? else {
                 continue;
             };
             message.text = text;
@@ -3337,7 +3136,7 @@ impl Session {
                 delivery: message.delivery.to_string(),
                 attachments,
             })?;
-            self.flush_gate_context();
+            self.gates_do(|gates, session| gates.flush_context(session));
         }
         self.sync();
         Ok(())
@@ -3689,9 +3488,9 @@ impl Session {
         }
         // `session_start` gates, then the command-line task through `prompt_submit`. A task a gate
         // dropped ends a one-shot run (exit 1) and leaves a TUI waiting for the next message.
-        let task_kept = self.start_gates().await;
+        let task_kept = self.gates_start().await;
         if !task_kept && !self.keep {
-            self.end_gates("denied").await;
+            self.gates_end("denied").await;
             let _ = self.record(EventBody::SessionEnded {
                 reason: "denied".into(),
             });
@@ -3704,7 +3503,7 @@ impl Session {
             match self.idle(rx).await {
                 Idle::Turn => {}
                 Idle::End => {
-                    self.end_gates("end").await;
+                    self.gates_end("end").await;
                     let _ = self.record(EventBody::SessionEnded {
                         reason: "end".into(),
                     });
@@ -3845,7 +3644,7 @@ impl Session {
                 }
             }
         }
-        self.end_gates(&reason).await;
+        self.gates_end(&reason).await;
         // Give detached notify hooks a short grace period before a one-shot process exits: otherwise
         // the runtime is dropped with the hook task still queued and `turn_done` never fires.
         crate::notify::wait_outstanding(Duration::from_secs(5)).await;
@@ -3990,8 +3789,7 @@ impl Session {
         });
         self.report(HerdrState::Working);
         self.turn_steps = 0;
-        self.turn_blocked = false;
-        self.turn_tool_calls = 0;
+        self.gates_do(|gates, _| gates.reset_turn());
         loop {
             // An explicit cap counts the steps of *this* turn: reaching it pauses the turn (the work so far is
             // kept, and the next message opens a new turn with a fresh count).
@@ -4190,19 +3988,29 @@ impl Session {
                 self.final_text = text;
                 // ------------------------------------------------------ turn_end A gate can send the model back once
                 // per turn with a reason, or replace the final text.
-                if self.gated(crate::gates::Event::TurnEnd, None) {
+                if self
+                    .features
+                    .gates
+                    .as_ref()
+                    .expect("gates feature")
+                    .gated(crate::gates::Event::TurnEnd, None)
+                {
+                    let (tool_calls, blocked) = {
+                        let gates = self.features.gates.as_ref().expect("gates feature");
+                        (gates.turn_tool_calls(), gates.turn_blocked())
+                    };
                     let payload = json!({
                         "final_text": self.final_text,
-                        "tool_calls": self.turn_tool_calls,
+                        "tool_calls": tool_calls,
                         "steps": self.turn_steps,
-                        "blocked": self.turn_blocked,
+                        "blocked": blocked,
                     });
-                    match self
-                        .gate(crate::gates::Event::TurnEnd, None, payload)
-                        .await?
-                    {
-                        crate::gates::Verdict::Deny { gate, reason } if !self.turn_blocked => {
-                            self.turn_blocked = true;
+                    let verdict = self
+                        .gates_call(crate::gates::Event::TurnEnd, None, payload)
+                        .await?;
+                    match verdict {
+                        crate::gates::Verdict::Deny { gate, reason } if !blocked => {
+                            self.gates_do(|gates, _| gates.set_turn_blocked(true));
                             let reason = if reason.trim().is_empty() {
                                 "no reason given".to_string()
                             } else {
@@ -4827,10 +4635,16 @@ impl Session {
         // input the call runs with (and that `tool_started` records).
         let mut calls: Vec<ToolCall> = calls.to_vec();
         let mut vetoed: Vec<Option<(String, String)>> = vec![None; calls.len()];
-        self.turn_tool_calls += calls.len() as u32;
+        self.gates_do(|gates, _| gates.add_turn_tool_calls(calls.len() as u32));
         for index in 0..calls.len() {
             let name = calls[index].name.clone();
-            if !self.gated(crate::gates::Event::BeforeTool, Some(&name)) {
+            if !self
+                .features
+                .gates
+                .as_ref()
+                .expect("gates feature")
+                .gated(crate::gates::Event::BeforeTool, Some(&name))
+            {
                 continue;
             }
             let payload = json!({
@@ -4839,7 +4653,7 @@ impl Session {
                 "input": calls[index].args,
             });
             match self
-                .gate(crate::gates::Event::BeforeTool, Some(&name), payload)
+                .gates_call(crate::gates::Event::BeforeTool, Some(&name), payload)
                 .await?
             {
                 crate::gates::Verdict::Deny { gate, reason } => {
@@ -5072,7 +4886,12 @@ impl Session {
             // or append a note to it. Only a call that ran and finished.
             if forced[index].is_none()
                 && matches!(outcome.outcome.as_str(), "ok" | "error")
-                && self.gated(crate::gates::Event::AfterTool, Some(&call.name))
+                && self
+                    .features
+                    .gates
+                    .as_ref()
+                    .expect("gates feature")
+                    .gated(crate::gates::Event::AfterTool, Some(&call.name))
             {
                 let payload = json!({
                     "tool": call.name,
@@ -5084,7 +4903,7 @@ impl Session {
                     "out_path": outcome.out_path,
                 });
                 if let crate::gates::Verdict::Rewrite(value) = self
-                    .gate(crate::gates::Event::AfterTool, Some(&call.name), payload)
+                    .gates_call(crate::gates::Event::AfterTool, Some(&call.name), payload)
                     .await?
                     && let Some(result) = value.get("result").and_then(Value::as_str)
                 {
@@ -5557,6 +5376,7 @@ mod tests {
                         "ses_1".into(),
                     ),
                 )),
+                gates: Some(crate::features::gates::Gates::new()),
                 sources: crate::features::sources::Sources::new(crate::sources::Watch::default()),
             },
             governor: None,
@@ -5565,13 +5385,7 @@ mod tests {
             trust: std::sync::Arc::new(crate::trust::Trust::new(dir_for_trust(), String::new())),
             tally: Default::default(),
             retry_wait: Default::default(),
-            gates: None,
-            turn_blocked: false,
-            turn_tool_calls: 0,
-            initial_task: None,
-            pending_gate_context: Vec::new(),
             titled: false,
-            gate_notes: Vec::new(),
             kids: children::Kids::new("ses_1", Default::default(), None),
         }
     }

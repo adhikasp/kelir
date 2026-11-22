@@ -3,7 +3,7 @@
 //! call: the `mcp_started` record, the pending client reply, and the matching
 //! `mcp_settled` record. Nothing here talks to the model.
 //!
-//! The session implements [`McpCore`] for the narrow set of core operations this feature
+//! The session implements `McpCore` for the narrow set of core operations this feature
 //! needs (record, sync, gate-run logging, disabled tools, live-call ids, turn). The feature
 //! never holds the event writer.
 
@@ -31,7 +31,6 @@ struct McpPending {
 pub(crate) trait McpCore {
     fn record(&mut self, body: EventBody) -> Result<crate::event::LogEvent, String>;
     fn sync(&mut self);
-    fn record_gate_runs(&mut self, runs: &[crate::gates::Run]) -> Result<(), String>;
     fn disabled(&self) -> &std::collections::BTreeSet<String>;
     fn live_calls(&self) -> &[String];
     fn turn(&self) -> u32;
@@ -231,7 +230,17 @@ impl Mcp {
             .cloned()
             .and_then(|value| serde_json::from_value::<Vec<crate::gates::Run>>(value).ok())
         {
-            let _ = core.record_gate_runs(&runs);
+            for run in runs {
+                let _ = core.record(EventBody::Gate {
+                    gate: run.gate.clone(),
+                    event: run.event.clone(),
+                    decision: run.decision.clone(),
+                    reason: run.reason.clone(),
+                    ms: run.ms,
+                    rewritten: run.rewritten,
+                    error: run.error.clone(),
+                });
+            }
         }
         let recorded = core.record(EventBody::McpSettled {
             mcp_id: id.to_string(),
@@ -414,9 +423,6 @@ mod tests {
             })
         }
         fn sync(&mut self) {}
-        fn record_gate_runs(&mut self, _: &[crate::gates::Run]) -> Result<(), String> {
-            Ok(())
-        }
         fn disabled(&self) -> &BTreeSet<String> {
             &self.disabled
         }
