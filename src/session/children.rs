@@ -196,7 +196,7 @@ impl Session {
             let _ = reply.send(Response::error("child: the task is empty"));
             return;
         }
-        let Some(inbox) = self.mcp_inbox.clone() else {
+        let Some(inbox) = self.inbox.clone() else {
             let _ = reply.send(Response::error(
                 "child: the session is not serving children",
             ));

@@ -55,15 +55,6 @@ mod children;
 
 type Inbox = mpsc::UnboundedReceiver<Incoming>;
 
-/// A `kelir mcp` call that is logged (`mcp_started`) and running on a broker
-/// task; its client is answered when `mcp_settled` is written.
-struct McpPending {
-    reply: oneshot::Sender<Response>,
-    server: String,
-    tool: String,
-    parent: Option<String>,
-}
-
 pub async fn run(args: RunArgs) -> u8 {
     // `--child` starts the task as a child of the session this tool call runs in. Outside any
     // session it is just a run (and `--background` has nothing to wake).
@@ -417,20 +408,12 @@ struct Session {
     /// Steps taken in the turn now running, reset at every turn start: an
     /// explicit `max_steps` cap counts these, not the session-wide `step`.
     turn_steps: u32,
+    /// The loop's own inbox sender: broker tasks, children and bg jobs hand
+    /// finished work back through it.
+    inbox: Option<mpsc::UnboundedSender<Incoming>>,
     /// Tools turned off for the rest of the session. The list sent to the
     /// provider never changes.
     disabled: BTreeSet<String>,
-    /// The MCP broker: servers started lazily, kept for the session, and the
-    /// only thing that writes `mcp_started`/`mcp_settled`.
-    mcp: crate::mcp::broker::Broker,
-    /// The loop's own inbox sender, so broker tasks can hand a finished call
-    /// back to the loop that owns the log writer.
-    mcp_inbox: Option<mpsc::UnboundedSender<Incoming>>,
-    /// Calls registered in the log and still running on a broker task.
-    mcp_pending: std::collections::HashMap<String, McpPending>,
-    /// Channel messages that arrived while a tool batch was settling; the next
-    /// boundary writes them, so a call's results stay contiguous.
-    mcp_channel_queue: Vec<(String, String)>,
     /// The provider call ids of this batch that have **not** settled yet, so a
     /// `stop --call` for a call that is done is refused.
     live_calls: Vec<String>,
@@ -850,8 +833,13 @@ async fn drive(opts: Options) -> u8 {
     watch_bg(session.dir.join("bg"), tx.clone());
     // MCP: broker tasks report back through the same channel, and channel
     // servers connect now.
-    session.mcp_inbox = Some(tx.clone());
-    session.mcp.attach(tx.clone());
+    session.inbox = Some(tx.clone());
+    session
+        .features
+        .mcp
+        .as_mut()
+        .expect("mcp feature")
+        .attach(tx.clone());
     // The root looks for children whose process is gone once a second, so a
     // crashed one frees its slot and a killed subtree is recorded.
     if session.kids.is_root() {
@@ -964,7 +952,9 @@ async fn drive(opts: Options) -> u8 {
     }
 
     let code = session.run(&mut rx).await;
-    session.mcp.shutdown().await;
+    if let Some(mcp) = session.features.mcp.as_ref() {
+        mcp.shutdown().await;
+    }
     if let Some((watchdog, to_tui)) = tui {
         // One last paint, then the terminal goes back to the shell.
         let _ = to_tui.send(UiEvent::Quit);
@@ -1471,7 +1461,46 @@ async fn reopen(
     })
 }
 
+impl crate::features::mcp::McpCore for Session {
+    fn record(&mut self, body: EventBody) -> Result<LogEvent, String> {
+        Session::record(self, body)
+    }
+    fn sync(&mut self) {
+        Session::sync(self);
+    }
+    fn record_gate_runs(&mut self, runs: &[crate::gates::Run]) -> Result<(), String> {
+        Session::record_gate_runs(self, runs)
+    }
+    fn disabled(&self) -> &BTreeSet<String> {
+        &self.disabled
+    }
+    fn live_calls(&self) -> &[String] {
+        &self.live_calls
+    }
+    fn turn(&self) -> u32 {
+        self.turn
+    }
+    fn gates(&self) -> Option<Arc<crate::gates::Runner>> {
+        self.gates.clone()
+    }
+    fn inbox(&self) -> Option<mpsc::UnboundedSender<Incoming>> {
+        self.inbox.clone()
+    }
+}
+
 impl Session {
+    /// Lend the MCP feature and the core to one operation without overlapping mutable
+    /// borrows: the feature is moved out for the duration and put straight back.
+    fn mcp_do<R>(
+        &mut self,
+        f: impl FnOnce(&mut crate::features::mcp::Mcp, &mut Session) -> R,
+    ) -> R {
+        let mut mcp = self.features.mcp.take().expect("mcp feature");
+        let result = f(&mut mcp, self);
+        self.features.mcp = Some(mcp);
+        result
+    }
+
     /// The date the session's frozen system prompt was rendered with (the
     /// `date:` line in its Environment block).
     fn rendered_date(&self) -> Option<String> {
@@ -1616,14 +1645,7 @@ impl Session {
             turn: prepared.resume.as_ref().map(|read| read.turns).unwrap_or(0),
             turn_steps: 0,
             disabled: BTreeSet::new(),
-            mcp: crate::mcp::broker::Broker::new(
-                prepared.cwd.clone(),
-                prepared.dir.clone(),
-                prepared.id.clone(),
-            ),
-            mcp_inbox: None,
-            mcp_pending: std::collections::HashMap::new(),
-            mcp_channel_queue: Vec::new(),
+            inbox: None,
             refused_fields: BTreeSet::new(),
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
@@ -1655,6 +1677,13 @@ impl Session {
                     prepared.models_fetch.take(),
                     &prepared.model,
                 ),
+                mcp: Some(crate::features::mcp::Mcp::new(
+                    crate::mcp::broker::Broker::new(
+                        prepared.cwd.clone(),
+                        prepared.dir.clone(),
+                        prepared.id.clone(),
+                    ),
+                )),
                 sources: crate::features::sources::Sources::new(crate::sources::Watch::default()),
             },
             governor: prepared.governor,
@@ -2355,7 +2384,7 @@ impl Session {
         }
         // MCP servers: name, state, tool count and channel flag only. Never
         // config, env, descriptions or server stderr (those can hold secrets).
-        let servers = self.mcp.servers();
+        let servers = self.features.mcp.as_ref().expect("mcp feature").servers();
         let mcp: Vec<Value> = servers["servers"]
             .as_array()
             .into_iter()
@@ -2565,7 +2594,7 @@ impl Session {
             return None;
         }
         if crate::mcp::broker::is_mcp_verb(&name) {
-            self.mcp_verb(request, reply);
+            self.mcp_do(|mcp, session| mcp.verb(session, request, reply));
             return None;
         }
         if name == crate::child::VERB || name == "brief" {
@@ -2640,7 +2669,7 @@ impl Session {
             return AtOnce::Rejected;
         }
         if crate::mcp::broker::is_mcp_verb(&name) {
-            self.mcp_verb(request, reply);
+            self.mcp_do(|mcp, session| mcp.verb(session, request, reply));
             return AtOnce::Rejected;
         }
         if name == crate::child::VERB || name == "brief" {
@@ -2691,251 +2720,6 @@ impl Session {
         // why it could not), and a client must not wait on a reply nobody kept.
         let _ = reply.send(answer);
         AtOnce::Applied(end.map(Box::new))
-    }
-
-    // ----------------------------------------------------------------- MCP
-
-    /// The broker's verbs (`mcp`, and the internal `mcp-settle`/`mcp-notify`).
-    fn mcp_verb(&mut self, request: Request, reply: oneshot::Sender<Response>) {
-        match request.verb.as_str() {
-            crate::mcp::broker::VERB_SETTLE | crate::mcp::broker::VERB_NOTIFY => {
-                let internal = request.from == crate::mcp::broker::FROM_INTERNAL
-                    && request.args.get("key").and_then(Value::as_str) == Some(self.mcp.key());
-                if !internal {
-                    let _ = reply.send(Response::error(format!(
-                        "{}: an internal verb",
-                        request.verb
-                    )));
-                } else if request.verb == crate::mcp::broker::VERB_SETTLE {
-                    self.mcp_settle(&request.args);
-                    let _ = reply.send(Response::error("settled"));
-                } else {
-                    self.mcp_notify(&request.args);
-                    let _ = reply.send(Response::error("noted"));
-                }
-            }
-            _ => self.mcp_request(request, reply),
-        }
-    }
-
-    fn mcp_request(&mut self, request: Request, reply: oneshot::Sender<Response>) {
-        use crate::mcp::broker as broker_mod;
-        let args = request.args;
-        if args.get("op").and_then(Value::as_str) != Some("call") {
-            let broker = self.mcp.clone();
-            tokio::spawn(async move {
-                let _ = reply.send(broker.read_op(&args).await);
-            });
-            return;
-        }
-        let text = |key: &str| {
-            args.get(key)
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string()
-        };
-        let (server, tool) = (text("server"), text("tool"));
-        if !self.mcp.has_server(&server) {
-            let _ = reply.send(Response::ok(
-                broker_mod::VERB,
-                0,
-                "now",
-                self.mcp.unknown_server(&server),
-            ));
-            return;
-        }
-        let arguments = args.get("args").cloned().unwrap_or_else(|| json!({}));
-        let envelope = args.get("envelope").and_then(Value::as_bool) == Some(true);
-        let parent = args
-            .get("parent_call_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let mcp_id = format!("mcp_{}", ulid::Ulid::generate().to_string().to_lowercase());
-        if let Err(message) = self.record(EventBody::McpStarted {
-            mcp_id: mcp_id.clone(),
-            server: server.clone(),
-            tool: tool.clone(),
-            // The shape only: a tool argument can be a secret.
-            args: Payload::value(crate::mcp::loggable_args(&arguments)),
-            parent_call_id: parent.clone(),
-        }) {
-            let _ = reply.send(Response::error(message));
-            return;
-        }
-        self.sync();
-        self.mcp_pending.insert(
-            mcp_id.clone(),
-            McpPending {
-                reply,
-                server: server.clone(),
-                tool: tool.clone(),
-                parent,
-            },
-        );
-        let Some(inbox) = self.mcp_inbox.clone() else {
-            let output = crate::mcp::CallOutput::failed(
-                crate::mcp::render::EXIT_UNAVAILABLE,
-                "unavailable",
-                "kelir mcp: the session is not serving MCP calls",
-            );
-            self.mcp_settle(&json!({"mcp_id": mcp_id, "output": output}));
-            return;
-        };
-        // `tools` can turn off one tool (`mcp:<server>.<tool>`) or a whole
-        // server (`mcp:<server>`); the call is still logged, and refused.
-        if self.disabled.contains(&format!("mcp:{server}.{tool}"))
-            || self.disabled.contains(&format!("mcp:{server}"))
-        {
-            let output = crate::mcp::CallOutput::failed(
-                crate::mcp::render::EXIT_TOOL_ERROR,
-                "disabled",
-                format!("kelir mcp: {server}.{tool}: disabled by user"),
-            );
-            self.mcp_settle(&json!({"mcp_id": mcp_id, "output": output}));
-            return;
-        }
-        let broker = self.mcp.clone();
-        let gates = self.gates.clone();
-        let turn = self.turn;
-        tokio::spawn(async move {
-            let (output, runs) = gated_mcp_call(
-                gates.as_deref(),
-                &broker,
-                (&server, &tool),
-                arguments,
-                envelope,
-                &mcp_id,
-                turn,
-            )
-            .await;
-            let args = json!({
-                "key": broker.key(),
-                "mcp_id": mcp_id,
-                "output": output,
-                "gate_runs": runs,
-            });
-            let (settle_reply, _dropped) = oneshot::channel();
-            let _ = inbox.send(Incoming {
-                request: Request::new(
-                    crate::mcp::broker::VERB_SETTLE,
-                    args,
-                    crate::mcp::broker::FROM_INTERNAL,
-                ),
-                reply: settle_reply,
-                action: None,
-            });
-        });
-    }
-
-    /// Record `mcp_settled` and only then answer the client.
-    fn mcp_settle(&mut self, args: &Value) {
-        let Some(id) = args.get("mcp_id").and_then(Value::as_str) else {
-            return;
-        };
-        let Some(pending) = self.mcp_pending.remove(id) else {
-            return;
-        };
-        let output: crate::mcp::CallOutput = args
-            .get("output")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_else(|| {
-                crate::mcp::CallOutput::failed(
-                    crate::mcp::render::EXIT_UNAVAILABLE,
-                    "unavailable",
-                    "kelir mcp: the broker lost the result",
-                )
-            });
-        // The gates that ran on this call (they ran off the loop, so the loop
-        // is the one that writes them down).
-        if let Some(runs) = args
-            .get("gate_runs")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<Vec<crate::gates::Run>>(value).ok())
-        {
-            let _ = self.record_gate_runs(&runs);
-        }
-        let recorded = self.record(EventBody::McpSettled {
-            mcp_id: id.to_string(),
-            server: pending.server,
-            tool: pending.tool,
-            outcome: output.outcome.clone(),
-            exit_code: output.exit_code,
-            bytes: output.bytes,
-            out_path: output.out_path.clone(),
-            parent_call_id: pending.parent,
-        });
-        self.sync();
-        let answer = match recorded {
-            Ok(_) => Response::ok(
-                crate::mcp::broker::VERB,
-                0,
-                "now",
-                serde_json::to_value(&output).unwrap_or(Value::Null),
-            ),
-            Err(message) => Response::error(message),
-        };
-        let _ = pending.reply.send(answer);
-    }
-
-    /// An inbound notification from a server. A channel message becomes a `source` event (kind
-    /// `channel`) at the next safe boundary; handling policy (waking the model) is's.
-    fn mcp_notify(&mut self, args: &Value) {
-        let server = args
-            .get("server")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let method = args.get("method").and_then(Value::as_str).unwrap_or("");
-        let params = args.get("params").cloned().unwrap_or(Value::Null);
-        if method == "kelir/unavailable" {
-            let why = params
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string();
-            let _ = self.record(EventBody::Error {
-                location: "mcp".into(),
-                message: format!("channel server `{server}` is unavailable: {why}"),
-                retryable: false,
-                status: None,
-                attempt: None,
-                retry_in_ms: None,
-            });
-            self.sync();
-            return;
-        }
-        if !method.starts_with("notifications/claude/channel") {
-            return;
-        }
-        let mut text = match params.get("content").and_then(Value::as_str) {
-            Some(text) => text.to_string(),
-            None => params.to_string(),
-        };
-        if let Some(meta) = params.get("meta").filter(|meta| !meta.is_null()) {
-            text.push_str(&format!("\n[meta {meta}]"));
-        }
-        self.mcp_channel_queue.push((server, text));
-        // Mid-batch the queue waits (a call's results stay contiguous); any
-        // other time it is written now.
-        if self.live_calls.is_empty() {
-            self.flush_channel_queue();
-        }
-    }
-
-    fn flush_channel_queue(&mut self) {
-        if self.mcp_channel_queue.is_empty() {
-            return;
-        }
-        for (server, text) in std::mem::take(&mut self.mcp_channel_queue) {
-            let _ = self.record(EventBody::Source {
-                kind: "channel".into(),
-                name: server,
-                text: Some(Payload::text(text)),
-                path: None,
-            });
-        }
-        self.sync();
     }
 
     /// The `bg-spawn` answer: the shim only ever answers a job, and a job is the only sender allowed to
@@ -3039,7 +2823,7 @@ impl Session {
 
     /// Apply the verbs due at `boundary`.
     async fn apply(&mut self, boundary: Boundary) -> Result<Applied, String> {
-        self.flush_channel_queue();
+        self.mcp_do(|mcp, session| mcp.flush(session));
         let mut applied = Applied::default();
         for pending in self.scheduler.due(boundary) {
             self.apply_pending(pending, &mut applied).await?;
@@ -5454,65 +5238,6 @@ impl Session {
 
 /// `provider/model` splits only when the prefix is a configured provider: `deepseek/deepseek- chat` is
 /// a model id on the current provider, while `openrouter/deepseek/deepseek-chat` names a provider.
-async fn gated_mcp_call(
-    gates: Option<&crate::gates::Runner>,
-    broker: &crate::mcp::broker::Broker,
-    (server, tool): (&str, &str),
-    mut arguments: Value,
-    envelope: bool,
-    mcp_id: &str,
-    turn: u32,
-) -> (crate::mcp::CallOutput, Vec<crate::gates::Run>) {
-    use crate::gates::{Event, Verdict};
-    let name = format!("mcp:{server}.{tool}");
-    let mut runs = Vec::new();
-    if let Some(gates) = gates.filter(|gates| gates.has(Event::BeforeTool, Some(&name))) {
-        let payload = json!({"tool": name, "call_id": mcp_id, "input": arguments});
-        let chain = gates
-            .run_event(Event::BeforeTool, Some(&name), turn, payload, None)
-            .await;
-        runs.extend(chain.runs);
-        match chain.verdict {
-            Verdict::Deny { gate, reason } => {
-                let output = crate::mcp::CallOutput::failed(
-                    crate::mcp::render::EXIT_TOOL_ERROR,
-                    "denied",
-                    tools::denied_text(&gate, &reason),
-                );
-                return (output, runs);
-            }
-            Verdict::Rewrite(input) => arguments = input,
-            Verdict::Allow => {}
-        }
-    }
-    let mut output = broker
-        .call(server, tool, arguments.clone(), envelope, mcp_id)
-        .await;
-    if let Some(gates) = gates.filter(|gates| gates.has(Event::AfterTool, Some(&name)))
-        && matches!(output.outcome.as_str(), "ok" | "error")
-    {
-        let payload = json!({
-            "tool": name,
-            "call_id": mcp_id,
-            "input": arguments,
-            "result": output.stdout,
-            "outcome": output.outcome,
-            "exit_code": output.exit_code,
-        });
-        let chain = gates
-            .run_event(Event::AfterTool, Some(&name), turn, payload, None)
-            .await;
-        runs.extend(chain.runs);
-        if let Verdict::Rewrite(value) = chain.verdict
-            && let Some(result) = value.get("result").and_then(Value::as_str)
-        {
-            output.stdout = result.to_string();
-            output.bytes = output.stdout.len() as u64;
-        }
-    }
-    (output, runs)
-}
-
 fn print_result_event(
     outcome: &str,
     exit_code: u8,
@@ -5806,16 +5531,7 @@ mod tests {
             turn: 0,
             turn_steps: 0,
             disabled: BTreeSet::new(),
-            mcp: crate::mcp::broker::Broker::with_servers(
-                Default::default(),
-                None,
-                std::env::temp_dir(),
-                std::env::temp_dir(),
-                "ses_1".into(),
-            ),
-            mcp_inbox: None,
-            mcp_pending: std::collections::HashMap::new(),
-            mcp_channel_queue: Vec::new(),
+            inbox: None,
             refused_fields: BTreeSet::new(),
             live_calls: Vec::new(),
             scheduler: Scheduler::default(),
@@ -5832,6 +5548,15 @@ mod tests {
             pending_task: String::new(),
             features: crate::features::Features {
                 models: models::Models::new(1_000, "default", None, None, None, model),
+                mcp: Some(crate::features::mcp::Mcp::new(
+                    crate::mcp::broker::Broker::with_servers(
+                        Default::default(),
+                        None,
+                        std::env::temp_dir(),
+                        std::env::temp_dir(),
+                        "ses_1".into(),
+                    ),
+                )),
                 sources: crate::features::sources::Sources::new(crate::sources::Watch::default()),
             },
             governor: None,
