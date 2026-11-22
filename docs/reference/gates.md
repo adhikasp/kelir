@@ -136,7 +136,11 @@ run's `KELIR_GATE_RUN` token, so a gate that detaches with `setsid` or a double
 fork is found too); no gate leaves a process behind, and none opens a console
 window on Windows. If kelir itself is killed mid-gate, a small `kelir gate-guard`
 process started beside the gate notices within about 0.2 s and kills the gate's
-tree (Unix). **Limits:** the token sweep reads `/proc` on Linux and `ps` on
+tree (Unix). The runner owns the tree while kelir is alive (process group on Unix,
+kill-on-close Job Object on Windows), but a hard kill of the session runs no
+cleanup in the dead process: on Unix the separate guard is the only thing that
+still signals the gate's group. This is why `gate-guard` remains a hidden
+subcommand. **Limits:** the token sweep reads `/proc` on Linux and `ps` on
 macOS (on other Unix systems only the process group is killed); a gate that
 clears its own environment before detaching escapes the sweep on either system,
 and one that crosses `ssh` or a container boundary is out of reach on any
