@@ -270,8 +270,7 @@ fn no_row_is_hidden_while_a_later_block_streams() {
     app.apply(UiEvent::Delta(
         "Intro paragraph one.\n\nIntro paragraph two that is a bit longer and wraps around the sixty column pane.\n\n```\nl1\nl2\nl3\nl4\nl5\nl6\n".into(),
     ));
-    let mut seen: Vec<String> = app.take_scroll().iter().map(line_text).collect();
-    seen.extend(app.live_view().iter().map(|r| r.text()));
+    let seen: Vec<String> = app.cached_rows.iter().map(line_text).collect();
     let joined = seen.join("\n");
     assert!(
         joined.contains("Intro paragraph two") && joined.contains("sixty column pane"),

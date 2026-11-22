@@ -49,13 +49,7 @@ fn started(command: &str) -> UiEvent {
 /// The full screen text of the viewport (state row, facts row, live rows).
 fn snap(app: &mut App, width: u16) -> String {
     let backend = ratatui::backend::TestBackend::new(width, VIEWPORT);
-    let mut terminal = ratatui::Terminal::with_options(
-        backend,
-        ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Inline(VIEWPORT),
-        },
-    )
-    .unwrap();
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(app, frame)).unwrap();
     let buffer = terminal.backend().buffer();
     let mut out = String::new();
@@ -197,21 +191,19 @@ fn b1_calls_then_pause_notice_in_order() {
 // ----------------------------------------------------------------------- S1
 
 /// While a long fence streams line by line, every row the text has produced is
-/// in the scrollback or the live rows, once, in order, never in neither.
+/// in the owned transcript exactly once, in order. The full-screen app keeps
+/// one transcript (there is no scrollback/live split to double-count).
 #[test]
 fn s1_no_row_vanishes_and_none_repeats_while_a_fence_streams() {
     let mut app = app(60);
     turn(&mut app);
-    let mut committed: Vec<String> = Vec::new();
     app.apply(UiEvent::Delta(
         "Intro paragraph before the code.\n\n".into(),
     ));
     app.apply(UiEvent::Delta("```text\n".into()));
     for i in 0..40 {
         app.apply(UiEvent::Delta(format!("line-{i:02}\n")));
-        committed.extend(scroll(&mut app));
-        let live: Vec<String> = app.live_view().iter().map(|r| r.text()).collect();
-        let all: Vec<String> = committed.iter().cloned().chain(live).collect();
+        let all: Vec<String> = app.cached_rows.iter().map(line_text).collect();
         let intro = all.iter().filter(|r| r.contains("Intro paragraph")).count();
         assert_eq!(
             intro, 1,
@@ -227,9 +219,9 @@ fn s1_no_row_vanishes_and_none_repeats_while_a_fence_streams() {
     }
     app.apply(UiEvent::Delta("```\n\nAfter.".into()));
     app.apply(UiEvent::Assistant { text: "x".into() });
-    committed.extend(scroll(&mut app));
+    let all: Vec<String> = app.cached_rows.iter().map(line_text).collect();
     for j in 0..40 {
-        let n = committed
+        let n = all
             .iter()
             .filter(|r| r.contains(&format!("line-{j:02}")))
             .count();
@@ -572,21 +564,18 @@ fn one_megabyte_single_block_per_delta_cost_does_not_explode() {
 fn s1_a_long_list_block_reaches_history_while_it_streams() {
     let mut app = app(60);
     turn(&mut app);
-    let mut committed: Vec<String> = Vec::new();
     for i in 0..40 {
         app.apply(UiEvent::Delta(format!(
             "- item-{i:02} of the list
 "
         )));
-        committed.extend(scroll(&mut app));
-        let live: Vec<String> = app.live_view().iter().map(|r| r.text()).collect();
-        let all: Vec<String> = committed.iter().cloned().chain(live).collect();
+        let all: Vec<String> = app.cached_rows.iter().map(line_text).collect();
         for j in 0..=i {
             let n = all
                 .iter()
                 .filter(|r| r.contains(&format!("item-{j:02}")))
                 .count();
-            assert_eq!(n, 1, "item-{j:02} appears {n}x at i={i}");
+            assert_eq!(n, 1, "item-{j:02} appears {n}x at i={i}: {all:#?}");
         }
     }
 }

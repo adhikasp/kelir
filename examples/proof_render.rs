@@ -1,4 +1,4 @@
-//! Proof: render the idle viewport and a long wrapped prompt as plain text.
+//! Proof: render the idle screen and a long wrapped prompt as plain text.
 use kelir::editor::Key;
 use kelir::tui::{self, App, Press, UiEvent};
 use ratatui::Terminal;
@@ -15,13 +15,7 @@ fn channels() -> (
 
 fn dump(app: &mut App, height: u16, label: &str) {
     let backend = TestBackend::new(80, height);
-    let mut terminal = Terminal::with_options(
-        backend,
-        ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Inline(height),
-        },
-    )
-    .unwrap();
+    let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| tui::render(app, frame)).unwrap();
     println!("===== {label} =====");
     let buffer = terminal.backend().buffer();
@@ -48,14 +42,13 @@ fn main() {
         final_text: "Here is the answer to your first question.".into(),
     });
     app.apply(UiEvent::Title("Fix the input box gap".into()));
-    let h = tui::viewport_height_for(app.editor.visual_rows().len() as u16, 0);
-    dump(&mut app, h, "idle with title");
+    let screen: u16 = 24;
+    dump(&mut app, screen, "idle with title");
 
     // A long prompt that wraps across several visual rows at width 80.
     let text = "Please refactor the editor so that the cursor moves by visual row when the prompt wraps across several lines and the input box grows to keep the whole message visible at all times. Also remove the redundant status prefix, add an automatic session title from the first prompt, show it in the facts row, and make the Herdr pane title match it too.";
     for c in text.chars() {
         app.press(Press::Edit(Key::Char(c)));
     }
-    let h2 = tui::viewport_height_for(app.editor.visual_rows().len() as u16, 0);
-    dump(&mut app, h2, "long wrapped prompt");
+    dump(&mut app, screen, "long wrapped prompt");
 }

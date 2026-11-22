@@ -1,6 +1,6 @@
-//! The TUI's own layer of the pyramid: snapshots of the inline area, the
-//! action→verb enumeration, the non-TTY fallback, and a headless PTY drive of
-//! the real binary against the scripted mock.
+//! The full-screen TUI: snapshots of the owned viewport and status rows, the
+//! action→verb enumeration, the non-TTY fallback, and PTY drives of the real
+//! binary against the scripted mock.
 
 // Test crates target behaviour, not pedantic style (#23).
 #![allow(clippy::pedantic, clippy::nursery)]
@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 
 use crate::support::{Mock, Reply, run_task, sse, text_turn, tool_turn};
 use kelir::commands::{self, Action, Parsed};
-use kelir::tui::{self, App, Phase, UiEvent, VIEWPORT_HEIGHT};
+use kelir::tui::{self, App, Phase, UiEvent};
+
+/// Full-screen height the snapshot tests render at.
+pub(crate) const SCREEN: u16 = 20;
 use kelir::verbs;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -29,62 +32,21 @@ fn channels() -> (
     (to_tui, verbs)
 }
 
-/// Render one app state into a 60x8 TestBackend and return the inline area as
-/// text, one line per row, trailing spaces trimmed.
-/// Render the app at the viewport height it actually asks for: the real TUI
-/// rebuilds the viewport from its content each frame, so a fixed 8-row buffer
-/// would leave stale rows below a short idle input.
+/// Render one app state into a fixed 60x20 full-screen TestBackend and return
+/// the text, one line per row, trailing spaces trimmed. The full-screen TUI
+/// always renders the entire terminal, unlike the old inline viewport.
 fn snapshot(app: &mut App) -> String {
-    let content_height = tui::viewport_height_for(
-        app.editor.visual_rows().len() as u16,
-        app.wanted_live_rows(),
-    );
-    // The tail overlay replaces the live/state/editor rows with the captured
-    // output; give it at least enough rows for the header and the tail lines.
-    let height = if app.show_tail {
-        content_height.max((app.tail.len() as u16 + 2).min(VIEWPORT_HEIGHT))
-    } else {
-        content_height
-    };
-    let backend = TestBackend::new(60, height);
-    let mut terminal = Terminal::with_options(
-        backend,
-        ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Inline(height),
-        },
-    )
-    .unwrap();
-    terminal.draw(|frame| tui::render(app, frame)).unwrap();
-    let buffer = terminal.backend().buffer();
-    let mut out = String::new();
-    for y in 0..buffer.area.height {
-        let mut line = String::new();
-        for x in 0..buffer.area.width {
-            if let Some(cell) = buffer.cell(Rect::new(x, y, 1, 1).as_position()) {
-                line.push_str(cell.symbol());
-            }
-        }
-        out.push_str(line.trim_end());
-        out.push('\n');
-    }
-    out
+    render_into(app, 60, SCREEN)
 }
 
-/// Render `app` into a `width`x`VIEWPORT_HEIGHT` TestBackend (the maximum,
-/// used by the width-tier and streaming tests) with rows sized to content.
+/// Render `app` into a `width`x`SCREEN` full-screen TestBackend.
 fn render_at(app: &mut App, width: u16) -> String {
-    let height = tui::viewport_height_for(
-        app.editor.visual_rows().len() as u16,
-        app.wanted_live_rows(),
-    );
+    render_into(app, width, SCREEN)
+}
+
+fn render_into(app: &mut App, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::with_options(
-        backend,
-        ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Inline(height),
-        },
-    )
-    .unwrap();
+    let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| tui::render(app, frame)).unwrap();
     let buffer = terminal.backend().buffer();
     let mut out = String::new();
@@ -111,7 +73,7 @@ fn line_text(line: &ratatui::text::Line<'_>) -> String {
 
 fn new_app() -> App {
     let (to_tui, verbs) = channels();
-    App::new(60, VIEWPORT_HEIGHT as usize, to_tui, verbs, String::new())
+    App::new(60, SCREEN as usize, to_tui, verbs, String::new())
 }
 
 /// The text of a pty stream, with every CSI/OSC escape removed: the assertion
@@ -130,10 +92,17 @@ fn plain(screen: &str) -> String {
                 // 0x40..=0x7e (the `[` itself is in that range, so it has to go
                 // first or the scan stops on it).
                 chars.next();
+                let mut final_byte = '\0';
                 for c in chars.by_ref() {
                     if ('@'..='~').contains(&c) {
+                        final_byte = c;
                         break;
                     }
+                }
+                // A differential repaint writes runs at absolute cursor
+                // positions; consecutive runs are separate screen words.
+                if matches!(final_byte, 'H' | 'f' | 'A' | 'B') {
+                    out.push(' ');
                 }
             }
             Some(']') => {
@@ -170,34 +139,47 @@ fn herdr_records(screen: &str) -> Vec<String> {
     records
 }
 
-/// Assert the screen's row `index` equals `expected`, and that every other row
-/// is `blank`; returns the whole screen for a message.
-fn row_eq(screen: &str, index: usize, expected: &str) {
-    let rows: Vec<&str> = screen.lines().collect();
-    assert_eq!(
-        rows.get(index),
-        Some(&expected),
-        "row {index} of {screen:?}"
-    );
+/// The state row carries an activity word and a hint; find it by the glyphs
+/// used for idle/working/paused/error, since its screen position depends on
+/// the number of editor rows.
+fn state_row(screen: &str) -> &str {
+    screen
+        .lines()
+        .find(|r| {
+            [
+                "idle", "writing", "thinking", "running", "paused", "error", "done",
+            ]
+            .iter()
+            .any(|word| r.contains(word))
+        })
+        .unwrap_or("")
 }
 
-/// The viewport is content-sized: with nothing streaming there are no blank
-/// live rows above the state row. A streaming answer renders markdown with no
-/// `##`/`**` left in it.
+/// The facts row is the last non-empty line of a full-screen snapshot.
+fn facts_row(screen: &str) -> &str {
+    screen.lines().last().unwrap_or("")
+}
+
+/// The full-screen view keeps the input and facts at the bottom, with the
+/// transcript above; a streaming answer renders markdown (no `##`/`**`).
 #[test]
 fn snapshot_the_idle_viewport() {
     let mut app = new_app();
     app.push_text(""); // nothing to commit
     let screen = snapshot(&mut app);
-    row_eq(&screen, 0, " ● idle · ready");
-    row_eq(&screen, 1, "›");
-    row_eq(&screen, 2, "0 tok in");
-    assert_eq!(screen.lines().count(), 3, "no blank live rows: {screen:?}");
+    let rows: Vec<&str> = screen.lines().collect();
+    assert_eq!(rows.len(), SCREEN as usize, "a full screen: {screen:?}");
+    assert!(
+        rows.iter().any(|r| r.starts_with(" ● idle · ready")),
+        "state row: {screen:?}"
+    );
+    assert!(rows.contains(&"›"));
+    assert!(rows.last().unwrap().starts_with("0 tok in"));
 }
 
-/// A settled answer never leaves blank live rows between it and the input.
-/// This is the gap the user saw after a turn ended and at the welcome banner;
-/// with a long, wrapping, multi-paragraph answer it must still hold.
+/// A settled answer lives in the owned scrollback and is visible above the
+/// input. The view is deterministic across paints, and shows no markdown
+/// markers or blank gap in the transcript.
 #[test]
 fn a_settled_long_answer_leaves_no_blank_gap_above_the_input() {
     let mut app = new_app();
@@ -213,25 +195,21 @@ fn a_settled_long_answer_leaves_no_blank_gap_above_the_input() {
         outcome: "done".into(),
         final_text: answer,
     });
-    // Everything settled into scrollback; the viewport is the input only.
     assert!(
-        app.wanted_live_rows() == 0,
-        "no live content after the turn"
+        app.transcript_text().contains("Notes"),
+        "the answer is an owned entry"
     );
     let screen = snapshot(&mut app);
-    let rows: Vec<&str> = screen.lines().collect();
-    assert!(rows.len() <= 4, "no spare rows: {screen:?}");
+    assert_eq!(screen.lines().count(), SCREEN as usize);
+    // The viewport follows the bottom of a long answer, so the tail is visible
+    // (the whole answer is in `transcript_text`, checked above).
     assert!(
-        rows[0].contains("idle"),
-        "state follows the answer: {screen:?}"
+        screen.contains("committed, with enough words"),
+        "answer in scrollback: {screen:?}"
     );
-    assert!(
-        !rows[..2].iter().any(|row| row.is_empty()),
-        "no blank gap: {screen:?}"
-    );
-    // A subsequent empty frame is just as tight: no stale live rows.
+    assert!(!screen.contains("##"), "no raw markdown: {screen:?}");
     let screen2 = snapshot(&mut app);
-    assert_eq!(screen, screen2, "the viewport stays tight across paints");
+    assert_eq!(screen, screen2, "the view is stable across paints");
 }
 
 #[test]
@@ -256,20 +234,16 @@ fn snapshot_streaming_text_in_the_live_area() {
     assert!(screen.contains("Hello **wor"), "{screen:?}");
     app.apply(UiEvent::Delta("ld**\n\n".into()));
     let screen = snapshot(&mut app);
-    let state = screen.lines().next().unwrap_or_default();
+    let state = state_row(&screen);
     assert!(state.contains("writing"), "{screen:?}");
-    // A closed block goes straight into the scrollback now (S1): the closed
-    // emphasis shows there, with no literal markers.
-    let committed: Vec<String> = app.take_scroll().iter().map(line_text).collect();
+    // A closed block stays in the owned transcript and renders without markers.
+    let screen = snapshot(&mut app);
     assert!(
-        committed.iter().any(|row| row.contains("Hello world")),
-        "the closed emphasis renders: {committed:?}"
+        screen.contains("Hello world"),
+        "the closed emphasis renders: {screen:?}"
     );
-    assert!(
-        !committed.iter().any(|row| row.contains("**")),
-        "no literal markers: {committed:?}"
-    );
-    let facts = screen.lines().last().unwrap_or_default();
+    assert!(!screen.contains("**"), "no literal markers: {screen:?}");
+    let facts = facts_row(&screen);
     assert!(facts.starts_with("test/model"), "{facts:?}");
 }
 
@@ -290,7 +264,7 @@ fn snapshot_a_running_call() {
         input: json!({"command": "sleep 1"}),
     });
     let screen = snapshot(&mut app);
-    let state = screen.lines().next().unwrap_or_default();
+    let state = state_row(&screen);
     assert!(state.contains("running bash: sleep 1"), "{screen:?}");
     // No live rows while a call runs: the state row is the first row, right
     // under the last committed scrollback line.
@@ -309,10 +283,10 @@ fn snapshot_an_error() {
     app.apply(UiEvent::Error("provider said no".into()));
     assert_eq!(app.status.phase, Phase::Error);
     let screen = snapshot(&mut app);
-    let state = screen.lines().next().unwrap_or_default();
+    let state = state_row(&screen);
     assert!(state.contains("error"), "{screen:?}");
     assert!(state.contains("provider said no"), "{screen:?}");
-    let facts = screen.lines().last().unwrap_or_default();
+    let facts = facts_row(&screen);
     assert_eq!(facts.trim(), "test/model · 0 tok in", "{facts:?}");
 }
 
@@ -359,8 +333,8 @@ fn snapshot_the_output_tail_view() {
     assert!(snapshot(&mut app).contains('›'));
 }
 
-/// A long line in the editor wraps across the editor's rows: text is never
-/// clipped or spilled into the facts row, and the prompt appears only once.
+/// A long line in the editor wraps across its rows: text is never clipped or
+/// spilled into the facts row, and the prompt appears only once.
 #[test]
 fn snapshot_a_long_editor_line_wraps_across_its_rows() {
     let mut app = new_app();
@@ -369,19 +343,24 @@ fn snapshot_a_long_editor_line_wraps_across_its_rows() {
     }
     let screen = snapshot(&mut app);
     let rows: Vec<&str> = screen.lines().collect();
-    // The viewport grows with the wrapped prompt: state, two editor rows,
-    // facts — no spare blank editor or live rows.
-    assert_eq!(rows.len(), 4, "{screen:?}");
-    // Editor rows are 1 and 2; each holds the 2-column prompt plus 58 columns
-    // of text (60 - 2). 80 characters wrap to 58 on the first row and 22 on
-    // the second.
-    assert!(rows[1].starts_with("› "), "row 1: {:?}", rows[1]);
-    assert!(rows[2].starts_with("  "), "row 2: {:?}", rows[2]);
-    assert_eq!(rows[1].chars().count(), 60, "{}", rows[1]);
-    assert_eq!(rows[2].trim_end().chars().count(), 24, "{}", rows[2]);
-    assert_eq!(rows[3], "0 tok in", "{}", rows[3]);
-    // The state row is first, right under the scrollback: no blank live rows.
-    assert!(rows[0].contains("idle"), "{screen:?}");
+    assert_eq!(rows.len(), SCREEN as usize, "{screen:?}");
+    // The editor sits above the facts row at the bottom of the screen. It has
+    // two rows: the prompt on the first, a continuation indent on the second.
+    let prompt = rows.iter().position(|r| r.starts_with("› ")).unwrap();
+    assert!(
+        rows[prompt + 1].starts_with("  "),
+        "row: {:?}",
+        rows[prompt + 1]
+    );
+    assert_eq!(rows[prompt].chars().count(), 60, "{}", rows[prompt]);
+    assert_eq!(
+        rows[prompt + 1].trim_end().chars().count(),
+        24,
+        "{}",
+        rows[prompt + 1]
+    );
+    assert_eq!(rows[prompt + 2], "0 tok in", "{}", rows[prompt + 2]);
+    assert!(rows.iter().any(|r| r.contains("idle")), "{screen:?}");
 }
 
 /// 80, 60 and 40 columns: the state row, the facts row and a tool line all fit
@@ -393,7 +372,7 @@ fn snapshot_narrow_panes_keep_every_row_inside_its_width() {
         let (verbs, _incoming) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             width as usize,
-            VIEWPORT_HEIGHT as usize,
+            SCREEN as usize,
             to_tui,
             verbs,
             String::new(),
@@ -415,7 +394,7 @@ fn snapshot_narrow_panes_keep_every_row_inside_its_width() {
                 "width {width}, row {index}: {row:?}"
             );
         }
-        let state = screen.lines().next().unwrap_or_default();
+        let state = state_row(&screen);
         assert!(state.contains("running"), "width {width}: {state:?}");
     }
 }
@@ -433,8 +412,8 @@ fn snapshot_the_idle_and_working_rows_are_visibly_different() {
         limit: None,
     });
     let working = render_at(&mut app, 60);
-    let idle_state = idle.lines().next().unwrap_or_default().to_string();
-    let working_state = working.lines().next().unwrap_or_default().to_string();
+    let idle_state = state_row(&idle).to_string();
+    let working_state = state_row(&working).to_string();
     assert!(idle_state.contains("idle"), "{idle_state:?}");
     assert!(working_state.contains("thinking"), "{working_state:?}");
     assert_ne!(
@@ -759,7 +738,9 @@ fn drive_pty_in_idle_or_turn(
     let wait_for = |screen: &Arc<Mutex<Vec<u8>>>, needle: &str, limit: Duration| -> bool {
         let deadline = Instant::now() + limit;
         while Instant::now() < deadline {
-            if text(screen).contains(needle) {
+            let raw = text(screen);
+            if raw.contains(needle) || (!needle.contains('\u{1b}') && plain(&raw).contains(needle))
+            {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -998,8 +979,11 @@ async fn the_tui_renders_a_markdown_answer_and_commits_it() {
     // stream interleaves escape sequences with the text, so the assertion is
     // on the stripped text (a reader sees the stripped text).
     let text = plain(&run.screen);
-    assert!(text.contains("Some bold words"), "{text:?}");
-    assert!(text.contains("cargo test"), "{text:?}");
+    // A differential repaint only writes changed cells, so spaces that were
+    // already on screen are absent from the byte stream. Compare words.
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(compact.contains("Someboldwords"), "{text:?}");
+    assert!(compact.contains("cargotest"), "{text:?}");
     // A done turn ends on its prose: no check mark line.
     // (the state row's idle text is checked by the snapshot tests; the pty's
     // repaint diff only rewrites what changed, so it need not appear here)
@@ -1058,6 +1042,8 @@ fn drive_and_count_idle_bytes(
         })
         .expect("open a pty");
     let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_kelir"));
+    // A kelir session's own env would change what the run under test does.
+    crate::support::scrub_pty(&mut command);
     command.cwd(&cwd);
     command.env("KELIR_CONFIG", &config);
     command.env("KELIR_CONFIG_DIR", state.join("no-config"));
@@ -1104,7 +1090,9 @@ fn drive_and_count_idle_bytes(
     let wait_for = |screen: &Arc<Mutex<Vec<u8>>>, needle: &str, limit: Duration| -> bool {
         let deadline = Instant::now() + limit;
         while Instant::now() < deadline {
-            if text(screen).contains(needle) {
+            let raw = text(screen);
+            if raw.contains(needle) || (!needle.contains('\u{1b}') && plain(&raw).contains(needle))
+            {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -1673,8 +1661,12 @@ async fn the_idle_status_line_stays_calm_even_with_a_cap() {
         run.screen
     );
     // And the banner names the cap too, so the two never disagree.
+    let compact: String = plain(&run.screen)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     assert!(
-        run.screen.contains("step cap 3 per turn"),
+        compact.contains("stepcap3perturn"),
         "screen: {:?}",
         run.screen
     );
@@ -1772,8 +1764,9 @@ async fn the_tui_banner_names_a_window_only_when_it_fell_back() {
 
     assert_eq!(run.code, 0, "screen: {:?}", run.screen);
     // One line, not two: the same fallback is never announced twice.
+    let screen = plain(&run.screen);
     assert_eq!(
-        run.screen.matches("window 128000 tokens").count(),
+        screen.matches("window 128000 tokens").count(),
         1,
         "one fallback line: {:?}",
         run.screen
@@ -1854,8 +1847,9 @@ async fn a_slow_list_is_applied_to_an_idle_tui_session() {
     .expect("the pty driver");
 
     let screen = &run.screen;
+    let plain_screen = plain(screen);
     assert!(
-        screen.matches("window 128000 tokens").count() == 1,
+        plain_screen.matches("window 128000 tokens").count() == 1,
         "the late answer is applied once, while idle: {screen:?}"
     );
 }
@@ -1903,8 +1897,9 @@ async fn an_offline_start_says_the_window_it_fell_back_to() {
     .expect("the pty driver");
 
     let screen = &run.screen;
+    let plain_screen = plain(screen);
     assert!(
-        screen.matches("window 128000 tokens").count() == 1,
+        plain_screen.matches("window 128000 tokens").count() == 1,
         "one fallback line, not two: {screen:?}"
     );
     assert!(
@@ -1952,8 +1947,9 @@ async fn a_model_swap_announces_the_new_window() {
     let screen = &run.screen;
     // The source is `cache` or `api` depending on whether the swap's fetch had
     // landed; the point is that the number is said at all, once.
+    let plain_screen = plain(screen);
     assert!(
-        screen.matches("» window 200000 tokens").count() == 1,
+        plain_screen.matches("» window 200000 tokens").count() == 1,
         "the swap's window is announced, once: {screen:?}"
     );
 }
@@ -2019,4 +2015,476 @@ async fn a_csi_u_shift_enter_adds_a_newline_instead_of_submitting() {
         .find(|event| event["type"] == "user")
         .expect("a user event");
     assert_eq!(user["text"], "first line\nsecond line");
+}
+
+/// The regression that motivated the full-screen rewrite: three turns, each
+/// with a long answer and a tool call, must all remain reachable from the
+/// viewport. The second answer in particular used to vanish into the
+/// terminal's scrollback when the inline view handed rows away.
+#[test]
+fn three_turns_with_calls_and_long_answers_are_all_reachable() {
+    let mut app = new_app();
+    let mut answers = Vec::new();
+    for turn in 1..=3 {
+        app.apply(UiEvent::TurnStarted {
+            turn,
+            provider: "openrouter".into(),
+            model: "test/model".into(),
+            limit: None,
+        });
+        app.submit(&format!("question {turn}"));
+        let answer = format!(
+            "answer {turn}: {}",
+            "a long sentence that wraps across several rows of the viewport ".repeat(6)
+        );
+        answers.push(answer.clone());
+        app.apply(UiEvent::Delta(answer.clone()));
+        app.apply(UiEvent::ToolStarted {
+            name: "bash".into(),
+            input: serde_json::json!({"command": format!("echo {turn}")}),
+        });
+        app.apply(UiEvent::ToolSettled {
+            name: "bash".into(),
+            input: serde_json::json!({"command": format!("echo {turn}")}),
+            outcome: "ok".into(),
+            exit_code: Some(0),
+            elapsed_ms: 1,
+            bytes: 2,
+            lines: 1,
+            spilled: false,
+            out_path: String::new(),
+            tail: String::new(),
+        });
+        app.apply(UiEvent::Assistant {
+            text: answer.clone(),
+        });
+        app.apply(UiEvent::TurnEnded {
+            outcome: "done".into(),
+            final_text: answer,
+        });
+    }
+    // Bottom follows the last answer; Home reaches the first question.
+    let bottom = snapshot(&mut app);
+    assert!(bottom.contains("answer 3"), "{bottom}");
+    app.press(tui::Press::Top);
+    let top = snapshot(&mut app);
+    assert!(
+        top.contains("question 1"),
+        "first prompt unreachable: {top}"
+    );
+    app.press(tui::Press::PageDown);
+    let middle = snapshot(&mut app);
+    assert!(
+        middle.contains("answer 1") || middle.contains("answer 2"),
+        "an earlier answer is unreachable when scrolling down: {middle}"
+    );
+    app.press(tui::Press::Bottom);
+    assert!(snapshot(&mut app).contains("answer 3"));
+}
+
+/// Resize keeps the reader's logical scroll position: the first visible row
+/// maps from the old rows/viewport to the new ones, and a deliberate scroll is
+/// never silently turned back into "follow the bottom".
+#[test]
+fn resize_keeps_the_scroll_position_and_the_new_lines_marker() {
+    let mut app = new_app();
+    for i in 0..40 {
+        app.push_text(&format!(
+            "line {i} with enough words to wrap across a narrow pane"
+        ));
+    }
+    app.set_size(60, 20);
+    app.press(tui::Press::Top);
+    assert_eq!(app.scroll_position(), Some(0));
+    // A wider window reflows into fewer rows; the top stays at the start.
+    app.set_size(80, 20);
+    assert!(app.scroll_position().is_some(), "resize cleared the scroll");
+    assert_eq!(app.scroll_position(), Some(0));
+    // Following at the bottom stays following across a resize.
+    app.press(tui::Press::Bottom);
+    assert_eq!(app.scroll_position(), None);
+    app.set_size(60, 24);
+    assert_eq!(app.scroll_position(), None);
+}
+
+/// The "N new lines" marker belongs to a reader who scrolled away; sitting at
+/// the bottom must not accumulate it.
+#[test]
+fn the_new_lines_marker_only_counts_output_after_scrolling_away() {
+    let mut app = new_app();
+    for i in 0..40 {
+        app.push_text(&format!("settled line {i}"));
+    }
+    assert_eq!(app.pending_new, 0, "the marker appeared while following");
+    app.press(tui::Press::Top);
+    app.push_text("a late line while scrolled away");
+    assert!(
+        app.pending_new > 0,
+        "no marker after output while scrolled away"
+    );
+    app.press(tui::Press::Bottom);
+    assert_eq!(app.pending_new, 0);
+}
+
+// ------------------------------------------------- full-screen PTY regression
+
+/// Reconstruct the visible grid from the bytes a ratatui frame emitted. Only
+/// the subset ratatui uses is needed: cursor positioning, SGR, modes and
+/// printable text. This lets a test assert what a human would see at a given
+/// scroll position, not merely what bytes happened to pass through the pty.
+fn screen_text(raw: &str, from: usize, rows: usize, cols: usize) -> String {
+    let mut grid = vec![vec![' '; cols]; rows];
+    let (mut row, mut col) = (0usize, 0usize);
+    let start = raw.get(..from).map_or(0, |prefix| prefix.chars().count());
+    let mut chars = raw.chars().skip(start).peekable();
+    let mut params = String::new();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\u{1b}' => match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    params.clear();
+                    while let Some(&next) = chars.peek() {
+                        if next.is_ascii_digit() || matches!(next, ';' | '?' | '>' | '<') {
+                            params.push(next);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    let Some(final_byte) = chars.next() else {
+                        break;
+                    };
+                    match final_byte {
+                        'H' | 'f' => {
+                            let mut parts = params
+                                .split(';')
+                                .filter(|p| p.chars().all(|c| c.is_ascii_digit()));
+                            let r = parts
+                                .next()
+                                .and_then(|p| p.parse::<usize>().ok())
+                                .unwrap_or(1);
+                            let c = parts
+                                .next()
+                                .and_then(|p| p.parse::<usize>().ok())
+                                .unwrap_or(1);
+                            row = r.saturating_sub(1).min(rows.saturating_sub(1));
+                            col = c.saturating_sub(1).min(cols.saturating_sub(1));
+                        }
+                        'J' => {
+                            for line in &mut grid {
+                                line.fill(' ');
+                            }
+                        }
+                        'K' => {
+                            for cell in grid[row].iter_mut().skip(col) {
+                                *cell = ' ';
+                            }
+                        }
+                        'A' => row = row.saturating_sub(1),
+                        'B' => row = (row + 1).min(rows.saturating_sub(1)),
+                        'C' => col = (col + 1).min(cols.saturating_sub(1)),
+                        'D' => col = col.saturating_sub(1),
+                        _ => {}
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if next == '\u{7}' {
+                            break;
+                        }
+                        if next == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' => col = 0,
+            '\n' => row = (row + 1).min(rows.saturating_sub(1)),
+            ch if !ch.is_control() && row < rows => {
+                grid[row][col] = ch;
+                col += 1;
+                if col >= cols {
+                    col = 0;
+                    row = (row + 1).min(rows.saturating_sub(1));
+                }
+            }
+            _ => {}
+        }
+    }
+    grid.iter()
+        .map(|line| line.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Kill the child even if an assertion inside the driver panics.
+struct KillPty(Box<dyn portable_pty::ChildKiller + Send>);
+impl Drop for KillPty {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+    }
+}
+
+#[tokio::test]
+async fn full_screen_scroll_resize_and_restore_in_a_real_pty() {
+    // Three turns whose answers are long enough to push the first turn off a
+    // 30-row viewport: the scroll keys must bring it back from the app's own
+    // transcript, not from the terminal's scrollback.
+    let turns = [
+        ("FIRST_PROMPT", "FIRST_ANSWER"),
+        ("SECOND_PROMPT", "SECOND_ANSWER"),
+        ("THIRD_PROMPT", "THIRD_ANSWER"),
+    ];
+    let replies: Vec<_> = turns
+        .iter()
+        .map(|(_, answer)| {
+            let body = format!("{answer} {}", "word ".repeat(220));
+            Reply::Sse(sse(&text_turn(&body, 0)))
+        })
+        .collect();
+    let mock = Mock::start(replies).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_full_screen_pty(cwd, config, state, base_url, &turns)
+    })
+    .await
+    .expect("the pty driver");
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    // Leaving the alternate screen and restoring the cursor is what makes the
+    // user's own scrollback come back intact.
+    assert!(
+        run.screen.contains("\u{1b}[?1049l"),
+        "alternate screen not restored: {:?}",
+        run.screen
+    );
+    assert!(
+        run.screen.contains("\u{1b}[?25h"),
+        "cursor not restored: {:?}",
+        run.screen
+    );
+}
+
+/// Drive three turns through the real binary, press real scroll keys, resize
+/// the pty, then quit. Each snapshot is the bytes painted *after* the key, so
+/// it is the visible viewport at that position, not the whole byte stream.
+fn drive_full_screen_pty(
+    cwd: std::path::PathBuf,
+    config: std::path::PathBuf,
+    state: std::path::PathBuf,
+    base_url: String,
+    turns: &[(&str, &str)],
+) -> PtyRun {
+    let pty_system = portable_pty::native_pty_system();
+    let pair = pty_system
+        .openpty(portable_pty::PtySize {
+            rows: 30,
+            cols: 90,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open a pty");
+    let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_kelir"));
+    crate::support::scrub_pty(&mut command);
+    command.cwd(&cwd);
+    command.env("KELIR_CONFIG", &config);
+    command.env("KELIR_CONFIG_DIR", state.join("no-config"));
+    command.env("KELIR_STATE_DIR", &state);
+    command.env("KELIR_HOME", state.join("home"));
+    command.env("KELIR_BASE_URL", &base_url);
+    command.env("OPENROUTER_API_KEY", "test-openrouter-key");
+    command.env("TERM", "xterm-256color");
+    let mut child = pair.slave.spawn_command(command).expect("spawn kelir");
+    drop(pair.slave);
+    let _killer = KillPty(child.clone_killer());
+    let writer = Arc::new(Mutex::new(pair.master.take_writer().expect("pty writer")));
+    let mut reader = pair.master.try_clone_reader().expect("pty reader");
+    let screen = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let sink = screen.clone();
+    let responder = writer.clone();
+    let reader_task = std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    let bytes = &chunk[..n];
+                    sink.lock().unwrap().extend_from_slice(bytes);
+                    let text = String::from_utf8_lossy(bytes);
+                    let mut replies = Vec::new();
+                    for _ in 0..text.matches("\u{1b}[6n").count() {
+                        replies.extend_from_slice(b"\x1b[1;1R");
+                    }
+                    for _ in 0..text.matches("\u{1b}[c").count() {
+                        replies.extend_from_slice(b"\x1b[?1;2c");
+                    }
+                    if !replies.is_empty() {
+                        let mut out = responder.lock().unwrap();
+                        let _ = out.write_all(&replies);
+                        let _ = out.flush();
+                    }
+                }
+            }
+        }
+    });
+    let raw = || String::from_utf8_lossy(&screen.lock().unwrap()).into_owned();
+    // A full-screen repaint can split one word across several cursor moves;
+    // plain() inserts padding spaces for those. Compare only non-whitespace.
+    let squash =
+        |text: &str| -> String { plain(text).chars().filter(|c| !c.is_whitespace()).collect() };
+    let wait_for = |needle: &str, limit: Duration| -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            let value = raw();
+            if value.contains(needle) || squash(&value).contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+    let send = |bytes: &[u8]| {
+        let mut out = writer.lock().unwrap();
+        out.write_all(bytes).unwrap();
+        out.flush().unwrap();
+    };
+    // Reconstruct the visible grid from the pty stream and wait until the
+    // requested answer is actually on screen.
+    let wait_screen = |from: usize, rows: usize, cols: usize, label: &str| -> String {
+        let deadline = Instant::now() + crate::support::CEILING;
+        loop {
+            let view = screen_text(&raw(), from, rows, cols);
+            if view.contains(label) {
+                return view;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{label:?} never on screen: {view:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    assert!(
+        wait_for("kelir", crate::support::CEILING),
+        "no TUI: {}",
+        raw()
+    );
+    let _ = wait_for("\u{1b}[?2004h", Duration::from_secs(3));
+    for (prompt, answer) in turns {
+        send(prompt.as_bytes());
+        let suffix = &prompt[prompt.len().saturating_sub(6)..];
+        assert!(
+            wait_for(suffix, Duration::from_secs(10)),
+            "no echo of {prompt}: {}",
+            raw()
+        );
+        send(b"\r");
+        assert!(
+            wait_for(answer, crate::support::CEILING),
+            "no {answer}: {}",
+            raw()
+        );
+    }
+
+    // One PageUp shows the previous page (turn two), not the tail.
+    send(b"\x1b[5~");
+    let up_one = wait_screen(0, 30, 90, "SECOND_ANSWER");
+    assert!(
+        up_one.contains("SECOND_PROMPT"),
+        "second prompt not visible: {up_one:?}"
+    );
+    assert!(
+        !up_one.contains("THIRD_ANSWER"),
+        "tail still visible after one PageUp: {up_one:?}"
+    );
+    // Home jumps to the oldest turn.
+    send(b"\x1b[H");
+    let up_two = wait_screen(0, 30, 90, "FIRST_ANSWER");
+    assert!(
+        up_two.contains("FIRST_PROMPT"),
+        "first prompt not visible: {up_two:?}"
+    );
+
+    // PageDown returns toward the tail.
+    send(b"\x1b[6~");
+    let down_one = wait_screen(0, 30, 90, "SECOND_ANSWER");
+    assert!(
+        down_one.contains("SECOND_PROMPT"),
+        "second prompt not visible: {down_one:?}"
+    );
+    send(b"\x1b[6~");
+    let down_two = wait_screen(0, 30, 90, "THIRD_ANSWER");
+    assert!(
+        down_two.contains("THIRD_PROMPT"),
+        "last prompt not visible: {down_two:?}"
+    );
+
+    // Resize the real pty: the app reflows the owned transcript and keeps the
+    // reader's scroll position. Parse only the frames after the resize, at the
+    // new geometry.
+    let resize_at = screen.lock().unwrap().len();
+    pair.master
+        .resize(portable_pty::PtySize {
+            rows: 24,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("resize the pty");
+    let resized = wait_screen(resize_at, 24, 60, "THIRD_ANSWER");
+    assert!(
+        resized.contains("THIRD_PROMPT"),
+        "tail lost on resize: {resized:?}"
+    );
+    send(b"\x1b[5~");
+    let up_again = wait_screen(resize_at, 24, 60, "SECOND_ANSWER");
+    assert!(
+        up_again.contains("SECOND_PROMPT"),
+        "resize lost the scroll position: {up_again:?}"
+    );
+    send(b"\x1b[H");
+    let top_again = wait_screen(resize_at, 24, 60, "FIRST_ANSWER");
+    assert!(
+        top_again.contains("FIRST_PROMPT"),
+        "resize could not reach the first turn: {top_again:?}"
+    );
+
+    send(b"/quit");
+    let _ = wait_for("/quit", Duration::from_secs(5));
+    send(b"\r");
+    let deadline = Instant::now() + crate::support::CEILING;
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.exit_code() as u64,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.clone_killer().kill();
+                panic!("kelir did not exit: {}", raw());
+            }
+        }
+    };
+    drop(reader_task);
+    PtyRun {
+        code,
+        screen: raw(),
+        session_dir: std::fs::read_dir(state.join("sessions"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path(),
+    }
 }

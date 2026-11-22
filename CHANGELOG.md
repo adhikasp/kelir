@@ -9,6 +9,14 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 ### Breaking
 
+- The TUI now owns the terminal's alternate screen instead of writing finished
+  turns into the terminal scrollback. Prompts and answers stay in an in-app
+  transcript reachable with PageUp/PageDown/Home/End; resize reflows it and
+  keeps the reader's scroll position. `Ctrl-Shift-Y` writes the whole
+  transcript to `transcript.txt` in the session directory. On exit the
+  alternate screen, kitty keyboard handshake, bracketed paste and raw mode are
+  restored; the user's own scrollback is untouched.
+
 - The event log is format 1. `session_started` carries `format: 1` and a reader
   refuses a log written in another format ("written by a different kelir format;
   start a new session"); there is no compatibility reader. The 16-type vocabulary

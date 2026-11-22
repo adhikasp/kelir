@@ -82,13 +82,17 @@ The tree is flat on purpose: a file is a subject.
 
 | file | owns |
 |---|---|
-| `src/tui.rs` | the interactive session: rows, keys, the loop, the terminal restore |
+| `src/tui.rs` | the session loop and the `UiEvent` vocabulary |
+| `src/tui/app.rs` | the owned transcript, scroll position and actions |
+| `src/tui/view.rs` | painting the four areas and the wrapped transcript |
+| `src/tui/keys.rs` | key bytes to `Press` and the kitty keyboard handshake |
+| `src/tui/terminal.rs` | alternate screen, raw mode and restore |
 | `src/activity.rs` | the state row's machine (`idle`, `thinking`, `running`, `rate limited`, …) |
 | `src/theme.rs` | colours and glyphs (`NO_COLOR`, `KELIR_ASCII`, `TERM=dumb`) |
 | `src/markdown.rs` | the renderer |
 | `src/tools_view.rs` | one line per tool call, groups, collapsed/expanded |
 | `src/editor.rs` | the input buffer and its image chips |
-| `src/scrollback.rs` | finished turns written above the live area |
+| `src/scrollback.rs` | pure row wrapping and display width for the TUI |
 | `src/herdr.rs` | the OSC 7501 status record |
 
 ## Self-documentation

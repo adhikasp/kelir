@@ -441,8 +441,7 @@ a systemd timer, Task Scheduler, any trigger) calls `kelir run --name <n>
 
 - `kelir run --json` streams the events as NDJSON on stdout and ends with a `result` event and
   an exit code. `kelir ask "<question>"` is the one-shot mode (cold start under 100 ms).
-- The TUI is ratatui with an inline viewport: finished turns go to the terminal's scrollback via
-  `insert_before`; only the input box and status line repaint. Every TUI action exists as a verb.
+- The TUI is ratatui in the alternate screen with its own owned scrollback viewport and no terminal-side `insert_before`; finished turns stay in the app and the whole screen is repainted on change. It resizes with the pane and preserves the reader's scroll position. Every TUI action exists as a verb
 - Herdr status is OSC 7501 (`app=kelir`, root session only, a resume label): `working` at turn
   start, `done` on success, `idle` on stop, `error` with a `msg`; `idle` instead of `done` when
   `TERM_PROGRAM=herdr-telegram`. A turn paused on an explicit step cap reports `blocked`: it is the

@@ -1303,6 +1303,41 @@ impl Stream {
         }
     }
 
+    /// The part of the open block not yet committed, rendered tolerantly.
+    /// Keeping only this tail in the live draft makes a long stream linear in
+    /// the number of deltas rather than quadratic in the message length.
+    pub fn tail_remaining(&self) -> String {
+        let mut text = self
+            .open
+            .get(self.delivered_bytes..)
+            .unwrap_or("")
+            .trim_end_matches('\n');
+        // A paragraph's wrap depends on all its text, so `settle` cannot commit
+        // rows early. Keep only its tail in the live draft: the whole block
+        // lands in the transcript when it closes, and a huge prose delta does
+        // not re-render a growing megabyte on every frame.
+        if !text.is_empty()
+            && self
+                .shape
+                .as_ref()
+                .is_none_or(|s| matches!(s, Shape::Whole))
+        {
+            let mut cut = 0usize;
+            for (i, _) in text.char_indices().rev() {
+                if text.len() - i > 4096 {
+                    cut = i;
+                    break;
+                }
+            }
+            text = &text[cut..];
+        }
+        if self.in_fence.is_some() {
+            format!("{text}\n```")
+        } else {
+            text.to_string()
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.open.trim().is_empty()
     }

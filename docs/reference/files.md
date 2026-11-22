@@ -36,6 +36,7 @@ variables above still win when set. Isolate a run with the two `*_DIR` variables
   bg/<bg-id>.status       # a job's state, plain JSON written atomically (tmp + rename); survives kelir exiting
   bg/<bg-id>.out          # a job's output
   owner                   # {"pid","start"} of the process that owns the session (who holds a name)
+  transcript.txt          # written on demand by Ctrl-Shift-Y in the TUI: the whole owned transcript
   host.err                # a child session only: its progress lines and errors (its stdout is its answer)
 ```
 

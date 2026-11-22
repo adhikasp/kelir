@@ -638,20 +638,17 @@ can start in a test.
   (`boundary: "dropped"`), the verb's answer says `applies: "dropped"` rather
   than `now` — for `ctl` clients and the TUI alike — and the UI is told
   "nothing is running" (M2 review N1).
-- **The inline viewport is a fixed 8 rows** (four live rows, a three-row editor,
-  the status line), and a terminal shorter than that gets fewer. Streaming text
-  that no longer fits is written into the scrollback as it arrives, so a long
-  answer scrolls like normal terminal output instead of growing the repaint area.
+- **The TUI owns the alternate screen and an in-app transcript.** The view has four areas: a reflowable transcript viewport, the state row, the editor and the facts row. Finished turns stay in the app; nothing is committed to the terminal's scrollback. `PageUp`/`PageDown` and `Home`/`End` navigate the owned rows, and resize reflows from the source entries while keeping the reader's scroll position.
 - **The TUI ends the session if it dies, and leaves the shell a clean
   terminal.** A panic or a terminal error in the UI task sends the `end` verb,
   so a broken UI cannot leave a pane hanging with no way in. On both paths —
-  `/quit`, a double Ctrl-C, and a panic — the viewport rows are erased (never
-  the scrollback above them), the cursor is shown and put on the first free row
-  below, bracketed paste is turned off and raw mode is dropped, so the shell's
-  next output starts on a new line instead of overwriting the banner (M2 review
-  F3, N5). The panic hook does this itself and then ratatui's hook; the normal
-  exit does not call `try_restore`, which would emit `LeaveAlternateScreen` for
-  a screen the inline viewport never entered.
+  `/quit`, a double Ctrl-C, and a panic — the cursor is shown, the alternate
+  screen and kitty keyboard handshake are left, bracketed paste is turned off
+  and raw mode is dropped, so the shell's next output starts on a new line
+  instead of overwriting the banner (M2 review F3, N5). The user's own
+  scrollback is never erased: it was untouched while the TUI ran. The panic
+  hook does this itself and then ratatui's hook; the normal exit calls the same
+  idempotent restore.
 - **A TUI session starts with no task and no `user` event.** `session_started`
   is written first; the first turn begins when the first `say` arrives, so the
   log and the request sequence are the same as any other session's.
