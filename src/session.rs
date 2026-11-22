@@ -20,11 +20,13 @@ use crate::chat::ToolCall;
 use crate::cli::{AskArgs, CommonArgs, ResumeArgs, RunArgs};
 use crate::compact;
 use crate::config::{self, Config};
+use crate::core::boundary::Cx;
 use crate::credentials;
 use crate::event::{
     Blobs, EventBody, EventLog, LogEvent, LoggedToolCall, Payload, SystemInfo, read_events,
     spill_payloads,
 };
+use crate::features::models::{self, Fetch, begin_models};
 use crate::herdr::{Herdr, State as HerdrState};
 use crate::ipc::{self, Incoming, Request, Response};
 use crate::provider::{self, Client};
@@ -459,19 +461,8 @@ struct Session {
     /// The task words from the command line, for the `user` event a resume
     /// adds when it is given a new message.
     pending_task: String,
-    /// The window compaction measures the context against, and where it came
-    /// from (`config`, `api`, `cache`, `default`).
-    window: u64,
-    window_source: &'static str,
-    /// The model the window was last applied for: the startup answer is
-    /// silent, a later model's answer is announced once.
-    window_model: Option<String>,
-    /// See [`Prepared::window_note`].
-    window_note: Option<String>,
-    models: Option<crate::models::Cache>,
-    /// A metadata fetch still running (or its answer, waiting to be taken);
-    /// applied at the next `before_step`.
-    models_fetch: Option<Fetch>,
+    /// Every feature's state, dispatched through the `Feature` boundaries.
+    features: crate::features::Features,
     /// Body fields a provider refused with a 400 during this session, by the field name: the retry leaves
     /// them out and the session remembers, so the same 400 is not paid twice.
     refused_fields: BTreeSet<String>,
@@ -899,7 +890,7 @@ async fn drive(opts: Options) -> u8 {
             )),
         ];
         // The window is not ambient: the number is for `state`, not the banner.
-        if let Some(line) = window_banner_line(&session) {
+        if let Some(line) = session.features.models.banner_line() {
             banner.push(tui::BannerLine::dim(line));
         }
         banner.push(tui::BannerLine::plain(
@@ -1101,201 +1092,6 @@ fn watch_bg(dir: PathBuf, tx: mpsc::UnboundedSender<Incoming>) {
     });
 }
 
-/// The provider's model list and how this process came by it.
-struct ModelList {
-    cache: Option<crate::models::Cache>,
-    fetched: bool,
-    why: Option<String>,
-}
-
-impl ModelList {
-    fn from_cache(cache: Option<crate::models::Cache>) -> Self {
-        Self {
-            cache,
-            fetched: false,
-            why: None,
-        }
-    }
-
-    fn with_why(mut self, why: Option<String>) -> Self {
-        self.why = why;
-        self
-    }
-}
-
-/// A `GET /models` running beside the session, never on its critical path.
-struct Fetch {
-    rx: Option<oneshot::Receiver<ModelList>>,
-}
-
-impl Fetch {
-    fn none() -> Self {
-        Self { rx: None }
-    }
-
-    fn pending(rx: oneshot::Receiver<ModelList>) -> Self {
-        Self { rx: Some(rx) }
-    }
-
-    fn is_running(&self) -> bool {
-        self.rx.is_some()
-    }
-
-    /// The answer, if the fetch has already finished. Never waits: a fetch that
-    /// is still running costs this call nothing at all.
-    fn take_ready(&mut self) -> Option<ModelList> {
-        let rx = self.rx.as_mut()?;
-        match rx.try_recv() {
-            Ok(list) => {
-                self.rx = None;
-                Some(list)
-            }
-            Err(oneshot::error::TryRecvError::Empty) => None,
-            Err(oneshot::error::TryRecvError::Closed) => {
-                // The task ended without sending (it panicked): nothing to
-                // apply, and the cache on disk is what the session keeps using.
-                self.rx = None;
-                Some(ModelList::from_cache(None))
-            }
-        }
-    }
-
-    /// Wait at most `budget` for the answer. Running out of budget leaves the
-    /// fetch running for the next boundary.
-    async fn wait(&mut self, budget: std::time::Duration) -> Option<ModelList> {
-        let rx = self.rx.as_mut()?;
-        match tokio::time::timeout(budget, rx).await {
-            Ok(Ok(list)) => {
-                self.rx = None;
-                Some(list)
-            }
-            Ok(Err(_)) => {
-                self.rx = None;
-                Some(ModelList::from_cache(None))
-            }
-            // Not ready: keep the receiver, and the fetch keeps running.
-            Err(_) => None,
-        }
-    }
-}
-
-/// Spawn the fetch, unless the cache on disk already answers.
-fn start_fetch(client: &Client, provider: &str, endpoint: &str) -> Fetch {
-    let now = crate::models::now_ms();
-    let cached = crate::models::load(endpoint);
-    if let Some(cache) = &cached
-        && (cache.is_fresh(now) || cache.in_backoff(now))
-    {
-        return Fetch::none();
-    }
-    let client = client.clone();
-    let provider = provider.to_string();
-    let endpoint = endpoint.to_string();
-    let (tx, rx) = oneshot::channel();
-    // The task holds only the sender, so dropping the session (or the grace)
-    // never cancels it mid-write; a receiver that is gone just loses the send.
-    tokio::spawn(async move {
-        let list = fetch_models(&client, &provider, &endpoint, cached).await;
-        let _ = tx.send(list);
-    });
-    Fetch::pending(rx)
-}
-
-/// One fetch of `GET /models`, its result written beside the session state.
-async fn fetch_models(
-    client: &Client,
-    provider: &str,
-    endpoint: &str,
-    cached: Option<crate::models::Cache>,
-) -> ModelList {
-    let now = crate::models::now_ms();
-    let base_url = client.base_url();
-    match tokio::time::timeout(crate::models::FETCH_TIMEOUT, client.models()).await {
-        Ok(Ok(models)) => {
-            let cache = crate::models::Cache::new(provider, &base_url, models, now);
-            let _ = crate::models::store(&cache);
-            ModelList {
-                cache: Some(cache),
-                fetched: true,
-                why: None,
-            }
-        }
-        Ok(Err(reason)) => {
-            let mut cache = cached
-                .unwrap_or_else(|| crate::models::Cache::new(provider, &base_url, Vec::new(), 0));
-            cache.endpoint = endpoint.to_string();
-            cache.failed_at_ms = Some(now);
-            cache.error = Some(reason.clone());
-            let _ = crate::models::store(&cache);
-            ModelList {
-                cache: Some(cache),
-                fetched: false,
-                why: Some(reason),
-            }
-        }
-        // Slow, not wrong: the cached list keeps its age and the next start
-        // asks again. Nothing is remembered as a failure.
-        Err(_) => ModelList::from_cache(cached).with_why(Some("timeout".to_string())),
-    }
-}
-
-/// What a start uses before the fetch lands: the cached list (stale numbers
-/// beat the default) and the reason `state` gives for it.
-fn cached_list(provider: &str, base_url: &str) -> ModelList {
-    let endpoint = crate::models::endpoint_id(provider, base_url);
-    let flushed = crate::models::load(&endpoint);
-    let why = flushed
-        .as_ref()
-        .and_then(|cache| cache.error.clone())
-        .or_else(|| flushed.is_none().then(|| "fetching".to_string()));
-    ModelList::from_cache(flushed).with_why(why)
-}
-
-/// The banner's one line about the window, when the window is *not* the provider's: a start that fell
-/// back to the default (an offline endpoint, a 401, a list that has not landed) measures compaction
-fn window_banner_line(session: &Session) -> Option<String> {
-    if session.window_source == "api" || session.window_source == "config" {
-        return None;
-    }
-    // "fetching" is not a degradation, it is "the answer is not in yet": [`Session::apply_list`] says the
-    // real reason when it lands, so the banner does not name a window it is about to correct (and a start
-    if session.window_note.as_deref() == Some("the model list: fetching") {
-        return None;
-    }
-    match &session.window_note {
-        Some(note) => Some(format!(
-            "window {} tokens ({}) · {note}",
-            session.window, session.window_source
-        )),
-        // A stale cache or a configured number needs no apology; a fallback to
-        // the default with nothing to say about why does.
-        None if session.window_source == "default" => Some(format!(
-            "window {} tokens (default) · the model list did not answer",
-            session.window
-        )),
-        None => None,
-    }
-}
-
-/// The list to start with, and the fetch still running for the rest.
-async fn begin_models(client: &Client, provider: &str, base_url: &str) -> (ModelList, Fetch) {
-    let endpoint = crate::models::endpoint_id(provider, base_url);
-    let mut fetch = start_fetch(client, provider, &endpoint);
-    if !fetch.is_running() {
-        // Fresh (or a failure still inside its backoff): read from disk.
-        let list = ModelList::from_cache(crate::models::load(&endpoint));
-        let why = list.cache.as_ref().and_then(|cache| cache.error.clone());
-        return (list.with_why(why), fetch);
-    }
-    let early = cached_list(provider, base_url);
-    match fetch.wait(crate::models::START_GRACE).await {
-        Some(list) => (list, fetch),
-        // Not a failure, a slow endpoint: use what is cached and let the fetch
-        // finish beside the session.
-        None => (early, fetch),
-    }
-}
-
 async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let common = &opts.common;
     let mut cfg = config::load(common.config.as_deref())
@@ -1328,7 +1124,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         let over = cfg.override_window(&reopened.model);
         let (window, window_source) =
             crate::models::resolve(over, list.cache.as_ref(), list.fetched, &reopened.model);
-        let window_note = window_note(over, list.why.as_deref(), window_source);
+        let window_note = models::window_note(over, list.why.as_deref(), window_source);
         return Ok(Prepared {
             run_sources: opts
                 .run_options
@@ -1439,7 +1235,7 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let over = cfg.override_window(&model);
     let (window, window_source) =
         crate::models::resolve(over, list.cache.as_ref(), list.fetched, &model);
-    let window_note = window_note(over, list.why.as_deref(), window_source);
+    let window_note = models::window_note(over, list.why.as_deref(), window_source);
     let dir = crate::paths::session_dir(&id);
     crate::paths::create_private_dir(&dir.join("commands")).map_err(|error| {
         Failure::Run(format!(
@@ -1510,16 +1306,6 @@ async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     })
 }
 
-/// Why this start has the window it has, or `None` when the answer needs no explanation: a configured
-/// window is the person's own number, and a fetched or cached list needs nothing said.
-fn window_note(over: Option<u64>, why: Option<&str>, source: &str) -> Option<String> {
-    let why = why?;
-    if over.filter(|window| *window > 0).is_some() || source == "api" || source == "cache" {
-        return None;
-    }
-    Some(format!("the model list: {why}"))
-}
-
 /// The opt-in governor for one provider config: `max_concurrent_requests` slots, advisory
 /// file locks under the state root. `None` (the default) is no limit at all.
 fn governor_for(provider: &crate::config::ProviderConfig) -> Option<crate::governor::Governor> {
@@ -1530,7 +1316,7 @@ fn governor_for(provider: &crate::config::ProviderConfig) -> Option<crate::gover
 
 /// The governor's identity for a provider: its base URL, which is what "one provider" means
 /// on the wire (two config names pointing at one endpoint share the endpoint's limit).
-fn provider_base(provider: &crate::config::ProviderConfig) -> String {
+pub(crate) fn provider_base(provider: &crate::config::ProviderConfig) -> String {
     provider
         .base_url
         .split("://")
@@ -1731,6 +1517,50 @@ impl Session {
         Ok(())
     }
 
+    /// `model` swaps the provider/model for the rest of the session: a thin
+    /// delegation, so a verb remains a core decision and the state lives in the feature.
+    fn swap_model(&mut self, target: &str) -> Result<(), String> {
+        let Session {
+            writer,
+            blobs,
+            events,
+            ui,
+            cfg,
+            dir,
+            id,
+            model,
+            provider_name,
+            client,
+            active_provider,
+            governor,
+            ctx,
+            tally,
+            json,
+            tui,
+            features,
+            ..
+        } = self;
+        let mut cx = Cx {
+            writer,
+            blobs,
+            events,
+            ui,
+            cfg,
+            dir,
+            id,
+            model,
+            provider_name,
+            client,
+            active_provider,
+            governor,
+            ctx,
+            tally,
+            json: *json,
+            tui: *tui,
+        };
+        features.models.swap_model(target, &mut cx)
+    }
+
     fn open(
         prepared: Prepared,
         trust: std::sync::Arc<crate::trust::Trust>,
@@ -1819,14 +1649,16 @@ impl Session {
                 .unwrap_or(false),
             retryable_failure: false,
             pending_task: prepared.task.clone(),
-            window: prepared.window,
-            window_source: prepared.window_source,
-            // Seeded from the startup answer, so a later `/model` swap announces a changed window: `apply_list`
-            // must see which model the current number belongs to, and a fresh cache starts no fetch at all, so
-            window_model: Some(prepared.model.clone()),
-            window_note: prepared.window_note.take(),
-            models: prepared.models.take(),
-            models_fetch: prepared.models_fetch.take(),
+            features: crate::features::Features {
+                models: models::Models::new(
+                    prepared.window,
+                    prepared.window_source,
+                    prepared.window_note.take(),
+                    prepared.models.take(),
+                    prepared.models_fetch.take(),
+                    &prepared.model,
+                ),
+            },
             watch: crate::sources::Watch::default(),
             governor: prepared.governor,
             trust,
@@ -2505,13 +2337,21 @@ impl Session {
             session_steps: self.step,
             // Until the model list answers (or a window is configured) the
             // number is a guess, and a guess is `null`, not 128000.
-            window: (self.window_source != "default").then_some(self.window),
-            window_source: self.window_source,
+            window: (self.features.models.window_source != "default")
+                .then_some(self.features.models.window),
+            window_source: self.features.models.window_source,
             running: &self.live_calls,
             retry,
             warn: self.warn(),
         };
         let mut state = crate::usage::status_json(&self.tally, &live);
+        let mut feature_fields = serde_json::Map::new();
+        self.features.status(&mut feature_fields);
+        if let Some(object) = state.as_object_mut() {
+            for (key, value) in feature_fields {
+                object.insert(key, value);
+            }
+        }
         // MCP servers: name, state, tool count and channel flag only. Never
         // config, env, descriptions or server stderr (those can hold secrets).
         let servers = self.mcp.servers();
@@ -2679,17 +2519,18 @@ impl Session {
             "running": self.live_calls,
             "provider": self.provider_name,
             "model": self.model,
-            "window": self.window,
-            "window_source": self.window_source,
+            "window": self.features.models.window,
+            "window_source": self.features.models.window_source,
             // Why this start does not have the provider's window, when it does not: `http 401`,
             // `offline`, `timeout`, `malformed`, `fetching`. Absent when nothing needs saying.
-            "window_note": self.window_note,
+            "window_note": self.features.models.window_note,
             // Whether the list is still being fetched beside the session.
             "models_fetching": self
-                .models_fetch
+                .features
+                .models
+                .fetch
                 .as_ref()
-                .map(Fetch::is_running)
-                .unwrap_or(false),
+                .is_some_and(Fetch::is_running),
             "disabled": self.disabled.iter().cloned().collect::<Vec<_>>(),
         })
     }
@@ -3476,108 +3317,6 @@ impl Session {
         matches!(last, Some(Some(seen)) if seen == hash)
     }
 
-    /// `model` swaps the provider/model for the rest of the session. It applies at the next step,
-    /// so the cache restart is expected: another model has another cache.
-    fn swap_model(&mut self, target: &str) -> Result<(), String> {
-        let (provider, model) = split_model_target(target, &self.cfg.providers);
-        let provider = provider
-            .map(str::to_string)
-            .unwrap_or_else(|| self.provider_name.clone());
-        let model = model.to_string();
-        let provider_cfg = if provider == self.provider_name {
-            // The same provider: the key already in memory is the live one, and
-            // a re-read here could only start another process.
-            self.active_provider.clone()
-        } else {
-            // A swap to another provider needs *that* provider's key, resolved the same way the start
-            // resolved this one. It happens once, on a verb, so the bounded read is fine here.
-            let mut provider_cfg = self
-                .cfg
-                .provider(&provider)
-                .map_err(|error| error.to_string())?;
-            credentials::resolve(&mut provider_cfg)?;
-            provider_cfg
-        };
-        // The governor belongs to the provider a request goes to: a swap to a governed provider must take its
-        // slots (and a swap away must stop being held to the old limit).
-        let governor = governor_for(&provider_cfg);
-        let client = Client::new(provider_cfg.clone(), &self.id, self.cfg.cache_ttl.clone())
-            .map_err(|error| error.message)?;
-        self.provider_name = provider;
-        self.model = model;
-        self.client = client;
-        self.active_provider = provider_cfg;
-        self.governor = governor;
-        // Another model, possibly another provider: resolve from that endpoint's cache (never the network mid-
-        // turn) and start a fetch beside the session when it is stale, so the new provider's list arrives at
-        let base_url = self.client.base_url();
-        let endpoint = crate::models::endpoint_id(&self.provider_name, &base_url);
-        self.models = crate::models::load(&endpoint);
-        self.models_fetch = Some(start_fetch(&self.client, &self.provider_name, &endpoint));
-        let over = self.cfg.override_window(&self.model);
-        let (window, source) =
-            crate::models::resolve(over, self.models.as_ref(), false, &self.model);
-        // A swap is the one moment a person must be told the window changed: it is not the startup answer any
-        // more, and it sets the compaction threshold for the rest of the session.
-        if window != self.window || source != self.window_source {
-            self.emit(UiEvent::Info(format!(
-                "» window {window} tokens ({source})"
-            )));
-        }
-        self.window = window;
-        self.window_source = source;
-        let why = self.models.as_ref().and_then(|cache| cache.error.clone());
-        self.window_note = window_note(over, why.as_deref(), source);
-        Ok(())
-    }
-
-    /// Take the metadata fetch's answer if it has landed, and apply it: the list a `model` swap
-    /// or a later step will read, and the window if the configuration does not override it.
-    async fn apply_models(&mut self) {
-        let ready = match self.models_fetch.as_mut() {
-            Some(fetch) => fetch.take_ready(),
-            None => None,
-        };
-        if let Some(list) = ready {
-            self.apply_list(list);
-        }
-    }
-
-    /// Apply one answer from the metadata fetch: the list every later step and a `model` swap
-    /// read, and the window when the configuration does not override it.
-    fn apply_list(&mut self, list: ModelList) {
-        if let Some(cache) = list.cache {
-            self.models = Some(cache);
-        }
-        let over = self.cfg.override_window(&self.model);
-        let (window, source) =
-            crate::models::resolve(over, self.models.as_ref(), list.fetched, &self.model);
-        // The startup answer is silent: the banner no longer carries the window. Two cases
-        // are not silent, and both are one dim line:
-        let note = window_note(over, list.why.as_deref(), source);
-        let previous = self.window_model.replace(self.model.clone());
-        let swapped = previous.is_some_and(|model| model != self.model);
-        let moved = swapped && (window != self.window || source != self.window_source);
-        // A start whose fetch had not landed says the fallback here instead: the banner could only say
-        // "fetching" (the answer did not exist yet), and the reason is what a person needs (F-window).
-        let fell_back = source == "default"
-            && note.is_some()
-            && (note != self.window_note || source != self.window_source);
-        if moved || fell_back {
-            let mut line = format!("» window {window} tokens ({source})");
-            if let Some(note) = &note
-                && fell_back
-            {
-                line.push_str(" · ");
-                line.push_str(note);
-            }
-            self.emit(UiEvent::Info(line));
-        }
-        self.window = window;
-        self.window_source = source;
-        self.window_note = note;
-    }
-
     /// Messages that should start the next turn: `later` deliveries, and any
     /// `say` that was still waiting when the turn ended.
     fn take_turn_messages(&mut self) -> Option<TurnStart> {
@@ -3808,7 +3547,9 @@ impl Session {
     /// Whether the provider says the current model takes images: `Some(true)` and `Some(false)` are
     /// answers, `None` is "not stated" (the fetched or cached model list has no entry, or the entry has no
     fn vision_support(&self) -> Option<bool> {
-        self.models
+        self.features
+            .models
+            .models
             .as_ref()
             .and_then(|models| models.vision_for(&self.model))
     }
@@ -3990,7 +3731,11 @@ impl Session {
     /// it has an entry, else the built-in family table, so a first session (cold or slow list) still asks a
     fn parallel_calls(&self) -> bool {
         crate::models::parallel_calls(
-            self.models.as_ref().map(|cache| cache.models.as_slice()),
+            self.features
+                .models
+                .models
+                .as_ref()
+                .map(|cache| cache.models.as_slice()),
             &self.model,
         )
     }
@@ -4004,7 +3749,11 @@ impl Session {
             .map(|provider| provider.reasoning_effort_explicit)
             .unwrap_or(false);
         crate::models::reasoning_effort_allowed(
-            self.models.as_ref().map(|cache| cache.models.as_slice()),
+            self.features
+                .models
+                .models
+                .as_ref()
+                .map(|cache| cache.models.as_slice()),
             &self.model,
             explicit,
         )
@@ -4063,7 +3812,7 @@ impl Session {
                 // The provider's own count is the honest size; the estimate
                 // covers the step after a compaction.
                 let tokens = self.last_prompt_tokens.unwrap_or(estimate);
-                let window = self.window;
+                let window = self.features.models.window;
                 // After a compaction that did not shrink anything, wait for the context to grow past it
                 // instead of paying for a summary on every step.
                 let above_floor = self
@@ -4482,17 +4231,55 @@ impl Session {
         loop {
             // A metadata fetch that started with the session lands here as well as at `before_step`: an idle
             // session answers `state` too, and a list that arrived while nobody was asking should still be applied
-            let landed = match self.models_fetch.as_mut() {
+            let landed = match self.features.models.fetch.as_mut() {
                 Some(fetch) if fetch.is_running() => fetch.wait(IDLE_MODELS_WAIT).await,
                 _ => None,
             };
             if let Some(list) = landed {
-                self.apply_list(list);
+                let Self {
+                    writer,
+                    blobs,
+                    events,
+                    ui,
+                    cfg,
+                    dir,
+                    id,
+                    model,
+                    provider_name,
+                    client,
+                    active_provider,
+                    governor,
+                    ctx,
+                    tally,
+                    json,
+                    tui,
+                    features,
+                    ..
+                } = self;
+                let mut cx = Cx {
+                    writer,
+                    blobs,
+                    events,
+                    ui,
+                    cfg,
+                    dir,
+                    id,
+                    model,
+                    provider_name,
+                    client,
+                    active_provider,
+                    governor,
+                    ctx,
+                    tally,
+                    json: *json,
+                    tui: *tui,
+                };
+                features.models.apply_list(list, &mut cx);
                 continue;
             }
             // A fetch still running must not strand its answer: blocking on `rx.recv` here would keep the idle
             // session from ever applying a list that lands a second later (the offline reason the banner and
-            let incoming = match self.models_fetch.as_ref().map(Fetch::is_running) {
+            let incoming = match self.features.models.fetch.as_ref().map(Fetch::is_running) {
                 Some(true) => {
                     tokio::select! {
                         incoming = rx.recv() => incoming,
@@ -4587,7 +4374,45 @@ impl Session {
 
             // ---------------------------------------------------- before_step A metadata fetch that ran beside
             // the session is applied here: this is the first boundary that reads the window, so the list has had
-            self.apply_models().await;
+            let Self {
+                writer,
+                blobs,
+                events,
+                ui,
+                cfg,
+                dir,
+                id,
+                model,
+                provider_name,
+                client,
+                active_provider,
+                governor,
+                ctx,
+                tally,
+                json,
+                tui,
+                features,
+                ..
+            } = self;
+            let mut cx = Cx {
+                writer,
+                blobs,
+                events,
+                ui,
+                cfg,
+                dir,
+                id,
+                model,
+                provider_name,
+                client,
+                active_provider,
+                governor,
+                ctx,
+                tally,
+                json: *json,
+                tui: *tui,
+            };
+            features.before_step(&mut cx).await;
             let applied = self.apply(Boundary::BeforeStep).await?;
             if applied.end {
                 return Ok(TurnEnd::End);
@@ -5801,18 +5626,6 @@ async fn gated_mcp_call(
     (output, runs)
 }
 
-fn split_model_target<'a>(
-    target: &'a str,
-    providers: &'a std::collections::BTreeMap<String, crate::config::ProviderConfig>,
-) -> (Option<&'a str>, &'a str) {
-    match target.split_once('/') {
-        Some((prefix, rest)) if providers.contains_key(prefix) && !rest.is_empty() => {
-            (Some(prefix), rest)
-        }
-        _ => (None, target),
-    }
-}
-
 fn print_result_event(
     outcome: &str,
     exit_code: u8,
@@ -5938,6 +5751,15 @@ pub(crate) async fn task_text(parts: &[String]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::models::ModelList;
+
+    /// Test-facing alias: the parser now lives with the models feature.
+    fn split_model_target<'a>(
+        target: &'a str,
+        providers: &'a std::collections::BTreeMap<String, crate::config::ProviderConfig>,
+    ) -> (Option<&'a str>, &'a str) {
+        crate::features::models::test_split_model_target(target, providers)
+    }
 
     #[test]
     fn session_ids_are_prefixed_lowercase_ulids() {
@@ -6121,12 +5943,9 @@ mod tests {
             in_flight: false,
             retryable_failure: false,
             pending_task: String::new(),
-            window: 1_000,
-            window_source: "default",
-            window_model: Some(model.to_string()),
-            window_note: None,
-            models: None,
-            models_fetch: None,
+            features: crate::features::Features {
+                models: models::Models::new(1_000, "default", None, None, None, model),
+            },
             watch: crate::sources::Watch::default(),
             governor: None,
             // A throwaway trust state in the same temp dir: no socket here, and
@@ -6285,27 +6104,35 @@ mod tests {
     fn the_banner_names_a_window_only_when_it_is_not_the_providers() {
         let mut session = test_session("m");
         // The provider's own answer: no line at all.
-        session.window = 262_144;
-        session.window_source = "api";
-        session.window_note = None;
-        assert_eq!(window_banner_line(&session), None);
+        session.features.models.window = 262_144;
+        session.features.models.window_source = "api";
+        session.features.models.window_note = None;
+        assert_eq!(session.features.models.banner_line(), None);
         // A configured number is the person's own: no apology either.
-        session.window_source = "config";
-        assert_eq!(window_banner_line(&session), None);
+        session.features.models.window_source = "config";
+        assert_eq!(session.features.models.banner_line(), None);
         // A stale cache has numbers that are real, and `state` carries the why.
-        session.window_source = "cache";
-        session.window = 100_000;
-        assert_eq!(window_banner_line(&session), None);
+        session.features.models.window_source = "cache";
+        session.features.models.window = 100_000;
+        assert_eq!(session.features.models.banner_line(), None);
         // The fallback: the number and the reason, on one line.
-        session.window_source = "default";
-        session.window = crate::compact::DEFAULT_WINDOW;
-        session.window_note = Some("the model list: offline".into());
-        let line = window_banner_line(&session).expect("a fallback is announced");
+        session.features.models.window_source = "default";
+        session.features.models.window = crate::compact::DEFAULT_WINDOW;
+        session.features.models.window_note = Some("the model list: offline".into());
+        let line = session
+            .features
+            .models
+            .banner_line()
+            .expect("a fallback is announced");
         assert!(line.contains("window 128000 tokens (default)"), "{line}");
         assert!(line.contains("offline"), "{line}");
         // A fallback with nothing to say about why still says it fell back.
-        session.window_note = None;
-        let line = window_banner_line(&session).expect("a fallback is announced");
+        session.features.models.window_note = None;
+        let line = session
+            .features
+            .models
+            .banner_line()
+            .expect("a fallback is announced");
         assert!(line.contains("window 128000 tokens (default)"), "{line}");
         assert!(line.contains("did not answer"), "{line}");
     }
@@ -6315,15 +6142,15 @@ mod tests {
     fn a_window_that_changes_after_a_swap_is_announced_once() {
         let mut session = test_session("first/model");
         assert_eq!(
-            session.window_model.as_deref(),
+            session.features.models.window_model.as_deref(),
             Some("first/model"),
             "the startup answer names its model"
         );
         // The swap itself is the first announcement, from `swap_model`: this test only has the constructor's
         // seeding to check, so it drives `apply_list` the way a landed fetch does after a swap.
         session.model = "second/model".into();
-        session.window = 1_000;
-        session.window_source = "default";
+        session.features.models.window = 1_000;
+        session.features.models.window_source = "default";
         let (tx, mut rx) = mpsc::unbounded_channel();
         session.ui = Some(tx);
         let mut cache = crate::models::Cache::new(
@@ -6340,11 +6167,52 @@ mod tests {
             0,
         );
         cache.fetched_at_ms = crate::models::now_ms();
-        session.apply_list(ModelList {
-            cache: Some(cache),
-            fetched: true,
-            why: None,
-        });
+        let Session {
+            writer,
+            blobs,
+            events,
+            ui,
+            cfg,
+            dir,
+            id,
+            model,
+            provider_name,
+            client,
+            active_provider,
+            governor,
+            ctx,
+            tally,
+            json,
+            tui,
+            features,
+            ..
+        } = &mut session;
+        let mut cx = Cx {
+            writer,
+            blobs,
+            events,
+            ui,
+            cfg,
+            dir,
+            id,
+            model,
+            provider_name,
+            client,
+            active_provider,
+            governor,
+            ctx,
+            tally,
+            json: *json,
+            tui: *tui,
+        };
+        features.models.apply_list(
+            ModelList {
+                cache: Some(cache),
+                fetched: true,
+                why: None,
+            },
+            &mut cx,
+        );
         let announced: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
             .filter_map(|event| match event {
                 UiEvent::Info(text) => Some(text),
@@ -6356,16 +6224,57 @@ mod tests {
             announced[0].contains("262144 tokens (api)"),
             "{announced:?}"
         );
-        assert_eq!(session.window, 262_144);
-        assert_eq!(session.window_source, "api");
+        assert_eq!(session.features.models.window, 262_144);
+        assert_eq!(session.features.models.window_source, "api");
 
         // A second answer for the same model is silent: the number did not move
         // for a new model, so there is nothing new to say.
-        session.apply_list(ModelList {
-            cache: None,
-            fetched: true,
-            why: None,
-        });
+        let Session {
+            writer,
+            blobs,
+            events,
+            ui,
+            cfg,
+            dir,
+            id,
+            model,
+            provider_name,
+            client,
+            active_provider,
+            governor,
+            ctx,
+            tally,
+            json,
+            tui,
+            features,
+            ..
+        } = &mut session;
+        let mut cx = Cx {
+            writer,
+            blobs,
+            events,
+            ui,
+            cfg,
+            dir,
+            id,
+            model,
+            provider_name,
+            client,
+            active_provider,
+            governor,
+            ctx,
+            tally,
+            json: *json,
+            tui: *tui,
+        };
+        features.models.apply_list(
+            ModelList {
+                cache: None,
+                fetched: true,
+                why: None,
+            },
+            &mut cx,
+        );
         assert!(
             rx.try_recv().is_err(),
             "the same model's answer is not announced twice"

@@ -1,4 +1,5 @@
 #![feature(random)]
+#![feature(return_type_notation)]
 // Cargo's `[lints.clippy]` allow-list is overwritten by the `pedantic`/ `nursery` group flags on this
 // nightly (lint-groups-priority).
 #![allow(
@@ -100,6 +101,7 @@ pub mod cli;
 pub mod commands;
 pub mod compact;
 pub mod config;
+pub mod core;
 pub mod credentials;
 pub mod ctl;
 pub mod docs;
@@ -107,6 +109,7 @@ pub mod doctor;
 pub mod editor;
 pub mod envs;
 pub mod event;
+pub mod features;
 pub mod fold;
 pub mod gates;
 pub mod governor;
