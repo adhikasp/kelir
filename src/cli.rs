@@ -1,4 +1,4 @@
-//! Command line surface: `kelir run`, `kelir ask` and `kelir ctl`.
+//! Command line surface: `kelir run` (with `--ask`, `--resume`) and `kelir ctl`.
 
 use std::path::PathBuf;
 
@@ -22,14 +22,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run a task to completion.
+    /// Run a task to completion (`--ask` prints the final text only).
     Run(RunArgs),
-    /// Ask one question and print the final text.
-    Ask(AskArgs),
     /// Start the interactive session (the default with no subcommand).
     Tui(TuiArgs),
-    /// Continue a session from its log (never re-runs a tool call).
-    Resume(ResumeArgs),
     /// Watch a running or finished session (read-only by default).
     Attach(AttachArgs),
     /// Send a verb to a running session and print its answer.
@@ -44,12 +40,10 @@ pub enum Command {
     Mcp(McpArgs),
     /// Ask a side question on a snapshot of this session (`brief "<question>"`).
     Brief(BriefArgs),
-    /// List sessions as a tree: state, depth, model, cache hits, task.
+    /// List sessions and children as a tree; manage session names.
     Ls(LsArgs),
     /// Stop a child (and everything below it): `kill <session>` or `kill --tree`.
     Kill(KillArgs),
-    /// Named sessions: ls, rename, forget.
-    Sessions(SessionsArgs),
     /// Headless channel bridge: serve conversations from channel MCP servers.
     Channel(ChannelArgs),
     /// Show which key each provider would use (never the key itself).
@@ -94,6 +88,9 @@ pub struct RunArgs {
     /// The task. Read from stdin when omitted.
     #[arg(value_name = "TASK")]
     pub task: Vec<String>,
+    /// Ask one question and print the final text.
+    #[arg(long)]
+    pub ask: bool,
     /// Stream the event log as NDJSON on stdout.
     #[arg(long)]
     pub json: bool,
@@ -130,34 +127,6 @@ pub struct RunArgs {
     /// answer into the new one (scheduler decides when: a weekly cron line).
     #[arg(long, requires = "name")]
     pub fresh: bool,
-}
-
-/// `kelir resume <id> [task]`: continue a session from its log.
-#[derive(Debug, Args, Clone)]
-pub struct ResumeArgs {
-    #[command(flatten)]
-    pub common: CommonArgs,
-    /// Session id, or a unique prefix of one.
-    #[arg(value_name = "ID")]
-    pub id: String,
-    /// A message to add before the turn continues. Read from stdin with `-`.
-    #[arg(value_name = "TASK")]
-    pub task: Vec<String>,
-    /// Stream the event log as NDJSON on stdout.
-    #[arg(long)]
-    pub json: bool,
-    /// Stay alive after the turn ends.
-    #[arg(long)]
-    pub keep: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-pub struct AskArgs {
-    #[command(flatten)]
-    pub common: CommonArgs,
-    /// The question. Read from stdin when omitted.
-    #[arg(value_name = "QUESTION")]
-    pub question: Vec<String>,
 }
 
 /// `kelir` with no subcommand, or `kelir tui`.
@@ -265,9 +234,12 @@ pub struct BriefArgs {
     pub question: Vec<String>,
 }
 
-/// `kelir ls`.
+/// `kelir ls [sessions|rename|forget]`. One noun for nodes of the session tree:
+/// the default prints the tree; the three subcommands manage named sessions.
 #[derive(Debug, Args, Clone)]
 pub struct LsArgs {
+    #[command(subcommand)]
+    pub command: Option<LsCommand>,
     /// Print the tree as JSON.
     #[arg(long)]
     pub json: bool,
@@ -275,6 +247,16 @@ pub struct LsArgs {
     /// roots when run outside a session).
     #[arg(long)]
     pub all: bool,
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub enum LsCommand {
+    /// List named sessions: name, state, last activity, tokens.
+    Sessions(SessionsLsArgs),
+    /// Give a session's name to another name.
+    Rename(SessionsRenameArgs),
+    /// Drop a name (the session and its log stay).
+    Forget(SessionsForgetArgs),
 }
 
 /// `kelir kill`.
@@ -289,7 +271,7 @@ pub struct KillArgs {
     pub tree: bool,
 }
 
-/// `kelir sessions …`.
+/// `kelir channel …`: a headless channel bridge.
 #[derive(Debug, Args, Clone)]
 pub struct ChannelArgs {
     #[command(flatten)]
@@ -303,22 +285,6 @@ pub struct ChannelArgs {
     /// Dump one JSON status line at startup, then serve (for `ctl status` tests).
     #[arg(long)]
     pub status_once: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-pub struct SessionsArgs {
-    #[command(subcommand)]
-    pub command: SessionsCommand,
-}
-
-#[derive(Debug, Subcommand, Clone)]
-pub enum SessionsCommand {
-    /// List sessions: name, state, last activity, tokens.
-    Ls(SessionsLsArgs),
-    /// Give a session's name to another name.
-    Rename(SessionsRenameArgs),
-    /// Drop a name (the session and its log stay).
-    Forget(SessionsForgetArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -613,8 +579,17 @@ mod tests {
     }
 
     #[test]
-    fn ask_has_no_json_flag() {
-        assert!(Cli::try_parse_from(["kelir", "ask", "--json", "q"]).is_err());
+    fn a_question_is_a_run_with_the_ask_flag() {
+        let cli = Cli::parse_from(["kelir", "run", "--ask", "q"]);
+        match cli.command {
+            Some(Command::Run(args)) => {
+                assert!(args.ask);
+                assert!(!args.json);
+            }
+            _ => panic!("expected run"),
+        }
+        // The flag is a plain run flag: it can be combined with --json.
+        assert!(Cli::try_parse_from(["kelir", "run", "--ask", "--json", "q"]).is_ok());
     }
 
     #[test]
@@ -651,30 +626,23 @@ mod tests {
     }
 
     #[test]
-    fn resume_parses_an_id_a_task_and_the_flags() {
-        let cli = Cli::parse_from(["kelir", "resume", "--json", "ses_01", "carry", "on"]);
+    fn resume_is_a_run_flag_with_an_id_a_task_and_the_flags() {
+        let cli = Cli::parse_from([
+            "kelir", "run", "--resume", "ses_01", "--json", "carry", "on",
+        ]);
         match cli.command {
-            Some(Command::Resume(args)) => {
-                assert_eq!(args.id, "ses_01");
+            Some(Command::Run(args)) => {
+                assert_eq!(args.resume.as_deref(), Some("ses_01"));
                 assert_eq!(args.task, vec!["carry".to_string(), "on".to_string()]);
                 assert!(args.json);
                 assert!(!args.keep);
             }
-            _ => panic!("expected resume"),
+            _ => panic!("expected run"),
         }
-        // `kelir resume <id>` alone: continue whatever the log left in flight.
-        let cli = Cli::parse_from(["kelir", "resume", "ses_01"]);
+        // `kelir run --resume <id>` alone: continue whatever the log left in flight.
+        let cli = Cli::parse_from(["kelir", "run", "--resume", "ses_01"]);
         match cli.command {
-            Some(Command::Resume(args)) => assert!(args.task.is_empty()),
-            _ => panic!("expected resume"),
-        }
-        // The same thing as a flag on `run`.
-        let cli = Cli::parse_from(["kelir", "run", "--resume", "ses_01", "more"]);
-        match cli.command {
-            Some(Command::Run(args)) => {
-                assert_eq!(args.resume.as_deref(), Some("ses_01"));
-                assert_eq!(args.task, vec!["more".to_string()]);
-            }
+            Some(Command::Run(args)) => assert!(args.task.is_empty()),
             _ => panic!("expected run"),
         }
     }
@@ -823,9 +791,12 @@ mod tests {
             Some(Command::Run(args)) => assert_eq!(args.common.max_steps, Some(5)),
             _ => panic!("expected run"),
         }
-        match Cli::parse_from(["kelir", "ask", "--max-steps", "0", "q"]).command {
-            Some(Command::Ask(args)) => assert_eq!(args.common.max_steps, Some(0)),
-            _ => panic!("expected ask"),
+        match Cli::parse_from(["kelir", "run", "--ask", "--max-steps", "0", "q"]).command {
+            Some(Command::Run(args)) => {
+                assert_eq!(args.common.max_steps, Some(0));
+                assert!(args.ask);
+            }
+            _ => panic!("expected run"),
         }
         // Unset stays unset: no cap is the default, never a zero.
         match Cli::parse_from(["kelir", "run", "task"]).command {

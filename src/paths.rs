@@ -181,7 +181,7 @@ pub fn session_candidates_in(base: &Path, spec: &str) -> Result<Vec<String>, Str
     }
 }
 
-/// Resolve `kelir resume <spec>`: an exact id, a unique prefix, or `latest`
+/// Resolve `kelir run --resume <spec>`: an exact id, a unique prefix, or `latest`
 /// (the newest session, dead or alive — resuming is how a dead one continues).
 pub fn resolve_session(spec: &str) -> Result<String, String> {
     resolve_session_in(&sessions_dir(), spec)

@@ -117,7 +117,11 @@ async fn crash_point(point: &str) {
     let at_crash = sandbox.lines_in("side_effect.log");
 
     let second = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "--resume", id.as_str()],
+            &[],
+        )
         .await;
     assert_eq!(
         second.code, 0,
@@ -251,7 +255,11 @@ async fn a_torn_last_line_is_reported_on_resume_and_the_session_continues() {
     std::fs::write(&path, text).unwrap();
 
     let second = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "--resume", id.as_str()],
+            &[],
+        )
         .await;
     assert_eq!(second.code, 0, "stderr: {}", second.stderr);
     let log = sandbox.log(&id);
@@ -308,7 +316,11 @@ async fn resume_replaces_the_stale_socket_of_the_dead_process() {
     }
 
     let second = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "--resume", id.as_str()],
+            &[],
+        )
         .await;
     assert_eq!(second.code, 0, "stderr: {}", second.stderr);
     let log = sandbox.log(&id);
@@ -326,7 +338,7 @@ async fn resume_refuses_a_session_that_is_still_running() {
     let attempt = sandbox
         .kelir(
             &mock.base_url(),
-            &["resume", "--json", live.id.as_str()],
+            &["run", "--json", "--resume", live.id.as_str()],
             &[],
         )
         .await;
@@ -362,7 +374,7 @@ async fn resume_adds_a_new_task_after_a_clean_end() {
     let second = sandbox
         .kelir(
             &mock.base_url(),
-            &["resume", "--json", id.as_str(), "second question"],
+            &["run", "--json", "--resume", id.as_str(), "second question"],
             &[],
         )
         .await;
@@ -396,7 +408,11 @@ async fn resume_adds_a_new_task_after_a_clean_end() {
 
     // A resume with nothing in flight and nothing new has no turn to run.
     let third = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "--resume", id.as_str()],
+            &[],
+        )
         .await;
     assert_eq!(third.code, 0, "stderr: {}", third.stderr);
     assert_eq!(mock.request_count(), 2, "the idle resume made a request");
@@ -429,7 +445,11 @@ async fn a_log_that_was_never_closed_resumes_without_a_new_task() {
     std::fs::write(&path, kept).unwrap();
 
     let second = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "--resume", id.as_str()],
+            &[],
+        )
         .await;
     assert_eq!(second.code, 0, "stderr: {}", second.stderr);
     assert_eq!(mock.request_count(), 2, "an unclosed log was not continued");
@@ -711,7 +731,7 @@ async fn simultaneous_resumes_never_both_write_the_log() {
             .await;
         assert_ne!(first.code, 0, "round {round}: the run did not crash");
         let id = sandbox.only_session();
-        let args = ["resume", "--json", id.as_str()];
+        let args = ["run", "--json", "--resume", id.as_str()];
         let url = mock.base_url();
         let (a, b) = tokio::join!(
             sandbox.kelir(&url, &args, &[]),
@@ -767,7 +787,11 @@ async fn a_queued_compaction_survives_a_crash_and_is_applied_on_resume() {
     );
     let id = sandbox.only_session();
     let second = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "--resume", id.as_str()],
+            &[],
+        )
         .await;
     assert_eq!(second.code, 0, "stderr: {}", second.stderr);
 

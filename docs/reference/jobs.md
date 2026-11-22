@@ -1,7 +1,7 @@
 # Named and scheduled runs
 
 **Summary:** `kelir run --name`, `--single-flight`, `--timeout`, `--task-file`,
-`--fresh`, `kelir sessions ls`, the name lock, `STATUS.json`, exit codes and
+`--fresh`, `kelir ls sessions`, the name lock, `STATUS.json`, exit codes and
 recipes for cron, a systemd timer and Windows Task Scheduler.
 **Read this when:** you want a scheduler to run a task in a named session, you
 are debugging a run that skipped (exit 75) or timed out (exit 124), or you read
@@ -18,9 +18,9 @@ runs skip instead of fork the log.
 
 ```text
 kelir run --name <name> [--single-flight] [--timeout D] [--task-file PATH] [--fresh] "task"
-kelir sessions ls [--json] [--named] [--all]
-kelir sessions rename <old> <new>
-kelir sessions forget <name>
+kelir ls sessions [--json] [--named] [--all]
+kelir ls rename <old> <new>
+kelir ls forget <name>
 ```
 
 - A name is `[a-z0-9._-]{1,64}`, starts with a letter or digit, has no trailing
@@ -36,7 +36,7 @@ kelir sessions forget <name>
 - A name whose session is running is refused, naming the holder's pid from the
   session's `owner` file (pid plus start time, so a recycled pid is not a
   holder).
-- `sessions ls` lists named sessions and the newest unnamed roots: name, id,
+- `kelir ls sessions` lists named sessions and the newest unnamed roots: name, id,
   state, last activity, tokens and cache-hit ratio, and (for a named run) `outcome`. `--json` adds
   `model`, `steps` and `pid`.
 
@@ -142,4 +142,4 @@ Use the Task Scheduler's "Run whether user is logged on or not" option for a
 window-free run; kelir creates no console windows of its own.
 
 Read the result from anywhere with `<state>/names/nightly.status.json` or
-`kelir sessions ls --json`.
+`kelir ls sessions --json`.

@@ -170,7 +170,7 @@ async fn after_a_pause_the_next_say_starts_a_fresh_count() {
     session.end().await;
 }
 
-/// A paused turn is continued by `kelir resume` the same way a stopped one is:
+/// A paused turn is continued by `kelir run --resume` the same way a stopped one is:
 /// the log is picked up, a new turn runs with a fresh count, and the work the
 /// paused turn did is still in it.
 #[tokio::test]
@@ -190,7 +190,11 @@ async fn resume_continues_a_paused_turn() {
     let id = sandbox.only_session();
 
     let second = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "--resume", id.as_str()],
+            &[],
+        )
         .await;
     assert_eq!(second.code, 0, "{}", second.stderr);
     let result = second.result().expect("result");

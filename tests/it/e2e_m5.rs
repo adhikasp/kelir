@@ -452,11 +452,12 @@ async fn a_resumed_session_keeps_watching_the_sources_it_recorded() {
         first.state.clone(),
         &resumed_mock,
         &[
-            "resume",
+            "run",
             "--keep",
             "--json",
             "--cwd",
             &project.path(),
+            "--resume",
             &session_id,
         ],
         "",
@@ -660,7 +661,15 @@ async fn a_resume_keeps_watching_a_skill_the_verb_added() {
     let mut second = LiveSession::start_reusing(
         first.state.clone(),
         &resumed_mock,
-        &["resume", "--keep", "--json", "--cwd", &project.path(), &id],
+        &[
+            "run",
+            "--keep",
+            "--json",
+            "--cwd",
+            &project.path(),
+            "--resume",
+            &id,
+        ],
         "",
     )
     .await;
@@ -717,7 +726,15 @@ async fn a_resume_after_a_compaction_says_the_source_the_summary_folded_away() {
     let mut second = LiveSession::start_reusing(
         live.state.clone(),
         &resumed_mock,
-        &["resume", "--keep", "--json", "--cwd", &project.path(), &id],
+        &[
+            "run",
+            "--keep",
+            "--json",
+            "--cwd",
+            &project.path(),
+            "--resume",
+            &id,
+        ],
         "compact_keep = 0\n",
     )
     .await;

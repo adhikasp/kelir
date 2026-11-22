@@ -932,8 +932,13 @@ async fn resume_settles_an_orphaned_mcp_call_as_unknown() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let mock2 = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
-    let mut resumed =
-        LiveSession::start_reusing(state, &mock2, &["resume", "--json", id.as_str()], "").await;
+    let mut resumed = LiveSession::start_reusing(
+        state,
+        &mock2,
+        &["run", "--json", "--resume", id.as_str()],
+        "",
+    )
+    .await;
     let settled = resumed.wait_for_call("call_settled", "mcp").await;
     assert_eq!(settled["id"], json!(mcp_id));
     assert_eq!(settled["outcome"], "unknown", "{settled}");

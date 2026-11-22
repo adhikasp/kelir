@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::cli::{ResumeArgs as ResumeCliArgs, RunArgs as RunCliArgs};
+use crate::cli::RunArgs as RunCliArgs;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -815,22 +815,14 @@ async fn start_turn(
         text.push_str(&format!("\n[attachments {}]\n", pointers.join(" ")));
     }
     let started = session.clone();
-    let code = if resume {
-        crate::session::resume(ResumeCliArgs {
-            common: common.clone(),
-            id: session.clone(),
-            task: vec![text],
-            json: false,
-            keep: false,
-        })
-        .await
-    } else {
+    let code = {
         let task = RunCliArgs {
             common: common.clone(),
             task: vec![text],
+            ask: false,
             json: false,
             keep: false,
-            resume: None,
+            resume: resume.then(|| session.clone()),
             child: false,
             background: false,
             // The id travels in the turn's own task-local slot.

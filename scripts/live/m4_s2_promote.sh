@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scenario 2: promotion at 5 s of a 20 s command, taskkill the session, the job survives,
-# `kelir bg out` reads it, `kelir resume` shows it settled.
+# `kelir bg out` reads it, `kelir run --resume` shows it settled.
 # Usage: m4_s2_promote.sh <scratch-root>
 source "$(dirname "$0")/m4_common.sh" "$1" s2
 export KELIR_PROMOTE_AFTER=5
@@ -26,6 +26,6 @@ say "--- kelir bg out $ID (no session) ---"; "$BIN" bg out "$ID"
 say "--- kelir bg wait $ID --timeout 40 ---"; "$BIN" bg wait "$ID" --timeout 40; say "wait exit=$?"
 say "--- kelir bg out $ID after finish ---"; "$BIN" bg out "$ID"
 jq -c . "$BGDIR/$ID.status"
-say "--- kelir resume ---"
+say "--- kelir run --resume ---"
 "$BIN" resume --json --model "$MODEL" "$SID" > "$S/resume.ndjson" 2> "$S/resume.err"; say "resume exit=$?"
 jq -c 'select(.type|test("bg_|resumed|user|session_ended")) | {seq,type,from,bg_id,state,exit_code,text:((.text//"")|tostring|.[0:120])}' "$LOG"

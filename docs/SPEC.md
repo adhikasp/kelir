@@ -43,9 +43,9 @@ that appends an event; the loop applies verbs at named boundaries.
   session.
 - **Exiting kelir stops the session:** running tool calls are killed with their process trees,
   as `stop`. Background jobs are the exception (they are detached on purpose, below). Picking a
-  session up again is `kelir resume <id>`.
+  session up again is `kelir run --resume <id>`.
 - **A bg job that finishes while its session is not running** is only recorded: its shim writes
-  `calls/<id>/<id>.status`, and the next `resume` folds it into the log as a `call_settled` with `kind: "bg"`. Nothing wakes a
+  `calls/<id>/<id>.status`, and the next `run --resume` folds it into the log as a `call_settled` with `kind: "bg"`. Nothing wakes a
   stopped session.
 - **Children are separate OS processes** the model starts from `bash` (`kelir run --child`,
   `kelir brief`; there is no spawn tool), each owning its own session dir. They live inside the parent's process group (Unix) or Job Object (Windows), so
@@ -414,7 +414,7 @@ a systemd timer, Task Scheduler, any trigger) calls `kelir run --name <n>
   session id, published create-or-fail and replaced by rename. An existing name **resumes** that
   session (M3 resume) and appends the task as a `user` event `from: "job"`; a name whose session
   is running is refused with the holder's pid (the session's `owner` file: pid + start time).
-  `kelir sessions ls|rename|forget`. `--fresh` rebinds a name to a new session and carries the old
+  `kelir ls sessions|rename|forget`. `--fresh` rebinds a name to a new session and carries the old
   one's last summary or answer into it as a `carry` source.
 - **Run flags.** `--single-flight` takes the lock and writes STATUS; `--timeout D` is the
   wall-clock deadline (stop the turn, exit 124); `--task-file PATH` reads the task from a file;
@@ -441,7 +441,7 @@ a systemd timer, Task Scheduler, any trigger) calls `kelir run --name <n>
 ## Scriptable, TUI and Herdr status
 
 - `kelir run --json` streams the events as NDJSON on stdout and ends with a `result` event and
-  an exit code. `kelir ask "<question>"` is the one-shot mode (cold start under 100 ms).
+  an exit code. `kelir run --ask "<question>"` is the one-shot mode (cold start under 100 ms).
 - The TUI is ratatui in the alternate screen with its own owned scrollback viewport and no terminal-side `insert_before`; finished turns stay in the app and the whole screen is repainted on change. It resizes with the pane and preserves the reader's scroll position. Every TUI action exists as a verb
 - Herdr status is OSC 7501 (`app=kelir`, root session only, a resume label): `working` at turn
   start, `done` on success, `idle` on stop, `error` with a `msg`; `idle` instead of `done` when

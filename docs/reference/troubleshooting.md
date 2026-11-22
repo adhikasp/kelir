@@ -33,7 +33,7 @@ unset both mean no cap).
 
 The session socket is a file on Unix and a pipe name on Windows; a session that
 was killed leaves the file behind. `kelir ctl` says the session is not running
-and exits 1 — it does not wait. Pick the session up with `kelir resume <id>`: it
+and exits 1 — it does not wait. Pick the session up with `kelir run --resume <id>`: it
 binds the socket afresh and replaces a stale one. A call that was started and never settled is
 settled in the log as `call_settled{kind:…, outcome:"unknown"}`; it is reported to the model
 as an unknown outcome and **never re-run**.
@@ -42,7 +42,7 @@ as an unknown outcome and **never re-run**.
 
 A job outlives the session on purpose: its shim writes `calls/<id>/<id>.status`,
 nothing wakes a stopped session. `kelir bg ls` (inside a session) and
-`kelir bg out <id>` read it; the next `resume` folds the settled job into the log
+`kelir bg out <id>` read it; the next `run --resume` folds the settled job into the log
 as `call_settled{kind:"bg"}` plus the wake-up message. A job killed with the machine is the
 one case with no status file: `bg ls` does not list it at all (no status file, no row) and the log has a
 `call_started{kind:"bg"}` with no settle.

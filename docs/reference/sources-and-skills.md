@@ -72,7 +72,7 @@ still read how kelir works.
 Two more embedded skills, discovered exactly like `kelir` (machine layer, no file,
 replaced by a skills-directory entry of the same name): `delegation`
 (`src/docs/skill-delegation.md`: when and how to start another kelir with
-`kelir run` / `kelir ask` / `kelir bg run`, foreground vs background, what to put
+`kelir run` / `kelir run --ask` / `kelir bg run`, foreground vs background, what to put
 in the task, the limits the model keeps for itself, reading results; it names
 only commands `kelir --help` lists, and a test fails if that stops being true) and `herdr` (`src/docs/skill-herdr.md`: inside
 a pane, `hc ls --json` with state/status/agent/where/cwd across machines, counting

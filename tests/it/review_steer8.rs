@@ -46,7 +46,7 @@ async fn a_resume_does_not_repeat_a_warning_the_log_already_owes() {
     let second = sandbox
         .kelir(
             &mock.base_url(),
-            &["resume", "--json", id.as_str(), "more"],
+            &["run", "--json", "--resume", id.as_str(), "more"],
             &[],
         )
         .await;

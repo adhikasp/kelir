@@ -1277,7 +1277,11 @@ async fn a_resumed_root_settles_the_children_it_cannot_reach_as_lost() {
 
     let sandbox = Sandbox::from_live(&root);
     let out = sandbox
-        .kelir(&mock.base_url(), &["resume", &root.id, "go on"], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--resume", &root.id, "go on"],
+            &[],
+        )
         .await;
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     let log = sandbox.log(&root.id);

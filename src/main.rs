@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::process::ExitCode;
 
-use kelir::cli::{Cli, Command};
+use kelir::cli::{Cli, Command, LsArgs};
 
 /// Windows: stop children (and their children) from inheriting this process's own
 /// stdout/stderr handles.
@@ -32,10 +32,8 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let code = match cli.command {
         Some(Command::Run(args)) => kelir::session::run(args).await,
-        Some(Command::Ask(args)) => kelir::session::ask(args).await,
         // Flags before the subcommand fill in what it did not set.
         Some(Command::Tui(args)) => kelir::session::tui(args.with_fallback(cli.tui)).await,
-        Some(Command::Resume(args)) => kelir::session::resume(args).await,
         Some(Command::Ctl(args)) => kelir::ctl::ctl(args).await,
         Some(Command::Attach(args)) => kelir::attach::run(args).await,
         Some(Command::View(args)) => kelir::session::view(args).await,
@@ -43,13 +41,20 @@ async fn main() -> ExitCode {
         Some(Command::Bg(args)) => kelir::bg::cli(args.command).await,
         Some(Command::Mcp(args)) => kelir::mcp::cli::run(args.words).await,
         Some(Command::Brief(args)) => kelir::childcli::brief(args).await,
-        Some(Command::Ls(args)) => kelir::childcli::ls(args).await,
-        Some(Command::Kill(args)) => kelir::childcli::kill(args).await,
-        Some(Command::Sessions(args)) => match args.command {
-            kelir::cli::SessionsCommand::Ls(args) => kelir::names::sessions_ls(&args),
-            kelir::cli::SessionsCommand::Rename(args) => kelir::names::sessions_rename(&args),
-            kelir::cli::SessionsCommand::Forget(args) => kelir::names::sessions_forget(&args),
+        Some(Command::Ls(LsArgs { command, json, all })) => match command {
+            Some(kelir::cli::LsCommand::Sessions(a)) => kelir::names::sessions_ls(&a),
+            Some(kelir::cli::LsCommand::Rename(a)) => kelir::names::sessions_rename(&a),
+            Some(kelir::cli::LsCommand::Forget(a)) => kelir::names::sessions_forget(&a),
+            None => {
+                kelir::childcli::ls(kelir::cli::LsArgs {
+                    command: None,
+                    json,
+                    all,
+                })
+                .await
+            }
         },
+        Some(Command::Kill(args)) => kelir::childcli::kill(args).await,
         Some(Command::Channel(args)) => kelir::channel::run(args).await,
         Some(Command::ChildHost) => kelir::session::child_host().await,
         Some(Command::Doctor(args)) => kelir::doctor::doctor(args),

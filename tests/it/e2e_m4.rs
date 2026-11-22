@@ -228,7 +228,7 @@ async fn a_call_past_the_limit_is_promoted_and_wakes_the_model_when_it_settles()
 
 /// The milestone's headline: kelir is killed (not ended) while a promoted job
 /// runs; the job survives, keeps writing, `kelir bg out`/`wait` still read it
-/// with no session at all, and `kelir resume` folds it into the log as
+/// with no session at all, and `kelir run --resume` folds it into the log as
 #[tokio::test]
 async fn a_promoted_job_survives_a_killed_session_and_resume_folds_it_in() {
     let mock = Mock::start(vec![
@@ -289,7 +289,7 @@ async fn a_promoted_job_survives_a_killed_session_and_resume_folds_it_in() {
     let resumed = sandbox
         .kelir(
             &mock.base_url(),
-            &["resume", "--json", session_id.as_str()],
+            &["run", "--json", "--resume", session_id.as_str()],
             &[],
         )
         .await;

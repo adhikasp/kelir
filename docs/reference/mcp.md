@@ -55,7 +55,7 @@ the error and exits 2.
   watcher in its process group that kills the group when the session is gone,
   even if the server ignores stdin EOF. On Windows a Job Object does this.
 - **When the file is read.** The session reads both layers once, when it
-  starts. Editing `mcp.toml` has no effect on a running session (`kelir resume`
+  starts. Editing `mcp.toml` has no effect on a running session (`kelir run --resume`
   or a new session picks it up); a one-shot `kelir mcp` outside a session
   reads it on every command.
 - **A project file is code.** `.kelir/mcp.toml` can name any `command`, and

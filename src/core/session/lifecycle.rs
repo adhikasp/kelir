@@ -330,7 +330,7 @@ impl Session {
             self.record_plan_sources(true)?;
         }
         if !self.run.pending_task.trim().is_empty() {
-            // `kelir resume <id> <task>`: a new message on the existing log.
+            // `kelir run --resume <id> <task>`: a new message on the existing log.
             let delivery = if read.in_flight { "next" } else { "now" };
             let task = self.run.pending_task.clone();
             self.gates_do(|gates, session| gates.submit_task(session, task, delivery))?;

@@ -11,7 +11,7 @@ The tree is flat on purpose: a file is a subject.
 
 | file | owns |
 |---|---|
-| `src/session.rs` | the session process: prepare, the step loop, boundaries, tool batches, resume, `run`/`ask`/`tui`/`view` |
+| `src/session.rs` | the session process: prepare, the step loop, boundaries, tool batches, resume, `run`/`run --ask`/`tui`/`view` |
 | `src/fold.rs` | `fold(events.jsonl)`: the messages a request is built from |
 | `src/stream.rs` | one provider response: SSE in, deltas and tool-call fragments out |
 | `src/sse.rs` | the SSE parser (bytes to events, no HTTP) |
@@ -31,7 +31,7 @@ The tree is flat on purpose: a file is a subject.
 
 | file | owns |
 |---|---|
-| `src/names.rs` | named sessions (`names/<name>`), STATUS lookups, `kelir sessions` |
+| `src/names.rs` | named sessions (`names/<name>`), STATUS lookups, `kelir ls sessions` |
 | `src/namedrun.rs` | scheduled `kelir run --name --single-flight`: durations, lock and STATUS, date/carry sources, timeout, exit codes |
 | `src/namedrun.rs` | STATUS schema and the per-run state shared with the deadline watcher |
 | `src/joblock.rs` | the single-flight lock: atomic create-and-own, pid + start time, checked takeover |

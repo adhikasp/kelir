@@ -3,7 +3,7 @@
 #   flaky   : 429 (Retry-After 3), 429 (no header), 503, then ok -> the turn must finish, with waits
 #   stop    : a 60 s Retry-After wait is ended by `ctl stop` within 1 s -> outcome stopped
 #   now     : the same wait, but `ctl say --now` -> does the wait end at once?
-#   pause   : budget 4 s vs Retry-After 3 forever -> paused, exit 0; then `kelir resume` retries
+#   pause   : budget 4 s vs Retry-After 3 forever -> paused, exit 0; then `kelir run --resume` retries
 #   cut     : a stream cut before any tool call -> retried
 #   overlap : two real kelir vs OpenRouter, max_concurrent_requests=1 -> peak in flight must be 1
 #   control : the same without the knob -> peak is expected to reach 2

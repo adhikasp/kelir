@@ -111,6 +111,6 @@ name (`docs/reference/mcp.md`).
 
 A finished session is a directory; delete it when you no longer need its log.
 Do not delete a session's directory while a `kelir` owns it: the socket, the log
-and a job's status files are all live. `kelir resume <id>` is how a stopped
+and a job's status files are all live. `kelir run --resume <id>` is how a stopped
 session is picked up, and it is also what folds in a job that settled while
 nothing was running — a job's `calls/<id>/<id>.status` is the only record until then.

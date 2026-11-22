@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::VERSION;
 use crate::chat::ToolCall;
-use crate::cli::{AskArgs, CommonArgs, ResumeArgs, RunArgs};
+use crate::cli::{CommonArgs, RunArgs};
 use crate::compact;
 use crate::config::{self, Config};
 use crate::core::boundary::Cx;
@@ -109,7 +109,7 @@ pub async fn run(args: RunArgs) -> u8 {
     }
     drive(Options {
         json: args.json,
-        ask: false,
+        ask: args.ask,
         keep: args.keep,
         tui: false,
         common: args.common,
@@ -153,45 +153,12 @@ pub async fn run_with_options(
     .await
 }
 
-/// `kelir resume <id> [task]`: continue a session from its log.
-pub async fn resume(args: ResumeArgs) -> u8 {
-    drive(Options {
-        json: args.json,
-        ask: false,
-        keep: args.keep,
-        tui: false,
-        common: args.common,
-        task: args.task,
-        resume: Some(args.id),
-        id: None,
-        child: None,
-        run_options: None,
-    })
-    .await
-}
-
-pub async fn ask(args: AskArgs) -> u8 {
-    drive(Options {
-        json: false,
-        ask: true,
-        keep: false,
-        tui: false,
-        common: args.common,
-        task: args.question,
-        resume: None,
-        id: None,
-        child: None,
-        run_options: None,
-    })
-    .await
-}
-
 /// `kelir` with no subcommand, or `kelir tui`: the interactive session.
 pub async fn tui(args: crate::cli::TuiArgs) -> u8 {
     if !std::io::stdout().is_terminal() {
         eprintln!(
             "kelir: no terminal: `kelir` is the interactive session and needs a TTY \
-             (use `kelir run <task>` or `kelir ask <question>` in a script)"
+             (use `kelir run <task>` or `kelir run --ask <question>` in a script)"
         );
         return 2;
     }

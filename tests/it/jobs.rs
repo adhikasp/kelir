@@ -147,10 +147,10 @@ async fn named_single_flight_runs_resume_one_session_and_write_status() {
     assert!(now.get("cost_usd").is_none());
     assert!(!sb.state.join("names").join("nightly.lock").exists());
 
-    let ls = kelir(&sb, &mock, &["sessions", "ls", "--json"], &[]).await;
+    let ls = kelir(&sb, &mock, &["ls", "sessions", "--json"], &[]).await;
     let rows: Vec<Value> = serde_json::from_str(ls.stdout.trim()).unwrap();
     assert_eq!(rows[0]["outcome"], "done");
-    let table = kelir(&sb, &mock, &["sessions", "ls"], &[]).await;
+    let table = kelir(&sb, &mock, &["ls", "sessions"], &[]).await;
     assert!(table.stdout.contains("OUTCOME") && table.stdout.contains("done"));
     clean(&sb).await;
 }
@@ -387,7 +387,7 @@ async fn every_resumed_session_announces_the_new_date() {
 }
 
 /// STATUS and lock files share `names/` with bindings but are not names: they
-/// must not warn in `sessions ls` or be usable as a `--name` that clobbers them.
+/// must not warn in `kelir ls sessions` or be usable as a `--name` that clobbers them.
 #[tokio::test]
 async fn status_and_lock_files_are_not_name_bindings() {
     let mock = Mock::start(vec![text("real answer")]).await;
@@ -409,7 +409,7 @@ async fn status_and_lock_files_are_not_name_bindings() {
     std::fs::write(&tombstone, r#"{"token":"x"}"#).unwrap();
     let tombstone_bytes = std::fs::read(&tombstone).unwrap();
 
-    let ls = kelir(&sb, &mock, &["sessions", "ls", "--json"], &[]).await;
+    let ls = kelir(&sb, &mock, &["ls", "sessions", "--json"], &[]).await;
     assert_eq!(ls.code, 0, "{}", ls.stderr);
     assert!(
         !ls.stderr.contains("status.json") && !ls.stderr.contains(".stale."),
@@ -539,7 +539,7 @@ async fn a_corrupt_name_file_is_tolerated_and_replaced() {
     let sb = Sandbox::new("");
     std::fs::create_dir_all(sb.state.join("names")).unwrap();
     std::fs::write(sb.state.join("names").join("broken"), "{ nope").unwrap();
-    let ls = kelir(&sb, &mock, &["sessions", "ls"], &[]).await;
+    let ls = kelir(&sb, &mock, &["ls", "sessions"], &[]).await;
     assert_eq!(ls.code, 0, "{}", ls.stderr);
     assert!(!ls.stderr.contains("panicked"), "{}", ls.stderr);
     let run = kelir(&sb, &mock, &["run", "--name", "broken", "go"], &[]).await;

@@ -190,7 +190,7 @@ async fn pause_resume_pause_resume_walks_a_long_job_forward() {
 
     // The config cap (2) applies to the resumed turn; the flag overrides it.
     let second = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", &id], &[])
+        .kelir(&mock.base_url(), &["run", "--json", "--resume", &id], &[])
         .await;
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert_eq!(second.result().unwrap()["outcome"], "paused");
@@ -203,7 +203,7 @@ async fn pause_resume_pause_resume_walks_a_long_job_forward() {
     let third = sandbox
         .kelir(
             &mock.base_url(),
-            &["resume", "--json", "--max-steps", "0", &id],
+            &["run", "--json", "--max-steps", "0", "--resume", &id],
             &[],
         )
         .await;
@@ -254,7 +254,7 @@ async fn ask_accepts_the_flag() {
     let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("an answer", 0)))]).await;
     let run = run_task(
         &mock,
-        &["ask", "--max-steps", "1", "a question"],
+        &["run", "--ask", "--max-steps", "1", "a question"],
         &[],
         None,
         "",

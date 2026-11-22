@@ -778,7 +778,9 @@ async fn a_resume_does_not_repeat_a_source_the_log_already_has() {
     let mut second = LiveSession::start_reusing(
         first.live.state.clone(),
         &mock2,
-        &["resume", "--keep", "--json", "--cwd", &repo_arg, &id],
+        &[
+            "run", "--keep", "--json", "--cwd", &repo_arg, "--resume", &id,
+        ],
         "",
     )
     .await;
@@ -879,7 +881,9 @@ async fn a_resume_keeps_a_system_prompt_that_was_spilled_to_a_blob() {
     let mut second = LiveSession::start_reusing(
         first.live.state.clone(),
         &mock2,
-        &["resume", "--keep", "--json", "--cwd", &repo_arg, &id],
+        &[
+            "run", "--keep", "--json", "--cwd", &repo_arg, "--resume", &id,
+        ],
         "",
     )
     .await;

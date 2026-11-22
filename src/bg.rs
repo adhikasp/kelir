@@ -801,7 +801,7 @@ pub fn promoted_text(
     }
     text.push_str(
         "you will get a message when it settles (a headless run that has already \
-         exited delivers it on `kelir resume`).",
+         exited delivers it on `kelir run --resume`).",
     );
     text
 }
@@ -2042,7 +2042,7 @@ mod tests {
         assert!(text.contains("s/calls/11-2-1/out"), "{text}");
         assert!(text.contains("--- tail ---\nhi"), "{text}");
         assert!(
-            text.ends_with("delivers it on `kelir resume`)."),
+            text.ends_with("delivers it on `kelir run --resume`)."),
             "a headless run must say when the wake arrives: {text}"
         );
         assert!(

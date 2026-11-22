@@ -42,7 +42,7 @@ applied at **one named boundary** — never between a tool call and its result.
 `ctl` finds a session by id, by a unique prefix, or `latest`. It reads the
 session's socket address from `<state>/sessions/<id>/sock`; a session that is not
 running is an error with exit 1, not a queue: a message to a stopped session is a
-`kelir resume <id> "<message>"`.
+`kelir run --resume <id> "<message>"`.
 
 ## Who sends what
 

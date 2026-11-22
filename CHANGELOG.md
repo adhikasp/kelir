@@ -7,6 +7,14 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 ## [Unreleased]
 
+### Breaking — rewrite P4B CLI surface
+
+- Three redundant subcommands are gone: `kelir ask` is `kelir run --ask`,
+  `kelir resume <id> [task]` is `kelir run --resume <id> [task]`, and
+  `kelir sessions ls|rename|forget` is `kelir ls sessions|rename|forget`. No
+  alias or compatibility subcommand is kept. Scripts and the builtin skills use
+  the new spellings.
+
 ### Breaking — rewrite P4B state layout
 
 - A background job now owns exactly one directory: session jobs live under

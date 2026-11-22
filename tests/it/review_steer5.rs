@@ -346,7 +346,7 @@ async fn a_free_slot_costs_no_noticeable_latency() {
 
 // ---------------------------------------------------------- pause and resume
 
-/// A turn that paused on an outage is picked up by `kelir resume`: it retries
+/// A turn that paused on an outage is picked up by `kelir run --resume`: it retries
 /// from the same fold with a fresh budget.
 #[tokio::test]
 async fn resume_after_a_provider_pause_retries_from_the_same_fold() {
@@ -377,7 +377,11 @@ retry_max_wait = 5
     assert_eq!(paused["outcome"], "paused", "{paused}");
     let before = sandbox.log(&id).len();
     let out = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "--resume", id.as_str()],
+            &[],
+        )
         .await;
     assert_eq!(out.code, 0, "{}{}", out.stdout, out.stderr);
     let log = sandbox.log(&id);

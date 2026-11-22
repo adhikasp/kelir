@@ -40,7 +40,7 @@ fn kelir_docs(args: &[&str]) -> (i32, String, String) {
 fn docs_skill_prints_each_builtin_skill_in_full() {
     for (name, needle) in [
         ("herdr", "Never kill, remove, interrupt"),
-        ("delegation", "kelir ask"),
+        ("delegation", "kelir run --ask"),
         ("kelir", "kelir docs"),
     ] {
         let (code, out, err) = kelir_docs(&["--skill", name]);

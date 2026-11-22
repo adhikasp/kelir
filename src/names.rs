@@ -1,4 +1,4 @@
-//! Named sessions: `names/<name>` -> a session id, and `kelir sessions`.
+//! Named sessions: `names/<name>` -> a session id, and `kelir ls sessions`.
 //! A name is a file in `<state>/names/` holding one small JSON object.
 //! It is published create-or-fail ([`crate::atomic::publish_new`]) so two processes naming one
 //! session at once cannot both win, and replaced with a rename so a reader never sees half of one.
@@ -318,7 +318,7 @@ pub fn new_session_id() -> String {
     format!("ses_{}", ulid::Ulid::generate().to_string().to_lowercase())
 }
 
-// ------------------------------------------------------------- kelir sessions
+// ------------------------------------------------------------- kelir ls sessions
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Summary {
@@ -406,7 +406,7 @@ fn name_index() -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-/// How many unnamed root sessions `sessions ls` adds to the named ones.
+/// How many unnamed root sessions `kelir ls sessions` adds to the named ones.
 const RECENT: usize = 20;
 
 pub fn sessions_ls(args: &crate::cli::SessionsLsArgs) -> u8 {

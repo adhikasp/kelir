@@ -489,7 +489,7 @@ async fn an_unknown_provider_table_says_where_it_is_and_what_to_rename() {
     for args in [
         vec!["run", "--json", "hi"],
         vec!["doctor"],
-        vec!["ask", "hi"],
+        vec!["run", "--ask", "hi"],
     ] {
         let run = run_task(&mock, &args, &[("KELIR_CONFIG", &path)], None, "").await;
         assert_eq!(run.code, 2, "{:?}: {}{}", args, run.stdout, run.stderr);

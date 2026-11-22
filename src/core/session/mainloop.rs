@@ -14,7 +14,7 @@ impl Session {
         // Every way out of the loop below sets it (the loop always runs at
         // least one turn).
         let mut reason: String;
-        // A resumed session with nothing in flight and nothing new has no turn to run: `kelir resume <id>` on
+        // A resumed session with nothing in flight and nothing new has no turn to run: `kelir run --resume <id>` on
         // a finished session reports and leaves.
         if self.run.resumed && !self.run.in_flight && !self.run.has_task && !self.out.keep {
             let _ = self.record(EventBody::SessionEnded {

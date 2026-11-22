@@ -441,7 +441,7 @@ can start in a test.
 ## M0
 
 - **`user.from` may be `cli`.** The spec lists `tui`, `ctl`, `channel`, `job`,
-  `gate`. `kelir run` / `kelir ask` are the scriptable surface, so their user
+  `gate`. `kelir run` (including `kelir run --ask`) is the scriptable surface, so their user
   events carry `"from": "cli"` instead of pretending to be one of the five.
 - **OpenCode Go base URL is `https://opencode.ai/inference/go/v1`.** The spec
   writes `https://opencode.ai/inference/go`; the OpenAI-compatible endpoint is
@@ -682,9 +682,9 @@ can start in a test.
   `step` and `turn` continue from the log instead of restarting. The turn's own
   step count restarts at 0 (it is per turn), and today's `max_steps`/`--max-steps`
   applies to the resumed turn like every other config knob.
-- **`kelir resume <id>` on a finished session with no task does nothing.** It
+- **`kelir run --resume <id>` on a finished session with no task does nothing.** It
   appends the `resumed` event and one `session_ended {reason: "resumed"}`, exits
-  0 and makes no provider request. With a task (`kelir resume <id> <task>`,
+  0 and makes no provider request. With a task (`kelir run --resume <id> <task>`,
   `kelir run --resume <id> <task>`) the message is appended (delivery `next`
   when a turn was in flight, so it lands after the unknown results) and one turn
   runs.
@@ -902,7 +902,7 @@ can start in a test.
 - **`resume` folds `calls/<id>/<id>.status` into the log** after the unknown-result block:
   for every job or promoted call, `bg_started` if the log lacks it, and
   `bg_settled` + the wake message if it settled while nothing was running. A
-  wake found this way sets `has_task`, so a bare `kelir resume <id>` runs the turn
+  wake found this way sets `has_task`, so a bare `kelir run --resume <id>` runs the turn
   that reads it — "a job that finishes while the session is not running is only
   recorded" holds on the shim's side (nothing wakes a dead session), and the
   record is what the resume then acts on. A job still running is only recorded,
@@ -1311,7 +1311,7 @@ this differs from the spec text, or needed a call the brief left open:
   microseconds. So `credentials::resolve` blocks for at most `AUTH_TIMEOUT` (5 s), called from
   `prepare`/`reopen` and from a `model` verb that swaps provider, before the first request is built
   (a background task holding the key would put the secret in another place). Measured on the dev
-  box: `opencode auth export opencode` 1221 ms cold, 289/308/296 ms after; the whole `kelir ask` on
+  box: `opencode auth export opencode` 1221 ms cold, 289/308/296 ms after; the whole `kelir run --ask` on
   `opencode-go` 1964/2063 ms through the store vs 1661/1483 ms with `KELIR_GO_API_KEY` set, i.e.
   the read costs ~0.4 s of a cold start that is dominated by the first network round trip.
 - **`opencode auth export opencode` is run twice at most, and never in a loop.** When the store's
@@ -1624,7 +1624,7 @@ follow-up commit series that restores three things the first pass lost.
 - **`delegation` describes what `main` has, not M7's CLI (M8 fix, review F7).** M7 (`kelir run --child`,
   `kelir brief`, `kelir ls`, the depth/10/16 caps, `child_started`/`child_settled`) is on `job/m7`, not merged
   when this was fixed, so the first version told the model to run commands that failed. The skill now teaches
-  plain `kelir run`, `kelir ask` and `kelir bg run`, with the limits (depth 1, three at a time) written as the
+  plain `kelir run`, `kelir run --ask` and `kelir bg run`, with the limits (depth 1, three at a time) written as the
   model's own discipline, since nothing enforces them. A unit test
   (`builtin_skills_name_only_subcommands_and_flags_kelir_help_lists`) fails if any builtin skill shows a
   `kelir <subcommand>` or `--flag` that `kelir --help` does not list. **Whoever merges M7 rewrites
@@ -1713,7 +1713,7 @@ side). Where the code had to choose:
   parent recorded (`killed`, `lost`, …), else `ended`/`crashed`. Outside a session it shows the
   ten newest roots and their descendants; `--all` shows every session. Costs are the tally of
   the logs (provider cost, else the price table; `-` when unknown).
-- **A resumed child is a root again.** `kelir resume <child>` reopens its log as an ordinary
+- **A resumed child is a root again.** `kelir run --resume <child>` reopens its log as an ordinary
   session (the link and the root's socket died with the parent). A resumed *root* settles the
   children its log shows unsettled as `lost`.
 - **`ctl status`** now reports `children` (live descendants; it was always 0) and `child_list`
@@ -1740,7 +1740,7 @@ side). Where the code had to choose:
 - **A project's notify hooks need trust.** The brief says "gate-like"; a project `jobs.toml` is
   repository content, so its hooks follow the project-gate rule (`trusted_projects` /
   `KELIR_TRUST_PROJECT`). The machine file's hooks always run.
-- **The date source is on every resume, not only on jobs.** `kelir resume` and `run --name` add it
+- **The date source is on every resume, not only on jobs.** `kelir run --resume` and `run --name` add it
   too (when a task or an in-flight turn follows), because the frozen prompt is stale the same way.
   A child or brief never adds it.
 - **The `owner` file.** There was no record of which pid owns a session, so the name-collision

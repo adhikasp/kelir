@@ -3,7 +3,7 @@
 # Usage: steer4_live.sh <scenario> <scratch-dir>   (OPENROUTER_API_KEY must be in the environment)
 #   nolimit  a real 110-step turn (> the old default of 100) completes with no max_steps
 #   cap      --max-steps 5 pauses (exit 0); a --keep session's `say continue` resumes with a fresh count
-#   resume   a paused run is continued by `kelir resume` (fresh count, no call re-run)
+#   resume   a paused run is continued by `kelir run --resume` (fresh count, no call re-run)
 #   stopgap  the old user-config line max_steps = 4294967295 still parses and a turn finishes
 set -u
 SCN="$1"; S="$2"

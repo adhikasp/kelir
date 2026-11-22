@@ -233,7 +233,7 @@ async fn r4_a_crash_during_a_resume_resumes_again_without_double_results() {
     let second = sandbox
         .kelir(
             &mock.base_url(),
-            &["resume", "--json", id.as_str()],
+            &["run", "--json", "--resume", id.as_str()],
             &[("KELIR_CRASH_AT", "mid_tool")],
         )
         .await;
@@ -254,7 +254,11 @@ async fn r4_a_crash_during_a_resume_resumes_again_without_double_results() {
         "call_2 ran {two_at_second_crash} times"
     );
     let third = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "--resume", id.as_str()],
+            &[],
+        )
         .await;
     assert_eq!(third.code, 0, "stderr: {}", third.stderr);
 
@@ -330,7 +334,7 @@ async fn r5_a_torn_line_is_reported_once_not_on_every_later_resume() {
     std::fs::write(&path, torn).unwrap();
 
     for task in [None, Some("again"), Some("and again")] {
-        let mut args = vec!["resume", "--json", id.as_str()];
+        let mut args = vec!["run", "--json", "--resume", id.as_str()];
         if let Some(task) = task {
             args.push(task);
         }
@@ -398,7 +402,7 @@ async fn r6_stop_is_answered_while_a_compaction_is_summarising() {
     live.end().await;
 }
 
-/// R7: a turn cut off by a provider outage continues on `kelir resume`. Since
+/// R7: a turn cut off by a provider outage continues on `kelir run --resume`. Since
 /// STEER-5 an outage past the waiting budget *pauses* the turn (outcome
 /// `paused`, exit 0) rather than failing it; a resume (and a later `say`)
 /// retries it from the same fold. M3.md: "A stopped or crashed turn continues
@@ -426,7 +430,11 @@ async fn r7_resume_retries_a_turn_that_ended_in_a_provider_error() {
     assert_eq!(ended["outcome"], "paused", "{ended}");
     let before = mock.request_count();
     let second = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "--resume", id.as_str()],
+            &[],
+        )
         .await;
     assert_eq!(second.code, 0, "stderr: {}", second.stderr);
     let after = mock.request_count();
@@ -470,7 +478,11 @@ async fn r8_resume_continues_a_stopped_turn() {
     let sandbox = Sandbox::from_live(&live);
     let before = mock.request_count();
     let out = sandbox
-        .kelir(&mock.base_url(), &["resume", "--json", id.as_str()], &[])
+        .kelir(
+            &mock.base_url(),
+            &["run", "--json", "--resume", id.as_str()],
+            &[],
+        )
         .await;
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     assert!(
@@ -508,7 +520,7 @@ async fn r9_two_simultaneous_resumes_do_not_both_write_the_log() {
         .await;
     assert_ne!(first.code, 0);
     let id = sandbox.only_session();
-    let args = ["resume", "--json", id.as_str()];
+    let args = ["run", "--json", "--resume", id.as_str()];
     let url = mock.base_url();
     let (a, b) = tokio::join!(
         sandbox.kelir(&url, &args, &[]),
