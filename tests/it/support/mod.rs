@@ -670,7 +670,7 @@ impl Run {
     }
 
     pub fn command_out(&self, call_id: &str) -> String {
-        let path = self.session_dir.join("commands").join(call_id).join("out");
+        let path = self.session_dir.join("calls").join(call_id).join("out");
         std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
     }

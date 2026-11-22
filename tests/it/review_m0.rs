@@ -57,9 +57,9 @@ async fn background_child_does_not_block_the_call() {
 }
 
 /// F3: a provider-supplied call id is used as a directory name. It must not be
-/// able to write outside `commands/`.
+/// able to write outside `calls/`.
 #[tokio::test]
-async fn call_id_cannot_escape_the_commands_dir() {
+async fn call_id_cannot_escape_the_calls_dir() {
     let mock = Mock::start(vec![
         Reply::Sse(sse(&tool_turn(
             "../../escaped",
@@ -70,10 +70,10 @@ async fn call_id_cannot_escape_the_commands_dir() {
     ])
     .await;
     let run = run_task(&mock, &["run", "--json", "go"], &[], None, "").await;
-    let escaped = run.session_dir.join("commands").join("../../escaped");
+    let escaped = run.session_dir.join("calls").join("../../escaped");
     assert!(
         !escaped.exists(),
-        "call id `../../escaped` wrote outside the session's commands/ dir"
+        "call id `../../escaped` wrote outside the calls/ dir"
     );
 }
 

@@ -7,6 +7,12 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 ## [Unreleased]
 
+### Breaking — rewrite P4B state layout
+
+- Tool and MCP call output directories moved from `<session>/commands/` to
+  `<session>/calls/`. Direct readers of the old path must switch; existing sessions
+  are not migrated (no compatibility readers).
+
 ### Breaking
 
 - The TUI now owns the terminal's alternate screen instead of writing finished

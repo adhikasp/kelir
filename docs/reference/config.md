@@ -28,7 +28,7 @@ keys come from the environment, `key_cmd`, or opencode's store.
 | `provider` | string | `openrouter` | `--provider` | which of the two providers this session uses | `src/config.rs:load` |
 | `model` | string | `deepseek/deepseek-v4.1-flash-1017` | `--model` | the model id sent with every request | `src/config.rs:load` |
 | `shell` | string or array of strings | Windows: Git for Windows `bash.exe`, else `bash` on PATH, else `cmd.exe /C`; elsewhere: `bash` on PATH, else `$SHELL`, else `sh`, each with `-c`; the array is the argv prefix | — | the program `bash` tool calls and `kelir bg run` commands run in | `src/config.rs:load` |
-| `spill_limit` | integer (bytes) | `10240` | — | output over this many bytes is written to `commands/<call>/out` and the model sees a spill notice instead of the whole text | `src/config.rs:load` |
+| `spill_limit` | integer (bytes) | `10240` | — | output over this many bytes is written to `calls/<call>/out` and the model sees a spill notice instead of the whole text | `src/config.rs:load` |
 | `max_steps` | integer | unset: no cap. `0` also means no cap | `--max-steps` | cap the steps of one turn; reaching it *pauses* the turn (`turn_ended` with `reason: "steps"`), and the next message starts a new turn | `src/config.rs:load` |
 | `cache_ttl` | string | unset: the provider's own default | — | the `cache_control.ttl` sent with the request (`5m`, `1h`), for providers that charge separately for a longer break-even | `src/config.rs:load` |
 | `prompt` | path | the embedded `src/prompt.md` | — | the base prompt file; when set it replaces `<config>/prompt.md` (read only when `prompt` is unset); only `<cwd>/.kelir/prompt.md` wins over it | `src/config.rs:load_prompt` |

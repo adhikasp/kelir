@@ -553,19 +553,19 @@ impl Trust {
         ))
     }
 
-    /// Is `candidate` a path inside this session's `bg/` or `commands/`?
+    /// Is `candidate` a path inside this session's `bg/` or `calls/`?
     pub fn inside_bg(&self, candidate: &str) -> bool {
         self.check_job_path(candidate, "out").is_ok()
     }
 
     fn check_job_path(&self, candidate: &str, field: &str) -> Result<(), String> {
-        for base in [self.bg_dir(), self.dir.join("commands")] {
+        for base in [self.bg_dir(), crate::paths::calls_dir(&self.dir)] {
             if resolve_inside(&base, candidate).is_ok() {
                 return Ok(());
             }
         }
         Err(format!(
-            "{field}: `{}` is not inside this session's own bg/ or commands/ directories",
+            "{field}: `{}` is not inside this session's own bg/ or calls/ directories",
             candidate.trim()
         ))
     }
@@ -752,7 +752,7 @@ mod tests {
     fn the_registry_holds_only_ids_the_session_minted() {
         let dir = temp_dir("owns");
         std::fs::create_dir_all(dir.join("bg")).unwrap();
-        std::fs::create_dir_all(dir.join("commands").join("12-3-2")).unwrap();
+        std::fs::create_dir_all(dir.join("calls").join("12-3-2")).unwrap();
         let trust = Trust::new(dir.clone(), "t".into());
         // A call's output directory, and a status file dropped by a child, are
         // both *files*: neither makes a job.

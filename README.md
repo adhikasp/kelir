@@ -85,7 +85,7 @@ corrupt the conversation.
 ```
 ~/.local/state/kelir/sessions/ses_01…/
   events.jsonl          append-only, fsync'd, the only source of truth
-  commands/<id>/out     every tool's full output, never truncated
+  calls/<id>/out        every tool's full output, never truncated
   bg/<id>.status        background jobs, which survive kelir exiting
 ```
 

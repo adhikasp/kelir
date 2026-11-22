@@ -321,7 +321,7 @@ impl Broker {
         let Some(entry) = self.0.servers.get(server) else {
             return CallOutput::failed(EXIT_USAGE, "error", format!("unknown server `{server}`"));
         };
-        let out_dir = self.0.session_dir.join("commands").join(mcp_id);
+        let out_dir = crate::paths::call_dir(&self.0.session_dir, mcp_id);
         run_call(
             &client,
             &entry.config,

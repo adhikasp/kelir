@@ -75,6 +75,19 @@ pub fn session_dir(id: &str) -> PathBuf {
     sessions_dir().join(id)
 }
 
+const CALLS: &str = "calls";
+
+/// All per-call artefacts: `<session>/calls/`. Every tool, MCP, background and child call
+/// owns one directory below this, from `call_started` to the final `call_settled`.
+pub fn calls_dir(session_dir: &Path) -> PathBuf {
+    session_dir.join(CALLS)
+}
+
+/// A call's directory: `<session>/calls/<call-id>/` (bash, edit, MCP and bg alike).
+pub fn call_dir(session_dir: &Path, id: &str) -> PathBuf {
+    calls_dir(session_dir).join(id)
+}
+
 /// Create a directory only the user can reach: mode 0700 on Unix, where a umask like `002` would
 /// otherwise make the session log and its socket group-readable.
 pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
@@ -206,6 +219,13 @@ mod tests {
     fn session_dir_is_under_sessions() {
         let dir = session_dir("ses_test");
         assert!(dir.ends_with("sessions/ses_test") || dir.ends_with("sessions\\ses_test"));
+    }
+
+    #[test]
+    fn call_paths_are_under_the_sessions_calls_dir() {
+        let session = Path::new("state").join("sessions").join("ses_1");
+        assert_eq!(calls_dir(&session), session.join("calls"));
+        assert_eq!(call_dir(&session, "12-3-2"), session.join("calls/12-3-2"));
     }
 
     #[test]

@@ -56,10 +56,10 @@ impl Ctx {
         }
     }
 
-    /// `<session>/commands/<dir>`, where `<dir>` is kelir's own `<seq>-<step>-<n>` name:
+    /// `<session>/calls/<dir>`, where `<dir>` is kelir's own `<seq>-<step>-<n>` name:
     /// monotonic, filesystem-safe, and never derived from a provider-supplied id.
     pub fn call_dir(&self, dir: &str) -> PathBuf {
-        self.session_dir.join("commands").join(dir)
+        crate::paths::call_dir(&self.session_dir, dir)
     }
 
     pub fn keep_group(&self, group: crate::proc::ProcessGroup) {
@@ -392,9 +392,9 @@ mod tests {
     }
 
     #[test]
-    fn call_dir_is_under_commands_without_the_call_id() {
+    fn call_dir_is_under_calls_without_the_call_id() {
         let dir = ctx().call_dir("12-3-2");
-        assert!(dir.ends_with(PathBuf::from("commands").join("12-3-2")));
+        assert!(dir.ends_with(PathBuf::from("calls").join("12-3-2")));
         assert!(!dir.to_string_lossy().contains("call_"));
     }
 
@@ -425,7 +425,7 @@ mod tests {
     fn a_stopped_call_reports_its_partial_output_and_out_path() {
         let stopped = ToolOutcome::stopped_with_output(
             "wrong approach",
-            "s/ses_1/commands/7-1-1/out",
+            "s/ses_1/calls/7-1-1/out",
             42,
             2,
             "line one\nline two\n",
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(stopped.outcome, "stopped");
         assert_eq!(stopped.bytes, 42);
         assert_eq!(stopped.lines, 2);
-        assert_eq!(stopped.out_path, "s/ses_1/commands/7-1-1/out");
+        assert_eq!(stopped.out_path, "s/ses_1/calls/7-1-1/out");
         assert!(
             stopped
                 .result
@@ -447,7 +447,7 @@ mod tests {
             stopped.result
         );
         assert!(
-            stopped.result.contains("s/ses_1/commands/7-1-1/out"),
+            stopped.result.contains("s/ses_1/calls/7-1-1/out"),
             "{}",
             stopped.result
         );

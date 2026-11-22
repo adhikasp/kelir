@@ -86,10 +86,10 @@ fn status_of(sandbox: &Sandbox, id: &str) -> Value {
         .unwrap_or_else(|_| panic!("no readable status at {}", path.display()))
 }
 
-/// The first `commands/*/out` of the only session in the sandbox.
+/// The first `calls/*/out` of the only session in the sandbox.
 fn first_command_out(sandbox: &Sandbox) -> String {
     let session = sandbox.session_dir(&sandbox.only_session());
-    let mut dirs: Vec<_> = std::fs::read_dir(session.join("commands"))
+    let mut dirs: Vec<_> = std::fs::read_dir(session.join("calls"))
         .unwrap()
         .flatten()
         .map(|entry| entry.path())

@@ -655,7 +655,7 @@ pub fn seed_snapshot(
     depth: u32,
 ) -> Result<usize, String> {
     let cut = snapshot_cut(events);
-    crate::paths::create_private_dir(&dest.join("commands"))
+    crate::paths::create_private_dir(&crate::paths::calls_dir(dest))
         .map_err(|error| format!("cannot create {}: {error}", dest.display()))?;
     for name in ["blobs", "attachments"] {
         let from = source.join(name);

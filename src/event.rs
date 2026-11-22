@@ -1078,7 +1078,7 @@ mod tests {
                     exit_code: Some(0),
                     bytes: Some(3),
                     lines: Some(1),
-                    out_path: Some("commands/call_1/out".into()),
+                    out_path: Some("calls/call_1/out".into()),
                     spilled: Some(false),
                     result: Some("ok\n".into()),
                     ..CallSettle::default()

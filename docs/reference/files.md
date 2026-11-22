@@ -28,13 +28,13 @@ variables above still win when set. Isolate a run with the two `*_DIR` variables
   events.jsonl.torn       # the fragment of a torn last line, kept when it was cut off
   sock                    # the session socket (a pipe name on Windows)
   token                   # 64-hex per-session socket token, owner-only; read by kelir ctl
-  commands/<call-id>/out  # a tool call's whole output, from the first byte
-  gates/g<n>.sh|.bat|.ps1 # the command text of gate number n, written for the shell (`gates`)
-  commands/mcp_<ulid>/    # a `kelir mcp` call: `out` (its text) and any decoded image/blob files
-  blobs/<seq>-<field>     # a payload over 10 KB, referenced from its event
-  attachments/<n>-<name>  # an image `kelir view` queued
+  calls/<call-id>/out     # a tool call's whole output, from the first byte
+  calls/mcp_<ulid>/        # one `kelir mcp` call: `out` (its text) and any decoded image/blob files
   bg/<bg-id>.status       # a job's state, plain JSON written atomically (tmp + rename); survives kelir exiting
   bg/<bg-id>.out          # a job's output
+  gates/g<n>.sh|.bat|.ps1 # the command text of gate number n, written for the shell (`gates`)
+  blobs/<seq>-<field>     # a payload over 10 KB, referenced from its event
+  attachments/<n>-<name>  # an image `kelir view` queued
   owner                   # {"pid","start"} of the process that owns the session (who holds a name)
   transcript.txt          # written on demand by Ctrl-Shift-Y in the TUI: the whole owned transcript
   host.err                # a child session only: its progress lines and errors (its stdout is its answer)
@@ -63,11 +63,10 @@ Session ids are ULIDs, so the directory names sort into creation order and
   names/<name>            # a named session: {"session","created","updated"} (owner-only dir)
   spool/<server>.jsonl    # channel mode's fsync'd, append-only inbound queue (src/channel.rs)
   channel-status/status.json # live channel driver status snapshot
-  names/<name>           # name binding; .lock while a run is in flight; .status.json (`docs/reference/jobs.md`)
   models-<endpoint>.json  # one endpoint's model list, cached for a day, written temp-then-rename
   locks/<provider>-<slot> # the concurrency governor's advisory locks
   bg/<bg-id>.*            # jobs started outside a session (kelir bg run from a plain shell)
-  mcp/<ulid>/             # decoded images/blobs of a one-shot `kelir mcp` call (outside a session)
+  mcp/<ulid>/             # one-shot `kelir mcp` call's decoded files outside a session
 ```
 
 `locks/` holds OS file locks, not pid files: a kelir that crashes leaks nothing
@@ -95,8 +94,8 @@ name (`docs/reference/mcp.md`).
 |---|---|---|
 | `events.jsonl` | `src/event.rs` | the log (`docs/reference/events.md`) |
 | `blobs/` | `src/event.rs` | a payload too big to be inline |
-| `commands/<call-id>/out` | `src/tools/bash.rs`, `src/spill.rs` | a tool call's whole output |
-| `commands/mcp_<ulid>/` | `src/mcp/broker.rs`, `src/mcp/mod.rs` | a `kelir mcp` call's text and decoded blobs |
+| `calls/<call-id>/out` | `src/tools/bash.rs`, `src/spill.rs` | a tool call's whole output |
+| `calls/mcp_<ulid>/` | `src/mcp/broker.rs`, `src/mcp/mod.rs` | a `kelir mcp` call's text and decoded blobs |
 | `gates/` | `src/gates.rs` | the script each gate's command string is run from |
 | `bg/` | `src/bg.rs` | background jobs (they outlive the session on purpose) |
 | `host.err` | `src/child.rs` | a child session's stderr (written by its parent's spawn) |

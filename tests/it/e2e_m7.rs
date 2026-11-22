@@ -1117,7 +1117,7 @@ async fn registry_operations_need_a_child_session_in_the_tree_and_no_secret_trav
         assert!(!line.contains(&root_token), "{line}");
     }
     // sleep or a "done" guess in `ls`. The full `env | sort` output is in the child's
-    // `commands/<id>/out` file; the event's `result` is only the model's preview and is
+    // `calls/<id>/out` file; the event's `result` is only the model's preview and is
     // deliberately spilled (first/last 1 KB) when the inherited environment is large.
     // Under nextest each test process inherits a different set of `KELIR_*`/`CARGO_*`
     // variables, so the sorted dump crosses the 10 KB spill limit on some runs: the
@@ -1157,7 +1157,7 @@ async fn registry_operations_need_a_child_session_in_the_tree_and_no_secret_trav
     // call directory so the assertion holds whatever the inherited env size is.
     let mut full_dump = dump.clone();
     for path in dump_dir
-        .join("commands")
+        .join("calls")
         .read_dir()
         .into_iter()
         .flatten()
@@ -1219,7 +1219,7 @@ async fn registry_operations_need_a_child_session_in_the_tree_and_no_secret_trav
             // it in its own directory, and any file under that session is
             // inside the same trust boundary); it must not appear under a
             // DIFFERENT session. Check the path's session component, not just
-            // any path component: a `commands/<seq>/out` file belongs to its
+            // any path component: a `calls/<seq>/out` file belongs to its
             // session even though its own name is not a session id.
             for (owner, token) in &child_tokens {
                 let session_name = path

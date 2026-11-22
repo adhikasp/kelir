@@ -3,7 +3,7 @@
 //!
 //! F8's incident was a test child inside a session injecting "bg job was lost" user events. The
 //! token stops a stranger; it cannot stop a tool child, so the job-ownership check has to be the
-//! thing that does. Today ownership is "a `commands/<id>/` directory or a `bg/<id>.status` file
+//! thing that does. Today ownership is "a `calls/<id>/` directory or a `bg/<id>.status` file
 //! exists" — both of which that child can create itself.
 
 // Test crates target behaviour, not pedantic style (#23).
@@ -48,17 +48,14 @@ fn impersonated(log: &[Value], id: &str) -> bool {
         .any(|event| event["type"] == "user" && event["from"] == "job")
 }
 
-/// B1: a tool child makes up a job by creating `commands/<fake>/` and "reporting" it lost.
+/// B1: a tool child makes up a job by creating `calls/<fake>/` and "reporting" it lost.
 #[tokio::test]
 async fn a_child_cannot_invent_a_job_by_making_a_commands_dir() {
     let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     session.wait_for("turn_ended").await;
     let token = kelir::trust::read_token(&session.session_dir).unwrap();
-    let dir = session
-        .session_dir
-        .join("commands")
-        .join("bg_fake_by_child");
+    let dir = session.session_dir.join("calls").join("bg_fake_by_child");
     std::fs::create_dir_all(&dir).unwrap();
     let _ = raw(
         &session,

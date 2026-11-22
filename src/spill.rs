@@ -1,5 +1,5 @@
 //! Big outputs: over the limit, the model sees a notice instead of the bytes.
-//! The full output always goes to `commands/<n>/out`; memory holds only what the model could see
+//! The full output always goes to `calls/<n>/out`; memory holds only what the model could see
 //! anyway: the first `limit` bytes (inline result), the first 1 KB (head) and a 1 KB tail ring,
 //! plus byte and line counts.
 //! Output of any size therefore costs the same ~11 KB of memory.

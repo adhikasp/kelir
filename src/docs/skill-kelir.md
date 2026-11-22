@@ -30,7 +30,7 @@ Topics: `README`, `config`, `cli`, `env`, `verbs`, `mcp`, `channels`, `gates`, `
 
 - **This session is a process plus a log.** `<state>/sessions/<id>/events.jsonl`
   is the only source of truth: every request is `fold(events.jsonl)`, live and on
-  resume. A file under `commands/<call-id>/out` holds a tool call's whole output.
+  resume. A file under `calls/<call-id>/out` holds a tool call's whole output.
 - **Everything is a verb.** `say`, `later`, `stop`, `model`, `tools`, `skills`,
   `compact`, `view`, `end`: `kelir ctl <session|latest> <verb> [args]`. They apply
   at named boundaries, never between a tool call and its result.

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 pub const SHELL_CMD_MAX: usize = 6_000;
 
 /// The file a command is written to, inside the directory kelir owns for the call
-/// (`<session>/commands/<id>/`, or `bg/` for a job).
+/// (`<session>/calls/<id>/`, or `bg/` for a job).
 pub const SCRIPT_EXT_UNIX: &str = ".sh";
 pub const SCRIPT_EXT_CMD: &str = ".bat";
 pub const SCRIPT_EXT_PS1: &str = ".ps1";

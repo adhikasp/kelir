@@ -441,7 +441,7 @@ async fn a_call_inside_a_bash_call_is_logged_between_its_start_and_settle() {
     assert_eq!(settled["exit_code"], 0);
     let out_path = settled["out_path"].as_str().unwrap();
     assert!(
-        out_path.contains("commands"),
+        out_path.contains("calls"),
         "the result lives in the session dir: {out_path}"
     );
     assert_eq!(std::fs::read_to_string(out_path).unwrap(), "from-the-model");

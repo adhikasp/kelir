@@ -1999,7 +1999,7 @@ mod tests {
         let text = promoted_text(
             "11-2-1",
             Duration::from_secs(600),
-            Path::new("s/commands/11-2-1/out"),
+            Path::new("s/calls/11-2-1/out"),
             12,
             2,
             "hi\n",
@@ -2010,7 +2010,7 @@ mod tests {
         assert!(text.contains("kelir bg wait 11-2-1"), "{text}");
         assert!(text.contains("kelir bg cancel 11-2-1"), "{text}");
         assert!(text.contains("12 bytes, 2 lines"), "{text}");
-        assert!(text.contains("s/commands/11-2-1/out"), "{text}");
+        assert!(text.contains("s/calls/11-2-1/out"), "{text}");
         assert!(text.contains("--- tail ---\nhi"), "{text}");
         assert!(
             text.ends_with("delivers it on `kelir resume`)."),

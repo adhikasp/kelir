@@ -746,7 +746,7 @@ mod tests {
             "--id",
             "11-2-1",
             "--out",
-            "s/ses_1/commands/11-2-1/out",
+            "s/ses_1/calls/11-2-1/out",
             "--cmd",
             "sleep 60",
             "--shell",

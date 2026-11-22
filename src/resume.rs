@@ -457,10 +457,10 @@ mod tests {
         assert!(UNKNOWN_RESULT.contains("unknown outcome"));
         assert!(UNKNOWN_RESULT.contains("may or may not have completed"));
         assert!(UNKNOWN_RESULT.contains("Check before retrying"));
-        let partial = unknown_result(Some(("commands/7-1-1/out", 42, 2)));
+        let partial = unknown_result(Some(("calls/7-1-1/out", 42, 2)));
         assert!(partial.starts_with(UNKNOWN_RESULT));
         assert!(partial.contains("42 bytes, 2 lines"));
-        assert!(partial.contains("commands/7-1-1/out"));
+        assert!(partial.contains("calls/7-1-1/out"));
         // Zero bytes is the same as no output at all.
         assert_eq!(unknown_result(Some(("out", 0, 0))), UNKNOWN_RESULT);
     }

@@ -38,7 +38,7 @@ impl Session {
         Ok(())
     }
 
-    /// The partial output of a call the previous process started, when its `commands/<seq>-*` directory
+    /// The partial output of a call the previous process started, when its `calls/<seq>-*` directory
     /// still has one.
     pub(crate) fn interrupted_output(&self, call: &UnsettledCall) -> Option<(String, u64, u64)> {
         if !call.started {
@@ -59,7 +59,7 @@ impl Session {
                 _ => None,
             })?;
         let prefix = format!("{seq}-");
-        let entry = std::fs::read_dir(self.log.dir.join("commands"))
+        let entry = std::fs::read_dir(crate::paths::calls_dir(&self.log.dir))
             .ok()?
             .flatten()
             .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))?;

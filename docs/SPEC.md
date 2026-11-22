@@ -18,7 +18,8 @@ that appends an event; the loop applies verbs at named boundaries.
 ```
 <state>/sessions/<id>/
   events.jsonl            # append-only, fsync'd per batch, monotonic seq; the only source of truth
-  commands/<call-id>/out  # full tool output, never truncated; also the >10 KB spill file
+  calls/<call-id>/out     # one dir per tool/MCP/child call; the `out` file holds the full
+                          #   tool output, never truncated, and is also the >10 KB spill file
   bg/<bg-id>.status       # written by the bg shim; survives kelir exiting; the dir is 0700
   sock                    # the session socket (a named pipe on Windows)
   token                   # this session's secret, owner-only (0600), removed when the session ends;
@@ -77,7 +78,7 @@ so a check against same-user code cannot hold.
 - **Other checks that still apply.** A `bg-spawn` honours only `cmd`, `shell`, `cwd` and `env`
   (filtered, without `KELIR_TOKEN`/`KELIR_SOCK`); the session mints the id and pins the shim's kind
   and socket. It refuses a request that names an id, every job/status/out path must resolve inside
-  this session's own `bg/` or `commands/` (canonicalised: `..`, symlinks out, UNC and other drives
+  this session's own `calls/` or `bg/` (canonicalised: `..`, symlinks out, UNC and other drives
   refused), and one session mints at most `256` ids on request. No verb writes its request wholesale
   to the log. Tool children do not inherit `OPENROUTER_API_KEY` or `KELIR_GO_API_KEY` unless the
   user names a custom `key_env`.
@@ -96,7 +97,7 @@ so a check against same-user code cannot hold.
 
 | tool | does |
 |---|---|
-| `bash` | runs a command in the configured shell (see *Shell and platforms*); output tee'd to `commands/<id>/out` |
+| `bash` | runs a command in the configured shell (see *Shell and platforms*); output tee'd to `calls/<id>/out` |
 | `edit` | string replace in one file: `{path, old, new, replace_all?}`; `old` must match exactly once unless `replace_all`; `old: ""` on a missing file creates it. Preserves the file's line endings (CRLF stays CRLF). Returns the changed line numbers. Reading files is `bash` (`cat`, `sed -n`, `rg`). |
 | `compact` | compacts this session's context (see *Compaction*); takes an optional `focus` |
 
@@ -152,9 +153,9 @@ diagnostic notes are `note`.
 | `step_started` | `step`, `provider`, `model`, `request_hash` | one per provider request |
 | `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]` (`id`, `name`, `args`), `finish_reason`, `usage?` | the model's answer; `usage` carries the final stream chunk's token counts |
 | `step_usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `allowance?`, `kind?` | a provider request with no assistant event (compaction, gate scoring) |
-| `call_started` | `id`, `kind`, `info{name, input?, dir?, session?, parent?, depth?, background?, model?}` | intent for any call; `dir` is the call's own `commands/<dir>` name, so a resume adopts it from the log |
+| `call_started` | `id`, `kind`, `info{name, input?, dir?, session?, parent?, depth?, background?, model?}` | intent for any call; `dir` is the call's own `calls/<dir>` name, so a resume adopts it from the log |
 | `call_settled` | `id`, `kind`, `outcome`, `exit_code?`, `bytes?`, `lines?`, `out_path?`, `spilled?`, `result?`, `state?` | one commit; `result` is what the model sees (≤10 KB or the spill notice) |
-| `verb` | `name`, `args`, `from`, `boundary`, `error?` | every verb received, applied or not; `boundary: "rejected"` is a refusal (a foreign job id, a path outside the session's own `bg/`, an unparsable verb), with `error` saying why |
+| `verb` | `name`, `args`, `from`, `boundary`, `error?` | every verb received, applied or not; `boundary: "rejected"` is a refusal (a foreign job id, a path outside the session's own `calls/`, a path outside the session's own `bg/`, an unparsable verb), with `error` saying why |
 | `gate` | `gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?` | every gate run, including fail-open ones |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by` (`user`, `agent`, `auto`), `tokens_before`, `tokens_after` | the fold replaces everything up to `through_seq` except the pins |
 | `turn_ended` | `outcome` (`done`, `stopped`, `paused`, `error`), `final_text`, `reason?` | `paused` covers two cases, distinguished by `reason`: `steps` (an explicit `max_steps` cap) and `provider` (the retry budget was exhausted). Neither is a failure: `--keep` stays alive and the next message opens a new turn |
@@ -241,7 +242,7 @@ killed** (outcome `promoted`; work in flight is never destroyed by a clock). A l
 
 Any tool result over **10 KB** reaches the model as a notice instead: byte and line counts, the
 path, a 1 KB head and 1 KB tail, and a one-line `rg`/`jq`/`sed -n` hint. The file is
-`commands/<id>/out` in the session dir, never `/tmp`. **Sweep:** a session's `commands/` is
+`calls/<id>/out` in the session dir, never `/tmp`. **Sweep:** a session's `calls/` is
 deleted 7 days after the session's **last event**, so a thread that is still in use keeps its
 files. The log itself is kept.
 

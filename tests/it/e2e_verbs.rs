@@ -931,7 +931,7 @@ async fn stop_during_a_provider_backoff_is_obeyed_at_once() {
 /// Poll until a call has written `needle` to its output file, and return the
 /// forward-slashed path the event log uses.
 async fn wait_for_output(session: &LiveSession, needle: &str) -> String {
-    let commands = session.session_dir.join("commands");
+    let commands = session.session_dir.join("calls");
     let mut found = None;
     eventually(
         &format!(

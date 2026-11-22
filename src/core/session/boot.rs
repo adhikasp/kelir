@@ -440,7 +440,7 @@ pub(crate) async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
         crate::models::resolve(over, list.cache.as_ref(), list.fetched, &model);
     let window_note = models::window_note(over, list.why.as_deref(), window_source);
     let dir = crate::paths::session_dir(&id);
-    crate::paths::create_private_dir(&dir.join("commands")).map_err(|error| {
+    crate::paths::create_private_dir(&crate::paths::calls_dir(&dir)).map_err(|error| {
         Failure::Run(format!(
             "cannot create the session directory {}: {error}",
             dir.display()

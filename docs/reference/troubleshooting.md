@@ -40,7 +40,7 @@ as an unknown outcome and **never re-run**.
 
 ## "A background job I started is gone"
 
-A job outlives the session on purpose: its shim writes `bg/<id>.status`, and
+A job outlives the session on purpose: its shim writes `bg/<id>.status`,
 nothing wakes a stopped session. `kelir bg ls` (inside a session) and
 `kelir bg out <id>` read it; the next `resume` folds the settled job into the log
 as `call_settled{kind:"bg"}` plus the wake-up message. A job killed with the machine is the
@@ -67,7 +67,7 @@ contain it — that is the cache working as intended.
 
 ## "A tool call's output was cut"
 
-It was not: the whole output is `commands/<call-id>/out` from the first byte, and
+It was not: the whole output is `calls/<call-id>/out` from the first byte, and
 what the model saw is `call_settled.result`, which is a head/tail excerpt once the
 output passes `spill_limit` (10 KB). `spilled: true` and `out_path` in the same
 event say so. The model is told the path; a `bash` call can read the rest.

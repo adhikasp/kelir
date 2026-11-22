@@ -139,7 +139,7 @@ async fn one_bash_call_then_answer() {
     let out_path = settled["out_path"].as_str().unwrap();
     let started_seq = started["seq"].as_u64().unwrap();
     assert!(
-        out_path.contains(&format!("/commands/{started_seq}-1-1/out")),
+        out_path.contains(&format!("/calls/{started_seq}-1-1/out")),
         "{out_path}"
     );
     assert!(!out_path.contains("call_1"), "{out_path}");

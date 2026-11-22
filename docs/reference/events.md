@@ -52,7 +52,7 @@ A string over `PAYLOAD_LIMIT` (10 KB) is written to `blobs/<seq>-<field>` in the
 session dir and the event holds
 `{"spilled": true, "path": …, "bytes": N, "preview": …}`. `fold` reads it back,
 so the request bytes are the same as if it had been inline. Tool *output* takes a
-different route: the whole output is in `commands/<call-id>/out` from the first
+different route: the whole output is in `calls/<call-id>/out` from the first
 byte, and a `call_settled` result is the ≤10 KB head/tail the model sees
 (`docs/reference/files.md`).
 
