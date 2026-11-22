@@ -94,12 +94,14 @@ impl Session {
                     if report.reason == PauseReason::Steps {
                         if !self.out.tui {
                             eprintln!("→ {message}");
+                        } else {
+                            self.ui_note(message.clone());
                         }
                     } else {
                         if !self.out.tui {
                             eprintln!("kelir: {message}");
                         }
-                        self.emit(UiEvent::Info(format!("» {message}")));
+                        self.ui_note(format!("» {message}"));
                         self.run.final_text = message.clone();
                     }
                     let text = match report.reason {
@@ -120,7 +122,7 @@ impl Session {
                     if !self.out.tui {
                         eprintln!("kelir: {message}");
                     }
-                    self.emit(UiEvent::Error(message.clone()));
+                    self.ui_error(message.clone());
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "error".into(),
                         reason: None,
@@ -276,13 +278,13 @@ impl Session {
                 let pending = self.accept_as(incoming, bare_stop.then_some("dropped"));
                 if let Some(pending) = pending {
                     if matches!(pending.verb, Verb::Stop { call: None, .. }) {
-                        self.emit(UiEvent::Info("» stop: nothing is running".into()));
+                        self.ui_note("» stop: nothing is running");
                     } else if let Verb::Compact { focus } = &pending.verb {
                         // A human asked to compact while idle: nothing is running, so this is safe to do *now*.
-                        self.emit(UiEvent::Info(match focus {
+                        self.ui_note(match focus {
                             Some(focus) => format!("» compact: {focus}"),
                             None => "» compact".to_string(),
-                        }));
+                        });
                         self.compact.request = Some(CompactRequest {
                             by: "user",
                             focus: focus.clone(),
@@ -297,7 +299,7 @@ impl Session {
             if self.compact.request.as_ref().is_some_and(|r| r.immediate) {
                 let request = self.compact.request.take().expect("checked above");
                 if let Err(message) = self.run_compact(rx, &request).await {
-                    self.emit(UiEvent::Info(format!("» compact failed: {message}")));
+                    self.ui_note(format!("» compact failed: {message}"));
                 }
             }
             match self.take_turn_messages() {

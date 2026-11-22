@@ -295,10 +295,7 @@ impl Session {
                     // A message from anywhere but this UI gets echoed, so a
                     // steering `ctl say` is visible in the pane it steers.
                     if pending.from != "tui" {
-                        self.emit(UiEvent::Info(format!(
-                            "› {}",
-                            crate::util::one_line_visible(&text, 200)
-                        )));
+                        self.ui_note(format!("› {}", crate::util::one_line_visible(&text, 200)));
                     }
                     // The text carries the pointers; the list carries the paths they name, so a reader (and a
                     // later tool) can see which images a message was about without parsing prose .
@@ -348,13 +345,11 @@ impl Session {
                     // An image queued by `kelir view` from inside a call: it becomes a `source` event at the tail, so the
                     // next request carries an image part and every earlier message (and the cached prefix) stays byte-
                     match self.apply_view(&path) {
-                        Ok((rel, bytes)) => {
+                        Ok(_) => {
                             applied.messages += 1;
-                            self.emit(UiEvent::Attachment { rel, bytes });
                             self.sync();
                         }
                         Err(message) => {
-                            self.emit(UiEvent::Error(message.clone()));
                             self.record(EventBody::Error {
                                 location: "view".into(),
                                 message,
@@ -371,10 +366,10 @@ impl Session {
                 Verb::Compact { focus } => {
                     // Applies at `before_step`: the compaction needs a provider call and must never land between
                     // a tool call and its result.
-                    self.emit(UiEvent::Info(match &focus {
+                    self.ui_note(match &focus {
                         Some(focus) => format!("» compact: {focus}"),
                         None => "» compact".to_string(),
-                    }));
+                    });
                     if self.compact.request.is_none() {
                         self.compact.request = Some(CompactRequest {
                             by: "user",
@@ -400,7 +395,7 @@ impl Session {
                 // A job of this session's own, killed on request.
                 Verb::Cancel { id } => {
                     match crate::bg::cancel_in(&self.trust.bg_dir(), &id).await {
-                        Ok(text) => self.emit(UiEvent::Info(format!("· {text}"))),
+                        Ok(text) => self.ui_note(format!("· {text}")),
                         Err(text) => {
                             self.record(EventBody::Error {
                                 location: "verb".into(),

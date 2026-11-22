@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use kelir::markdown::{self, Layout, Row, Stream};
-use kelir::tui::{App, UiEvent};
+use kelir::tui::App;
 use serde_json::json;
 use unicode_width::UnicodeWidthStr;
 
@@ -21,8 +21,8 @@ fn line_text(line: &ratatui::text::Line<'_>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
-fn settled(command: &str) -> UiEvent {
-    UiEvent::ToolSettled {
+fn settled(command: &str) -> Ev {
+    Ev::ToolSettled {
         name: "bash".into(),
         input: json!({"command": command}),
         outcome: "ok".into(),
@@ -45,10 +45,10 @@ fn texts(rows: &[Row]) -> Vec<String> {
 #[test]
 fn tool_lines_land_in_the_scrollback_before_the_prose_that_followed_them() {
     let mut app = app(80);
-    app.apply(settled("git --version"));
-    app.apply(settled("python --version"));
-    app.apply(UiEvent::Delta("All good, both are installed.".into()));
-    app.apply(UiEvent::Assistant {
+    app.push(settled("git --version"));
+    app.push(settled("python --version"));
+    app.push(Ev::Delta("All good, both are installed.".into()));
+    app.push(Ev::Assistant {
         text: "All good, both are installed.".into(),
     });
     let scroll: Vec<String> = app.take_scroll().iter().map(line_text).collect();
@@ -69,11 +69,11 @@ fn tool_lines_land_in_the_scrollback_before_the_prose_that_followed_them() {
 fn a_folded_group_precedes_multi_block_prose() {
     let mut app = app(80);
     for c in ["a", "b", "c", "d"] {
-        app.apply(settled(c));
+        app.push(settled(c));
     }
     let prose = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n\nFourth.";
-    app.apply(UiEvent::Delta(prose.into()));
-    app.apply(UiEvent::Assistant { text: prose.into() });
+    app.push(Ev::Delta(prose.into()));
+    app.push(Ev::Assistant { text: prose.into() });
     let scroll: Vec<String> = app.take_scroll().iter().map(line_text).collect();
     let last_call = scroll
         .iter()
@@ -239,7 +239,7 @@ fn a_one_megabyte_message_streams_in_bounded_time() {
         let started = Instant::now();
         let mut chunk = String::new();
         if name == "fence" {
-            app.apply(UiEvent::Delta("```\n".into()));
+            app.push(Ev::Delta("```\n".into()));
         }
         while total < 500_000 {
             chunk.clear();
@@ -248,7 +248,7 @@ fn a_one_megabyte_message_streams_in_bounded_time() {
                 i += 1;
             }
             total += chunk.len();
-            app.apply(UiEvent::Delta(chunk.clone()));
+            app.push(Ev::Delta(chunk.clone()));
             // A frame per delta: the worst case the paint loop can ask for.
             let _ = app.live_lines();
             let _ = app.take_scroll();
@@ -267,7 +267,7 @@ fn a_one_megabyte_message_streams_in_bounded_time() {
 #[test]
 fn no_row_is_hidden_while_a_later_block_streams() {
     let mut app = app(60);
-    app.apply(UiEvent::Delta(
+    app.push(Ev::Delta(
         "Intro paragraph one.\n\nIntro paragraph two that is a bit longer and wraps around the sixty column pane.\n\n```\nl1\nl2\nl3\nl4\nl5\nl6\n".into(),
     ));
     let seen: Vec<String> = app.cached_rows.iter().map(line_text).collect();
@@ -454,8 +454,8 @@ fn backspace_removes_a_pasted_image_chip_whole() {
 fn the_state_row_keeps_paused_and_error_after_the_turn_ends() {
     use kelir::activity::Kind;
     let mut a = app(80);
-    a.apply(UiEvent::Paused { steps: 2 });
-    a.apply(UiEvent::TurnEnded {
+    a.push(Ev::Paused { steps: 2 });
+    a.push(Ev::TurnEnded {
         outcome: "paused".into(),
         final_text: String::new(),
     });
@@ -465,8 +465,8 @@ fn the_state_row_keeps_paused_and_error_after_the_turn_ends() {
         "paused stays on the state row"
     );
     let mut b = app(80);
-    b.apply(UiEvent::Error("http 401: bad key".into()));
-    b.apply(UiEvent::TurnEnded {
+    b.push(Ev::Error("http 401: bad key".into()));
+    b.push(Ev::TurnEnded {
         outcome: "error".into(),
         final_text: String::new(),
     });

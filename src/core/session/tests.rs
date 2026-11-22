@@ -482,7 +482,10 @@ fn a_window_that_changes_after_a_swap_is_announced_once() {
     );
     let announced: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|event| match event {
-            UiEvent::Info(text) => Some(text),
+            crate::tui::View::Log(event) => match event.body {
+                crate::event::EventBody::Note(note) => Some(note.text),
+                _ => None,
+            },
             _ => None,
         })
         .collect();

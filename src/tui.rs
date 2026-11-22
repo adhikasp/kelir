@@ -11,7 +11,6 @@ use std::io::Write;
 use std::time::Instant;
 
 use ratatui::crossterm::event::Event;
-use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::activity::Kind;
@@ -21,63 +20,60 @@ use crate::theme::Theme;
 
 pub use app::{App, Entry};
 pub use keys::{Press, translate};
+
+/// An out-of-log note shown exactly like a log note. The session records the
+/// real event when it has a sequence number; this is for the few UI-only
+/// messages whose log copy is written elsewhere.
+pub fn note_event(text: impl Into<String>) -> crate::event::LogEvent {
+    crate::event::LogEvent::new(
+        0,
+        crate::event::EventBody::Note(crate::event::Note {
+            kind: "core".into(),
+            text: text.into(),
+        }),
+    )
+}
+
+/// The error counterpart of [`note_event`]: a view-only diagnostic, never a
+/// record in `events.jsonl`.
+pub fn error_event(message: impl Into<String>) -> crate::event::LogEvent {
+    crate::event::LogEvent::new(
+        0,
+        crate::event::EventBody::Error {
+            location: "ui".into(),
+            message: message.into(),
+            retryable: false,
+            status: None,
+            attempt: None,
+            retry_in_ms: None,
+        },
+    )
+}
+
 pub use view::{
     PROMPT_WIDTH, call_head, call_label, facts_for_width, fit, last_line, read_tail, render,
     status_text, tokens, tui_wait_line,
 };
 
-/// What the session tells the UI. One direction only: the UI never reaches
-/// into the session. Every variant names a fact the session already knows; the
-/// view owns no event vocabulary of its own.
+/// The one channel from the session to the view. Log events are the source of
+/// truth; live events are the handful of facts that never enter the log.
+// LogEvent is already cloned at every append; boxing it would add an
+// allocation to the hottest path without making the channel cheaper.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
-pub enum UiEvent {
-    TurnStarted {
-        turn: u32,
-        provider: String,
-        model: String,
-        limit: Option<u32>,
-    },
-    Step {
-        step: u32,
-        provider: String,
-        model: String,
-        turn_steps: u32,
-        limit: Option<u32>,
-    },
-    Paused {
-        steps: u32,
-    },
+pub enum View {
+    Log(crate::event::LogEvent),
+    Live(Live),
+}
+
+/// What only the running TUI knows: keystrokes in flight, transient wait
+/// countdowns, verb answers and terminal status. Everything else is a log
+/// event.
+#[derive(Debug, Clone)]
+pub enum Live {
+    /// Provider text as it arrives, before the assistant event is committed.
     Delta(String),
-    Usage {
-        prompt: u64,
-        completion: u64,
-        cached: u64,
-    },
-    Assistant {
-        text: String,
-    },
-    ToolStarted {
-        name: String,
-        input: Value,
-    },
-    ToolSettled {
-        name: String,
-        input: Value,
-        outcome: String,
-        exit_code: Option<i32>,
-        elapsed_ms: u64,
-        bytes: u64,
-        lines: u64,
-        spilled: bool,
-        out_path: String,
-        tail: String,
-    },
-    Attachment {
-        rel: String,
-        bytes: u64,
-    },
-    Info(String),
-    Error(String),
+    /// A rate-limit or slot wait, whose deadline is not a log fact.
     Retrying {
         line: String,
         until: Instant,
@@ -85,16 +81,12 @@ pub enum UiEvent {
         attempt: u32,
     },
     RetryingDone,
+    /// An answer to a verb the TUI sent itself.
     Reply(Response),
+    /// The Herdr pane's status word.
     Herdr {
         state: HerdrState,
     },
-    TurnEnded {
-        outcome: String,
-        final_text: String,
-    },
-    Title(String),
-    TitleRecord(String),
     Quit,
 }
 
@@ -134,7 +126,6 @@ impl Phase {
 pub struct Status {
     pub provider: String,
     pub model: String,
-    pub turn: u32,
     pub step: u32,
     pub prompt_tokens: u64,
     pub last_prompt_tokens: u64,
@@ -153,7 +144,6 @@ impl Default for Status {
         Self {
             provider: String::new(),
             model: String::new(),
-            turn: 0,
             step: 0,
             prompt_tokens: 0,
             last_prompt_tokens: 0,
@@ -197,7 +187,7 @@ impl BannerLine {
 pub struct Tui {
     pub app: App,
     terminal: ratatui::DefaultTerminal,
-    events: mpsc::UnboundedReceiver<UiEvent>,
+    events: mpsc::UnboundedReceiver<View>,
     keys: mpsc::UnboundedReceiver<Event>,
     tick: Option<Instant>,
     last_paint: Option<Instant>,
@@ -205,8 +195,9 @@ pub struct Tui {
     guard: terminal::RestoreGuard,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Step {
-    Ui(UiEvent),
+    Ui(View),
     Key(Event),
     Tick,
 }
@@ -214,8 +205,8 @@ enum Step {
 /// Take the terminal and the session's event stream. The caller has already
 /// checked that stdout is a terminal.
 pub fn start(
-    events: mpsc::UnboundedReceiver<UiEvent>,
-    to_tui: mpsc::UnboundedSender<UiEvent>,
+    events: mpsc::UnboundedReceiver<View>,
+    to_tui: mpsc::UnboundedSender<View>,
     verbs: mpsc::UnboundedSender<crate::ipc::Incoming>,
     banner: &[BannerLine],
     cap: Option<u32>,
@@ -275,7 +266,7 @@ impl Tui {
 
     /// Everything already queued is applied before the next paint: a burst of
     /// streamed deltas costs one frame, not one frame each.
-    fn drain(&mut self, first: UiEvent) {
+    fn drain(&mut self, first: View) {
         self.app.apply(first);
         let mut applied = 1usize;
         while let Ok(event) = self.events.try_recv() {

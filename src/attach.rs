@@ -1,18 +1,16 @@
 //! Replay the event log through the TUI's row model.
-//! The same [`crate::tui::UiEvent`] the session sends to the TUI is produced here from a log line,
-//! then applied to a real [`crate::tui::App`].
-//! That is how the viewer shows the state row, collapsed tool calls, markdown and outcome lines
-//! without a second renderer.
+//! Every log line is fed to the very same [`crate::tui::App`] the live TUI
+//! drives, as a [`crate::tui::View::Log`] — there is no second renderer and no
+//! translation layer to keep in sync.
 
 use std::collections::VecDeque;
 
 use ratatui::text::Line;
-use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::event::{EventBody, LogEvent};
+use crate::event::LogEvent;
 use crate::ipc::Incoming;
-use crate::tui::{App, UiEvent};
+use crate::tui::{App, View};
 
 /// How many rendered rows the viewer keeps. A 100k-event log still costs this
 /// much memory, not a row per event.
@@ -32,7 +30,7 @@ pub struct Viewer {
 
 impl Viewer {
     pub fn new(width: usize, height: usize) -> Self {
-        let (to_tui, _from) = mpsc::unbounded_channel::<UiEvent>();
+        let (to_tui, _from) = mpsc::unbounded_channel::<View>();
         let (to_verbs, _incoming) = mpsc::unbounded_channel::<Incoming>();
         let app = App::new(width, height, to_tui, to_verbs, String::new());
         Self {
@@ -55,9 +53,7 @@ impl Viewer {
 
     pub fn apply(&mut self, event: &LogEvent) -> Vec<Line<'static>> {
         self.applied += 1;
-        for ui in from_event(event) {
-            self.app.apply(ui);
-        }
+        self.app.apply(View::Log(event.clone()));
         let fresh = self.app.take_scroll();
         for line in &fresh {
             self.rows.push_back(line.clone());
@@ -111,137 +107,6 @@ impl Viewer {
     /// The viewer's one-line state, from the same status the TUI uses.
     pub fn status_line(&self) -> String {
         crate::tui::status_text(&self.app.status)
-    }
-}
-
-/// Convert one log event into the UI events the TUI's row model consumes.
-pub fn from_event(event: &LogEvent) -> Vec<UiEvent> {
-    let mut out = Vec::new();
-    match &event.body {
-        EventBody::StepStarted {
-            step,
-            provider,
-            model,
-            ..
-        } => out.push(UiEvent::Step {
-            step: *step,
-            provider: provider.clone(),
-            model: model.clone(),
-            turn_steps: *step,
-            limit: None,
-        }),
-        EventBody::SessionTitle { title } => {
-            out.push(UiEvent::Title(title.clone()));
-        }
-        EventBody::Assistant { text, usage, .. } => {
-            let text = payload_text(text);
-            if !text.is_empty() {
-                out.push(UiEvent::Assistant { text });
-            }
-            if let Some(usage) = usage {
-                out.push(UiEvent::Usage {
-                    prompt: usage.prompt_tokens,
-                    completion: usage.completion_tokens,
-                    cached: usage.cached_tokens,
-                });
-            }
-        }
-        EventBody::StepUsage(usage) => out.push(UiEvent::Usage {
-            prompt: usage.prompt_tokens,
-            completion: usage.completion_tokens,
-            cached: usage.cached_tokens,
-        }),
-        EventBody::CallStarted(start) if start.kind == "tool" => {
-            out.push(UiEvent::ToolStarted {
-                name: start.info.name.clone(),
-                input: start
-                    .info
-                    .input
-                    .as_ref()
-                    .map(payload_value)
-                    .unwrap_or(Value::Null),
-            });
-        }
-        EventBody::CallSettled(settle) => {
-            let detail = settle
-                .state
-                .as_deref()
-                .or(settle.exit_code.map(|_| "exited"))
-                .unwrap_or(&settle.outcome);
-            out.push(UiEvent::Info(format!(
-                "{} {} {}",
-                settle.kind, settle.id, detail
-            )));
-        }
-        EventBody::User { text, from, .. } => {
-            let text = payload_text(text);
-            if !text.is_empty() {
-                out.push(UiEvent::Info(format!("› {text}")));
-            }
-            let _ = from;
-        }
-        EventBody::Source {
-            kind,
-            name,
-            text,
-            path,
-            ..
-        } => {
-            let detail = text
-                .as_ref()
-                .map(payload_text)
-                .or_else(|| path.clone())
-                .unwrap_or_default();
-            out.push(UiEvent::Info(format!("· {kind} {name}: {detail}")));
-        }
-        EventBody::TurnEnded {
-            outcome,
-            final_text,
-            ..
-        } => out.push(UiEvent::TurnEnded {
-            outcome: outcome.clone(),
-            final_text: payload_text(final_text),
-        }),
-        EventBody::Error { message, .. } => out.push(UiEvent::Error(message.clone())),
-        EventBody::Note(note) => out.push(UiEvent::Info(note.text.clone())),
-        EventBody::SessionEnded { reason } => {
-            out.push(UiEvent::Info(format!("session ended: {reason}")));
-        }
-        EventBody::Verb {
-            name,
-            from,
-            boundary,
-            error,
-            ..
-        } => {
-            if boundary == "rejected" {
-                out.push(UiEvent::Error(
-                    error.clone().unwrap_or_else(|| format!("{name} refused")),
-                ));
-            } else if name != "status" && name != "observe" {
-                out.push(UiEvent::Info(format!("» {name} ({from}) · {boundary}")));
-            }
-        }
-        // Compaction, gates and retries have no row in the live TUI either.
-        _ => {}
-    }
-    out
-}
-
-fn payload_text(value: &crate::event::Payload) -> String {
-    match value {
-        crate::event::Payload::Inline(Value::String(text)) => text.clone(),
-        crate::event::Payload::Inline(other) => other.to_string(),
-        crate::event::Payload::Blob(reference) => reference.preview.clone(),
-    }
-}
-
-fn payload_value(value: &crate::event::Payload) -> Value {
-    match value {
-        crate::event::Payload::Inline(inner) => inner.clone(),
-        crate::event::Payload::Blob(reference) => {
-            serde_json::json!({"path": reference.path, "bytes": reference.bytes})
-        }
     }
 }
 
@@ -536,7 +401,7 @@ fn crossterm_width_height() -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::Payload;
+    use crate::event::{EventBody, Payload};
     use serde_json::json;
 
     fn event(body: EventBody) -> LogEvent {

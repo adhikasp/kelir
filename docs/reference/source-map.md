@@ -82,7 +82,7 @@ The tree is flat on purpose: a file is a subject.
 
 | file | owns |
 |---|---|
-| `src/tui.rs` | the session loop and the `UiEvent` vocabulary |
+| `src/tui.rs` | the session loop and the `View`/`Live` vocabulary |
 | `src/tui/app.rs` | the owned transcript, scroll position and actions |
 | `src/tui/view.rs` | painting the four areas and the wrapped transcript |
 | `src/tui/keys.rs` | key bytes to `Press` and the kitty keyboard handshake |

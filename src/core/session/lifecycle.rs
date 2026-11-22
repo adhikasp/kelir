@@ -281,9 +281,9 @@ impl Session {
             unknown += 1;
         }
         if unknown > 0 {
-            self.emit(UiEvent::Info(format!(
+            self.ui_note(format!(
                 "kelir: resumed · {unknown} call(s) had an unknown outcome and were not re-run"
-            )));
+            ));
         }
         // An agent-called compaction that was settled but never applied — a kill between the tool's
         // `compaction queued` result and the boundary that summarises — is queued again here, so the model's
@@ -295,9 +295,9 @@ impl Session {
                 focus,
                 immediate: false,
             });
-            self.emit(UiEvent::Info(
+            self.ui_note(
                 "kelir: resumed · a queued compaction is applied at the next step".to_string(),
-            ));
+            );
         }
         // Background jobs that started or settled while no session was running: the shim's status file is the
         for event in &self.log.events {
@@ -322,10 +322,10 @@ impl Session {
             // A job settling while the session was down *is* something to do:
             // the resumed turn reads the message like any other.
             self.run.has_task = true;
-            self.emit(UiEvent::Info(
+            self.ui_note(
                 "kelir: resumed · a background job settled while this session was not running"
                     .to_string(),
-            ));
+            );
         }
         if !self.run.pending_task.trim().is_empty() || read.in_flight {
             self.record_plan_sources(true)?;

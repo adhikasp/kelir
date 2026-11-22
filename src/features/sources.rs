@@ -4,7 +4,7 @@
 
 use crate::core::boundary::{Cx, Feature};
 use crate::event::{EventBody, Payload};
-use crate::tui::UiEvent;
+use crate::tui::{View, note_event};
 
 pub struct Sources {
     watch: crate::sources::Watch,
@@ -86,7 +86,7 @@ impl Sources {
             None => crate::sources::SourcePath::Embedded,
         };
         self.record_source(kind, name, &body, &logged, cx)?;
-        cx.emit(UiEvent::Info(format!("» skills: {name}")));
+        cx.emit(View::Log(note_event(format!("» skills: {name}"))));
         cx.sync();
         Ok(())
     }
@@ -135,10 +135,10 @@ impl Sources {
                 attempt: None,
                 retry_in_ms: None,
             })?;
-            cx.emit(UiEvent::Info(format!(
+            cx.emit(View::Log(note_event(format!(
                 "» source deleted on disk: {}",
                 crate::util::path_string(&removed.path)
-            )));
+            ))));
             // The model curates its memory, so a note it can no longer find must not stay a live fact in
             // its context: a one-line tail message, the system prefix untouched.
             if removed.kind == crate::sources::SourceKind::Memory {
@@ -176,10 +176,10 @@ impl Sources {
                 &crate::sources::SourcePath::File(path.clone()),
                 cx,
             )?;
-            cx.emit(UiEvent::Info(format!(
+            cx.emit(View::Log(note_event(format!(
                 "» source changed on disk: {}",
                 crate::util::path_string(&path)
-            )));
+            ))));
         }
         // A memory note created since the start (the common case: the model
         // wrote a new file) is announced like a changed one.
@@ -194,10 +194,10 @@ impl Sources {
                     &crate::sources::SourcePath::File(found.path.clone()),
                     cx,
                 )?;
-                cx.emit(UiEvent::Info(format!(
+                cx.emit(View::Log(note_event(format!(
                     "» new memory note: {}",
                     crate::util::path_string(&found.path)
-                )));
+                ))));
                 count += 1;
             }
         }

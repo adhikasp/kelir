@@ -20,7 +20,7 @@ pub struct Cx<'a> {
     pub(crate) writer: &'a mut crate::event::EventLog,
     pub(crate) blobs: &'a mut crate::event::Blobs,
     pub(crate) events: &'a mut Vec<LogEvent>,
-    pub(crate) ui: &'a Option<mpsc::UnboundedSender<crate::tui::UiEvent>>,
+    pub(crate) ui: &'a Option<mpsc::UnboundedSender<crate::tui::View>>,
     pub(crate) cfg: &'a crate::config::Config,
     pub(crate) dir: &'a PathBuf,
     pub(crate) id: &'a str,
@@ -68,7 +68,7 @@ impl<'a> Cx<'a> {
 
     /// Send an informational UI event; a dead UI never fails a turn. Retry events
     /// carry core state (`retry_wait`) and must go through `Session::emit`, not here.
-    pub(crate) fn emit(&self, event: crate::tui::UiEvent) {
+    pub(crate) fn emit(&self, event: crate::tui::View) {
         if let Some(ui) = self.ui {
             let _ = ui.send(event);
         }

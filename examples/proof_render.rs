@@ -1,13 +1,14 @@
 //! Proof: render the idle screen and a long wrapped prompt as plain text.
 use kelir::editor::Key;
-use kelir::tui::{self, App, Press, UiEvent};
+use kelir::event::{EventBody, LogEvent, Payload};
+use kelir::tui::{self, App, Press, View};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 fn channels() -> (
-    mpsc::UnboundedSender<UiEvent>,
+    mpsc::UnboundedSender<View>,
     mpsc::UnboundedSender<kelir::ipc::Incoming>,
 ) {
     (mpsc::unbounded_channel().0, mpsc::unbounded_channel().0)
@@ -34,14 +35,31 @@ fn main() {
     let (to_tui, verbs) = channels();
     let mut app = App::new(80, 24, to_tui, verbs, String::new());
     // One finished answer so the live area has content above the editor.
-    app.apply(UiEvent::Assistant {
-        text: "Here is the answer to your first question.".into(),
-    });
-    app.apply(UiEvent::TurnEnded {
-        outcome: "done".into(),
-        final_text: "Here is the answer to your first question.".into(),
-    });
-    app.apply(UiEvent::Title("Fix the input box gap".into()));
+    app.apply(View::Log(LogEvent::new(
+        1,
+        EventBody::Assistant {
+            step: 1,
+            text: Payload::text("Here is the answer to your first question."),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            usage: None,
+        },
+    )));
+    app.apply(View::Log(LogEvent::new(
+        2,
+        EventBody::TurnEnded {
+            outcome: "done".into(),
+            reason: None,
+            final_text: Payload::text("Here is the answer to your first question."),
+        },
+    )));
+    app.apply(View::Log(LogEvent::new(
+        3,
+        EventBody::SessionTitle {
+            title: "Fix the input box gap".into(),
+        },
+    )));
     let screen: u16 = 24;
     dump(&mut app, screen, "idle with title");
 

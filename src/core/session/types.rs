@@ -9,7 +9,7 @@ pub(crate) struct Options {
     pub(crate) ask: bool,
     pub(crate) keep: bool,
     /// Interactive: an inline viewport owns the terminal and every turn is
-    /// rendered through `tui::UiEvent`s instead of stdout.
+    /// rendered through `tui::View`s instead of stdout.
     pub(crate) tui: bool,
     pub(crate) common: CommonArgs,
     /// The task words from the command line (`run`, `ask`); empty for the TUI.
@@ -151,7 +151,7 @@ pub(crate) struct Out {
     pub(crate) echo_assistant: bool,
     pub(crate) keep: bool,
     pub(crate) tui: bool,
-    pub(crate) ui: Option<mpsc::UnboundedSender<UiEvent>>,
+    pub(crate) ui: Option<mpsc::UnboundedSender<crate::tui::View>>,
     pub(crate) herdr: Option<Herdr>,
 }
 

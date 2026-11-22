@@ -6,8 +6,9 @@
 #![allow(clippy::pedantic, clippy::nursery)]
 use std::time::{Duration, Instant};
 
+use crate::support::{ApplyEv as _, Ev};
 use kelir::markdown::{self, Layout, Stream};
-use kelir::tui::{App, UiEvent, render};
+use kelir::tui::{App, render};
 use ratatui::layout::Rect;
 use serde_json::json;
 use unicode_width::UnicodeWidthStr;
@@ -24,8 +25,8 @@ fn line_text(line: &ratatui::text::Line<'_>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
-fn settled(command: &str, exit: i32) -> UiEvent {
-    UiEvent::ToolSettled {
+fn settled(command: &str, exit: i32) -> Ev {
+    Ev::ToolSettled {
         name: "bash".into(),
         input: json!({"command": command}),
         outcome: if exit == 0 { "ok" } else { "error" }.into(),
@@ -39,8 +40,8 @@ fn settled(command: &str, exit: i32) -> UiEvent {
     }
 }
 
-fn started(command: &str) -> UiEvent {
-    UiEvent::ToolStarted {
+fn started(command: &str) -> Ev {
+    Ev::ToolStarted {
         name: "bash".into(),
         input: json!({"command": command}),
     }
@@ -75,7 +76,7 @@ fn pos(rows: &[String], needle: &str) -> usize {
 }
 
 fn turn(app: &mut App) {
-    app.apply(UiEvent::TurnStarted {
+    app.push(Ev::TurnStarted {
         turn: 1,
         provider: "openrouter".into(),
         model: "m".into(),
@@ -92,15 +93,15 @@ fn b1_interleaved_prose_and_calls_keep_event_order() {
     let mut app = app(80);
     turn(&mut app);
     let full = "First I look.\n\nNext I read.\n\nDone, here is the answer.";
-    app.apply(UiEvent::Delta("First I look.".into()));
-    app.apply(started("echo one"));
-    app.apply(settled("echo one", 0));
-    app.apply(UiEvent::Delta("\n\nNext I read.".into()));
-    app.apply(started("echo two"));
-    app.apply(settled("echo two", 0));
-    app.apply(UiEvent::Delta("\n\nDone, here is the answer.".into()));
-    app.apply(UiEvent::Assistant { text: full.into() });
-    app.apply(UiEvent::TurnEnded {
+    app.push(Ev::Delta("First I look.".into()));
+    app.push(started("echo one"));
+    app.push(settled("echo one", 0));
+    app.push(Ev::Delta("\n\nNext I read.".into()));
+    app.push(started("echo two"));
+    app.push(settled("echo two", 0));
+    app.push(Ev::Delta("\n\nDone, here is the answer.".into()));
+    app.push(Ev::Assistant { text: full.into() });
+    app.push(Ev::TurnEnded {
         outcome: "done".into(),
         final_text: full.into(),
     });
@@ -120,14 +121,14 @@ fn b1_interleaved_prose_and_calls_keep_event_order() {
 fn b1_a_call_in_the_middle_of_a_paragraph_splits_it_above_the_call() {
     let mut app = app(80);
     turn(&mut app);
-    app.apply(UiEvent::Delta("I will now run the thing".into()));
-    app.apply(started("make"));
-    app.apply(settled("make", 0));
-    app.apply(UiEvent::Delta(" and report back.".into()));
-    app.apply(UiEvent::Assistant {
+    app.push(Ev::Delta("I will now run the thing".into()));
+    app.push(started("make"));
+    app.push(settled("make", 0));
+    app.push(Ev::Delta(" and report back.".into()));
+    app.push(Ev::Assistant {
         text: "I will now run the thing and report back.".into(),
     });
-    app.apply(UiEvent::TurnEnded {
+    app.push(Ev::TurnEnded {
         outcome: "done".into(),
         final_text: String::new(),
     });
@@ -146,16 +147,16 @@ fn b1_parallel_calls_settling_out_of_order_precede_the_answer() {
     let mut app = app(80);
     turn(&mut app);
     for c in ["a1", "b2", "c3"] {
-        app.apply(started(c));
+        app.push(started(c));
     }
-    app.apply(settled("c3", 0));
-    app.apply(settled("a1", 1));
-    app.apply(settled("b2", 0));
-    app.apply(UiEvent::Delta("Answer text.".into()));
-    app.apply(UiEvent::Assistant {
+    app.push(settled("c3", 0));
+    app.push(settled("a1", 1));
+    app.push(settled("b2", 0));
+    app.push(Ev::Delta("Answer text.".into()));
+    app.push(Ev::Assistant {
         text: "Answer text.".into(),
     });
-    app.apply(UiEvent::TurnEnded {
+    app.push(Ev::TurnEnded {
         outcome: "done".into(),
         final_text: String::new(),
     });
@@ -177,10 +178,10 @@ fn b1_parallel_calls_settling_out_of_order_precede_the_answer() {
 fn b1_calls_then_pause_notice_in_order() {
     let mut app = app(80);
     turn(&mut app);
-    app.apply(started("x1"));
-    app.apply(settled("x1", 0));
-    app.apply(UiEvent::Paused { steps: 1 });
-    app.apply(UiEvent::TurnEnded {
+    app.push(started("x1"));
+    app.push(settled("x1", 0));
+    app.push(Ev::Paused { steps: 1 });
+    app.push(Ev::TurnEnded {
         outcome: "paused".into(),
         final_text: String::new(),
     });
@@ -197,12 +198,10 @@ fn b1_calls_then_pause_notice_in_order() {
 fn s1_no_row_vanishes_and_none_repeats_while_a_fence_streams() {
     let mut app = app(60);
     turn(&mut app);
-    app.apply(UiEvent::Delta(
-        "Intro paragraph before the code.\n\n".into(),
-    ));
-    app.apply(UiEvent::Delta("```text\n".into()));
+    app.push(Ev::Delta("Intro paragraph before the code.\n\n".into()));
+    app.push(Ev::Delta("```text\n".into()));
     for i in 0..40 {
-        app.apply(UiEvent::Delta(format!("line-{i:02}\n")));
+        app.push(Ev::Delta(format!("line-{i:02}\n")));
         let all: Vec<String> = app.cached_rows.iter().map(line_text).collect();
         let intro = all.iter().filter(|r| r.contains("Intro paragraph")).count();
         assert_eq!(
@@ -217,8 +216,8 @@ fn s1_no_row_vanishes_and_none_repeats_while_a_fence_streams() {
             assert_eq!(n, 1, "line-{j:02} appears {n}x at i={i}: {all:#?}");
         }
     }
-    app.apply(UiEvent::Delta("```\n\nAfter.".into()));
-    app.apply(UiEvent::Assistant { text: "x".into() });
+    app.push(Ev::Delta("```\n\nAfter.".into()));
+    app.push(Ev::Assistant { text: "x".into() });
     let all: Vec<String> = app.cached_rows.iter().map(line_text).collect();
     for j in 0..40 {
         let n = all
@@ -235,8 +234,8 @@ fn s1_no_row_vanishes_and_none_repeats_while_a_fence_streams() {
 fn s5_paused_and_error_rows_stay_until_the_next_turn() {
     let mut app = app(80);
     turn(&mut app);
-    app.apply(UiEvent::Paused { steps: 2 });
-    app.apply(UiEvent::TurnEnded {
+    app.push(Ev::Paused { steps: 2 });
+    app.push(Ev::TurnEnded {
         outcome: "paused".into(),
         final_text: String::new(),
     });
@@ -252,8 +251,8 @@ fn s5_paused_and_error_rows_stay_until_the_next_turn() {
     assert!(s.contains("thinking"), "{s}");
     assert!(!s.contains("⏸"), "{s}");
 
-    app.apply(UiEvent::Error("http 401: provider refused".into()));
-    app.apply(UiEvent::TurnEnded {
+    app.push(Ev::Error("http 401: provider refused".into()));
+    app.push(Ev::TurnEnded {
         outcome: "error".into(),
         final_text: String::new(),
     });
@@ -268,7 +267,7 @@ fn steer5_rate_limited_shows_countdown_and_attempt_and_clears() {
     let mut app = app(100);
     turn(&mut app);
     let until = Instant::now() + Duration::from_secs(34);
-    app.apply(UiEvent::Retrying {
+    app.push(Ev::Retrying {
         line: "rate limited (429): retrying in 34 s, attempt 2, say stop to cancel".into(),
         until,
         status: Some(429),
@@ -283,7 +282,7 @@ fn steer5_rate_limited_shows_countdown_and_attempt_and_clears() {
     let s2 = snap(&mut app, 100);
     assert!(s2.contains("rate limited"), "{s2}");
     assert_ne!(s, s2, "countdown must change after 10 s");
-    app.apply(UiEvent::RetryingDone);
+    app.push(Ev::RetryingDone);
     let s3 = snap(&mut app, 100);
     assert!(!s3.contains("rate limited"), "{s3}");
 }
@@ -292,7 +291,7 @@ fn steer5_rate_limited_shows_countdown_and_attempt_and_clears() {
 fn steer5_a_slot_wait_is_not_a_rate_limit() {
     let mut app = app(100);
     turn(&mut app);
-    app.apply(UiEvent::Retrying {
+    app.push(Ev::Retrying {
         line: "waiting for a provider slot".into(),
         until: Instant::now() + Duration::from_secs(3),
         status: None,
@@ -306,18 +305,18 @@ fn steer5_a_slot_wait_is_not_a_rate_limit() {
 fn steer5_provider_exhaustion_reads_paused_with_the_reason() {
     let mut app = app(110);
     turn(&mut app);
-    app.apply(UiEvent::Retrying {
+    app.push(Ev::Retrying {
         line: "rate limited (503)".into(),
         until: Instant::now() + Duration::from_secs(1),
         status: Some(503),
         attempt: 1,
     });
-    app.apply(UiEvent::RetryingDone);
-    app.apply(UiEvent::Info(
+    app.push(Ev::RetryingDone);
+    app.push(Ev::Info(
         "turn paused: provider unavailable after 2 attempts: provider error (503); say continue"
             .into(),
     ));
-    app.apply(UiEvent::TurnEnded {
+    app.push(Ev::TurnEnded {
         outcome: "paused".into(),
         final_text: String::new(),
     });
@@ -340,8 +339,8 @@ async fn s6_collapse_and_bare_expand_are_not_commands() {
     assert!(rows.iter().all(|r| !r.contains("tool output")), "{rows:#?}");
     // A call is still one line each, whatever the old commands said.
     turn(&mut app);
-    app.apply(started("echo hi"));
-    app.apply(settled("echo hi", 0));
+    app.push(started("echo hi"));
+    app.push(settled("echo hi", 0));
     let rows = scroll(&mut app);
     assert!(rows.iter().any(|r| r.contains("echo hi")), "{rows:#?}");
     assert!(rows.iter().all(|r| !r.contains("call")), "{rows:#?}");
@@ -450,7 +449,7 @@ fn stream_cost(text: &str, delta: usize) -> (Duration, Duration) {
     let mut worst = Duration::ZERO;
     for chunk in text.as_bytes().chunks(delta) {
         let t = Instant::now();
-        app.apply(UiEvent::Delta(String::from_utf8_lossy(chunk).into_owned()));
+        app.push(Ev::Delta(String::from_utf8_lossy(chunk).into_owned()));
         let _ = scroll(&mut app);
         let _ = app.live_view();
         worst = worst.max(t.elapsed());
@@ -565,7 +564,7 @@ fn s1_a_long_list_block_reaches_history_while_it_streams() {
     let mut app = app(60);
     turn(&mut app);
     for i in 0..40 {
-        app.apply(UiEvent::Delta(format!(
+        app.push(Ev::Delta(format!(
             "- item-{i:02} of the list
 "
         )));
@@ -639,4 +638,72 @@ fn the_media_type_follows_the_bytes_not_the_extension() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(sniffed.map(|(format, _)| format), Some("gif"));
     assert_eq!(mime, "image/gif", "declared type must follow the bytes");
+}
+
+/// B1 regression: a failed call's diagnostic line comes from `CallSettle.tail`,
+/// not from the last line of the (head/tail-wrapped) result blob. Both the live
+/// TUI and `attach` read the same event, so one assertion covers both paths.
+#[test]
+fn a_failed_call_keeps_the_diagnostic_tail_from_the_settled_event() {
+    let mut app = app(80);
+    app.push(Ev::ToolStarted {
+        name: "bash".into(),
+        input: json!({"command": "cargo build"}),
+    });
+    app.push(Ev::ToolSettled {
+        name: "bash".into(),
+        input: json!({"command": "cargo build"}),
+        outcome: "error".into(),
+        exit_code: Some(101),
+        elapsed_ms: 10,
+        bytes: 40,
+        lines: 2,
+        spilled: false,
+        out_path: String::new(),
+        tail: "error[E0432]: unresolved import `missing_crate`".into(),
+    });
+    let rows = scroll(&mut app);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("error[E0432]: unresolved import `missing_crate`")),
+        "the diagnostic line must be on the transcript: {rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("[ END OF RESULT ]")),
+        "the row must come from CallSettle.tail, not the result blob: {rows:#?}"
+    );
+}
+
+/// N3 regression: two local echoes must each be matched to their own log
+/// event, even when an unrelated event lands between them.
+#[test]
+fn two_queued_echoes_match_by_text_not_by_position() {
+    let mut app = app(80);
+    app.push_user("FIRST_ECHO");
+    app.push_user("SECOND_ECHO");
+    let user = |text: &str| {
+        kelir::tui::View::Log(kelir::event::LogEvent::new(
+            1,
+            kelir::event::EventBody::User {
+                text: kelir::event::Payload::text(text),
+                from: "test".into(),
+                delivery: "test".into(),
+                attachments: Vec::new(),
+            },
+        ))
+    };
+    app.apply(user("SECOND_ECHO"));
+    app.push(Ev::Info("an unrelated announcement".into()));
+    app.apply(user("FIRST_ECHO"));
+    let rows = scroll(&mut app);
+    assert_eq!(
+        rows.iter().filter(|r| r.contains("FIRST_ECHO")).count(),
+        1,
+        "the first echo must not be duplicated or swallowed: {rows:#?}"
+    );
+    assert_eq!(
+        rows.iter().filter(|r| r.contains("SECOND_ECHO")).count(),
+        1,
+        "the second echo must not be duplicated or swallowed: {rows:#?}"
+    );
 }

@@ -125,7 +125,7 @@ pub(crate) async fn drive(opts: Options) -> u8 {
     // it can do is send verbs into the same channel the socket feeds.
     let mut tui = None;
     if opts.tui {
-        let (to_tui, from_session) = mpsc::unbounded_channel::<UiEvent>();
+        let (to_tui, from_session) = mpsc::unbounded_channel::<crate::tui::View>();
         let mut banner = vec![
             tui::BannerLine::plain(format!(
                 "kelir · {} · {}",
@@ -224,7 +224,7 @@ pub(crate) async fn drive(opts: Options) -> u8 {
     }
     if let Some((watchdog, to_tui)) = tui {
         // One last paint, then the terminal goes back to the shell.
-        let _ = to_tui.send(UiEvent::Quit);
+        let _ = to_tui.send(crate::tui::View::Live(crate::tui::Live::Quit));
         let _ = watchdog.await;
     }
     if opts.ask && !session.run.final_text.is_empty() {

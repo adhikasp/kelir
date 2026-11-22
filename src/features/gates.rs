@@ -12,19 +12,23 @@ use serde_json::{Value, json};
 
 use crate::core::boundary::Feature;
 use crate::event::{EventBody, LogEvent, Payload};
-use crate::tui::UiEvent;
+use crate::tui::{View, note_event};
 
 /// The core operations the gates feature needs. `Session` implements this.
 pub(crate) trait GatesCore {
     fn record(&mut self, body: EventBody) -> Result<LogEvent, String>;
     fn sync(&mut self);
-    fn emit(&self, event: UiEvent);
+    fn emit(&self, event: View);
     fn turn(&self) -> u32;
     fn tui(&self) -> bool;
     fn task_from(&self) -> &'static str;
     fn gate_ctx(&self) -> crate::gates::GateCtx<'_>;
     fn gates_config(&self) -> GatesConfig<'_>;
     fn events(&self) -> &[LogEvent];
+}
+
+fn view_note(text: String) -> View {
+    View::Log(note_event(&text))
 }
 
 /// What the feature reads from the core to build the gate runner once at start.
@@ -298,7 +302,7 @@ impl Gates {
                 if !core.tui() {
                     eprintln!("kelir: {message}");
                 }
-                core.emit(UiEvent::Info(format!("» {message}")));
+                core.emit(view_note(format!("» {message}")));
                 Ok(None)
             }
         }

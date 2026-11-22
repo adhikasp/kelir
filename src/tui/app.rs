@@ -22,7 +22,7 @@ use crate::tools_view::{self, CallLine};
 use super::keys::Press;
 use super::view;
 
-use super::{Phase, Status, UiEvent};
+use super::{Live, Phase, Status, View};
 
 /// One transcript item. Source text is kept so a resize can reflow every row
 /// from the event that made it: nothing is lost and nothing is written twice.
@@ -87,6 +87,12 @@ pub struct App {
     pub show_tail: bool,
     pub call_ordinal: u64,
     calls: HashMap<u64, CallLine>,
+    /// The call intents already painted, keyed by id, so a settlement can reuse their names.
+    call_starts: HashMap<String, (String, serde_json::Value)>,
+    /// User prompts echoed locally and not yet matched to their log event.
+    /// Matched by text, not by position: a gate or child message between the
+    /// echo and its log event must not swallow the wrong row.
+    own_user_echoes: Vec<String>,
     turn_steps: u32,
     turn_tokens: u64,
     /// Index of the paused/error summary row; it belongs to one turn only.
@@ -102,7 +108,7 @@ pub struct App {
     last_ctrl_c: Option<Instant>,
     status_records: Vec<String>,
     pub quit: bool,
-    to_tui: mpsc::UnboundedSender<UiEvent>,
+    to_tui: mpsc::UnboundedSender<View>,
     verbs: mpsc::UnboundedSender<Incoming>,
     token: String,
 }
@@ -111,7 +117,7 @@ impl App {
     pub fn new(
         width: usize,
         height: usize,
-        to_tui: mpsc::UnboundedSender<UiEvent>,
+        to_tui: mpsc::UnboundedSender<View>,
         verbs: mpsc::UnboundedSender<Incoming>,
         token: String,
     ) -> Self {
@@ -134,6 +140,8 @@ impl App {
             show_tail: false,
             call_ordinal: 0,
             calls: HashMap::new(),
+            call_starts: HashMap::new(),
+            own_user_echoes: Vec::new(),
             turn_steps: 0,
             turn_tokens: 0,
             summary_entry: None,
@@ -369,6 +377,13 @@ impl App {
     }
 
     pub fn push_user(&mut self, text: &str) {
+        self.own_user_echoes.push(text.to_string());
+        self.push_user_row(text);
+    }
+
+    /// A user row from the log: unlike a local echo it must not raise the
+    /// counter that suppresses the log copy (attach has no local echo).
+    fn push_user_row(&mut self, text: &str) {
         for line in text.lines() {
             self.append(Entry::User(line.to_string()));
         }
@@ -409,66 +424,18 @@ impl App {
         self.draft.clear();
     }
 
-    /// Apply one event from the session. The transcript is a projection of
-    /// these events in arrival order: nothing is written straight to a
-    /// terminal, so nothing can be dropped on a resize or a scroll.
-    pub fn apply(&mut self, event: UiEvent) {
+    /// Apply one view event: a durable log fact or the few live-only facts.
+    pub fn apply(&mut self, view: View) {
+        match view {
+            View::Live(live) => self.apply_live(live),
+            View::Log(event) => self.apply_log(&event),
+        }
+    }
+
+    fn apply_live(&mut self, live: Live) {
         let now = Instant::now();
-        match event {
-            UiEvent::TurnStarted {
-                turn,
-                provider,
-                model,
-                limit,
-            } => {
-                self.status.turn = turn;
-                self.status.provider = provider;
-                self.status.model = model;
-                self.status.phase = Phase::Working;
-                self.status.turn_steps = 0;
-                self.status.limit = limit;
-                self.turn_steps = 0;
-                self.turn_tokens = 0;
-                self.note.clear();
-                if let Some(index) = self.summary_entry.take()
-                    && index < self.entries.len()
-                {
-                    self.entries.remove(index);
-                    self.rewrap();
-                }
-                self.activity.step_started(now);
-            }
-            UiEvent::Step {
-                step,
-                provider,
-                model,
-                turn_steps,
-                limit,
-            } => {
-                self.status.step = step;
-                self.status.provider = provider;
-                self.status.model = model;
-                self.status.turn_steps = turn_steps;
-                self.status.limit = limit;
-                self.turn_steps = turn_steps;
-                self.status.phase = Phase::Working;
-                self.activity.step_started(now);
-                self.retry_deadline = None;
-            }
-            UiEvent::Paused { steps } => {
-                self.status.phase = Phase::Paused;
-                self.status.running = 0;
-                self.status.turn_steps = steps;
-                self.turn_steps = steps;
-                self.activity
-                    .paused(now, &format!("step cap {steps} reached"));
-                self.push_text(&format!(
-                    "turn paused after {} {}; say continue to resume",
-                    steps,
-                    view::plural(steps, "step")
-                ));
-            }
-            UiEvent::Delta(text) => {
+        match live {
+            Live::Delta(text) => {
                 self.status.phase = Phase::Working;
                 self.activity.text(now, text.chars().count());
                 self.clear_draft();
@@ -485,9 +452,6 @@ impl App {
                         }
                     }
                 }
-                // Rows that can no longer change go straight into the owned
-                // transcript; only the small tail stays as a draft. Re-rendering
-                // the whole open block on every delta would be quadratic.
                 let layout = crate::markdown::Layout::with_glyphs(self.width, self.theme.glyphs);
                 let from = self.stream.delivered_bytes();
                 let settled = self.stream.settle(layout, 3);
@@ -510,90 +474,7 @@ impl App {
                 let draft = self.stream.tail_remaining();
                 self.set_draft(draft);
             }
-            UiEvent::Usage {
-                prompt,
-                completion,
-                cached,
-            } => {
-                self.status.prompt_tokens += prompt;
-                self.status.last_prompt_tokens = prompt;
-                self.status.completion_tokens += completion;
-                self.status.cached_tokens += cached;
-                self.turn_tokens += prompt + completion;
-            }
-            UiEvent::Assistant { text } => {
-                // The stream's text wins; a reasoning-only step with no text
-                // contributes no prose and does not split a run of calls.
-                let final_text = self.stream.finish().unwrap_or_default();
-                let text = if final_text.trim().is_empty() {
-                    text
-                } else {
-                    final_text
-                };
-                if !text.trim().is_empty() {
-                    self.emit_markdown(&text);
-                }
-                self.stream = Stream::new();
-            }
-            UiEvent::ToolStarted { name, input } => {
-                // A call cannot be part of a paragraph: the prose that
-                // announced it is finished and belongs in the transcript
-                // before the call's line, not after the whole turn.
-                let streamed = self.stream.finish().unwrap_or_default();
-                if !streamed.trim().is_empty() {
-                    self.emit_markdown(&streamed);
-                }
-                self.status.running += 1;
-                self.activity
-                    .tool_started(now, &view::call_label(&name, &input));
-            }
-            UiEvent::ToolSettled {
-                name,
-                input,
-                outcome,
-                exit_code,
-                elapsed_ms: _,
-                bytes,
-                lines,
-                spilled,
-                out_path,
-                tail,
-            } => {
-                self.status.running = self.status.running.saturating_sub(1);
-                self.activity.tool_settled(now);
-                self.call_ordinal += 1;
-                let call = CallLine {
-                    ordinal: self.call_ordinal,
-                    name: name.clone(),
-                    head: view::call_head(&name, &input),
-                    outcome,
-                    exit_code,
-                    bytes,
-                    lines,
-                    spilled,
-                    out_path: out_path.clone(),
-                    tail,
-                    elapsed: None,
-                };
-                self.last_out = Some(out_path).filter(|path| !path.is_empty());
-                self.calls.insert(call.ordinal, call.clone());
-                self.append(Entry::Call(call));
-            }
-            UiEvent::Attachment { rel, bytes } => {
-                self.append(Entry::Dim(format!(
-                    "  view {rel} · {}",
-                    attachments::bytes_label(bytes)
-                )));
-            }
-            UiEvent::Info(text) => {
-                let text = if text.contains("say stop") {
-                    view::tui_wait_line(&text)
-                } else {
-                    text
-                };
-                self.push_text(&text);
-            }
-            UiEvent::Retrying {
+            Live::Retrying {
                 line,
                 until,
                 status,
@@ -612,19 +493,13 @@ impl App {
                 self.status.retrying = Some((view::tui_wait_line(&line), until));
                 self.note.clear();
             }
-            UiEvent::RetryingDone => {
+            Live::RetryingDone => {
                 self.status.retrying = None;
                 self.retry_deadline = None;
                 self.note.clear();
                 self.activity.retry_done(now);
             }
-            UiEvent::Error(text) => {
-                self.status.phase = Phase::Error;
-                self.activity
-                    .failed(now, &crate::util::one_line_visible(&text, 60));
-                self.append(Entry::Error(format!("kelir: {text}")));
-            }
-            UiEvent::Reply(response) => {
+            Live::Reply(response) => {
                 if response.ok {
                     let quiet = matches!(response.verb.as_deref(), Some("say") | Some("later"))
                         || (response.verb.as_deref() == Some("stop")
@@ -642,16 +517,128 @@ impl App {
                     self.note = crate::util::one_line_visible(&message, 60);
                 }
             }
-            UiEvent::TurnEnded {
+            Live::Herdr { state } => self.status_records.push(herdr::record(state)),
+            Live::Quit => self.quit = true,
+        }
+    }
+
+    fn apply_log(&mut self, event: &crate::event::LogEvent) {
+        use crate::event::EventBody;
+        let now = Instant::now();
+        match &event.body {
+            EventBody::SessionStarted {
+                provider, model, ..
+            } => {
+                self.status.provider = provider.clone();
+                self.status.model = model.clone();
+            }
+            EventBody::User { text, .. } => {
+                let text = payload_text(text);
+                if let Some(index) = self.own_user_echoes.iter().position(|echo| echo == &text) {
+                    self.own_user_echoes.remove(index);
+                } else if !text.is_empty() {
+                    self.push_user_row(&text);
+                }
+            }
+            EventBody::StepStarted {
+                step,
+                provider,
+                model,
+                ..
+            } => {
+                self.status.step = *step;
+                self.status.provider = provider.clone();
+                self.status.model = model.clone();
+                self.status.turn_steps += 1;
+                self.turn_steps = self.status.turn_steps;
+                if let Some(index) = self.summary_entry.take()
+                    && index < self.entries.len()
+                {
+                    self.entries.remove(index);
+                    self.rewrap();
+                }
+                self.status.phase = Phase::Working;
+                self.activity.step_started(now);
+                self.retry_deadline = None;
+            }
+            EventBody::Assistant { text, usage, .. } => {
+                let streamed = self.stream.finish().unwrap_or_default();
+                let text = payload_text(text);
+                let text = if streamed.trim().is_empty() {
+                    text
+                } else {
+                    streamed
+                };
+                if !text.trim().is_empty() {
+                    self.emit_markdown(&text);
+                }
+                self.stream = Stream::new();
+                if let Some(usage) = usage {
+                    self.add_usage(usage);
+                }
+            }
+            EventBody::StepUsage(usage) => self.add_usage(usage),
+            EventBody::CallStarted(start) if start.kind == "tool" => {
+                let streamed = self.stream.finish().unwrap_or_default();
+                if !streamed.trim().is_empty() {
+                    self.emit_markdown(&streamed);
+                }
+                let input = start
+                    .info
+                    .input
+                    .as_ref()
+                    .map(payload_value)
+                    .unwrap_or(serde_json::Value::Null);
+                self.call_starts
+                    .insert(start.id.clone(), (start.info.name.clone(), input.clone()));
+                self.status.running += 1;
+                self.activity
+                    .tool_started(now, &view::call_label(&start.info.name, &input));
+            }
+            EventBody::CallSettled(settle) => {
+                let (name, input) = self
+                    .call_starts
+                    .remove(&settle.id)
+                    .unwrap_or_else(|| (settle.kind.clone(), serde_json::Value::Null));
+                self.status.running = self.status.running.saturating_sub(1);
+                self.activity.tool_settled(now);
+                self.call_ordinal += 1;
+                let tail = settle.tail.clone().unwrap_or_else(|| {
+                    settle
+                        .result
+                        .as_ref()
+                        .map(|value| crate::tui::last_line(&payload_text(value)))
+                        .unwrap_or_default()
+                });
+                let call = CallLine {
+                    ordinal: self.call_ordinal,
+                    name: name.clone(),
+                    head: view::call_head(&name, &input),
+                    outcome: settle.outcome.clone(),
+                    exit_code: settle.exit_code,
+                    bytes: settle.bytes.unwrap_or_default(),
+                    lines: settle.lines.unwrap_or_default(),
+                    spilled: settle.spilled.unwrap_or_default(),
+                    out_path: settle.out_path.clone().unwrap_or_default(),
+                    tail,
+                    elapsed: None,
+                };
+                self.last_out = Some(call.out_path.clone()).filter(|path| !path.is_empty());
+                self.calls.insert(call.ordinal, call.clone());
+                self.append(Entry::Call(call));
+            }
+            EventBody::TurnEnded {
                 outcome,
                 final_text,
+                ..
             } => {
                 let streamed = self.stream.finish().unwrap_or_default();
                 if !streamed.trim().is_empty() {
                     self.emit_markdown(&streamed);
                 }
                 self.stream = Stream::new();
-                self.activity.turn_ended(now, &outcome);
+                self.activity.turn_ended(now, outcome);
+                let final_text = payload_text(final_text);
                 if outcome == "paused"
                     && let Some(reason) = view::pause_reason(&final_text)
                 {
@@ -666,13 +653,67 @@ impl App {
                 self.status.running = 0;
                 self.status.retrying = None;
                 self.note.clear();
-                self.turn_summary(&outcome);
+                self.turn_summary(outcome);
             }
-            UiEvent::Herdr { state } => self.status_records.push(herdr::record(state)),
-            UiEvent::Title(title) => self.status.title = title,
-            UiEvent::TitleRecord(record) => self.status_records.push(record),
-            UiEvent::Quit => self.quit = true,
+            EventBody::SessionTitle { title } => self.set_title(title.clone()),
+            EventBody::Error { message, .. } => {
+                self.status.phase = Phase::Error;
+                self.activity
+                    .failed(now, &crate::util::one_line_visible(message, 60));
+                self.append(Entry::Error(format!("kelir: {message}")));
+            }
+            EventBody::Note(note) => {
+                let text = if note.text.contains("say stop") {
+                    view::tui_wait_line(&note.text)
+                } else {
+                    note.text.clone()
+                };
+                self.push_text(&text);
+            }
+            EventBody::Source {
+                kind,
+                name,
+                text,
+                path,
+                ..
+            } => {
+                let detail = text
+                    .as_ref()
+                    .map(payload_text)
+                    .or_else(|| path.clone())
+                    .unwrap_or_default();
+                self.push_text(&format!("· {kind} {name}: {detail}"));
+            }
+            EventBody::Verb {
+                name,
+                from,
+                boundary,
+                error,
+                ..
+            } => {
+                if boundary == "rejected" {
+                    let message = error.clone().unwrap_or_else(|| format!("{name} refused"));
+                    self.status.phase = Phase::Error;
+                    self.activity
+                        .failed(now, &crate::util::one_line_visible(&message, 60));
+                    self.append(Entry::Error(format!("kelir: {message}")));
+                } else if name != "status" && name != "observe" {
+                    self.push_text(&format!("» {name} ({from}) · {boundary}"));
+                }
+            }
+            EventBody::SessionEnded { reason } => {
+                self.push_text(&format!("session ended: {reason}"));
+            }
+            _ => {}
         }
+    }
+
+    fn add_usage(&mut self, usage: &crate::event::Usage) {
+        self.status.prompt_tokens += usage.prompt_tokens;
+        self.status.last_prompt_tokens = usage.prompt_tokens;
+        self.status.completion_tokens += usage.completion_tokens;
+        self.status.cached_tokens += usage.cached_tokens;
+        self.turn_tokens += usage.prompt_tokens + usage.completion_tokens;
     }
 
     /// The one line for turns that need a human: nothing after a `done` turn.
@@ -943,7 +984,7 @@ impl App {
         let to_tui = self.to_tui.clone();
         tokio::spawn(async move {
             if let Ok(response) = answer.await {
-                let _ = to_tui.send(UiEvent::Reply(response));
+                let _ = to_tui.send(View::Live(Live::Reply(response)));
             }
         });
     }
@@ -1084,4 +1125,23 @@ fn osc52(text: &str) -> String {
     }
     out.push_str("\x1b\\");
     out
+}
+
+fn payload_text(value: &crate::event::Payload) -> String {
+    match value {
+        crate::event::Payload::Inline(value) => match value {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        },
+        crate::event::Payload::Blob(reference) => reference.preview.clone(),
+    }
+}
+
+fn payload_value(value: &crate::event::Payload) -> serde_json::Value {
+    match value {
+        crate::event::Payload::Inline(inner) => inner.clone(),
+        crate::event::Payload::Blob(reference) => {
+            serde_json::json!({"path": reference.path, "bytes": reference.bytes})
+        }
+    }
 }

@@ -11,7 +11,7 @@ use ratatui::crossterm::terminal::LeaveAlternateScreen;
 use tokio::sync::mpsc;
 
 use super::keys;
-use super::{BannerLine, Tui, UiEvent};
+use super::{BannerLine, Tui, View};
 use crate::ipc::Incoming;
 use crate::theme::Theme;
 
@@ -69,8 +69,8 @@ pub fn install_panic_hook(previous: Box<dyn Fn(&std::panic::PanicHookInfo) + Sen
 /// Take the terminal (raw mode, alternate screen, panic hook, keyboard), the
 /// event stream and the banner. The caller has already checked stdout is a TTY.
 pub fn start(
-    events: mpsc::UnboundedReceiver<UiEvent>,
-    to_tui: mpsc::UnboundedSender<UiEvent>,
+    events: mpsc::UnboundedReceiver<View>,
+    to_tui: mpsc::UnboundedSender<View>,
     verbs: mpsc::UnboundedSender<Incoming>,
     banner: &[BannerLine],
     cap: Option<u32>,

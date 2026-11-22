@@ -4,7 +4,8 @@
 
 // Test crates target behaviour, not pedantic style (#23).
 #![allow(clippy::pedantic, clippy::nursery)]
-use kelir::tui::{App, Phase, Status, UiEvent, facts_for_width, status_text};
+use crate::support::{ApplyEv as _, Ev};
+use kelir::tui::{App, Phase, Status, facts_for_width, status_text};
 use serde_json::json;
 
 fn app(width: usize) -> App {
@@ -17,8 +18,8 @@ fn line_text(line: &ratatui::text::Line<'_>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
-fn call(name: &str, input: serde_json::Value, outcome: &str, exit: Option<i32>) -> UiEvent {
-    UiEvent::ToolSettled {
+fn call(name: &str, input: serde_json::Value, outcome: &str, exit: Option<i32>) -> Ev {
+    Ev::ToolSettled {
         name: name.into(),
         input,
         outcome: outcome.into(),
@@ -36,11 +37,11 @@ fn call(name: &str, input: serde_json::Value, outcome: &str, exit: Option<i32>) 
     }
 }
 
-fn ok(command: &str) -> UiEvent {
+fn ok(command: &str) -> Ev {
     call("bash", json!({"command": command}), "ok", Some(0))
 }
 
-fn bad(command: &str, code: i32) -> UiEvent {
+fn bad(command: &str, code: i32) -> Ev {
     call("bash", json!({"command": command}), "ok", Some(code))
 }
 
@@ -49,8 +50,8 @@ fn rows(app: &mut App) -> Vec<String> {
 }
 
 fn prose(app: &mut App, text: &str) {
-    app.apply(UiEvent::Delta(text.into()));
-    app.apply(UiEvent::Assistant { text: text.into() });
+    app.push(Ev::Delta(text.into()));
+    app.push(Ev::Assistant { text: text.into() });
 }
 
 /// Every call keeps its own line AND its failed ones keep their tail, wherever
@@ -66,7 +67,7 @@ fn every_failure_in_a_fold_keeps_its_line_and_tail() {
         bad("second-fail", 7),
         ok("d"),
     ] {
-        app.apply(event);
+        app.push(event);
     }
     prose(&mut app, "done");
     let scroll = rows(&mut app);
@@ -97,7 +98,7 @@ fn every_failure_in_a_fold_keeps_its_line_and_tail() {
 fn an_all_failed_run_has_no_checkmark_line() {
     let mut app = app(80);
     for c in ["x", "y", "z"] {
-        app.apply(bad(c, 1));
+        app.push(bad(c, 1));
     }
     prose(&mut app, "all failed");
     let scroll = rows(&mut app);
@@ -117,14 +118,14 @@ fn an_all_failed_run_has_no_checkmark_line() {
 #[test]
 fn an_edit_inside_a_fold_keeps_its_own_line() {
     let mut app = app(80);
-    app.apply(ok("cat a"));
-    app.apply(call(
+    app.push(ok("cat a"));
+    app.push(call(
         "edit",
         json!({"path": "src/lib.rs", "old": "a", "new": "b"}),
         "ok",
         None,
     ));
-    app.apply(ok("cargo test"));
+    app.push(ok("cargo test"));
     prose(&mut app, "patched");
     let scroll = rows(&mut app);
     assert!(
@@ -147,15 +148,15 @@ fn an_edit_inside_a_fold_keeps_its_own_line() {
 #[test]
 fn a_cancelled_call_is_not_counted_as_a_checked_call() {
     let mut app = app(80);
-    app.apply(ok("a"));
-    app.apply(ok("b"));
-    app.apply(call(
+    app.push(ok("a"));
+    app.push(ok("b"));
+    app.push(call(
         "bash",
         json!({"command": "sleep 20"}),
         "stopped",
         None,
     ));
-    app.apply(UiEvent::TurnEnded {
+    app.push(Ev::TurnEnded {
         outcome: "stopped".into(),
         final_text: String::new(),
     });
@@ -187,10 +188,10 @@ fn prose_and_folds_keep_event_order() {
     let mut app = app(60);
     prose(&mut app, "Before the calls.");
     for c in ["a", "b", "c"] {
-        app.apply(ok(c));
+        app.push(ok(c));
     }
     prose(&mut app, "After the calls.");
-    app.apply(ok("solo"));
+    app.push(ok("solo"));
     prose(&mut app, "After the solo call.");
     let scroll = rows(&mut app);
     let at = |needle: &str| {
@@ -211,9 +212,9 @@ fn prose_and_folds_keep_event_order() {
 fn a_streaming_delta_commits_the_fold_before_its_own_rows() {
     let mut app = app(60);
     for c in ["a", "b", "c"] {
-        app.apply(ok(c));
+        app.push(ok(c));
     }
-    app.apply(UiEvent::Delta(
+    app.push(Ev::Delta(
         "First paragraph.\n\nSecond paragraph being streamed".into(),
     ));
     let mut scroll = rows(&mut app);
@@ -235,7 +236,7 @@ fn a_streaming_delta_commits_the_fold_before_its_own_rows() {
 fn the_open_group_preview_equals_what_commits() {
     let mut app = app(80);
     for event in [ok("a"), bad("f", 1), ok("b"), ok("c")] {
-        app.apply(event);
+        app.push(event);
     }
     let live: Vec<String> = app.live_lines().iter().map(line_text).collect();
     prose(&mut app, "x");
@@ -259,26 +260,26 @@ fn outcome_lines_exist_only_for_turns_that_need_a_human() {
         ("error", true),
     ] {
         let mut app = app(80);
-        app.apply(UiEvent::TurnStarted {
+        app.push(Ev::TurnStarted {
             turn: 1,
             provider: "p".into(),
             model: "m".into(),
             limit: None,
         });
-        app.apply(UiEvent::Step {
+        app.push(Ev::Step {
             step: 1,
             provider: "p".into(),
             model: "m".into(),
             turn_steps: 1,
             limit: None,
         });
-        app.apply(UiEvent::Usage {
+        app.push(Ev::Usage {
             prompt: 900,
             completion: 100,
             cached: 800,
         });
         prose(&mut app, "answer");
-        app.apply(UiEvent::TurnEnded {
+        app.push(Ev::TurnEnded {
             outcome: outcome.into(),
             final_text: "answer".into(),
         });

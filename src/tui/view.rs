@@ -168,14 +168,6 @@ pub fn pause_reason(message: &str) -> Option<String> {
 }
 
 /// `1 step`, `2 steps`: the count and its noun, never `1 steps`.
-pub fn plural(count: u32, noun: &str) -> String {
-    if count == 1 {
-        noun.to_string()
-    } else {
-        format!("{noun}s")
-    }
-}
-
 /// The one-line label for a running call in the state row.
 pub fn call_label(name: &str, input: &Value) -> String {
     if let Some(label) = tools_view::description(input) {

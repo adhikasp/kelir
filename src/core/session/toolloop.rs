@@ -53,10 +53,6 @@ impl Session {
                     ..crate::event::CallInfo::default()
                 },
             ))?;
-            self.emit(UiEvent::ToolStarted {
-                name: call.name.clone(),
-                input: call.args.clone(),
-            });
             let dir = dir_name;
             // The job registry: a call's output dir name is the id its `bg` reports carry, so the
             // session registers it before the shim starts.
@@ -289,6 +285,16 @@ impl Session {
                         crate::util::truncate_bytes(result, self.cfg.spill_limit.max(1024));
                 }
             }
+            // A failed call's tail row: the last line it printed, so the
+            // transcript says *why* without unfolding anything. It is written
+            // into the event, not recomputed by the view from the result blob.
+            let tail = if outcome.outcome == "ok" && outcome.exit_code.unwrap_or(0) == 0 {
+                String::new()
+            } else {
+                call_tail(&outcome)
+                    .or_else(|| last_result_line(&outcome.result))
+                    .unwrap_or_default()
+            };
             self.record(crate::event::call_settle(
                 &call.id,
                 "tool",
@@ -299,14 +305,15 @@ impl Session {
                     .lines(outcome.lines)
                     .out_path(&outcome.out_path)
                     .spilled(outcome.spilled)
-                    .result(outcome.result.clone().into()),
+                    .result(outcome.result.clone().into())
+                    .tail(tail),
             ))?;
             // A promoted call became a background job at this instant: a reader of the log should see the job, not
             // have to infer it from the `promoted` outcome.
             if outcome.outcome == "promoted" {
                 promoted.push(dir.clone());
             }
-            // The TUI renders its own line from `UiEvent::ToolSettled`; only the
+            // The TUI renders its own line from the call-settled log event; only the
             // headless path prints here, so the painter is the only writer.
             if !self.out.json && !self.out.tui {
                 let line = format!(
@@ -325,27 +332,6 @@ impl Session {
                     println!("{line}");
                 }
             }
-            // A failed call's tail row: the last line it printed, so the
-            // transcript says *why* without unfolding anything.
-            let tail = if outcome.outcome == "ok" && outcome.exit_code.unwrap_or(0) == 0 {
-                String::new()
-            } else {
-                call_tail(&outcome)
-                    .or_else(|| last_result_line(&outcome.result))
-                    .unwrap_or_default()
-            };
-            self.emit(UiEvent::ToolSettled {
-                name: call.name.clone(),
-                input: call.args.clone(),
-                outcome: outcome.outcome.clone(),
-                exit_code: outcome.exit_code,
-                elapsed_ms: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
-                bytes: outcome.bytes,
-                lines: outcome.lines,
-                spilled: outcome.spilled,
-                out_path: outcome.out_path.clone(),
-                tail,
-            });
         }
         self.sync();
         // Now that the batch's results are all in the log, a promoted call's job can be recorded
@@ -445,29 +431,29 @@ impl Session {
         loop {
             if let Some(slot) = governor.try_acquire() {
                 if announced {
-                    self.emit(UiEvent::RetryingDone);
+                    self.emit(crate::tui::View::Live(crate::tui::Live::RetryingDone));
                 }
                 return Ok(SlotWait::Taken(Some(slot)));
             }
             if !announced {
                 announced = true;
                 let line = format!("waiting for a provider slot ({})", governor.slots());
-                self.emit(UiEvent::Info(format!("» {line} …")));
-                self.emit(UiEvent::Retrying {
+                self.ui_note(format!("» {line} …"));
+                self.emit(crate::tui::View::Live(crate::tui::Live::Retrying {
                     line,
                     until: Instant::now() + Duration::from_secs(86_400),
                     // A slot wait is not a provider retry: no status, no attempt,
                     // so the state row keeps saying what it was doing.
                     status: None,
                     attempt: 0,
-                });
+                }));
             }
             match self.wait_for(rx, SLOT_POLL, inbox_open).await? {
                 // The slot poll is a poll: a verb that ends the *wait* just means "look again", and the next
                 // look takes the slot if it is free. The verb itself was already applied or queued.
                 Waited::Timeout | Waited::Retry => {}
                 Waited::End(end) => {
-                    self.emit(UiEvent::RetryingDone);
+                    self.emit(crate::tui::View::Live(crate::tui::Live::RetryingDone));
                     return Ok(SlotWait::Interrupted(*end));
                 }
             }
@@ -478,15 +464,15 @@ impl Session {
     /// event was already recorded, so NDJSON carries it; this is the human line.
     pub(crate) fn show_wait(&mut self, status: Option<u16>, wait: Duration, attempt: u32) {
         let line = crate::retry::wait_line(status, wait, attempt);
-        self.emit(UiEvent::Info(format!("» {line}")));
+        self.ui_note(format!("» {line}"));
         if !self.out.json && !self.out.tui {
             eprintln!("kelir: {line}");
         }
-        self.emit(UiEvent::Retrying {
+        self.emit(crate::tui::View::Live(crate::tui::Live::Retrying {
             line,
             until: Instant::now() + wait,
             status,
             attempt,
-        });
+        }));
     }
 }

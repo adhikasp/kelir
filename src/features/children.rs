@@ -20,7 +20,7 @@ use crate::core::session::util::new_session_id;
 use crate::event::{EventBody, LogEvent, Payload};
 use crate::features::children_ops::{run_child, wake_text};
 use crate::ipc::{self, Incoming, Request, Response};
-use crate::tui::UiEvent;
+use crate::tui::{View, note_event};
 use crate::verbs::{Pending, Verb};
 
 /// What the session keeps about the family it is in.
@@ -580,10 +580,10 @@ impl Session {
             delivery: "next".into(),
             attachments: Vec::new(),
         })?;
-        self.emit(UiEvent::Info(format!(
+        self.emit(View::Log(note_event(format!(
             "» {}",
             crate::util::one_line_visible(&text, 200)
-        )));
+        ))));
         self.sync();
         Ok(true)
     }

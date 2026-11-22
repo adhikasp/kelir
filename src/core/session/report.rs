@@ -107,6 +107,9 @@ impl Session {
             .writer
             .append(body)
             .map_err(|error| format!("cannot append to the event log: {error}"))?;
+        // One place to append and to publish: the live TUI and `attach` now
+        // consume the very same event, with no translation layer between.
+        self.emit(crate::tui::View::Log(event.clone()));
         if self.out.json {
             let stdout = std::io::stdout();
             let mut lock = stdout.lock();
@@ -125,7 +128,6 @@ impl Session {
             self.record(EventBody::SessionTitle {
                 title: title.clone(),
             })?;
-            self.emit(UiEvent::Title(title.clone()));
             self.report_title(&title);
         }
         Ok(event)
@@ -144,7 +146,7 @@ impl Session {
                 kind: warning.kind.to_string(),
                 text: warning.message.clone(),
             }));
-            self.emit(UiEvent::Info(format!("» warning: {}", warning.message)));
+            self.ui_note(format!("» warning: {}", warning.message));
             if !self.out.json && !self.out.tui {
                 eprintln!("kelir: warning: {}", warning.message);
             }
@@ -199,20 +201,20 @@ impl Session {
 
     /// Tell the UI what happened. A closed UI is not an error: the session is
     /// the source of truth and keeps working headless.
-    pub(crate) fn emit(&self, event: UiEvent) {
+    pub(crate) fn emit(&self, event: crate::tui::View) {
         match &event {
-            UiEvent::Retrying {
+            crate::tui::View::Live(crate::tui::Live::Retrying {
                 until,
                 status,
                 attempt,
                 ..
-            } => self.retry_wait.set(Some((
+            }) => self.retry_wait.set(Some((
                 *until,
                 *status,
                 *attempt,
                 *attempt == 0 && status.is_none(),
             ))),
-            UiEvent::RetryingDone => self.retry_wait.set(None),
+            crate::tui::View::Live(crate::tui::Live::RetryingDone) => self.retry_wait.set(None),
             _ => {}
         }
         if let Some(ui) = &self.out.ui {
@@ -227,7 +229,7 @@ impl Session {
         };
         let state = crate::herdr::state_for(state, herdr.telegram());
         if self.out.tui {
-            self.emit(UiEvent::Herdr { state });
+            self.emit(crate::tui::View::Live(crate::tui::Live::Herdr { state }));
         } else if let Some(herdr) = &mut self.out.herdr {
             herdr.report(state);
         }
@@ -235,14 +237,25 @@ impl Session {
 
     /// Set the Herdr pane title from the session title. In the TUI the record travels with the
     /// other status records and is written between paints; non-TUI paths write it here.
+    /// A human-only line: it goes to the view, never to the durable log. The
+    /// log keeps facts, not every UI announcement (the existing log-count tests depend on it), so this is a synthetic event with no sequence number.
+    pub(crate) fn ui_note(&mut self, text: impl Into<String>) {
+        self.emit(crate::tui::View::Log(crate::tui::note_event(text)));
+    }
+
+    /// An error the UI must show, also without adding a log record.
+    pub(crate) fn ui_error(&mut self, message: impl Into<String>) {
+        self.emit(crate::tui::View::Log(crate::tui::error_event(message)));
+    }
+
     pub(crate) fn report_title(&mut self, title: &str) {
         if self.out.herdr.is_none() {
             return;
         }
         let record = crate::herdr::title_record(title);
-        if self.out.tui {
-            self.emit(UiEvent::TitleRecord(record));
-        } else if let Some(herdr) = &mut self.out.herdr {
+        if !self.out.tui
+            && let Some(herdr) = &mut self.out.herdr
+        {
             herdr.write_record(&record);
         }
     }
@@ -269,10 +282,6 @@ impl Session {
 
     /// One turn is over: the UI gets its outcome, Herdr gets its word.
     pub(crate) fn finish_turn(&mut self, outcome: &str) {
-        self.emit(UiEvent::TurnEnded {
-            outcome: outcome.to_string(),
-            final_text: self.run.final_text.clone(),
-        });
         let state = match outcome {
             "done" => HerdrState::Done,
             "error" => HerdrState::Error,

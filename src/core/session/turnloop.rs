@@ -9,12 +9,6 @@ impl Session {
     pub(crate) async fn drive_turn(&mut self, rx: &mut Inbox) -> Result<TurnEnd, String> {
         self.run.final_text.clear();
         self.run.retryable_failure = false;
-        self.emit(UiEvent::TurnStarted {
-            turn: self.run.turn,
-            provider: self.provider.provider_name.clone(),
-            model: self.provider.model.clone(),
-            limit: self.cfg.max_steps,
-        });
         self.report(HerdrState::Working);
         self.run.turn_steps = 0;
         self.gates_do(|gates, _| gates.reset_turn());
@@ -24,7 +18,6 @@ impl Session {
             if let Some(cap) = self.cfg.max_steps
                 && self.run.turn_steps >= cap
             {
-                self.emit(UiEvent::Paused { steps: cap });
                 return Ok(TurnEnd::Paused(PauseReport::steps(cap)));
             }
             self.run.turn_steps += 1;
@@ -155,13 +148,6 @@ impl Session {
                 model: self.provider.model.clone(),
                 request_hash: crate::util::fnv1a64_hex(request_text.as_bytes()),
             })?;
-            self.emit(UiEvent::Step {
-                step,
-                provider: self.provider.provider_name.clone(),
-                model: self.provider.model.clone(),
-                turn_steps: self.run.turn_steps,
-                limit: self.cfg.max_steps,
-            });
 
             let assembler = match self.stream(rx, RequestFor::Step, false).await? {
                 StreamEnd::Assembled(assembler) => assembler,
@@ -198,16 +184,10 @@ impl Session {
                     kind: None,
                 }),
             })?;
-            self.emit(UiEvent::Assistant { text: text.clone() });
             if let Some(usage) = &assembler.usage {
                 // The size of the context the provider just saw: what the auto
                 // trigger compares to the window.
                 self.compact.last_prompt_tokens = Some(usage.prompt_tokens);
-                self.emit(UiEvent::Usage {
-                    prompt: usage.prompt_tokens,
-                    completion: usage.completion_tokens,
-                    cached: usage.cached_tokens,
-                });
                 self.note_warnings();
             }
             // Even a turn that ends up stopped keeps the last thing the model
@@ -269,7 +249,6 @@ impl Session {
                 if let Some(cap) = self.run.step_cap
                     && self.run.turn_steps >= cap
                 {
-                    self.emit(UiEvent::Paused { steps: cap });
                     return Ok(TurnEnd::Paused(PauseReport::steps(cap)));
                 }
                 return Ok(TurnEnd::Done);
@@ -569,7 +548,7 @@ impl Session {
                 Waited::Timeout => {}
                 // `model`/`say --now`: a *new* request, sent now, with a fresh slot and a fresh budget.
                 Waited::Retry => {
-                    self.emit(UiEvent::RetryingDone);
+                    self.emit(crate::tui::View::Live(crate::tui::Live::RetryingDone));
                     budget = crate::retry::Budget::new(budget_wait, policy.max_attempts);
                     attempt = 1;
                     rebuild = true;
@@ -578,11 +557,11 @@ impl Session {
                 // A verb ended the turn during the wait: the wait's note is cleared here too, so no
                 // swap/`end` race can leave a stale countdown behind.
                 Waited::End(end) => {
-                    self.emit(UiEvent::RetryingDone);
+                    self.emit(crate::tui::View::Live(crate::tui::Live::RetryingDone));
                     return Ok(*end);
                 }
             }
-            self.emit(UiEvent::RetryingDone);
+            self.emit(crate::tui::View::Live(crate::tui::Live::RetryingDone));
             attempt = attempt.saturating_add(1);
         }
     }
@@ -608,7 +587,9 @@ impl Session {
                     crash_now("mid_stream");
                 }
                 if let Some(ui) = &ui {
-                    let _ = ui.send(UiEvent::Delta(text.clone()));
+                    let _ = ui.send(crate::tui::View::Live(crate::tui::Live::Delta(
+                        text.clone(),
+                    )));
                 }
             }
         };

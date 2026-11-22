@@ -21,8 +21,9 @@ kelir attach <session|name> [--follow] [--since N] [--raw] [--plain] [--steer]
   process dies. The tail reader keeps a partial last line until the writer finishes it (torn-line
   tolerance), skips a line over 1 MB, and never loads the log whole.
 - `--raw` prints the original NDJSON lines. `--plain` prints unstyled text for pipes. By default
-  each event is rendered through the TUI's `UiEvent`/row model: the state row, collapsed tool
-  calls (including `bash` descriptions), markdown prose and outcome lines are the same.
+  each log event is fed to the same `App` as `View::Log`: the state row, collapsed tool
+  calls (including `bash` descriptions), markdown prose and outcome lines are the same. Human-only
+  announcements use a synthetic note view, so they add no log records.
 - The viewer is **read-only**: it never writes to the session dir, it opens no socket unless
   `--steer` is given, and disconnecting cannot affect the session. A bounded 4,000-row backlog
   keeps the working set under 10 MB even on a 100k-event log.

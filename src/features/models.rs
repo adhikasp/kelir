@@ -5,6 +5,7 @@ use tokio::sync::oneshot;
 
 use crate::core::boundary::{Cx, Feature};
 use crate::provider::Client;
+use crate::tui::note_event;
 
 /// The provider's model list and how this process came by it.
 pub struct ModelList {
@@ -270,7 +271,7 @@ impl Models {
                 line.push_str(" · ");
                 line.push_str(note);
             }
-            cx.emit(crate::tui::UiEvent::Info(line));
+            cx.emit(crate::tui::View::Log(note_event(&line)));
         }
         self.window = window;
         self.window_source = source;
@@ -315,9 +316,9 @@ impl Models {
         let (window, source) = crate::models::resolve(over, self.models.as_ref(), false, &model);
         // A swap is the one moment a person must be told the window changed.
         if window != self.window || source != self.window_source {
-            cx.emit(crate::tui::UiEvent::Info(format!(
+            cx.emit(crate::tui::View::Log(note_event(format!(
                 "» window {window} tokens ({source})"
-            )));
+            ))));
         }
         self.window = window;
         self.window_source = source;

@@ -9,9 +9,9 @@ use std::io::{Read as _, Write as _};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::support::{Mock, Reply, run_task, sse, text_turn, tool_turn};
+use crate::support::{ApplyEv as _, Ev, Mock, Reply, run_task, sse, text_turn, tool_turn};
 use kelir::commands::{self, Action, Parsed};
-use kelir::tui::{self, App, Phase, UiEvent};
+use kelir::tui::{self, App, Phase};
 
 /// Full-screen height the snapshot tests render at.
 pub(crate) const SCREEN: u16 = 20;
@@ -24,7 +24,7 @@ use serde_json::json;
 // ----------------------------------------------------------------- snapshots
 
 fn channels() -> (
-    tokio::sync::mpsc::UnboundedSender<UiEvent>,
+    tokio::sync::mpsc::UnboundedSender<kelir::tui::View>,
     tokio::sync::mpsc::UnboundedSender<kelir::ipc::Incoming>,
 ) {
     let (to_tui, _events) = tokio::sync::mpsc::unbounded_channel();
@@ -187,11 +187,11 @@ fn a_settled_long_answer_leaves_no_blank_gap_above_the_input() {
         + &"A long paragraph that wraps across several editor columns and scrolls \
             through the terminal as it is committed, with enough words to fill many rows. "
             .repeat(12);
-    app.apply(UiEvent::Delta(answer.clone()));
-    app.apply(UiEvent::Assistant {
+    app.push(Ev::Delta(answer.clone()));
+    app.push(Ev::Assistant {
         text: answer.clone(),
     });
-    app.apply(UiEvent::TurnEnded {
+    app.push(Ev::TurnEnded {
         outcome: "done".into(),
         final_text: answer,
     });
@@ -215,24 +215,24 @@ fn a_settled_long_answer_leaves_no_blank_gap_above_the_input() {
 #[test]
 fn snapshot_streaming_text_in_the_live_area() {
     let mut app = new_app();
-    app.apply(UiEvent::TurnStarted {
+    app.push(Ev::TurnStarted {
         turn: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
         limit: None,
     });
-    app.apply(UiEvent::Step {
+    app.push(Ev::Step {
         step: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
         turn_steps: 1,
         limit: None,
     });
-    app.apply(UiEvent::Delta("Hello **wor".into()));
+    app.push(Ev::Delta("Hello **wor".into()));
     let screen = snapshot(&mut app);
     // The unclosed `**` stays literal (a streamed prefix is not a mistake).
     assert!(screen.contains("Hello **wor"), "{screen:?}");
-    app.apply(UiEvent::Delta("ld**\n\n".into()));
+    app.push(Ev::Delta("ld**\n\n".into()));
     let screen = snapshot(&mut app);
     let state = state_row(&screen);
     assert!(state.contains("writing"), "{screen:?}");
@@ -250,16 +250,16 @@ fn snapshot_streaming_text_in_the_live_area() {
 #[test]
 fn snapshot_a_running_call() {
     let mut app = new_app();
-    app.apply(UiEvent::TurnStarted {
+    app.push(Ev::TurnStarted {
         turn: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
         limit: None,
     });
-    app.apply(UiEvent::Assistant {
+    app.push(Ev::Assistant {
         text: String::new(),
     });
-    app.apply(UiEvent::ToolStarted {
+    app.push(Ev::ToolStarted {
         name: "bash".into(),
         input: json!({"command": "sleep 1"}),
     });
@@ -274,13 +274,13 @@ fn snapshot_a_running_call() {
 #[test]
 fn snapshot_an_error() {
     let mut app = new_app();
-    app.apply(UiEvent::TurnStarted {
+    app.push(Ev::TurnStarted {
         turn: 1,
         provider: "openrouter".into(),
         model: "test/model".into(),
         limit: None,
     });
-    app.apply(UiEvent::Error("provider said no".into()));
+    app.push(Ev::Error("provider said no".into()));
     assert_eq!(app.status.phase, Phase::Error);
     let screen = snapshot(&mut app);
     let state = state_row(&screen);
@@ -298,7 +298,7 @@ fn snapshot_the_output_tail_view() {
     let out = dir.path().join("out");
     std::fs::write(&out, "line one\nline two\nline three\n").unwrap();
     let mut app = new_app();
-    app.apply(UiEvent::ToolSettled {
+    app.push(Ev::ToolSettled {
         name: "bash".into(),
         input: json!({"command": "cargo test"}),
         outcome: "ok".into(),
@@ -377,13 +377,13 @@ fn snapshot_narrow_panes_keep_every_row_inside_its_width() {
             verbs,
             String::new(),
         );
-        app.apply(UiEvent::TurnStarted {
+        app.push(Ev::TurnStarted {
             turn: 1,
             provider: "openrouter".into(),
             model: "deepseek/deepseek-v4.1-flash-1017".into(),
             limit: None,
         });
-        app.apply(UiEvent::ToolStarted {
+        app.push(Ev::ToolStarted {
             name: "bash".into(),
             input: json!({"command": "cargo test --all-targets -- --nocapture"}),
         });
@@ -405,7 +405,7 @@ fn snapshot_narrow_panes_keep_every_row_inside_its_width() {
 fn snapshot_the_idle_and_working_rows_are_visibly_different() {
     let mut app = new_app();
     let idle = render_at(&mut app, 60);
-    app.apply(UiEvent::TurnStarted {
+    app.push(Ev::TurnStarted {
         turn: 1,
         provider: "p".into(),
         model: "m".into(),
@@ -428,7 +428,7 @@ fn snapshot_the_idle_and_working_rows_are_visibly_different() {
 fn every_tool_call_commits_its_line_without_a_fold() {
     let mut app = new_app();
     for command in ["git --version", "python --version", "cargo fmt"] {
-        app.apply(UiEvent::ToolSettled {
+        app.push(Ev::ToolSettled {
             name: "bash".into(),
             input: json!({"command": command}),
             outcome: "ok".into(),
@@ -2026,7 +2026,7 @@ fn three_turns_with_calls_and_long_answers_are_all_reachable() {
     let mut app = new_app();
     let mut answers = Vec::new();
     for turn in 1..=3 {
-        app.apply(UiEvent::TurnStarted {
+        app.push(Ev::TurnStarted {
             turn,
             provider: "openrouter".into(),
             model: "test/model".into(),
@@ -2038,12 +2038,12 @@ fn three_turns_with_calls_and_long_answers_are_all_reachable() {
             "a long sentence that wraps across several rows of the viewport ".repeat(6)
         );
         answers.push(answer.clone());
-        app.apply(UiEvent::Delta(answer.clone()));
-        app.apply(UiEvent::ToolStarted {
+        app.push(Ev::Delta(answer.clone()));
+        app.push(Ev::ToolStarted {
             name: "bash".into(),
             input: serde_json::json!({"command": format!("echo {turn}")}),
         });
-        app.apply(UiEvent::ToolSettled {
+        app.push(Ev::ToolSettled {
             name: "bash".into(),
             input: serde_json::json!({"command": format!("echo {turn}")}),
             outcome: "ok".into(),
@@ -2055,10 +2055,10 @@ fn three_turns_with_calls_and_long_answers_are_all_reachable() {
             out_path: String::new(),
             tail: String::new(),
         });
-        app.apply(UiEvent::Assistant {
+        app.push(Ev::Assistant {
             text: answer.clone(),
         });
-        app.apply(UiEvent::TurnEnded {
+        app.push(Ev::TurnEnded {
             outcome: "done".into(),
             final_text: answer,
         });
@@ -2399,17 +2399,30 @@ fn drive_full_screen_pty(
         );
     }
 
-    // One PageUp shows the previous page (turn two), not the tail.
+    // One PageUp shows the previous page (turn two), not the tail. Poll for
+    // both halves of that state: the repaint is asynchronous, so a single
+    // snapshot can still be the old frame.
     send(b"\x1b[5~");
-    let up_one = wait_screen(0, 30, 90, "SECOND_ANSWER");
-    assert!(
-        up_one.contains("SECOND_PROMPT"),
-        "second prompt not visible: {up_one:?}"
-    );
+    let deadline = Instant::now() + crate::support::CEILING;
+    let up_one = loop {
+        let view = screen_text(&raw(), 0, 30, 90);
+        if view.contains("SECOND_ANSWER")
+            && view.contains("SECOND_PROMPT")
+            && !view.contains("THIRD_ANSWER")
+        {
+            break view;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "PageUp did not reach turn two: {view:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
     assert!(
         !up_one.contains("THIRD_ANSWER"),
-        "tail still visible after one PageUp: {up_one:?}"
+        "PageUp did not reach turn two: {up_one:?}"
     );
+
     // Home jumps to the oldest turn.
     send(b"\x1b[H");
     let up_two = wait_screen(0, 30, 90, "FIRST_ANSWER");
@@ -2452,8 +2465,15 @@ fn drive_full_screen_pty(
     send(b"\x1b[5~");
     let up_again = wait_screen(resize_at, 24, 60, "SECOND_ANSWER");
     assert!(
-        up_again.contains("SECOND_PROMPT"),
+        !up_again.contains("THIRD_ANSWER"),
         "resize lost the scroll position: {up_again:?}"
+    );
+    // The prompt for that answer is one page further up at this width.
+    send(b"\x1b[5~");
+    let up_prompt = wait_screen(resize_at, 24, 60, "SECOND_PROMPT");
+    assert!(
+        !up_prompt.contains("THIRD_ANSWER"),
+        "the second prompt must be reachable after resize: {up_prompt:?}"
     );
     send(b"\x1b[H");
     let top_again = wait_screen(resize_at, 24, 60, "FIRST_ANSWER");

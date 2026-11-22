@@ -64,22 +64,20 @@ impl Session {
     ) -> Result<Option<TurnEnd>, String> {
         match self.compact(rx, request).await {
             Ok(CompactRun::Applied(info)) => {
-                self.emit(UiEvent::Info(format!(
+                self.ui_note(format!(
                     "» compacted through seq {}: ~{} → ~{} tokens ({} pinned) · cache restarts",
                     info.through_seq, info.tokens_before, info.tokens_after, info.pinned
-                )));
+                ));
                 if info.tokens_after >= info.tokens_before {
-                    self.emit(UiEvent::Info(format!(
+                    self.ui_note(format!(
                         "» compact: it did not shrink the context (~{} → ~{} tokens); the event \
                          records both",
                         info.tokens_before, info.tokens_after
-                    )));
+                    ));
                 }
             }
             Ok(CompactRun::Nothing) => {
-                self.emit(UiEvent::Info(
-                    "» compact: nothing old enough to summarise".to_string(),
-                ));
+                self.ui_note("» compact: nothing old enough to summarise".to_string());
             }
             Ok(CompactRun::Skipped { before, would_be }) => {
                 // A summary that cannot shrink the context buys nothing, so it is not requested
@@ -90,7 +88,7 @@ impl Session {
                     "automatic compaction skipped: the summary and pins would not be smaller \
                      than the range they replace (~{before} → ~{would_be} tokens)"
                 );
-                self.emit(UiEvent::Info(format!("» compact skipped: {message}")));
+                self.ui_note(format!("» compact skipped: {message}"));
                 // One line in the log per episode, not one per step: the
                 // exception is the decision, the repeats add nothing.
                 if first_refusal {
@@ -169,12 +167,12 @@ impl Session {
             });
         }
 
-        self.emit(UiEvent::Info(format!(
+        self.ui_note(format!(
             "» compacting {} pinned message(s) through seq {} · ~{} tokens",
             plan.pinned_seqs.len(),
             plan.through_seq,
             tokens_before
-        )));
+        ));
         let summarising = self.capabilities(compact::summarise_request(
             &self.provider.client,
             &self.provider.model,
@@ -204,11 +202,6 @@ impl Session {
                 allowance: usage.allowance.clone(),
                 kind: Some("compact".into()),
             }))?;
-            self.emit(UiEvent::Usage {
-                prompt: usage.prompt_tokens,
-                completion: usage.completion_tokens,
-                cached: usage.cached_tokens,
-            });
             self.note_warnings();
             self.sync();
         }

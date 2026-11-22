@@ -108,10 +108,7 @@ impl Session {
             delivery: "next".into(),
             attachments: Vec::new(),
         })?;
-        self.emit(UiEvent::Info(format!(
-            "» {}",
-            crate::util::one_line_visible(&text, 200)
-        )));
+        self.ui_note(format!("» {}", crate::util::one_line_visible(&text, 200)));
         self.sync();
         Ok(true)
     }
@@ -275,10 +272,10 @@ impl Session {
             };
             message.text = text;
             if message.from != "tui" {
-                self.emit(UiEvent::Info(format!(
+                self.ui_note(format!(
                     "› {}",
                     crate::util::one_line_visible(&message.text, 200)
-                )));
+                ));
             }
             // A message deferred to the end of a turn (`/later`) is the same message: the list of the images its
             // text points at goes with it , or a queued prompt would be the one shape whose `attachments[]`

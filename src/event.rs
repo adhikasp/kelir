@@ -524,6 +524,11 @@ pub struct CallSettle {
     pub spilled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Payload>,
+    /// The diagnostic line the UI shows under a failed call. It is not a second
+    /// copy of `result`: the result is what the model sees, this is what a human
+    /// needs to see without unfolding anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
 }
@@ -555,6 +560,10 @@ impl CallSettle {
     }
     pub fn state(mut self, value: impl Into<String>) -> Self {
         self.state = Some(value.into());
+        self
+    }
+    pub fn tail(mut self, value: impl Into<String>) -> Self {
+        self.tail = Some(value.into());
         self
     }
 }

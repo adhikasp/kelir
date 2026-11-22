@@ -11,6 +11,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+mod ui;
+pub use ui::{ApplyEv, Ev};
+
 /// How long any wait in the harness may take before it calls the thing hung
 /// (STEER-9). It bounds a hang, never a normal run: every wait below returns the
 /// moment its event, file or exit shows up, so the ceiling only has to be larger

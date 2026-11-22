@@ -34,7 +34,7 @@ use crate::ipc::{self, Incoming, Request, Response};
 use crate::provider::{self, Client};
 use crate::resume::{self, UnsettledCall};
 use crate::tools::{self, Ctx, ToolOutcome};
-use crate::tui::{self, UiEvent};
+use crate::tui::{self};
 use crate::verbs::{self, Boundary, Pending, Scheduler, Verb};
 
 /// How long a stopped call may take to report back before the session settles it on the
@@ -274,7 +274,7 @@ impl crate::features::gates::GatesCore for Session {
     fn sync(&mut self) {
         Session::sync(self);
     }
-    fn emit(&self, event: UiEvent) {
+    fn emit(&self, event: crate::tui::View) {
         Session::emit(self, event);
     }
     fn turn(&self) -> u32 {
