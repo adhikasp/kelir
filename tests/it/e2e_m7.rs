@@ -135,10 +135,17 @@ fn of_type<'a>(events: &'a [Value], kind: &str) -> Vec<&'a Value> {
         .collect()
 }
 
+fn calls_of<'a>(events: &'a [Value], kind: &str, call_kind: &str) -> Vec<&'a Value> {
+    of_type(events, kind)
+        .into_iter()
+        .filter(|event| event["kind"] == call_kind)
+        .collect()
+}
+
 fn result_of_call(events: &[Value], call_id: &str) -> String {
     events
         .iter()
-        .find(|event| event["type"] == "tool_settled" && event["call_id"] == call_id)
+        .find(|event| event["type"] == "call_settled" && event["id"] == call_id)
         .map(|event| match &event["result"] {
             Value::String(text) => text.clone(),
             other => other["preview"].as_str().unwrap_or("").to_string(),
@@ -235,7 +242,7 @@ async fn a_child_of_a_child_finishes_and_the_result_is_the_bash_output() {
     assert!(started(&root).get("parent").is_none() || started(&root)["parent"].is_null());
 
     // The root is the registry: both descendants, started and settled.
-    let started_in_root = of_type(&root, "child_started");
+    let started_in_root = calls_of(&root, "call_started", "child");
     assert_eq!(
         started_in_root.len(),
         2,
@@ -249,10 +256,10 @@ B: {:?}",
     );
     let depths: Vec<u64> = started_in_root
         .iter()
-        .map(|event| event["depth"].as_u64().unwrap())
+        .map(|event| event["info"]["depth"].as_u64().unwrap())
         .collect();
     assert_eq!(depths, vec![1, 2]);
-    let settled_in_root = of_type(&root, "child_settled");
+    let settled_in_root = calls_of(&root, "call_settled", "child");
     assert_eq!(
         settled_in_root.len(),
         2,
@@ -266,16 +273,18 @@ B: {:?}",
             .iter()
             .all(|event| event["outcome"] == "done")
     );
-    assert!(
-        settled_in_root
+    let child_starts = calls_of(&root, "call_started", "child");
+    assert!(settled_in_root.iter().any(|event| {
+        child_starts
             .iter()
-            .any(|event| event["session"] == b_id.as_str() && event["result"] == "B result")
-    );
+            .any(|start| start["id"] == event["id"] && start["info"]["session"] == b_id.as_str())
+            && event["result"] == "B result"
+    }));
     // The middle agent also keeps its own child's pair (it is the parent).
-    assert_eq!(of_type(&a, "child_started").len(), 1);
-    assert_eq!(of_type(&a, "child_settled").len(), 1);
+    assert_eq!(calls_of(&a, "call_started", "child").len(), 1);
+    assert_eq!(calls_of(&a, "call_settled", "child").len(), 1);
     // The root's own pair is the only one in its log for its own child.
-    assert_eq!(of_type(&b, "child_started").len(), 0);
+    assert_eq!(of_type(&b, "call_started").len(), 0);
 }
 
 #[tokio::test]
@@ -434,13 +443,17 @@ async fn the_eleventh_live_child_of_one_agent_is_refused_and_nothing_outlives_th
     assert!(rcs[10].starts_with("rc=3 "), "the 11th: {}", rcs[10]);
     assert!(rcs[10].contains("10 live children"), "{}", rcs[10]);
     assert!(rcs[10].contains("limit 10"), "{}", rcs[10]);
-    assert_eq!(of_type(&root, "child_started").len(), 10);
+    assert_eq!(calls_of(&root, "call_started", "child").len(), 10);
     gate.notify_waiters();
     // The sleepers were still thinking when the root ended: none may survive it.
     no_leftovers(&family).await;
     // The root's end killed them; each is settled in its log, not left running.
-    let settled = of_type(&root, "child_settled");
-    assert_eq!(settled.len(), 0, "the root exited before they settled");
+    let settled = calls_of(&root, "call_settled", "child");
+    assert_eq!(
+        settled.len(),
+        0,
+        "the root exited before they settled: {settled:?}"
+    );
 }
 
 #[tokio::test]
@@ -528,7 +541,7 @@ async fn depth_four_is_refused() {
     );
     let (_, l1) = family.session_for("L1");
     assert_eq!(
-        of_type(&l1, "child_started").len(),
+        calls_of(&l1, "call_started", "child").len(),
         3,
         "L2, L3, L4 and nothing for L5"
     );
@@ -620,11 +633,14 @@ async fn a_brief_shares_the_parents_prefix_and_leaves_its_history_alone() {
     // The parent's history is untouched: the child_* pair, nothing else new.
     assert_eq!(of_type(&root, "user").len(), 1);
     assert_eq!(of_type(&root, "assistant").len(), 3);
-    let started = of_type(&root, "child_started");
+    let started = calls_of(&root, "call_started", "child");
     assert_eq!(started.len(), 1);
-    assert_eq!(started[0]["kind"], "brief");
-    assert_eq!(started[0]["parent"], root_id.as_str());
-    assert_eq!(of_type(&root, "child_settled")[0]["outcome"], "done");
+    assert_eq!(started[0]["info"]["name"], "brief");
+    assert_eq!(started[0]["info"]["parent"], root_id.as_str());
+    assert_eq!(
+        calls_of(&root, "call_settled", "child")[0]["outcome"],
+        "done"
+    );
     assert!(of_type(&root, "source").is_empty());
 }
 
@@ -678,7 +694,7 @@ async fn a_brief_cannot_delegate_and_ls_lists_it_as_a_brief() {
     );
     let (_, root) = family.session_for("ROOT");
     assert_eq!(
-        of_type(&root, "child_started").len(),
+        calls_of(&root, "call_started", "child").len(),
         1,
         "only the outer brief"
     );
@@ -751,7 +767,7 @@ async fn ls_shows_the_tree_and_kill_takes_a_subtree_but_only_from_above() {
 
     // Killing the nest stops it and the sleeper below it.
     assert!(text.contains("killrc=0"), "{text}");
-    let settled = of_type(&root, "child_settled");
+    let settled = of_type(&root, "call_settled");
     let killed: Vec<_> = settled
         .iter()
         .filter(|e| e["outcome"] == "killed")
@@ -916,7 +932,7 @@ async fn stopping_the_call_stops_its_foreground_child() {
     // The registry records how it ended, and the slot is free again.
     let settled = loop {
         let log = root.log();
-        if let Some(event) = log.iter().find(|event| event["type"] == "child_settled") {
+        if let Some(event) = log.iter().find(|event| event["type"] == "call_settled") {
             break event.clone();
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1100,7 +1116,6 @@ async fn registry_operations_need_a_child_session_in_the_tree_and_no_secret_trav
         }
         assert!(!line.contains(&root_token), "{line}");
     }
-    // The env dump finished: wait for the child's own `tool_settled` event, not a fixed
     // sleep or a "done" guess in `ls`. The full `env | sort` output is in the child's
     // `commands/<id>/out` file; the event's `result` is only the model's preview and is
     // deliberately spilled (first/last 1 KB) when the inherited environment is large.
@@ -1130,7 +1145,7 @@ async fn registry_operations_need_a_child_session_in_the_tree_and_no_secret_trav
     let dump: String = dump_log
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event["type"] == "tool_settled")
+        .filter(|event| event["type"] == "call_settled")
         .map(|event| {
             spill_found |= event["result"]
                 .as_str()
@@ -1139,7 +1154,6 @@ async fn registry_operations_need_a_child_session_in_the_tree_and_no_secret_trav
             event["result"].to_string()
         })
         .collect();
-    // The authoritative output is the child's `out` file. Find the `tool_started`
     // call directory so the assertion holds whatever the inherited env size is.
     let mut full_dump = dump.clone();
     for path in dump_dir
@@ -1267,10 +1281,15 @@ async fn a_resumed_root_settles_the_children_it_cannot_reach_as_lost() {
         .await;
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     let log = sandbox.log(&root.id);
-    let settled = of_type(&log, "child_settled");
+    let settled = calls_of(&log, "call_settled", "child");
     assert_eq!(settled.len(), 1, "{settled:?}");
     assert_eq!(settled[0]["outcome"], "lost");
-    assert_eq!(settled[0]["session"], list[0]["session"]);
+    let started = calls_of(&log, "call_started", "child");
+    let start = started
+        .iter()
+        .find(|event| event["id"] == settled[0]["id"])
+        .expect("the child this resume settled");
+    assert_eq!(start["info"]["session"], list[0]["session"]);
     gate.notify_waiters();
 }
 
@@ -1356,7 +1375,10 @@ async fn ctl_brief_prints_the_answer_and_leaves_the_history_alone() {
         1,
         "the question is not in the history"
     );
-    assert_eq!(of_type(&log, "child_started")[0]["kind"], "brief");
+    assert_eq!(
+        calls_of(&log, "call_started", "child")[0]["info"]["name"],
+        "brief"
+    );
     let verbs = of_type(&log, "verb");
     assert!(verbs.iter().any(|verb| verb["name"] == "brief"));
     // The brief asked about a finished conversation: its last message is the
@@ -1417,17 +1439,22 @@ async fn only_the_root_writes_the_herdr_status_and_a_long_answer_settles() {
     let (b_id, _) = family.session_for("CHILD-B");
     // The grandchild's 100 KB answer reached the root's registry (cut to what a
     // request line carries) and the middle agent's whole tool result.
-    let settled = of_type(&root, "child_settled");
+    let settled = calls_of(&root, "call_settled", "child");
     assert_eq!(settled.len(), 2, "{settled:?}");
+    let child_starts = calls_of(&root, "call_started", "child");
     let deep = settled
         .iter()
-        .find(|event| event["session"] == b_id.as_str())
+        .find(|event| {
+            child_starts.iter().any(|start| {
+                start["id"] == event["id"] && start["info"]["session"] == b_id.as_str()
+            })
+        })
         .unwrap();
     assert_eq!(deep["outcome"], "done");
     let (_, a) = family.session_for("CHILD-A");
     let call_b = a
         .iter()
-        .find(|event| event["type"] == "tool_settled" && event["call_id"] == "call_b")
+        .find(|event| event["type"] == "call_settled" && event["id"] == "call_b")
         .unwrap();
     assert_eq!(call_b["bytes"].as_u64().unwrap() as usize, long.len() + 1);
 }

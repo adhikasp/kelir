@@ -364,11 +364,19 @@ async fn two_concurrent_calls_to_one_server() {
     )
     .await;
     let took = started.elapsed();
-    let started_events = run.events_of("mcp_started");
-    let settled = run.events_of("mcp_settled");
+    let started_events: Vec<_> = run
+        .events_of("call_started")
+        .into_iter()
+        .filter(|e| e["kind"] == "mcp")
+        .collect();
+    let settled: Vec<_> = run
+        .events_of("call_settled")
+        .into_iter()
+        .filter(|e| e["kind"] == "mcp")
+        .collect();
     assert_eq!(started_events.len(), 2, "{:?}", run.event_types());
     assert_eq!(settled.len(), 2);
-    assert_ne!(started_events[0]["mcp_id"], started_events[1]["mcp_id"]);
+    assert_ne!(started_events[0]["id"], started_events[1]["id"]);
     assert!(settled.iter().all(|e| e["outcome"] == "ok"), "{settled:?}");
     // Serial would be >= 4 s of sleeping plus two spawns; allow generous slack.
     eprintln!("concurrent wall time: {took:?}");
@@ -380,7 +388,7 @@ async fn a_twelve_megabyte_result_survives_the_broker() {
     let files = Files::new();
     let toml = evil("timeout = 60\nenv = { MCP_EVIL = \"huge12\" }");
     let run = session_run(&files, &toml, "\"$KELIR_BIN\" mcp evil huge | wc -c").await;
-    let settled = run.one_event("mcp_settled");
+    let settled = run.one_call("call_settled", "mcp");
     assert_eq!(settled["outcome"], "ok", "{settled}");
     assert!(settled["bytes"].as_u64().unwrap() > 12_000_000, "{settled}");
     let size = std::fs::metadata(settled["out_path"].as_str().unwrap())

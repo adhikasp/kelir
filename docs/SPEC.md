@@ -44,7 +44,7 @@ that appends an event; the loop applies verbs at named boundaries.
   as `stop`. Background jobs are the exception (they are detached on purpose, below). Picking a
   session up again is `kelir resume <id>`.
 - **A bg job that finishes while its session is not running** is only recorded: its shim writes
-  `bg/<id>.status`, and the next `resume` folds it into the log as `bg_settled`. Nothing wakes a
+  `bg/<id>.status`, and the next `resume` folds it into the log as a `call_settled` with `kind: "bg"`. Nothing wakes a
   stopped session.
 - **Children are separate OS processes** the model starts from `bash` (`kelir run --child`,
   `kelir brief`; there is no spawn tool), each owning its own session dir. They live inside the parent's process group (Unix) or Job Object (Windows), so
@@ -67,11 +67,11 @@ so a check against same-user code cannot hold.
   `$KELIR_TOKEN` from its environment. The token file is removed when the session ends.
 - **Owned jobs and settle-once.** The session is the only issuer of explicit job ids
   (`bg_<32 random hex>`); a bash call's id is its `<seq>-<step>-<n>` output directory name. Ids are
-  recorded in an in-memory registry and in the log (`bg_started`, `tool_started.dir`) and rebuilt
+  recorded in an in-memory registry and in the log (`call_started{kind:"bg"}`, `call_started.dir` for tools) and rebuilt
   from the log on resume. `bg` reports, `cancel` and `bg-spawn` are refused when they name an id
   this session did not start, and the refusal is a `verb` event with boundary `rejected` (at most
   `32` per session). A settled job is accepted **once**: later reports for that id write no second
-  `bg_settled` event and wake the model no second time. A final record in `bg/<id>.final` wins over
+  `call_settled{kind:"bg"}` event and wake the model no second time. A final record in `bg/<id>.final` wins over
   the status file, so an older `running` record written back later cannot un-settle a job. A child
   holding the token can report on a job this session owns; that is the same-user trust boundary.
 - **Other checks that still apply.** A `bg-spawn` honours only `cmd`, `shell`, `cwd` and `env`
@@ -131,36 +131,39 @@ every one of them carries the session's token (*Who may drive a session*, above)
 There is no approval verb and no `ask`: kelir never waits on a human. There is no `rewind`
 (files are git's business, and a context rewind was judged not worth having).
 
-## Event log v0
+The shipped log is **format 1**: `session_started` carries `format: 1`, and any other
+value is refused with "written by a different kelir format; start a new session".
+
+## Event log v1
 
 One JSON object per line: `{"seq": n, "ts": "<RFC 3339>", "type": "<type>", …}`. `seq` is
 monotonic from 1. A torn last line is detected, skipped and reported on resume. Payloads over 10 KB
 are never inline: the event holds the path.
 
+There are 16 event types; calls of every kind share `call_started`/`call_settled` (`kind`: `tool`, `mcp`,
+`bg`, `child`), usage from a request with no assistant event is `step_usage`, and
+diagnostic notes are `note`.
+
 | type | key fields | notes |
 |---|---|---|
-| `session_started` | `id`, `parent?`, `depth`, `cwd`, `os`, `kelir_version`, `provider`, `model`, `system` (rendered text + hash), `sources[]` (name, path, hash), `tools[]`, `reasoning_effort?`, `key_origin?` | the frozen request prefix is recorded here. `key_origin` names the key's *source* (`env OPENROUTER_API_KEY`, `key_cmd getkey`, `opencode auth export opencode`), never the key |
+| `session_started` | `format: 1`, `id`, `parent?`, `depth`, `cwd`, `os`, `kelir_version`, `provider`, `model`, `system` (rendered text + hash), `sources[]` (name, path, hash), `tools[]`, `reasoning_effort?`, `key_origin?` | the frozen request prefix is recorded here. `key_origin` names the key's *source* (`env OPENROUTER_API_KEY`, `key_cmd getkey`, `opencode auth export opencode`), never the key |
 | `user` | `text`, `from` (`tui`, `ctl`, `channel`, `job`, `gate`), `delivery` (`now`, `next`, `later`), `attachments[]` | a human message; also what compaction pins |
 | `source` | `kind` (`hint`, `skill`, `instruction`, `memory`, `attachment`, `channel`), `name`, `text` or `path` | context that arrived after the start; rendered as a message at the tail |
 | `step_started` | `step`, `provider`, `model`, `request_hash` | one per provider request |
-| `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]` (`id`, `name`, `args`), `finish_reason` | |
-| `usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `allowance?` | from the final stream chunk |
-| `tool_started` | `call_id`, `name`, `input`, `pid?`, `dir?` | intent; written before the process starts. `dir` is the call's own `commands/<dir>` name (its job id), so a resume adopts it from the log rather than from a directory |
-| `tool_settled` | `call_id`, `outcome` (`ok`, `error`, `stopped`, `skipped`, `denied`, `disabled`, `promoted`, `unknown`), `exit_code?`, `bytes`, `lines`, `out_path`, `spilled`, `result` | commit; `result` is what the model sees (≤10 KB or the spill notice) |
-| `mcp_started` / `mcp_settled` | `mcp_id`, `server`, `tool`, `args`, `outcome`, `out_path`, `parent_call_id` | a `kelir mcp` call made from inside a bash call |
-| `bg_started` / `bg_settled` | `bg_id`, `call_id`, `cmd`, `pid`, `exit_code?`, `out_path` | `promoted` tool calls and explicit `kelir bg` jobs |
-| `child_started` / `child_settled` | `child_id`, `depth`, `task`, `background`, `outcome`, `result` | the child's own log is in its own dir |
+| `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]` (`id`, `name`, `args`), `finish_reason`, `usage?` | the model's answer; `usage` carries the final stream chunk's token counts |
+| `step_usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `allowance?`, `kind?` | a provider request with no assistant event (compaction, gate scoring) |
+| `call_started` | `id`, `kind`, `info{name, input?, dir?, session?, parent?, depth?, background?, model?}` | intent for any call; `dir` is the call's own `commands/<dir>` name, so a resume adopts it from the log |
+| `call_settled` | `id`, `kind`, `outcome`, `exit_code?`, `bytes?`, `lines?`, `out_path?`, `spilled?`, `result?`, `state?` | one commit; `result` is what the model sees (≤10 KB or the spill notice) |
 | `verb` | `name`, `args`, `from`, `boundary`, `error?` | every verb received, applied or not; `boundary: "rejected"` is a refusal (a foreign job id, a path outside the session's own `bg/`, an unparsable verb), with `error` saying why |
 | `gate` | `gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?` | every gate run, including fail-open ones |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by` (`user`, `agent`, `auto`), `tokens_before`, `tokens_after` | the fold replaces everything up to `through_seq` except the pins |
 | `turn_ended` | `outcome` (`done`, `stopped`, `paused`, `error`), `final_text`, `reason?` | `paused` covers two cases, distinguished by `reason`: `steps` (an explicit `max_steps` cap) and `provider` (the retry budget was exhausted). Neither is a failure: `--keep` stays alive and the next message opens a new turn |
-| `error` | `where`, `message`, `retryable`, `status?`, `attempt?`, `retry_in_ms?` | provider errors, broken gates, torn lines. A retryable provider error's `message` is the status and its class (`http 429: rate limited`), never a response body |
-| `resumed` | `from_seq`, `unsettled[]` | `unsettled` lists started-but-unsettled calls |
-| `session_ended` | `reason` | |
+| `note` | `kind`, `text` | threshold warnings and notification-hook outcomes; never part of the conversation |
+| `session_ended` | `reason` | the end of the session |
 
 **Context is always `fold(events.jsonl)`**, the same code path live and on resume. The fold
 renders: the frozen system message from `session_started`; then, in `seq` order, `user`,
-`assistant`, `tool_settled.result` and `source` events as messages; `compacted` replaces its range.
+`assistant`, `call_settled.result` and `source` events as messages; `compacted` replaces its range.
 
 ## Loop and boundaries
 
@@ -206,7 +209,7 @@ Per provider (OpenRouter's caching page read 2026-11-18):
   grows, with `ttl: "1h"` configurable.
 - **Children** get their own session id and cache; `brief` reuses its parent's id, so its
   snapshot prefix hits the parent's cache.
-- **Measured, not assumed:** every `usage` event records `cached_tokens` and `cache_write_tokens`
+- **Measured, not assumed:** every `assistant.usage` and `step_usage` record `cached_tokens` and `cache_write_tokens`
   (`usage.prompt_tokens_details`); `observe` and `kelir ls` show the hit ratio. Anthropic does not
   cache under 512–4,096 tokens (by model), so the first steps of a tiny session missing is
   expected.
@@ -214,7 +217,7 @@ Per provider (OpenRouter's caching page read 2026-11-18):
 ## Durability
 
 - fsync per batch; a crash loses at most the in-flight step.
-- On resume, a `tool_started` with no `tool_settled` is reported to the model as **unknown
+- On resume, a `call_started` with no `call_settled` is reported to the model as **unknown
   outcome and is not re-run** (naive replay re-runs `rm -rf`). The model decides what to check.
 - No workspace snapshots: recovering files is git.
 
@@ -255,8 +258,8 @@ joined; images and blobs go to files and their paths are printed; `--envelope` p
 result. Exit codes: 0 ok, 1 tool `isError`, 2 usage, 3 server unavailable, 4 timeout (unknown
 outcome, never retried). The session process is the broker: it starts a server lazily, keeps it
 for the session and serves the CLI over `KELIR_SOCK` (exported to every bash child); outside a
-session, `kelir mcp` spawns the server one-shot. Each call is an `mcp_started`/`mcp_settled`
-pair, and gates see it as tool `mcp:<server>.<tool>`. Channel servers (`tg-bridge`) are connected
+session, `kelir mcp` spawns the server one-shot. Each call is a `call_started`/`call_settled`
+pair with `kind: "mcp"`, and gates see it as tool `mcp:<server>.<tool>`. Channel servers (`tg-bridge`) are connected
 from the start because inbound messages arrive on that connection. Servers are configured in
 `mcp.toml`, each with an optional `description` for the hint.
 
@@ -374,10 +377,10 @@ answers ("do 1,4") resolved at `prompt_submit` against the last numbered list in
 A child is a kelir process the model starts from `bash`: `kelir run --child "<task>" [--background]`
 or `kelir brief "<question>"`. There is **no `spawn` tool**; the native tool list is `bash`, `edit`,
 `compact`. `KELIR_ROOT`, `KELIR_PARENT` and `KELIR_DEPTH` ride along with `KELIR_SOCK` and
-`KELIR_TOKEN` (exported to every bash child), so the CLI registers `child_started`/`child_settled`
+`KELIR_TOKEN` (exported to every bash child), so the CLI registers `call_started`/`call_settled` with `kind: "child"`
 with the **root session's socket** (the root stays the only writer of the registry and of its own log; each child still owns
 its own session dir with `parent`/`depth` in `session_started`). A foreground child's result is the
-bash call's stdout; a background child's `child_settled` arrives at the next boundary and wakes the
+bash call's stdout; a background child's `call_settled{kind:"child"}` arrives at the next boundary and wakes the
 parent. Because a child is a session, `stop`, `resume`, `observe`, `attach` and `kelir ls`/kill work
 on it unchanged. **Limits** (`config.toml`), enforced by the CLI against the root's registry: depth 3
 (root is 0), 10 children per agent, 16 live descendants per root; a start past a cap exits non-zero
@@ -390,7 +393,7 @@ snapshot of the parent's context, `edit`/`compact` refused, history untouched. D
 
 `kelir bg run|ls|out|wait|cancel`. A job runs under a small shim (`kelir bg-shim`, the same
 binary) that waits for the command, tees its output and writes `bg/<id>.status`, so it outlives
-the session. Completion while the session runs appends `bg_settled` and admits a message at the
+the session. Completion while the session runs appends `call_settled{kind:"bg"}` and admits a message at the
 next boundary so the agent wakes; while it does not, see *Process model*.
 
 A job's shim inherits `KELIR_SOCK` and `KELIR_TOKEN` from the session that started it (its
@@ -541,14 +544,14 @@ fold). Deps: tokio, serde, one HTTP client (reqwest + rustls), ratatui/crossterm
 
 | # | Build | How you know it works |
 |---|---|---|
-| M0 | one-file loop: Chat Completions client (OpenRouter + Go) → stream → `bash` + `edit`, parallel calls → 10 KB spill → event log v0 (incl. `tool_started`/`tool_settled`, `usage` with cache fields) → NDJSON out; CI on Linux, macOS, Windows | the fixed M0 task (a scratch clone of a small public repo: add a CLI flag and its test, make the suite pass; ~20 steps) passes on both providers on host A and on host B; `kelir run --json \| jq` works; **`cached_tokens > 0` from step 2 on both providers**; Go sees `x-opencode-session` and a `kelir/…` User-Agent |
+| M0 | one-file loop: Chat Completions client (OpenRouter + Go) → stream → `bash` + `edit`, parallel calls → 10 KB spill → event log v1 (`call_started`/`call_settled`, `usage` with cache fields) → NDJSON out; CI on Linux, macOS, Windows | the fixed M0 task (a scratch clone of a small public repo: add a CLI flag and its test, make the suite pass; ~20 steps) passes on both providers on host A and on host B; `kelir run --json \| jq` works; **`cached_tokens > 0` from step 2 on both providers**; Go sees `x-opencode-session` and a `kelir/…` User-Agent |
 | M1 | verbs `say`/`later`/`stop` (incl. `--call`)/`model`/`tools` over the session socket | a mid-turn instruction is obeyed at the next step; `stop --call` on a running `sleep` and the turn continues; a model swap applies next step |
 | M2 | inline ratatui TUI in the session process, plus the OSC 7501 writer | every TUI action is also a `ctl` verb; a kelir pane in the Herdr app shows working / idle / done |
 | M3 | durability (fsync, unsettled detection, `resume`) and compaction (tool, `/compact`, auto at 80 %) | `kill -9` at five random points, resume never re-runs a completed command; after a compaction the task and every human message are verbatim in the next request |
 | M4 | `bg` + shim + status files + 10-minute promotion + wake | a 15-minute command is promoted, kelir exits, `kelir bg out` still reads it, `resume` shows it settled |
 | M5 | sources (machine + project, incl. the Herdr line), skills, the pushed hint, memory, attachments, `observe` | with `HC_TERMINAL_ID` set the frozen system holds one Herdr line (pane, space, tab, where, plus a start-of-session snapshot of agent counts by state / other spaces / connected machines from `hc ls`) and without it none, `hc` missing fails open; `observe` matches what the provider received byte for byte; the hint names the right skill for 10 held-out prompts; the cache hit ratio holds across a hint |
 | — | **dogfood 1:** kelir is the default for the maintainer's own terminal side tasks | a week of real use; the scorecard reads kelir's logs |
-| M6 | `kelir mcp` (`rmcp` client, socket broker, `mcp_started`/`mcp_settled`) | `kelir mcp <server> <tool> … \| jq` works in a bash call; the call shows in `observe`; a >10 KB result spills |
+| M6 | `kelir mcp` (socket broker, `call_started`/`call_settled` with `kind: "mcp"`) | `kelir mcp <server> <tool> … \| jq` works in a bash call; the call shows in `observe`; a >10 KB result spills |
 | M7 | children as CLI (`kelir run --child`, `kelir brief`, root-registered via `KELIR_ROOT`/`KELIR_PARENT`/`KELIR_DEPTH`), caps, `kelir ls` and kill | a child of a child finishes; killing the parent leaves no orphan (Linux and Windows); the 17th live descendant is refused; `brief` hits the parent's cache |
 | M8 | gates (six events), the maintainer's gates: verify, note-check, pull/commit, "do 1,4"; and the builtin skills `delegation` and `herdr` (`herdr`: `hc ls --json` with state/status/agent/name/where/cwd across machines, group `where` by space prefix to answer how many agents share my space, `hc get/read/send/wait`, `hc machine ls`, and the rule **never kill another agent's pane**; outside Herdr the skill says so) | a hedged final answer is blocked once; a crashing gate fails open; `observe` lists what fired; asked "how many agents share my space?" inside a pane the model answers from `hc ls --json`, outside one it says it is not in Herdr |
 | M9 | jobs, named sessions, `STATUS` | a job resumes its session the next day; single-flight holds |

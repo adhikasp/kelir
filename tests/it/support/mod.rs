@@ -640,6 +640,16 @@ impl Run {
             .collect()
     }
 
+    pub fn one_call(&self, event_type: &str, kind: &str) -> &Value {
+        let found: Vec<_> = self
+            .events_of(event_type)
+            .into_iter()
+            .filter(|e| e["kind"] == kind)
+            .collect();
+        assert_eq!(found.len(), 1, "stderr: {}", self.stderr);
+        found[0]
+    }
+
     pub fn one_event(&self, event_type: &str) -> &Value {
         let found = self.events_of(event_type);
         assert_eq!(
@@ -934,13 +944,13 @@ impl LiveSession {
             guard,
         };
         let first = session.next_event().await;
-        // A fresh session starts with `session_started`; a resume picks the
-        // log up with `resumed`, and its id is the one it was given.
+        // A fresh session starts with `session_started`; a resume continues
+        // its log directly, and its id is the one it was given.
         match first["type"].as_str() {
             Some("session_started") => {
                 session.id = first["id"].as_str().expect("session id").to_string();
             }
-            Some("resumed") => {
+            _ => {
                 let sessions =
                     kelir::paths::sessions_newest_first_in(&session.state.join("sessions"));
                 assert_eq!(
@@ -950,7 +960,6 @@ impl LiveSession {
                 );
                 session.id = sessions[0].clone();
             }
-            other => panic!("a session's first event was {other:?}: {first}"),
         }
         session.session_dir = session.state.join("sessions").join(&session.id);
         session
@@ -991,6 +1000,16 @@ impl LiveSession {
     }
 
     /// Read until an event of this type arrives (never looks backwards).
+    /// Wait for a call event of a given kind (`tool`, `bg`, `mcp`, `child`).
+    pub async fn wait_for_call(&mut self, event_type: &str, kind: &str) -> Value {
+        loop {
+            let event = self.wait_for(event_type).await;
+            if event["kind"] == kind {
+                return event;
+            }
+        }
+    }
+
     pub async fn wait_for(&mut self, event_type: &str) -> Value {
         loop {
             let event = self.next_event().await;

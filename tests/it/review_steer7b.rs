@@ -24,8 +24,9 @@ printf '{{"id":"%s","state":"exited","exit_code":0,"started":"2026-01-01T00:00:0
 
 fn forged_in_log(log: &[Value]) -> (bool, bool) {
     let event = log.iter().any(|event| {
-        (event["type"] == "bg_started" || event["type"] == "bg_settled")
-            && event["bg_id"].as_str().is_some()
+        (event["type"] == "call_started" || event["type"] == "call_settled")
+            && event["kind"] == "bg"
+            && event["id"].as_str().is_some()
     });
     let wake = log.iter().any(|event| {
         event["type"] == "user"
@@ -36,7 +37,6 @@ fn forged_in_log(log: &[Value]) -> (bool, bool) {
 }
 
 /// B-NEW-1: a tool child forges the status file of a *registered call id* (an earlier call of the
-/// same session); the watcher records bg_started/bg_settled and a wake message from `job` with
 /// the child's text, and reads the tail of an arbitrary file named in `out`.
 #[tokio::test]
 async fn a_child_cannot_forge_a_status_file_for_a_registered_call_id() {

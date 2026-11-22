@@ -51,7 +51,9 @@ impl Session {
             .iter()
             .rev()
             .find_map(|event| match &event.body {
-                EventBody::ToolStarted { call_id, .. } if *call_id == call.call_id => {
+                EventBody::CallStarted(start)
+                    if start.kind == "tool" && start.id == call.call_id =>
+                {
                     Some(event.seq)
                 }
                 _ => None,
@@ -69,11 +71,8 @@ impl Session {
         Some((crate::util::path_string(&out), partial.bytes, partial.lines))
     }
 
-    /// The read-only view a built-in gate gets of this session. Kept in the core
-    /// because it borrows the provider client, config and fold.
+    /// The gate's read-only view of this session, borrowed from the core.
     pub(crate) fn gate_ctx(&self) -> crate::gates::GateCtx<'_> {
-        // The built-in hint must see machine-level skills, just as the old
-        // core hint did (`places(&ctx.cwd, &cfg.skills_dirs, Some(config_dir()))`).
         crate::gates::GateCtx {
             client: &self.provider.client,
             provider: &self.provider.active_provider,
@@ -120,8 +119,7 @@ impl Session {
         }
         self.tally.observe(event.seq, &event.body);
         self.log.events.push(event.clone());
-        // Name the session from its first human prompt. Deterministic, no model call (design note
-        // §9).
+        // Name the session from its first prompt: deterministic, no model call.
         if let Some(title) = title {
             self.log.titled = true;
             self.record(EventBody::SessionTitle {
@@ -139,16 +137,13 @@ impl Session {
         }
     }
 
-    /// After a `usage` event: say so, once, when a threshold was crossed.
     pub(crate) fn note_warnings(&mut self) {
         let warn = self.warn();
         for warning in self.tally.warnings(warn) {
-            let _ = self.record(EventBody::Warning {
+            let _ = self.record(EventBody::Note(crate::event::Note {
                 kind: warning.kind.to_string(),
-                message: warning.message.clone(),
-                value: warning.value,
-                threshold: warning.threshold,
-            });
+                text: warning.message.clone(),
+            }));
             self.emit(UiEvent::Info(format!("» warning: {}", warning.message)));
             if !self.out.json && !self.out.tui {
                 eprintln!("kelir: warning: {}", warning.message);
@@ -262,13 +257,13 @@ impl Session {
             detail,
         );
         if let Some(dispatch) = dispatch {
-            let outcome = dispatch.outcome().to_string();
-            let _ = self.record(EventBody::Notify {
-                event: dispatch.kind,
-                outcome,
-                error: dispatch.error,
-                hooks: dispatch.hooks as u32,
-            });
+            let detail = dispatch
+                .error
+                .unwrap_or_else(|| format!("{} hook(s) fired", dispatch.hooks));
+            let _ = self.record(EventBody::Note(crate::event::Note {
+                kind: "notify".into(),
+                text: format!("{}: {detail}", dispatch.kind),
+            }));
         }
     }
 
@@ -287,8 +282,7 @@ impl Session {
             _ => HerdrState::Idle,
         };
         self.report(state);
-        // Notifications are last: the log already has the outcome, so a hook that reads it sees a
-        // complete turn. Clone the detail first: `notify` records an event, which needs `&mut self`.
+        // Notifications are last; clone the detail before the event write borrows `self`.
         let detail = self.run.final_text.clone();
         match outcome {
             "done" => self.notify("turn_done", &detail),
@@ -339,8 +333,6 @@ impl Session {
         json!({
             "turn": self.run.turn,
             "step": self.run.step,
-            // The turn's own count and its cap, so a steering human sees a pause coming (FINDINGS: "a status line
-            // with steps used/limit would have shown it coming").
             "turn_steps": self.run.turn_steps,
             "max_steps": self.cfg.max_steps,
             "running": self.tools.live_calls,

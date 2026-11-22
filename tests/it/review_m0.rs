@@ -98,7 +98,7 @@ async fn repeated_call_ids_keep_every_output_file() {
     .await;
     let run = run_task(&mock, &["run", "--json", "go"], &[], None, "").await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    let settled = run.events_of("tool_settled");
+    let settled = run.events_of("call_settled");
     assert_eq!(settled.len(), 2);
     let first_path = settled[0]["out_path"].as_str().unwrap();
     let on_disk = std::fs::read_to_string(first_path).unwrap();
@@ -128,7 +128,7 @@ async fn edit_works_on_mixed_line_endings() {
     ])
     .await;
     let run = run_task(&mock_seed, &["run", "--json", "go"], &[], None, "").await;
-    let settled = run.events_of("tool_settled");
+    let settled = run.events_of("call_settled");
     assert_eq!(
         settled[1]["outcome"], "ok",
         "edit result: {}",
@@ -154,7 +154,7 @@ async fn malformed_tool_arguments_become_an_error_result() {
     .await;
     let run = run_task(&mock, &["run", "--json", "go"], &[], None, "").await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    let settled = run.one_event("tool_settled");
+    let settled = run.one_event("call_settled");
     assert_eq!(settled["outcome"], "error");
 }
 
@@ -172,7 +172,7 @@ async fn non_utf8_output_survives_the_round_trip() {
     .await;
     let run = run_task(&mock, &["run", "--json", "go"], &[], None, "").await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    let settled = run.one_event("tool_settled");
+    let settled = run.one_event("call_settled");
     assert_eq!(settled["bytes"], 7);
     assert!(settled["result"].as_str().unwrap().contains("end"));
 }

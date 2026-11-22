@@ -60,7 +60,7 @@ async fn say_mid_turn_is_in_the_next_request() {
     ])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
 
     let answer = session.ctl(&["say", "also print the time"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
@@ -70,7 +70,7 @@ async fn say_mid_turn_is_in_the_next_request() {
     assert_eq!(response["applies"], "queued");
     session.release();
 
-    let settled = session.wait_for("tool_settled").await;
+    let settled = session.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "ok");
     let ended = session.wait_for("turn_ended").await;
     assert_eq!(ended["outcome"], "done");
@@ -85,8 +85,8 @@ async fn say_mid_turn_is_in_the_next_request() {
     assert_eq!(requests[1].messages()[4]["content"], "also print the time");
 
     let log = session.log();
-    let started = of_type(&log, "tool_started")[0];
-    let settled = of_type(&log, "tool_settled")[0];
+    let started = of_type(&log, "call_started")[0];
+    let settled = of_type(&log, "call_settled")[0];
     let user = of_type(&log, "user")
         .into_iter()
         .find(|event| event["text"] == "also print the time")
@@ -119,7 +119,7 @@ async fn say_now_stops_the_running_call_within_two_seconds() {
     ])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
 
     let answer = session
         .ctl(&["say", "--now", "change of plan: just print hello"])
@@ -128,7 +128,7 @@ async fn say_now_stops_the_running_call_within_two_seconds() {
     // to start on a loaded box is not the session's latency (STEER-9).
     let started = Instant::now();
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
-    let settled = session.wait_for("tool_settled").await;
+    let settled = session.wait_for("call_settled").await;
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_secs(2),
@@ -179,7 +179,7 @@ async fn stop_ends_the_turn() {
     ])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
 
     let answer = session.ctl(&["stop", "enough for now"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
@@ -188,7 +188,7 @@ async fn stop_ends_the_turn() {
     assert_eq!(mock.request_count(), 1, "a stopped turn asks nothing more");
 
     let log = session.log();
-    let settled = of_type(&log, "tool_settled")[0];
+    let settled = of_type(&log, "call_settled")[0];
     assert_eq!(settled["outcome"], "stopped");
     assert!(
         settled["result"]
@@ -227,8 +227,8 @@ async fn stop_call_stops_one_of_two_parallel_calls() {
     ])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
+    session.wait_for("call_started").await;
 
     let answer = session
         .ctl(&["stop", "--call", "call_a", "wrong call"])
@@ -238,12 +238,12 @@ async fn stop_call_stops_one_of_two_parallel_calls() {
     // first by construction, not by the race between a stopwatch and a ctl.
     session.release();
 
-    let first = session.wait_for("tool_settled").await;
-    let second = session.wait_for("tool_settled").await;
-    assert_eq!(first["call_id"], "call_a");
+    let first = session.wait_for("call_settled").await;
+    let second = session.wait_for("call_settled").await;
+    assert_eq!(first["id"], "call_a");
     assert_eq!(first["outcome"], "stopped");
     assert_eq!(first["result"], "stopped by user: wrong call");
-    assert_eq!(second["call_id"], "call_b");
+    assert_eq!(second["id"], "call_b");
     assert_eq!(second["outcome"], "ok");
     assert_eq!(second["result"], "b\n");
 
@@ -280,7 +280,7 @@ async fn stop_call_with_an_unknown_id_is_refused() {
     ])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
 
     let answer = session.ctl(&["stop", "--call", "call_nope"]).await;
     assert_eq!(answer.code, 1, "{}", answer.stdout);
@@ -318,14 +318,14 @@ async fn model_swap_applies_at_the_next_step() {
     ])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
 
     let answer = session.ctl(&["model", "other/cheap-model"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     assert_eq!(answer.response()["applies"], "next_step");
     session.release();
 
-    session.wait_for("tool_settled").await;
+    session.wait_for("call_settled").await;
     session.wait_for("turn_ended").await;
 
     let requests = mock.requests();
@@ -364,12 +364,12 @@ async fn model_swap_can_change_the_provider() {
     // the test harness sets, so no `opencode` process is started here.
     let extra = "";
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], extra).await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
 
     let answer = session.ctl(&["model", "opencode-go/some-model"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     session.release();
-    session.wait_for("tool_settled").await;
+    session.wait_for("call_settled").await;
     session.wait_for("turn_ended").await;
 
     let log = session.log();
@@ -399,15 +399,15 @@ async fn tools_disable_returns_disabled_by_user_and_keeps_the_tool_list() {
     ])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
 
     let answer = session.ctl(&["tools", "--disable", "bash"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     session.release();
 
-    session.wait_for("tool_settled").await;
-    let disabled = session.wait_for("tool_settled").await;
-    assert_eq!(disabled["call_id"], "call_2");
+    session.wait_for("call_settled").await;
+    let disabled = session.wait_for("call_settled").await;
+    assert_eq!(disabled["id"], "call_2");
     assert_eq!(disabled["outcome"], "disabled");
     assert!(
         disabled["result"]
@@ -559,7 +559,7 @@ async fn end_mid_turn_stops_the_call_and_exits() {
     )))])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
 
     let answer = session.ctl(&["end"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
@@ -738,7 +738,7 @@ async fn a_headless_run_drains_queued_later_messages_before_exiting() {
     ])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
     let answer = session.ctl(&["later", "one more turn"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     session.release();
@@ -771,7 +771,7 @@ async fn every_bash_child_gets_kelir_sock() {
     let run = run_task(&mock, &["run", "--json", "go"], &[], None, "").await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     let id = run.one_event("session_started")["id"].as_str().unwrap();
-    let result = run.one_event("tool_settled")["result"]
+    let result = run.one_event("call_settled")["result"]
         .as_str()
         .unwrap()
         .trim()
@@ -798,7 +798,7 @@ async fn a_stopped_call_reports_its_partial_output() {
     ])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
     let out_path = wait_for_output(&session, "before the stop").await;
 
     let answer = session
@@ -809,7 +809,7 @@ async fn a_stopped_call_reports_its_partial_output() {
     assert_eq!(ended["outcome"], "done", "the turn continues");
 
     let log = session.log();
-    let settled = of_type(&log, "tool_settled")[0];
+    let settled = of_type(&log, "call_settled")[0];
     assert_eq!(settled["outcome"], "stopped");
     let result = settled["result"].as_str().unwrap();
     assert!(

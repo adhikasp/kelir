@@ -42,7 +42,7 @@ async fn settle_and_collect(session: &LiveSession) -> Vec<Value> {
 
 fn impersonated(log: &[Value], id: &str) -> bool {
     log.iter().any(|event| {
-        (event["type"] == "bg_started" || event["type"] == "bg_settled") && event["bg_id"] == id
+        (event["type"] == "call_started" || event["type"] == "call_settled") && event["id"] == id
     }) || log
         .iter()
         .any(|event| event["type"] == "user" && event["from"] == "job")

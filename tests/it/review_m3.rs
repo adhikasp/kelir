@@ -261,10 +261,10 @@ async fn r4_a_crash_during_a_resume_resumes_again_without_double_results() {
     let log = sandbox.log(&id);
     let settled: Vec<(String, String)> = log
         .iter()
-        .filter(|event| event["type"] == "tool_settled")
+        .filter(|event| event["type"] == "call_settled")
         .map(|event| {
             (
-                event["call_id"].as_str().unwrap().to_string(),
+                event["id"].as_str().unwrap().to_string(),
                 event["outcome"].as_str().unwrap().to_string(),
             )
         })
@@ -461,7 +461,7 @@ async fn r8_resume_continues_a_stopped_turn() {
     ])
     .await;
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "the task"], "").await;
-    live.wait_for("tool_started").await;
+    live.wait_for("call_started").await;
     assert_eq!(live.ctl(&["stop"]).await.code, 0);
     live.wait_for("turn_ended").await;
     let id = live.id.clone();
@@ -518,12 +518,10 @@ async fn r9_two_simultaneous_resumes_do_not_both_write_the_log() {
     let log = sandbox.log(&id);
     let seqs: Vec<u64> = log.iter().map(|e| e["seq"].as_u64().unwrap()).collect();
     let dense = seqs.windows(2).all(|w| w[1] == w[0] + 1);
-    let resumed = log.iter().filter(|e| e["type"] == "resumed").count();
     assert!(
-        dense && resumed == 1,
-        "two writers on one log: resumed={resumed}, seqs={seqs:?}, exits {} / {}",
-        a.code,
-        b.code
+        dense,
+        "two writers on one log: seqs={seqs:?}, exits {} / {}",
+        a.code, b.code
     );
 }
 

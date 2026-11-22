@@ -380,7 +380,7 @@ async fn a_slow_list_does_not_hold_the_first_request() {
         // The first step ran and its call settled while the list was still
         // held (or failed): the step did not wait for the metadata. That is an
         // ordering the gate guarantees, so no stopwatch is involved.
-        session.wait_for("tool_settled").await;
+        session.wait_for("call_settled").await;
         assert_eq!(
             mock.models_requests(),
             1,
@@ -421,7 +421,7 @@ async fn a_list_that_lands_after_the_grace_is_applied_at_the_next_step() {
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
     // The tool result settles, the loop reaches `before_step`, and the list is
     // there by then.
-    session.wait_for("tool_settled").await;
+    session.wait_for("call_settled").await;
     let deadline = std::time::Instant::now() + CEILING;
     loop {
         let state = state_of(&session.ctl(&["stop"]).await);

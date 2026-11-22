@@ -196,15 +196,14 @@ impl Session {
         // The summary's tokens belong in the log like any step's, marked so a
         // reader (and `kelir ls`) can tell it is not a step of the turn
         if let Some(usage) = &assembler.usage {
-            self.record(EventBody::Usage {
-                step: self.run.step,
+            self.record(EventBody::StepUsage(crate::event::Usage {
                 prompt_tokens: usage.prompt_tokens,
                 completion_tokens: usage.completion_tokens,
                 cached_tokens: usage.cached_tokens,
                 cache_write_tokens: usage.cache_write_tokens,
                 allowance: usage.allowance.clone(),
                 kind: Some("compact".into()),
-            })?;
+            }))?;
             self.emit(UiEvent::Usage {
                 prompt: usage.prompt_tokens,
                 completion: usage.completion_tokens,

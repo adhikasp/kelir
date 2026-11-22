@@ -6,7 +6,6 @@
 //! pass. Where a fix made the old assertion wrong rather than the code, the
 //! assertion was corrected and says so in place (the 3 MB file is now capped,
 //! F7; an edit back is now announced, F1); nothing was loosened. Two tests also
-//! wait for `tool_started` instead of `tool_settled`, because the watcher runs at
 //! the boundary after the call and writing the file afterwards raced it.
 //! Every directory is a tempdir: nothing here reads or writes a real home.
 
@@ -561,10 +560,9 @@ async fn a_deleted_source_is_quiet_and_a_recreated_one_is_reported() {
         &[],
     )
     .await;
-    // `tool_started`, not `tool_settled`: the watcher runs at the boundary
     // *after* the call settles, so the file has to change while the call is
     // still running (the scripted call sleeps a second) or the edit races it.
-    t.live.wait_for("tool_started").await;
+    t.live.wait_for("call_started").await;
     std::fs::remove_file(t.repo.join("AGENTS.md")).unwrap();
     t.live.wait_for("turn_ended").await;
     // There is no text to send, so no `source` event — but the deletion is one
@@ -620,7 +618,7 @@ async fn cache_prefix_only_grows_across_two_source_changes() {
         &[],
     )
     .await;
-    t.live.wait_for("tool_started").await;
+    t.live.wait_for("call_started").await;
     write(&t.repo.join("AGENTS.md"), "V2");
     t.live.wait_for("turn_ended").await;
     write(
@@ -659,7 +657,7 @@ async fn editing_a_file_back_leaves_the_model_with_the_current_text() {
         &[],
     )
     .await;
-    t.live.wait_for("tool_started").await;
+    t.live.wait_for("call_started").await;
     write(&t.repo.join("AGENTS.md"), "TEMPORARY-RULE");
     t.live.wait_for("turn_ended").await;
     write(&t.repo.join("AGENTS.md"), "ORIGINAL-RULE");
@@ -764,7 +762,7 @@ async fn a_resume_does_not_repeat_a_source_the_log_already_has() {
         &[],
     )
     .await;
-    first.live.wait_for("tool_started").await;
+    first.live.wait_for("call_started").await;
     write(&repo.join("AGENTS.md"), "EDITED");
     first.live.wait_for("turn_ended").await;
     assert_eq!(of_type(&first.live.log(), "source").len(), 1);
@@ -834,7 +832,7 @@ async fn a_skill_named_like_a_markdown_file_stays_a_skill() {
         &[],
     )
     .await;
-    t.live.wait_for("tool_started").await;
+    t.live.wait_for("call_started").await;
     write(
         &repo.join(".claude/skills/notes.md/SKILL.md"),
         skill("notes.md").replace("body of", "EDITED body of"),

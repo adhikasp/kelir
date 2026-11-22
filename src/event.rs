@@ -234,11 +234,85 @@ fn preview(text: &str) -> String {
     text[..end].to_string()
 }
 
+/// Build a call-start event. `kind` is `tool`, `mcp`, `bg` or `child`.
+pub fn call_start(id: impl Into<String>, kind: &str, info: CallInfo) -> EventBody {
+    EventBody::CallStarted(CallStart {
+        id: id.into(),
+        kind: kind.to_string(),
+        info,
+    })
+}
+
+/// Build a call-settled event with the given outcome. `CallSettle::default()` fills
+/// unused fields; callers set only those their kind reads.
+pub fn call_settle(
+    id: impl Into<String>,
+    kind: &str,
+    outcome: &str,
+    settle: CallSettle,
+) -> EventBody {
+    EventBody::CallSettled(CallSettle {
+        id: id.into(),
+        kind: kind.to_string(),
+        outcome: outcome.to_string(),
+        ..settle
+    })
+}
+
+impl CallInfo {
+    /// A call whose payload is its command or tool arguments.
+    pub fn named(name: impl Into<String>, input: Payload) -> Self {
+        Self {
+            name: name.into(),
+            input: Some(input),
+            ..Self::default()
+        }
+    }
+
+    pub fn bg(cmd: Payload) -> Self {
+        Self {
+            name: "bg".into(),
+            cmd: Some(cmd),
+            ..Self::default()
+        }
+    }
+
+    pub fn mcp(server: &str, tool: &str, args: Payload) -> Self {
+        Self {
+            name: format!("{server}/{tool}"),
+            input: Some(args),
+            ..Self::default()
+        }
+    }
+
+    pub fn child(
+        task: Payload,
+        session: &str,
+        parent: &str,
+        depth: u32,
+        kind: &str,
+        background: bool,
+        model: &str,
+    ) -> Self {
+        Self {
+            name: kind.to_string(),
+            input: Some(task),
+            session: Some(session.to_string()),
+            parent: Some(parent.to_string()),
+            depth: Some(depth),
+            background: Some(background),
+            model: Some(model.to_string()),
+            ..Self::default()
+        }
+    }
+}
+
 /// Apply the payload rule to every string field of an event.
 pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventBody, String> {
     Ok(match body {
         EventBody::SessionStarted {
             id,
+            format,
             parent,
             depth,
             cwd,
@@ -253,6 +327,7 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             key_origin,
         } => EventBody::SessionStarted {
             id,
+            format,
             parent,
             depth,
             cwd,
@@ -299,6 +374,7 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             reasoning,
             tool_calls,
             finish_reason,
+            usage,
         } => {
             let mut spilled_calls = Vec::with_capacity(tool_calls.len());
             for (index, call) in tool_calls.into_iter().enumerate() {
@@ -317,121 +393,21 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
                     .transpose()?,
                 tool_calls: spilled_calls,
                 finish_reason,
+                usage,
             }
         }
-        EventBody::ToolStarted {
-            call_id,
-            name,
-            input,
-            pid,
-            dir,
-        } => EventBody::ToolStarted {
-            call_id,
-            name,
-            input: spill_payload(blobs, seq, "input", input)?,
-            pid,
-            dir,
-        },
-        EventBody::ToolSettled {
-            call_id,
-            outcome,
-            exit_code,
-            bytes,
-            lines,
-            out_path,
-            spilled,
-            result,
-        } => EventBody::ToolSettled {
-            call_id,
-            outcome,
-            exit_code,
-            bytes,
-            lines,
-            out_path,
-            spilled,
-            result: spill_payload(blobs, seq, "result", result)?,
-        },
-        // A background job's command line is the only field that could grow:
-        // the rest are ids, paths and numbers.
-        EventBody::BgStarted {
-            bg_id,
-            call_id,
-            cmd,
-            pid,
-            out_path,
-        } => EventBody::BgStarted {
-            bg_id,
-            call_id,
-            cmd: spill_payload(blobs, seq, "bg.cmd", cmd)?,
-            pid,
-            out_path,
-        },
-        EventBody::BgSettled {
-            bg_id,
-            call_id,
-            cmd,
-            exit_code,
-            state,
-            out_path,
-        } => EventBody::BgSettled {
-            bg_id,
-            call_id,
-            cmd: spill_payload(blobs, seq, "bg.cmd", cmd)?,
-            exit_code,
-            state,
-            out_path,
-        },
-        // An MCP call's arguments are the only field that could grow; its
-        // result is in the file `out_path` names, never inline.
-        EventBody::McpStarted {
-            mcp_id,
-            server,
-            tool,
-            args,
-            parent_call_id,
-        } => EventBody::McpStarted {
-            mcp_id,
-            server,
-            tool,
-            args: spill_payload(blobs, seq, "mcp.args", args)?,
-            parent_call_id,
-        },
-        EventBody::ChildStarted {
-            child_id,
-            session,
-            parent,
-            depth,
-            kind,
-            task,
-            background,
-            model,
-        } => EventBody::ChildStarted {
-            child_id,
-            session,
-            parent,
-            depth,
-            kind,
-            task: spill_payload(blobs, seq, "child.task", task)?,
-            background,
-            model,
-        },
-        EventBody::ChildSettled {
-            child_id,
-            session,
-            parent,
-            depth,
-            outcome,
-            exit_code,
-            result,
-        } => EventBody::ChildSettled {
-            child_id,
-            session,
-            parent,
-            depth,
-            outcome,
-            exit_code,
-            result: spill_payload(blobs, seq, "child.result", result)?,
-        },
+        EventBody::CallStarted(mut start) => {
+            if let Some(input) = start.info.input.take() {
+                start.info.input = Some(spill_payload(blobs, seq, "input", input)?);
+            }
+            EventBody::CallStarted(start)
+        }
+        EventBody::CallSettled(mut settle) => {
+            if let Some(result) = settle.result.take() {
+                settle.result = Some(spill_payload(blobs, seq, "result", result)?);
+            }
+            EventBody::CallSettled(settle)
+        }
         EventBody::TurnEnded {
             outcome,
             reason,
@@ -458,19 +434,6 @@ pub fn spill_payloads(body: EventBody, blobs: &Blobs, seq: u64) -> Result<EventB
             tokens_after,
             cache_restart,
         },
-        EventBody::Verb {
-            name,
-            args,
-            from,
-            boundary,
-            error,
-        } => EventBody::Verb {
-            name,
-            args: spill_payload(blobs, seq, "verb.args", args)?,
-            from,
-            boundary,
-            error,
-        },
         other => other,
     })
 }
@@ -488,7 +451,121 @@ fn spill_payload(
     }
 }
 
-/// A tool call as recorded in an `assistant` event.
+/// Token counts for one provider request, carried on its `assistant` event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Usage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_write_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance: Option<Value>,
+    /// `compact` for a summarising request, otherwise absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+/// The payload of one call event. Every field is read by fold, resume, a feature
+/// or the viewer; nothing is carried for an older log format.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CallInfo {
+    /// bash tool name, MCP `server/tool`, background command name, child kind.
+    pub name: String,
+    /// Tool arguments, MCP arguments or a child task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<Payload>,
+    /// A background job's command line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmd: Option<Payload>,
+    /// The per-call directory a bash tool wrote into.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// Child session id, and its parent session id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Child nesting depth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    /// Whether a child runs in the background.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
+    /// The model a child was started with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// A call's one lifecycle: intent, then one commit. `kind` is `tool`, `mcp`,
+/// `bg` or `child`; `info` carries only the fields that kind uses.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CallStart {
+    pub id: String,
+    pub kind: String,
+    pub info: CallInfo,
+}
+
+/// The settlement of a call. Only fields a reader uses are present; the fields
+/// a kind does not write are absent from the log rather than null.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CallSettle {
+    pub id: String,
+    pub kind: String,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lines: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub out_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spilled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Payload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+impl CallSettle {
+    pub fn exit_code(mut self, value: Option<i32>) -> Self {
+        self.exit_code = value;
+        self
+    }
+    pub fn bytes(mut self, value: u64) -> Self {
+        self.bytes = Some(value);
+        self
+    }
+    pub fn lines(mut self, value: u64) -> Self {
+        self.lines = Some(value);
+        self
+    }
+    pub fn out_path(mut self, value: impl Into<String>) -> Self {
+        self.out_path = Some(value.into());
+        self
+    }
+    pub fn spilled(mut self, value: bool) -> Self {
+        self.spilled = Some(value);
+        self
+    }
+    pub fn result(mut self, value: Payload) -> Self {
+        self.result = Some(value);
+        self
+    }
+    pub fn state(mut self, value: impl Into<String>) -> Self {
+        self.state = Some(value.into());
+        self
+    }
+}
+
+/// A diagnostic note: a threshold crossing or a notification-hook outcome.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Note {
+    pub kind: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoggedToolCall {
     pub id: String,
@@ -517,12 +594,16 @@ pub struct SourceInfo {
     pub hash: String,
 }
 
-/// The payload of a log line. `type` is the serde tag.
+/// The payload of a log line. `type` is the serde tag. Every field is
+/// required on read: event log v1 has no readers for older logs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventBody {
     SessionStarted {
+        /// Session id; also the provider's prompt-cache key.
         id: String,
+        /// `1`: a log written by any other format is refused.
+        format: u8,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<String>,
         depth: u32,
@@ -536,11 +617,9 @@ pub enum EventBody {
         sources: Vec<SourceInfo>,
         #[serde(default)]
         tools: Vec<String>,
-        /// The `reasoning_effort` sent with every request of this session, when one is set.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
-        /// Where this session's key came from (`env OPENROUTER_API_KEY`, `opencode auth export opencode`),
-        /// never the key itself.
+        /// Where the key came from, never the key itself.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_origin: Option<String>,
     },
@@ -575,131 +654,30 @@ pub enum EventBody {
         tool_calls: Vec<LoggedToolCall>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         finish_reason: Option<String>,
+        /// Usage from the final stream chunk of this step, when reported.
+        usage: Option<Usage>,
     },
-    Usage {
-        step: u32,
-        prompt_tokens: u64,
-        completion_tokens: u64,
-        cached_tokens: u64,
-        cache_write_tokens: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        allowance: Option<Value>,
-        /// `None` for a model step.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        kind: Option<String>,
-    },
-    /// Every verb received, applied or not.
+    /// Usage from a provider call with no assistant answer of its own
+    /// (compaction, gate scoring). `kind` names the caller.
+    StepUsage(Usage),
     Verb {
         name: String,
         #[serde(default)]
         args: Payload,
         #[serde(rename = "from")]
         from: String,
-        /// Where it applies (`now`, `next_step`, `queued`, `turn_end`) or
-        /// `rejected` when it was refused.
         boundary: String,
-        /// Why it was refused, when it was.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    ToolStarted {
-        call_id: String,
-        name: String,
-        input: Payload,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pid: Option<u32>,
-        /// The call's own directory under `commands/` (its job id,).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        dir: Option<String>,
-    },
-    ToolSettled {
-        call_id: String,
-        outcome: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        exit_code: Option<i32>,
-        bytes: u64,
-        lines: u64,
-        out_path: String,
-        spilled: bool,
-        result: Payload,
-    },
+    CallStarted(CallStart),
+    CallSettled(CallSettle),
     TurnEnded {
         outcome: String,
-        /// Why the turn paused (`steps`: an explicit `max_steps` cap, `provider`: the retry budget
-        /// ran out). Absent for every other outcome.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         final_text: Payload,
     },
-    /// A `kelir mcp <server> <tool>` call reached the session broker. Written before the call
-    /// goes to the server (intent, like `tool_started`).
-    McpStarted {
-        mcp_id: String,
-        server: String,
-        tool: String,
-        args: Payload,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_call_id: Option<String>,
-    },
-    /// The call's one commit.
-    McpSettled {
-        mcp_id: String,
-        server: String,
-        tool: String,
-        outcome: String,
-        exit_code: i32,
-        bytes: u64,
-        out_path: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_call_id: Option<String>,
-    },
-    /// A background job exists: an explicit `kelir bg run` (which reports itself over the session socket)
-    /// or a bash call promoted past `promote_after`.
-    BgStarted {
-        bg_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        call_id: Option<String>,
-        cmd: Payload,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pid: Option<u32>,
-        out_path: String,
-    },
-    /// A background job settled (exited or was cancelled) while this session owned its log.
-    BgSettled {
-        bg_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        call_id: Option<String>,
-        cmd: Payload,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        exit_code: Option<i32>,
-        state: String,
-        out_path: String,
-    },
-    /// A child session was admitted to the root's registry.
-    ChildStarted {
-        child_id: String,
-        session: String,
-        parent: String,
-        depth: u32,
-        /// `child` (`kelir run --child`) or `brief` (`kelir brief`).
-        kind: String,
-        task: Payload,
-        background: bool,
-        model: String,
-    },
-    /// A child settled: `outcome` is `done`, `paused`, `error`, `stopped`,
-    /// `killed` or `lost`; `result` is its final text (or the reason).
-    ChildSettled {
-        child_id: String,
-        session: String,
-        parent: String,
-        depth: u32,
-        outcome: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        exit_code: Option<i32>,
-        result: Payload,
-    },
-    /// A compaction: everything up to `through_seq` is replaced by `summary`, except the pinned messages.
     Compacted {
         through_seq: u64,
         summary: Payload,
@@ -711,51 +689,27 @@ pub enum EventBody {
         #[serde(default)]
         cache_restart: bool,
     },
-    /// A session reopened from its log: where it continued from, and which calls were started but
-    /// never settled (they are reported to the model as unknown outcomes and never re-run).
-    Resumed {
-        from_seq: u64,
-        #[serde(default)]
-        unsettled: Vec<String>,
-    },
     Error {
         #[serde(rename = "where")]
         location: String,
         message: String,
         retryable: bool,
-        /// The HTTP status, when there was a response (`provider` errors).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<u16>,
-        /// Which provider request failed, counting from 1 for this request.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
-        /// How long kelir will wait before the next attempt. Absent when it
-        /// will not retry, so a reader can tell "waited 34 s" from "gave up".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_in_ms: Option<u64>,
     },
     SessionEnded {
         reason: String,
     },
-    /// A deterministic title derived from the session's first prompt. Written
-    /// once; later prompts do not change it. Never sent to the model.
     SessionTitle {
         title: String,
     },
-    /// A notification hook ran: one event per event kind, with its
-    /// outcome. Never part of the conversation the model reads.
-    Notify {
-        /// `turn_done`, `error`, `paused`, `bg_settled`, `child_settled`.
-        event: String,
-        /// `ok`, `failed`, `rate_limited`, `no_hooks`.
-        outcome: String,
-        /// A hook's failure, when there was one (no key, no secret).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-        hooks: u32,
-    },
-    /// One gate run: every run, including the ones that failed open
-    /// (`error` says why). `rewritten` is only present when the gate rewrote.
+    /// A notification hook outcome or a threshold crossing. `kind` says which;
+    /// neither is part of the conversation the model reads.
+    Note(Note),
     Gate {
         gate: String,
         event: String,
@@ -766,14 +720,6 @@ pub enum EventBody {
         rewritten: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
-    },
-    /// A threshold the human or the driver set was crossed (`warn_prompt_tokens`).
-    Warning {
-        /// `prompt_tokens`.
-        kind: String,
-        message: String,
-        value: f64,
-        threshold: f64,
     },
 }
 
@@ -787,33 +733,35 @@ pub struct LogEvent {
 }
 
 impl EventBody {
-    /// Every event type the log writes, for the docs drift test. Checked
-    /// against `LogEvent::event_type` in the unit tests below.
+    /// Token counts from this event, when it carries a provider call's usage.
+    pub fn usage(&self) -> Option<&Usage> {
+        match self {
+            EventBody::Assistant { usage, .. } => usage.as_ref(),
+            EventBody::StepUsage(usage) => Some(usage),
+            _ => None,
+        }
+    }
+}
+
+impl EventBody {
+    /// Every event type the log writes, for the docs drift test.
     pub const NAMES: &'static [&'static str] = &[
         "session_started",
         "user",
         "source",
         "step_started",
         "assistant",
-        "usage",
+        "step_usage",
         "verb",
-        "tool_started",
-        "tool_settled",
+        "call_started",
+        "call_settled",
         "turn_ended",
-        "mcp_started",
-        "mcp_settled",
-        "bg_started",
-        "bg_settled",
-        "child_started",
-        "child_settled",
         "compacted",
-        "resumed",
         "error",
         "session_ended",
         "session_title",
-        "warning",
+        "note",
         "gate",
-        "notify",
     ];
 }
 
@@ -833,25 +781,17 @@ impl LogEvent {
             EventBody::Source { .. } => "source",
             EventBody::StepStarted { .. } => "step_started",
             EventBody::Assistant { .. } => "assistant",
-            EventBody::Usage { .. } => "usage",
+            EventBody::StepUsage(_) => "step_usage",
             EventBody::Verb { .. } => "verb",
-            EventBody::ToolStarted { .. } => "tool_started",
-            EventBody::ToolSettled { .. } => "tool_settled",
+            EventBody::CallStarted(_) => "call_started",
+            EventBody::CallSettled(_) => "call_settled",
             EventBody::TurnEnded { .. } => "turn_ended",
-            EventBody::McpStarted { .. } => "mcp_started",
-            EventBody::McpSettled { .. } => "mcp_settled",
-            EventBody::BgStarted { .. } => "bg_started",
-            EventBody::BgSettled { .. } => "bg_settled",
-            EventBody::ChildStarted { .. } => "child_started",
-            EventBody::ChildSettled { .. } => "child_settled",
             EventBody::Compacted { .. } => "compacted",
-            EventBody::Resumed { .. } => "resumed",
             EventBody::Error { .. } => "error",
             EventBody::SessionEnded { .. } => "session_ended",
             EventBody::SessionTitle { .. } => "session_title",
-            EventBody::Warning { .. } => "warning",
+            EventBody::Note(_) => "note",
             EventBody::Gate { .. } => "gate",
-            EventBody::Notify { .. } => "notify",
         }
     }
 }
@@ -966,11 +906,24 @@ pub struct LogRead {
 }
 
 /// Read every complete event line. A torn last line never fails the read.
+/// A log not written by format 1 is refused, with no migration path.
+pub const FORMAT_MESSAGE: &str = "written by a different kelir format; start a new session";
+
 pub fn read_events(path: &Path) -> io::Result<LogRead> {
     let bytes = std::fs::read(path)?;
     let mut out = LogRead::default();
     if bytes.is_empty() {
         return Ok(out);
+    }
+    let first: LogEvent = serde_json::from_slice(
+        bytes
+            .split(|byte| *byte == b'\n')
+            .find(|line| !line.is_empty())
+            .unwrap_or_default(),
+    )
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, FORMAT_MESSAGE))?;
+    if !matches!(first.body, EventBody::SessionStarted { format: 1, .. }) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, FORMAT_MESSAGE));
     }
     let mut start = 0usize;
     let mut last_complete = 0usize;
@@ -1004,50 +957,21 @@ pub fn read_events(path: &Path) -> io::Result<LogRead> {
 }
 
 #[cfg(test)]
+pub fn test_usage(prompt: u64, completion: u64, cached: u64, kind: Option<&str>) -> Usage {
+    Usage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        cached_tokens: cached,
+        cache_write_tokens: 0,
+        allowance: None,
+        kind: kind.map(str::to_string),
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    /// The names the docs test reads must be what `event_type` really returns.
-    #[test]
-    fn names_track_the_event_type_match() {
-        const SRC: &str = include_str!("event.rs");
-        let mut arms = Vec::new();
-        let mut inside = false;
-        let mut depth = 0usize;
-        for line in SRC.lines() {
-            if line.trim_start().starts_with("pub fn event_type(") {
-                inside = true;
-                continue;
-            }
-            if !inside {
-                continue;
-            }
-            if line.trim() == "match self.body {" {
-                depth = 1;
-                continue;
-            }
-            if depth > 0 {
-                if line.trim_start().starts_with('}') {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                let Some((_, rest)) = line.trim().split_once("=> ") else {
-                    continue;
-                };
-                let name = rest.trim().trim_end_matches(',');
-                if let Some(name) = name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
-                    arms.push(name);
-                }
-            }
-        }
-        let mut listed = EventBody::NAMES.to_vec();
-        arms.sort_unstable();
-        listed.sort_unstable();
-        assert_eq!(arms, listed, "`EventBody::NAMES` drifted from `event_type`");
-    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1062,6 +986,7 @@ mod tests {
     fn started() -> EventBody {
         EventBody::SessionStarted {
             id: "ses_01".into(),
+            format: 1,
             parent: None,
             depth: 0,
             cwd: "/tmp".into(),
@@ -1089,6 +1014,12 @@ mod tests {
                 delivery: "now".into(),
                 attachments: vec![],
             },
+            EventBody::Source {
+                kind: "hint".into(),
+                name: "note".into(),
+                text: Some("try this".into()),
+                path: None,
+            },
             EventBody::StepStarted {
                 step: 1,
                 provider: "openrouter".into(),
@@ -1105,98 +1036,73 @@ mod tests {
                     args: json!({"command": "ls"}).into(),
                 }],
                 finish_reason: Some("tool_calls".into()),
+                usage: Some(Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    cached_tokens: 4,
+                    cache_write_tokens: 2,
+                    allowance: None,
+                    kind: None,
+                }),
             },
-            EventBody::Usage {
-                step: 1,
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                cached_tokens: 4,
-                cache_write_tokens: 2,
-                allowance: Some(json!({"remaining": 1})),
-                kind: None,
-            },
-            EventBody::Usage {
-                step: 1,
+            EventBody::StepUsage(Usage {
                 prompt_tokens: 40,
                 completion_tokens: 60,
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 allowance: None,
                 kind: Some("compact".into()),
+            }),
+            EventBody::Verb {
+                name: "say".into(),
+                args: json!({"text": "hi", "now": true}).into(),
+                from: "ctl".into(),
+                boundary: "now".into(),
+                error: None,
             },
-            EventBody::ToolStarted {
-                call_id: "call_1".into(),
-                name: "bash".into(),
-                input: json!({"command": "ls"}).into(),
-                pid: Some(42),
-                dir: Some("9-1-1".into()),
-            },
-            EventBody::ToolSettled {
-                call_id: "call_1".into(),
-                outcome: "ok".into(),
-                exit_code: Some(0),
-                bytes: 3,
-                lines: 1,
-                out_path: "/state/commands/call_1/out".into(),
-                spilled: false,
-                result: "ok\n".into(),
-            },
-            EventBody::TurnEnded {
-                outcome: "done".into(),
-                reason: None,
-                final_text: "done".into(),
-            },
-            EventBody::McpStarted {
-                mcp_id: "mcp_01".into(),
-                server: "demo".into(),
-                tool: "echo".into(),
-                args: json!({"text": "hi"}).into(),
-                parent_call_id: Some("call_1".into()),
-            },
-            EventBody::McpSettled {
-                mcp_id: "mcp_01".into(),
-                server: "demo".into(),
-                tool: "echo".into(),
-                outcome: "ok".into(),
-                exit_code: 0,
-                bytes: 2,
-                out_path: "commands/mcp_01/out".into(),
-                parent_call_id: Some("call_1".into()),
-            },
-            EventBody::BgStarted {
-                bg_id: "bg_01".into(),
-                call_id: Some("call_1".into()),
-                cmd: "sleep 60".into(),
-                pid: Some(4242),
-                out_path: "bg/bg_01.out".into(),
-            },
-            EventBody::BgSettled {
-                bg_id: "bg_01".into(),
-                call_id: None,
-                cmd: "sleep 60".into(),
-                exit_code: Some(0),
-                state: "exited".into(),
-                out_path: "bg/bg_01.out".into(),
-            },
-            EventBody::ChildStarted {
-                child_id: "chd_01".into(),
-                session: "ses_02".into(),
-                parent: "ses_01".into(),
-                depth: 1,
-                kind: "child".into(),
-                task: "look at the tests".into(),
-                background: true,
-                model: "test/model".into(),
-            },
-            EventBody::ChildSettled {
-                child_id: "chd_01".into(),
-                session: "ses_02".into(),
-                parent: "ses_01".into(),
-                depth: 1,
-                outcome: "done".into(),
-                exit_code: Some(0),
-                result: "found two".into(),
-            },
+            call_start(
+                "call_1",
+                "tool",
+                CallInfo {
+                    name: "bash".into(),
+                    input: Some(json!({"command": "ls"}).into()),
+                    dir: Some("9-1-1".into()),
+                    ..CallInfo::default()
+                },
+            ),
+            call_settle(
+                "call_1",
+                "tool",
+                "ok",
+                CallSettle {
+                    exit_code: Some(0),
+                    bytes: Some(3),
+                    lines: Some(1),
+                    out_path: Some("commands/call_1/out".into()),
+                    spilled: Some(false),
+                    result: Some("ok\n".into()),
+                    ..CallSettle::default()
+                },
+            ),
+            call_start(
+                "mcp_01",
+                "mcp",
+                CallInfo::mcp("demo", "echo", json!({"text": "hi"}).into()),
+            ),
+            call_start("bg_01", "bg", CallInfo::named("bg", "sleep 60".into())),
+            call_start(
+                "chd_01",
+                "child",
+                CallInfo::child(
+                    "look at the tests".into(),
+                    "ses_02",
+                    "ses_01",
+                    1,
+                    "child",
+                    true,
+                    "test/model",
+                ),
+            ),
             EventBody::Compacted {
                 through_seq: 7,
                 summary: "we did the first half".into(),
@@ -1206,10 +1112,6 @@ mod tests {
                 tokens_after: 120,
                 cache_restart: true,
             },
-            EventBody::Resumed {
-                from_seq: 9,
-                unsettled: vec!["call_1".into()],
-            },
             EventBody::Error {
                 location: "provider".into(),
                 message: "boom".into(),
@@ -1218,23 +1120,75 @@ mod tests {
                 attempt: Some(2),
                 retry_in_ms: Some(1_500),
             },
+            EventBody::Note(Note {
+                kind: "warn_prompt_tokens".into(),
+                text: "too long".into(),
+            }),
+            EventBody::Note(Note {
+                kind: "notify".into(),
+                text: "turn_done: 1 hook(s) fired".into(),
+            }),
+            EventBody::TurnEnded {
+                outcome: "done".into(),
+                reason: None,
+                final_text: "done".into(),
+            },
+            EventBody::Gate {
+                gate: "g".into(),
+                event: "turn_end".into(),
+                decision: "allow".into(),
+                reason: String::new(),
+                ms: 1,
+                rewritten: true,
+                error: None,
+            },
             EventBody::SessionEnded {
                 reason: "done".into(),
             },
-            EventBody::Source {
-                kind: "hint".into(),
-                name: "note".into(),
-                text: Some("try this".into()),
-                path: None,
-            },
-            EventBody::Verb {
-                name: "say".into(),
-                args: json!({"text": "hi", "now": true}).into(),
-                from: "ctl".into(),
-                boundary: "now".into(),
-                error: None,
+            EventBody::SessionTitle {
+                title: "a title".into(),
             },
         ]
+    }
+
+    #[test]
+    fn names_track_the_event_types_samples_write() {
+        let mut seen: Vec<_> = samples()
+            .iter()
+            .map(|body| LogEvent::new(1, body.clone()).event_type())
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        let mut names = EventBody::NAMES.to_vec();
+        names.sort_unstable();
+        assert_eq!(seen, names);
+    }
+
+    #[test]
+    fn read_events_refuses_a_log_from_another_format() {
+        let dir = temp_dir("format");
+        let path = dir.join("events.jsonl");
+        let mut first = serde_json::to_value(LogEvent::new(1, started())).unwrap();
+        first["format"] = json!(2);
+        std::fs::write(&path, format!("{first}\n")).unwrap();
+        let error = read_events(&path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains(FORMAT_MESSAGE));
+
+        let user = serde_json::to_string(&LogEvent::new(
+            1,
+            EventBody::User {
+                text: "hi".into(),
+                from: "cli".into(),
+                delivery: "now".into(),
+                attachments: vec![],
+            },
+        ))
+        .unwrap();
+        std::fs::write(&path, format!("{user}\n")).unwrap();
+        let error = read_events(&path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains(FORMAT_MESSAGE));
     }
 
     #[test]
@@ -1344,6 +1298,7 @@ mod tests {
                 args: json!({"new": big.clone()}).into(),
             }],
             finish_reason: Some("tool_calls".into()),
+            usage: None,
         };
         let spilled = spill_payloads(body, &blobs, 11).unwrap();
         let value = serde_json::to_value(&spilled).unwrap();

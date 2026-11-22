@@ -47,14 +47,14 @@ async fn a_description_reaches_headless_output_but_the_command_stays_in_the_log(
     assert!(!lines[0].contains("printf"), "{}", lines[0]);
 
     // The log and `/expand` keep the whole call, description *and* command.
-    let started = run.one_event("tool_started");
-    assert_eq!(started["input"]["description"], DESC);
-    assert_eq!(started["input"]["command"], COMMAND);
+    let started = run.one_event("call_started");
+    assert_eq!(started["info"]["input"]["description"], DESC);
+    assert_eq!(started["info"]["input"]["command"], COMMAND);
     let assistant = run.events_of("assistant")[0];
     let args = &assistant["tool_calls"][0]["args"];
     assert_eq!(args["description"], DESC);
     assert_eq!(args["command"], COMMAND);
-    let settled = run.one_event("tool_settled");
+    let settled = run.one_event("call_settled");
     assert_eq!(settled["result"], "audit ok\n");
     let out_path = settled["out_path"].as_str().unwrap();
     assert_eq!(
@@ -92,11 +92,11 @@ async fn a_description_reaches_the_ndjson_tool_started_event() {
     let lines = run.json_lines();
     let started = lines
         .iter()
-        .find(|line| line["type"] == "tool_started")
+        .find(|line| line["type"] == "call_started")
         .expect("a tool_started NDJSON line");
-    assert_eq!(started["name"], "bash");
-    assert_eq!(started["input"]["description"], DESC);
-    assert_eq!(started["input"]["command"], COMMAND);
+    assert_eq!(started["info"]["name"], "bash");
+    assert_eq!(started["info"]["input"]["description"], DESC);
+    assert_eq!(started["info"]["input"]["command"], COMMAND);
 }
 
 #[test]

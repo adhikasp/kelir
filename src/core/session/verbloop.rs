@@ -24,7 +24,6 @@ impl Session {
         } = incoming;
         if let Some(pending) = self.note_own(action) {
             // The session's own watcher, not a client: nothing to log and nobody to answer, but the note still
-            // waits for a boundary like the `bg` report it stands in for, so `bg_started`/`bg_settled` land in the
             self.scheduler.push(pending);
             return None;
         }

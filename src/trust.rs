@@ -404,7 +404,6 @@ impl Trust {
     }
 
     /// Adopt a job a previous process of this session minted (a resume rebuilds the registry from
-    /// the log's `bg_started` events and from the jobs in its own `bg/` at startup).
     pub fn adopt(&self, id: &str) {
         let id = id.trim();
         if !valid_job_id(id) || self.owns(id) {

@@ -106,10 +106,10 @@ async fn a_pause_keeps_the_last_words_and_never_splits_a_call_from_its_result() 
     assert_eq!(ended["outcome"], "paused");
     assert_eq!(ended["final_text"], "halfway there");
     // Every started call settled before the pause: 2 started, 2 ended.
-    assert_eq!(run.events_of("tool_started").len(), 2);
-    assert_eq!(run.events_of("tool_settled").len(), 2);
+    assert_eq!(run.events_of("call_started").len(), 2);
+    assert_eq!(run.events_of("call_settled").len(), 2);
     let types = run.event_types();
-    let last_tool_end = types.iter().rposition(|t| t == "tool_settled").unwrap();
+    let last_tool_end = types.iter().rposition(|t| t == "call_settled").unwrap();
     let turn_end = types.iter().rposition(|t| t == "turn_ended").unwrap();
     assert!(last_tool_end < turn_end, "{types:?}");
 }
@@ -226,7 +226,7 @@ async fn pause_resume_pause_resume_walks_a_long_job_forward() {
     // Each file edit ran exactly once: a resume never re-ran a settled call.
     assert_eq!(
         log.iter()
-            .filter(|event| event["type"] == "tool_started")
+            .filter(|event| event["type"] == "call_started")
             .count(),
         5
     );

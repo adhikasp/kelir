@@ -126,29 +126,15 @@ async fn crash_point(point: &str) {
     );
 
     let log = sandbox.log(&id);
-    let resumed = events_of(&log, "resumed");
-    assert_eq!(resumed.len(), 1, "{point}: no resumed event: {log:?}");
-    let unsettled: Vec<&str> = resumed[0]["unsettled"]
-        .as_array()
-        .expect("unsettled")
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect();
     let expect_unsettled = matches!(point, "tool_started" | "mid_tool" | "usage");
-    if expect_unsettled {
-        assert_eq!(unsettled, vec!["call_1"], "{point}");
-    } else {
-        assert!(unsettled.is_empty(), "{point}: {unsettled:?}");
-    }
-
     // A started call nobody settled is reported as unknown, and the model sees
     // that in the next request; a call that completed keeps its real result.
     if expect_unsettled {
         let unknown = log
             .iter()
-            .find(|event| event["type"] == "tool_settled" && event["outcome"] == "unknown")
+            .find(|event| event["type"] == "call_settled" && event["outcome"] == "unknown")
             .unwrap_or_else(|| panic!("{point}: no unknown outcome: {log:?}"));
-        assert_eq!(unknown["call_id"], "call_1");
+        assert_eq!(unknown["id"], "call_1");
         assert!(
             unknown["result"]
                 .as_str()
@@ -178,7 +164,7 @@ async fn crash_point(point: &str) {
         );
         let settled = log
             .iter()
-            .find(|event| event["type"] == "tool_settled")
+            .find(|event| event["type"] == "call_settled")
             .expect("the settled call");
         assert_eq!(settled["outcome"], "ok", "{point}: {settled}");
     }
@@ -204,7 +190,6 @@ async fn crash_point(point: &str) {
         _ => assert_eq!(at_crash, 0, "{point}: the command ran {at_crash} time(s)"),
     }
     // The log agrees: the call was started once if the session got that far
-    // (`usage` and `mid_stream` die before any `tool_started`) and a resume never
     // dispatches it again, not even to settle an unknown outcome.
     let expected_starts = if matches!(point, "usage" | "mid_stream") {
         0
@@ -212,7 +197,10 @@ async fn crash_point(point: &str) {
         1
     };
     assert_eq!(
-        events_of(&log, "tool_started").len(),
+        events_of(&log, "call_started")
+            .iter()
+            .filter(|event| event["kind"] == "tool")
+            .count(),
         expected_starts,
         "{point}: the call was started again on resume: {log:?}"
     );
@@ -324,7 +312,6 @@ async fn resume_replaces_the_stale_socket_of_the_dead_process() {
         .await;
     assert_eq!(second.code, 0, "stderr: {}", second.stderr);
     let log = sandbox.log(&id);
-    assert_eq!(events_of(&log, "resumed").len(), 1);
     assert_eq!(log.last().unwrap()["type"], "session_ended");
 }
 
@@ -464,7 +451,6 @@ async fn a_log_that_was_never_closed_resumes_without_a_new_task() {
         resumed_request.messages().last()
     );
     let log = sandbox.log(&id);
-    assert_eq!(events_of(&log, "resumed").len(), 1);
     assert_eq!(events_of(&log, "turn_ended").len(), 2);
     assert_eq!(log.last().unwrap()["type"], "session_ended");
 }
@@ -569,7 +555,7 @@ async fn the_compact_tool_is_queued_and_applies_at_the_next_step() {
     assert_eq!(compacted[0]["by"], "agent");
     assert!(compacted[0]["through_seq"].as_u64().unwrap() > 0);
     // The call itself answered that the compaction is queued.
-    let settled = events_of(&log, "tool_settled");
+    let settled = events_of(&log, "call_settled");
     assert_eq!(settled.len(), 1);
     assert_eq!(settled[0]["outcome"], "ok");
     assert!(
@@ -737,8 +723,10 @@ async fn simultaneous_resumes_never_both_write_the_log() {
             seqs.windows(2).all(|w| w[1] == w[0] + 1),
             "round {round}: two writers forked the log: {seqs:?}"
         );
-        let resumed = events_of(&log, "resumed").len();
-        assert_eq!(resumed, 1, "round {round}: {resumed} resumes wrote the log");
+        assert!(
+            !events_of(&log, "session_ended").is_empty(),
+            "round {round}: no clean session end"
+        );
         assert!(
             a.code == 0 || b.code == 0,
             "round {round}: neither resume ran ({} / {})",
@@ -793,7 +781,7 @@ async fn a_queued_compaction_survives_a_crash_and_is_applied_on_resume() {
     assert_eq!(compacted[0]["by"], "agent");
     // N4: the summarising request's own tokens are in the log, marked so a
     // reader can tell it is not a step of the turn.
-    let summary_usage = events_of(&log, "usage")
+    let summary_usage = events_of(&log, "step_usage")
         .into_iter()
         .find(|event| event["kind"] == "compact")
         .unwrap_or_else(|| panic!("the summary's usage is not logged: {log:?}"));
@@ -830,10 +818,10 @@ async fn a_compaction_asked_for_while_a_tool_runs_waits_for_the_boundary() {
         "compact_keep = 0\n",
     )
     .await;
-    live.wait_for("tool_started").await;
+    live.wait_for("call_started").await;
     let answer = live.ctl(&["compact"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
-    live.wait_for("tool_settled").await;
+    live.wait_for("call_settled").await;
     live.wait_for("compacted").await;
     live.wait_for("turn_ended").await;
     let log = live.log();
@@ -845,15 +833,15 @@ async fn a_compaction_asked_for_while_a_tool_runs_waits_for_the_boundary() {
             .unwrap_or_else(|| panic!("no {event_type} in {log:?}"))
     };
     assert!(
-        index("tool_started") < index("verb"),
+        index("call_started") < index("verb"),
         "the verb was not taken while the tool ran"
     );
     assert!(
-        index("verb") < index("tool_settled"),
+        index("verb") < index("call_settled"),
         "the verb was taken between the call and its result"
     );
     assert!(
-        index("tool_settled") < index("compacted"),
+        index("call_settled") < index("compacted"),
         "the compaction landed before the batch settled: {log:?}"
     );
     let requests = mock.requests();

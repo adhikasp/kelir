@@ -5,6 +5,79 @@
 use super::*;
 
 const SKILL: &str = include_str!("skill-kelir.md");
+const SPEC: &str = include_str!("../../docs/SPEC.md");
+
+/// Log event names retired by format 1. These topics describe the log; a name
+/// here must be the v1 spelling.
+const OLD_EVENTS: &[&str] = &[
+    "mcp_started",
+    "mcp_settled",
+    "tool_started",
+    "tool_settled",
+    "bg_started",
+    "bg_settled",
+    "child_started",
+    "child_settled",
+];
+/// `config`, `env` and `notify` name *notify hooks*, which keep their spellings;
+/// the log-event drift check does not apply to them.
+const EVENT_TOPICS: &[&str] = &[
+    "events",
+    "mcp",
+    "children",
+    "troubleshooting",
+    "verbs",
+    "gates",
+    "attach",
+];
+
+/// The `note.kind` values a producer writes. A value in this list must be
+/// described in `events.md`; a value the docs describe must be written here.
+const NOTE_KINDS: &[(&str, &str)] = &[
+    ("prompt_tokens", include_str!("../usage.rs")),
+    ("notify", include_str!("../core/session/report.rs")),
+];
+
+#[test]
+fn documented_note_kinds_match_the_producers() {
+    let events = TOPICS
+        .iter()
+        .find(|entry| entry.name == "events")
+        .expect("the events topic exists")
+        .body;
+    for (kind, producer) in NOTE_KINDS {
+        assert!(
+            producer.contains(&format!("kind: \"{kind}\"")),
+            "no producer writes note.kind `{kind}`"
+        );
+        assert!(
+            events.contains(&format!("`{kind}`")),
+            "events.md does not document note.kind `{kind}`"
+        );
+    }
+}
+
+#[test]
+fn no_removed_event_names_in_the_event_reference() {
+    for entry in TOPICS
+        .iter()
+        .filter(|entry| EVENT_TOPICS.contains(&entry.name))
+    {
+        for old in OLD_EVENTS {
+            assert!(
+                !entry.body.contains(old),
+                "docs/reference/{}.md still names removed event `{old}`",
+                entry.name
+            );
+        }
+    }
+    for old in OLD_EVENTS {
+        assert!(
+            !SPEC.contains(old),
+            "docs/SPEC.md still names removed event `{old}`"
+        );
+    }
+}
 
 /// A code name is checked against the topic that owns it: a verb in another
 /// topic's prose is not a row in `verbs.md`.

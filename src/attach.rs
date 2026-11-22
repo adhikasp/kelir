@@ -133,52 +133,45 @@ pub fn from_event(event: &LogEvent) -> Vec<UiEvent> {
         EventBody::SessionTitle { title } => {
             out.push(UiEvent::Title(title.clone()));
         }
-        EventBody::Assistant { text, .. } => {
+        EventBody::Assistant { text, usage, .. } => {
             let text = payload_text(text);
             if !text.is_empty() {
                 out.push(UiEvent::Assistant { text });
             }
+            if let Some(usage) = usage {
+                out.push(UiEvent::Usage {
+                    prompt: usage.prompt_tokens,
+                    completion: usage.completion_tokens,
+                    cached: usage.cached_tokens,
+                });
+            }
         }
-        EventBody::Usage {
-            prompt_tokens,
-            completion_tokens,
-            cached_tokens,
-            ..
-        } => out.push(UiEvent::Usage {
-            prompt: *prompt_tokens,
-            completion: *completion_tokens,
-            cached: *cached_tokens,
+        EventBody::StepUsage(usage) => out.push(UiEvent::Usage {
+            prompt: usage.prompt_tokens,
+            completion: usage.completion_tokens,
+            cached: usage.cached_tokens,
         }),
-        EventBody::ToolStarted { name, input, .. } => out.push(UiEvent::ToolStarted {
-            name: name.clone(),
-            input: payload_value(input),
-        }),
-        EventBody::ToolSettled {
-            outcome,
-            exit_code,
-            bytes,
-            lines,
-            out_path,
-            spilled,
-            ..
-        } => {
-            let tail = if *outcome == "ok" && exit_code.unwrap_or(0) == 0 {
-                String::new()
-            } else {
-                read_tail(out_path, 4096).unwrap_or_default()
-            };
-            out.push(UiEvent::ToolSettled {
-                name: String::new(),
-                input: Value::Null,
-                outcome: outcome.clone(),
-                exit_code: *exit_code,
-                elapsed_ms: 0,
-                bytes: *bytes,
-                lines: *lines,
-                spilled: *spilled,
-                out_path: out_path.clone(),
-                tail,
+        EventBody::CallStarted(start) if start.kind == "tool" => {
+            out.push(UiEvent::ToolStarted {
+                name: start.info.name.clone(),
+                input: start
+                    .info
+                    .input
+                    .as_ref()
+                    .map(payload_value)
+                    .unwrap_or(Value::Null),
             });
+        }
+        EventBody::CallSettled(settle) => {
+            let detail = settle
+                .state
+                .as_deref()
+                .or(settle.exit_code.map(|_| "exited"))
+                .unwrap_or(&settle.outcome);
+            out.push(UiEvent::Info(format!(
+                "{} {} {}",
+                settle.kind, settle.id, detail
+            )));
         }
         EventBody::User { text, from, .. } => {
             let text = payload_text(text);
@@ -210,7 +203,7 @@ pub fn from_event(event: &LogEvent) -> Vec<UiEvent> {
             final_text: payload_text(final_text),
         }),
         EventBody::Error { message, .. } => out.push(UiEvent::Error(message.clone())),
-        EventBody::Warning { message, .. } => out.push(UiEvent::Info(message.clone())),
+        EventBody::Note(note) => out.push(UiEvent::Info(note.text.clone())),
         EventBody::SessionEnded { reason } => {
             out.push(UiEvent::Info(format!("session ended: {reason}")));
         }
@@ -228,14 +221,6 @@ pub fn from_event(event: &LogEvent) -> Vec<UiEvent> {
             } else if name != "status" && name != "observe" {
                 out.push(UiEvent::Info(format!("» {name} ({from}) · {boundary}")));
             }
-        }
-        EventBody::BgSettled { bg_id, state, .. } => {
-            out.push(UiEvent::Info(format!("job {bg_id} {state}")));
-        }
-        EventBody::ChildSettled {
-            child_id, outcome, ..
-        } => {
-            out.push(UiEvent::Info(format!("child {child_id} {outcome}")));
         }
         // Compaction, gates and retries have no row in the live TUI either.
         _ => {}
@@ -258,15 +243,6 @@ fn payload_value(value: &crate::event::Payload) -> Value {
             serde_json::json!({"path": reference.path, "bytes": reference.bytes})
         }
     }
-}
-
-fn read_tail(path: &str, max: usize) -> Option<String> {
-    if path.is_empty() {
-        return None;
-    }
-    let text = crate::tui::read_tail(std::path::Path::new(path), max).ok()?;
-    let line = crate::tui::last_line(&text);
-    (!line.is_empty()).then_some(line)
 }
 
 /// Parse one line into a log event. Bad lines are skipped, never half-applied.
@@ -611,16 +587,9 @@ mod tests {
                 reasoning: None,
                 tool_calls: Vec::new(),
                 finish_reason: None,
+                usage: None,
             },
-            EventBody::Usage {
-                step: 1,
-                prompt_tokens: 10,
-                completion_tokens: 2,
-                cached_tokens: 1,
-                cache_write_tokens: 0,
-                allowance: None,
-                kind: None,
-            },
+            EventBody::StepUsage(crate::event::test_usage(10, 2, 1, None)),
             EventBody::TurnEnded {
                 outcome: "done".into(),
                 reason: None,

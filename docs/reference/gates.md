@@ -174,7 +174,7 @@ key, no `key_env` variable. A gate that needs a secret is given it in its own
 
 One `gate` event per run (`gate`, `event`, `decision`, `reason`, `ms`,
 `rewritten?`, `error?`), including failed-open runs. A gate's rewritten input
-is in the `tool_started`/`user`/`turn_ended` event that used it; the model's
+is in the `call_started`/`call_settled` (`kind: "tool"`), `user` or `turn_ended` event that used it; the model's
 own `assistant` event keeps what it said. `kelir observe <session>` prints the
 effective gates (`== gates ==`, commands and `env` names only) and the runs so
 far (`== gates fired ==`). `kelir ctl <session> status` carries a `gates` object:

@@ -121,7 +121,7 @@ async fn kelir_view_refuses_a_missing_image_with_a_clear_message() {
     let log = session.log();
     let settled: Vec<&Value> = log
         .iter()
-        .filter(|event| event["type"] == "tool_settled")
+        .filter(|event| event["type"] == "call_settled")
         .collect();
     assert_eq!(settled.len(), 1);
     let result = settled[0]["result"].as_str().unwrap_or_default();

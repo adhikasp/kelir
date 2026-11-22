@@ -35,7 +35,6 @@ pub struct Observed {
     pub fired: Vec<Value>,
 }
 
-/// Cache hit ratio from the `usage` events.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CacheStats {
     pub prompt_tokens: u64,
@@ -227,17 +226,13 @@ fn last_hint(events: &[LogEvent], dir: &Path) -> Option<String> {
 fn cache_stats(events: &[LogEvent]) -> CacheStats {
     let mut stats = CacheStats::default();
     for event in events {
-        if let EventBody::Usage {
-            prompt_tokens,
-            cached_tokens,
-            kind: None,
-            ..
-        } = &event.body
+        if let Some(usage) = event.body.usage()
+            && usage.kind.is_none()
         {
-            stats.prompt_tokens += prompt_tokens;
-            stats.cached_tokens += cached_tokens;
-            stats.last_prompt = *prompt_tokens;
-            stats.last_cached = *cached_tokens;
+            stats.prompt_tokens += usage.prompt_tokens;
+            stats.cached_tokens += usage.cached_tokens;
+            stats.last_prompt = usage.prompt_tokens;
+            stats.last_cached = usage.cached_tokens;
         }
     }
     stats

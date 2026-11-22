@@ -150,6 +150,7 @@ impl Session {
         );
         session.record(EventBody::SessionStarted {
             id: prepared.id.clone(),
+            format: 1,
             parent: prepared.child.as_ref().map(|child| child.parent.clone()),
             depth: prepared.child.as_ref().map_or(0, |child| child.depth),
             cwd: crate::util::path_string(&prepared.cwd),
@@ -220,19 +221,9 @@ impl Session {
                 retry_in_ms: None,
             })?;
         }
-        let from_seq = resume::last_seq(&read.events);
-        self.record(EventBody::Resumed {
-            from_seq,
-            unsettled: read
-                .unsettled
-                .iter()
-                .map(|call| call.call_id.clone())
-                .collect(),
-        })?;
-        self.sync();
-
-        // A call the log shows as requested or started, with no result, gets exactly one synthetic
-        // result. Re-running it is what a naive replay does; it is how `rm -rf` runs twice.
+        // Calls the log shows as requested or started but never settled get exactly one
+        // synthetic result. Re-running them is what a naive replay does; it is how `rm -rf`
+        // runs twice.
         let mut unknown = 0usize;
         for call in &read.unsettled {
             let partial = self.interrupted_output(call);
@@ -242,60 +233,50 @@ impl Session {
                     .map(|(path, bytes, lines)| (path.as_str(), *bytes, *lines)),
             );
             let (out_path, bytes, lines) = partial.unwrap_or_default();
-            self.record(EventBody::ToolSettled {
-                call_id: call.call_id.clone(),
-                outcome: "unknown".into(),
-                exit_code: None,
-                bytes,
-                lines,
-                out_path,
-                spilled: false,
-                result: Payload::text(result),
-            })?;
+            self.record(crate::event::call_settle(
+                &call.call_id,
+                "tool",
+                "unknown",
+                crate::event::CallSettle::default()
+                    .bytes(bytes)
+                    .lines(lines)
+                    .out_path(out_path)
+                    .result(Payload::text(result)),
+            ))?;
             unknown += 1;
         }
-        // The same for `kelir mcp` calls: `mcp_started` with no `mcp_settled` means the session died while the
-        // server was running the tool.
+        // The same for `kelir mcp` calls: an mcp call start with no settlement means the
+        // session died while the server was running the tool.
         let settled: std::collections::HashSet<String> = self
             .log
             .events
             .iter()
             .filter_map(|event| match &event.body {
-                EventBody::McpSettled { mcp_id, .. } => Some(mcp_id.clone()),
+                EventBody::CallSettled(settle) if settle.kind == "mcp" => Some(settle.id.clone()),
                 _ => None,
             })
             .collect();
-        let orphans: Vec<(String, String, String, Option<String>)> = self
+        let orphans: Vec<String> = self
             .log
             .events
             .iter()
             .filter_map(|event| match &event.body {
-                EventBody::McpStarted {
-                    mcp_id,
-                    server,
-                    tool,
-                    parent_call_id,
-                    ..
-                } if !settled.contains(mcp_id) => Some((
-                    mcp_id.clone(),
-                    server.clone(),
-                    tool.clone(),
-                    parent_call_id.clone(),
-                )),
+                EventBody::CallStarted(start)
+                    if start.kind == "mcp" && !settled.contains(&start.id) =>
+                {
+                    Some(start.id.clone())
+                }
                 _ => None,
             })
             .collect();
-        for (mcp_id, server, tool, parent_call_id) in orphans {
-            self.record(EventBody::McpSettled {
+        for mcp_id in orphans {
+            self.record(crate::event::call_settle(
                 mcp_id,
-                server,
-                tool,
-                outcome: "unknown".into(),
-                exit_code: crate::mcp::render::EXIT_TIMEOUT,
-                bytes: 0,
-                out_path: String::new(),
-                parent_call_id,
-            })?;
+                "mcp",
+                "unknown",
+                crate::event::CallSettle::default()
+                    .exit_code(Some(crate::mcp::render::EXIT_TIMEOUT)),
+            ))?;
             unknown += 1;
         }
         if unknown > 0 {
@@ -318,11 +299,14 @@ impl Session {
             ));
         }
         // Background jobs that started or settled while no session was running: the shim's status file is the
-        // record, and this is where it reaches the log (`bg_started`, `bg_settled` and the message that wakes
         for event in &self.log.events {
             match &event.body {
-                EventBody::BgStarted { bg_id, .. } => self.trust.adopt(bg_id),
-                EventBody::ToolStarted { dir: Some(dir), .. } => self.trust.adopt(dir),
+                EventBody::CallStarted(start) if start.kind == "bg" => self.trust.adopt(&start.id),
+                EventBody::CallStarted(start) if start.kind == "tool" => {
+                    if let Some(dir) = &start.info.dir {
+                        self.trust.adopt(dir);
+                    }
+                }
                 _ => {}
             }
         }

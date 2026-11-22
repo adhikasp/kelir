@@ -23,7 +23,7 @@ async fn plain_answer_streams_events_and_usage() {
         "{types:?}"
     );
     assert_eq!(types[3], "assistant");
-    assert_eq!(types[4], "usage");
+    assert_eq!(types[4], "turn_ended");
     assert_eq!(&types[types.len() - 2..], &["turn_ended", "session_ended"]);
 
     // Monotonic seq from 1, one per line, with RFC 3339 timestamps.
@@ -42,7 +42,7 @@ async fn plain_answer_streams_events_and_usage() {
     assert_eq!(assistant["finish_reason"], "stop");
     assert_eq!(assistant["step"], 1);
 
-    let usage = run.one_event("usage");
+    let usage = &assistant["usage"];
     assert_eq!(usage["prompt_tokens"], 200);
     assert_eq!(usage["completion_tokens"], 8);
     assert_eq!(usage["cached_tokens"], 96);
@@ -122,13 +122,13 @@ async fn one_bash_call_then_answer() {
     let run = run_task(&mock, &["run", "--json", "run one command"], &[], None, "").await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
 
-    let started = run.one_event("tool_started");
-    assert_eq!(started["call_id"], "call_1");
-    assert_eq!(started["name"], "bash");
-    assert_eq!(started["input"]["command"], "printf 'kelir-ok\\n'");
+    let started = run.one_event("call_started");
+    assert_eq!(started["id"], "call_1");
+    assert_eq!(started["info"]["name"], "bash");
+    assert_eq!(started["info"]["input"]["command"], "printf 'kelir-ok\\n'");
 
-    let settled = run.one_event("tool_settled");
-    assert_eq!(settled["call_id"], "call_1");
+    let settled = run.one_event("call_settled");
+    assert_eq!(settled["id"], "call_1");
     assert_eq!(settled["outcome"], "ok");
     assert_eq!(settled["exit_code"], 0);
     assert_eq!(settled["result"], "kelir-ok\n");
@@ -189,15 +189,15 @@ async fn parallel_calls_settle_in_call_order() {
     let run = run_task(&mock, &["run", "--json", "run two"], &[], None, "").await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
 
-    let started: Vec<&Value> = run.events_of("tool_started");
+    let started: Vec<&Value> = run.events_of("call_started");
     assert_eq!(started.len(), 2);
-    assert_eq!(started[0]["call_id"], "call_slow");
-    assert_eq!(started[1]["call_id"], "call_fast");
+    assert_eq!(started[0]["id"], "call_slow");
+    assert_eq!(started[1]["id"], "call_fast");
 
-    let settled: Vec<&Value> = run.events_of("tool_settled");
+    let settled: Vec<&Value> = run.events_of("call_settled");
     assert_eq!(settled.len(), 2);
-    assert_eq!(settled[0]["call_id"], "call_slow");
-    assert_eq!(settled[1]["call_id"], "call_fast");
+    assert_eq!(settled[0]["id"], "call_slow");
+    assert_eq!(settled[1]["id"], "call_fast");
     assert_eq!(settled[0]["result"], "slow\n");
     assert_eq!(settled[1]["result"], "fast\n");
 
@@ -235,7 +235,7 @@ async fn edit_creates_a_file_then_bash_reads_it() {
         std::fs::read_to_string(run.cwd.join("note.txt")).unwrap(),
         "hello kelir\n"
     );
-    let settled: Vec<&Value> = run.events_of("tool_settled");
+    let settled: Vec<&Value> = run.events_of("call_settled");
     assert_eq!(settled.len(), 2);
     assert_eq!(settled[0]["outcome"], "ok");
     assert!(
@@ -269,7 +269,7 @@ async fn big_output_spills_to_a_notice() {
     .await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
 
-    let settled = run.one_event("tool_settled");
+    let settled = run.one_event("call_settled");
     assert_eq!(settled["outcome"], "ok");
     assert_eq!(settled["spilled"], true);
     assert_eq!(settled["bytes"], 12_000_000);
@@ -458,8 +458,8 @@ async fn a_fifty_kilobyte_edit_argument_is_spilled_but_honoured() {
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
 
     // The log holds blob references, not the 50 KB call twice over.
-    let started = run.one_event("tool_started");
-    let input = &started["input"];
+    let started = run.one_event("call_started");
+    let input = &started["info"]["input"];
     assert_eq!(input["spilled"], true, "{input}");
     let blob_path = input["path"].as_str().unwrap();
     assert!(blob_path.starts_with("blobs/"), "{blob_path}");
@@ -535,7 +535,7 @@ async fn a_background_child_survives_the_call() {
     .await;
     let run = run_task(&mock, &["run", "--json", "background"], &[], None, "").await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    let settled = run.events_of("tool_settled");
+    let settled = run.events_of("call_settled");
     assert_eq!(settled.len(), 2);
     assert_eq!(settled[0]["result"], "started\n");
     assert_eq!(

@@ -230,12 +230,14 @@ fn render(folded: &mut Folded, event: &LogEvent, session_dir: &Path) -> Result<(
             }
             folded.messages.push(ChatMessage::assistant(&text, &calls));
         }
-        EventBody::ToolSettled {
-            call_id, result, ..
-        } => {
+        EventBody::CallSettled(settle) if settle.kind == "tool" && settle.result.is_some() => {
             folded.messages.push(ChatMessage::tool(
-                call_id,
-                &result.resolve_text(session_dir)?,
+                &settle.id,
+                &settle
+                    .result
+                    .as_ref()
+                    .expect("checked above")
+                    .resolve_text(session_dir)?,
             ));
         }
         _ => {}
@@ -264,6 +266,7 @@ mod tests {
             1,
             EventBody::SessionStarted {
                 id: "ses_1".into(),
+                format: 1,
                 parent: None,
                 depth: 0,
                 cwd: "/tmp".into(),
@@ -312,20 +315,25 @@ mod tests {
                         args: json!({"command": "echo hi"}).into(),
                     }],
                     finish_reason: Some("tool_calls".into()),
+                    usage: None,
                 },
             ),
             LogEvent::new(
                 4,
-                EventBody::ToolSettled {
-                    call_id: "c1".into(),
-                    outcome: "ok".into(),
-                    exit_code: Some(0),
-                    bytes: 3,
-                    lines: 1,
-                    out_path: "out".into(),
-                    spilled: false,
-                    result: "hi\n".into(),
-                },
+                crate::event::call_settle(
+                    "c1",
+                    "tool",
+                    "ok",
+                    crate::event::CallSettle {
+                        exit_code: Some(0),
+                        bytes: Some(3),
+                        lines: Some(1),
+                        out_path: Some("out".into()),
+                        spilled: Some(false),
+                        result: Some("hi\n".into()),
+                        ..crate::event::CallSettle::default()
+                    },
+                ),
             ),
             LogEvent::new(
                 5,
@@ -335,6 +343,7 @@ mod tests {
                     reasoning: None,
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
+                    usage: None,
                 },
             ),
         ];
@@ -366,6 +375,7 @@ mod tests {
                     reasoning: None,
                     tool_calls: vec![],
                     finish_reason: None,
+                    usage: None,
                 },
             ),
         ];
@@ -478,14 +488,13 @@ mod tests {
             started(),
             LogEvent::new(
                 2,
-                EventBody::Usage {
+                EventBody::Assistant {
                     step: 1,
-                    prompt_tokens: 1,
-                    completion_tokens: 1,
-                    cached_tokens: 1,
-                    cache_write_tokens: 0,
-                    allowance: None,
-                    kind: None,
+                    text: "".into(),
+                    reasoning: None,
+                    tool_calls: vec![],
+                    finish_reason: None,
+                    usage: Some(crate::event::test_usage(1, 1, 1, None)),
                 },
             ),
             LogEvent::new(
@@ -517,6 +526,7 @@ mod tests {
                 args: Payload::value(args.clone()),
             }],
             finish_reason: Some("tool_calls".into()),
+            usage: None,
         };
         let spilled_body = spill_payloads(inline_body.clone(), &Blobs::new(&dir), 3).unwrap();
         assert_ne!(inline_body, spilled_body);
@@ -573,6 +583,7 @@ mod tests {
                     reasoning: None,
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
+                    usage: None,
                 },
             )
         }
@@ -633,6 +644,7 @@ mod tests {
                     reasoning: None,
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
+                    usage: None,
                 },
             ),
             LogEvent::new(
@@ -664,6 +676,7 @@ mod tests {
                     reasoning: None,
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
+                    usage: None,
                 },
             ),
             LogEvent::new(
@@ -710,6 +723,7 @@ mod tests {
                 reasoning: None,
                 tool_calls: vec![],
                 finish_reason: Some("stop".into()),
+                usage: None,
             },
         )
     }
@@ -877,7 +891,6 @@ mod tests {
         );
     }
 
-    /// `bg_settled` is a record of what happened, not a message: the model reads the `user` event that
     /// follows it (from `job`), so a job's completion renders exactly once — the same way live and on
     #[test]
     fn a_settled_job_renders_as_the_message_that_follows_it() {
@@ -888,24 +901,24 @@ mod tests {
             assistant_at(3, "on it"),
             LogEvent::new(
                 4,
-                EventBody::BgStarted {
-                    bg_id: "bg_1".into(),
-                    call_id: Some("call_1".into()),
-                    cmd: "sleep 60".into(),
-                    pid: Some(7),
-                    out_path: "bg/bg_1.out".into(),
-                },
+                crate::event::call_start(
+                    "bg_1",
+                    "bg",
+                    crate::event::CallInfo::named("bg", "sleep 60".into()),
+                ),
             ),
             LogEvent::new(
                 5,
-                EventBody::BgSettled {
-                    bg_id: "bg_1".into(),
-                    call_id: Some("call_1".into()),
-                    cmd: "sleep 60".into(),
-                    exit_code: Some(0),
-                    state: "exited".into(),
-                    out_path: "bg/bg_1.out".into(),
-                },
+                crate::event::call_settle(
+                    "bg_1",
+                    "bg",
+                    "exited",
+                    crate::event::CallSettle {
+                        exit_code: Some(0),
+                        state: Some("exited".into()),
+                        ..crate::event::CallSettle::default()
+                    },
+                ),
             ),
             user_at(6, "[bg job bg_1 exited 0] ...", "job"),
         ];
@@ -928,7 +941,6 @@ mod tests {
             1,
             "the job is reported once, not once per event"
         );
-        // A `bg_settled` with no message (a session that died before writing
         // one) adds nothing: the resume writes the message, not the fold.
         let only_events: Vec<LogEvent> = events.iter().take(5).cloned().collect();
         let folded = fold(&only_events, &dir).unwrap();
@@ -957,6 +969,7 @@ mod tests {
                         }),
                     }],
                     finish_reason: None,
+                    usage: None,
                 },
             ),
         ];

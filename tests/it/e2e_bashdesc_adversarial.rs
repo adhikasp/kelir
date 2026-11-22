@@ -249,9 +249,9 @@ async fn a_hostile_description_reaches_the_log_verbatim_but_not_the_human_line()
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
 
     // The log keeps the exact bytes for audit and /expand.
-    let started = run.one_event("tool_started");
-    assert_eq!(started["input"]["description"], attack);
-    assert_eq!(started["input"]["command"], SIMPLE);
+    let started = run.one_event("call_started");
+    assert_eq!(started["info"]["input"]["description"], attack);
+    assert_eq!(started["info"]["input"]["command"], SIMPLE);
     let assistant = run.events_of("assistant")[0];
     assert_eq!(assistant["tool_calls"][0]["args"]["description"], attack);
 
@@ -296,9 +296,9 @@ async fn a_long_and_wide_description_is_capped_in_the_real_headless_output() {
         .unwrap();
     assert_eq!(head.chars().count(), DESCRIPTION_MAX, "{head:?}");
     assert!(head.ends_with('…'), "{head:?}");
-    let started = run.one_event("tool_started");
+    let started = run.one_event("call_started");
     assert_eq!(
-        started["input"]["description"]
+        started["info"]["input"]["description"]
             .as_str()
             .unwrap()
             .chars()

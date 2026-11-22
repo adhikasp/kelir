@@ -526,7 +526,7 @@ async fn memory_is_frozen_into_the_system_and_changes_arrive_at_the_tail() {
         &config,
     )
     .await;
-    live.wait_for("tool_started").await;
+    live.wait_for("call_started").await;
     std::fs::write(notes.join("a.md"), "NOTE-A-EDITED").unwrap();
     std::fs::write(notes.join("b.md"), "NOTE-B-NEW").unwrap();
     live.wait_for("turn_ended").await;
@@ -566,7 +566,6 @@ async fn memory_is_frozen_into_the_system_and_changes_arrive_at_the_tail() {
     assert_eq!(code, 0, "{stderr}");
 }
 
-/// The scoring call's tokens are a `usage` event of kind `hint`.
 #[tokio::test]
 async fn the_scoring_calls_usage_is_recorded_as_kind_hint() {
     let project = Project::new();
@@ -593,7 +592,7 @@ async fn the_scoring_calls_usage_is_recorded_as_kind_hint() {
     )
     .await;
     assert_eq!(run.code, 0, "{}", run.stderr);
-    let usage = run.events_of("usage");
+    let usage = run.events_of("step_usage");
     let hints: Vec<&Value> = usage
         .iter()
         .copied()
@@ -603,11 +602,10 @@ async fn the_scoring_calls_usage_is_recorded_as_kind_hint() {
     assert_eq!(hints[0]["prompt_tokens"], 50);
     assert_eq!(hints[0]["completion_tokens"], 70);
     assert!(hints[0].get("cost_source").is_none(), "removed event field");
+    let main = run.one_event("assistant");
     assert!(
-        usage
-            .iter()
-            .any(|e| e.get("kind").is_none() || e["kind"].is_null()),
-        "the main step still has its own usage: {usage:?}"
+        main["usage"].is_object(),
+        "the main step still has its own usage: {main:?}"
     );
 }
 
@@ -642,7 +640,7 @@ async fn a_deleted_memory_note_is_told_to_the_model_once() {
         &config,
     )
     .await;
-    live.wait_for("tool_started").await;
+    live.wait_for("call_started").await;
     std::fs::remove_file(notes.join("a.md")).unwrap();
     live.wait_for("turn_ended").await;
     let log = live.log();

@@ -9,6 +9,17 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 ### Breaking
 
+- The event log is format 1. `session_started` carries `format: 1` and a reader
+  refuses a log written in another format ("written by a different kelir format;
+  start a new session"); there is no compatibility reader. The 16-type vocabulary
+  (down from 24): `usage` folds into `assistant.usage` (with `step_usage` for
+  requests that have no assistant event, such as compaction and gate scoring);
+  `tool_started`, `tool_settled`, `mcp_started`, `mcp_settled`, `bg_started`,
+  `bg_settled`, `child_started` and `child_settled` become `call_started` and
+  `call_settled` with `kind: tool|mcp|bg|child` and kind-specific fields under
+  `info`; `warning` and `notify` become `note` with `note.kind` (`error` stays its own type); the
+  write-only `resumed` event is gone. Consumers of `events.jsonl` must update.
+
 - `kelir docs --find` is now `kelir docs --search`; it prints `topic:line: text` hits,
   best-matching topic first. `kelir docs --generate` and `kelir docs --check` are removed:
   `docs/reference/` is hand-maintained markdown and `cargo test --lib docs` is the one

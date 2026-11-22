@@ -220,7 +220,7 @@ async fn b2_a_promoted_exec_tree_survives_a_killed_session_and_cancel_takes_it()
         "promote_after = 3\n",
     )
     .await;
-    let settled = live.wait_for("tool_settled").await;
+    let settled = live.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "promoted", "{settled}");
     let id = promoted_id(&settled);
     wait_until("the grandchildren", CEILING, || count_with(&markers) >= 3).await;
@@ -262,14 +262,14 @@ async fn b3_an_unpromoted_call_whose_shim_is_killed_settles_and_its_tree_goes() 
     ])
     .await;
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    live.wait_for("tool_started").await;
+    live.wait_for("call_started").await;
     let bg = live.session_dir.join("bg");
     wait_until("the call's status", CEILING, || {
         shim_of(&bg, "").is_some() && count_with(&markers) >= 2
     })
     .await;
     force_kill(shim_of(&bg, "").unwrap());
-    let settled = live.wait_for("tool_settled").await;
+    let settled = live.wait_for("call_settled").await;
     let left = settle_to_zero(|| count_with(&markers)).await;
     reap(&markers);
     live.kill().await;
@@ -399,7 +399,7 @@ async fn b7_a_lost_promoted_job_can_still_be_cancelled() {
         "promote_after = 3\n",
     )
     .await;
-    let settled = live.wait_for("tool_settled").await;
+    let settled = live.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "promoted", "{settled}");
     let id = promoted_id(&settled);
     let bg = live.session_dir.join("bg");

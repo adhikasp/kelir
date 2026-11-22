@@ -250,6 +250,7 @@ fn head(dir: &Path) -> Option<Head> {
 pub fn node_from(id: &str, events: &[LogEvent], alive: bool) -> Option<Node> {
     let (parent, depth, provider, model) = events.iter().find_map(|event| match &event.body {
         EventBody::SessionStarted {
+            format: 1,
             parent,
             depth,
             provider,
@@ -416,16 +417,27 @@ pub async fn ls(args: LsArgs) -> u8 {
         let Ok(read) = crate::event::read_events(&dir.join("events.jsonl")) else {
             continue;
         };
+        let started: std::collections::HashMap<String, String> = read
+            .events
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::CallStarted(start) if start.kind == "child" => Some((
+                    start.id.clone(),
+                    start.info.session.clone().unwrap_or_default(),
+                )),
+                _ => None,
+            })
+            .collect();
         let ended = matches!(
             read.events.last().map(|event| &event.body),
             Some(EventBody::SessionEnded { .. })
         );
         for event in &read.events {
-            if let EventBody::ChildSettled {
-                session, outcome, ..
-            } = &event.body
+            if let EventBody::CallSettled(settle) = &event.body
+                && settle.kind == "child"
+                && let Some(session) = started.get(&settle.id)
             {
-                settled.push((session.clone(), outcome.clone()));
+                settled.push((session.clone(), settle.outcome.clone()));
             }
         }
         let alive = !ended && ipc::connect(&dir, id).await.is_ok();

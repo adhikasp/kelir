@@ -14,7 +14,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 fn settled<'a>(log: &'a [Value], call_id: &str) -> &'a Value {
     log.iter()
-        .find(|event| event["type"] == "tool_settled" && event["call_id"] == call_id)
+        .find(|event| event["type"] == "call_settled" && event["id"] == call_id)
         .unwrap_or_else(|| panic!("no tool_settled for {call_id}"))
 }
 
@@ -37,8 +37,8 @@ async fn stop_call_leaves_a_long_running_sibling_alone() {
     ])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
+    session.wait_for("call_started").await;
     let started = Instant::now();
     let answer = session.ctl(&["stop", "--call", "call_a", "nope"]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
@@ -76,8 +76,8 @@ async fn stop_call_on_an_already_settled_call_does_not_harm_the_others() {
     ])
     .await;
     let mut session = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    session.wait_for("tool_started").await;
-    session.wait_for("tool_started").await;
+    session.wait_for("call_started").await;
+    session.wait_for("call_started").await;
     tokio::time::sleep(Duration::from_millis(800)).await;
     let answer = session.ctl(&["stop", "--call", "call_fast"]).await;
     // Either a clean refusal (the call is done) or a no-op is acceptable.

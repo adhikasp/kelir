@@ -123,7 +123,7 @@ async fn a_foreign_job_report_is_refused_and_recorded() {
         !session
             .log()
             .iter()
-            .any(|event| event["type"] == "bg_started"),
+            .any(|event| event["type"] == "call_started"),
         "a fabricated job reached the log"
     );
     let (code, stderr) = session.end().await;
@@ -497,8 +497,8 @@ async fn ctl_cancel_kills_an_owned_job_and_the_log_records_it() {
     let answer = session.ctl(&["cancel", &id]).await;
     assert_eq!(answer.code, 0, "{}{}", answer.stdout, answer.stderr);
     assert_eq!(answer.response()["ok"], true, "{}", answer.stdout);
-    let settled = session.wait_for("bg_settled").await;
-    assert_eq!(settled["bg_id"], id.as_str(), "{settled}");
+    let settled = session.wait_for("call_settled").await;
+    assert_eq!(settled["id"], id.as_str(), "{settled}");
     assert_eq!(settled["state"], "cancelled", "{settled}");
     let (code, stderr) = session.end().await;
     assert_eq!(code, 0, "{stderr}");
@@ -551,7 +551,7 @@ async fn a_settled_report_replayed_fifty_times_wakes_the_model_once() {
         "{}{}",
         cancelled.stdout, cancelled.stderr
     );
-    session.wait_for("bg_settled").await;
+    session.wait_for("call_settled").await;
 
     let out = session.session_dir.join("bg").join(format!("{id}.out"));
     for _ in 0..50 {
@@ -574,7 +574,7 @@ async fn a_settled_report_replayed_fifty_times_wakes_the_model_once() {
     let log = session.log();
     let settles = log
         .iter()
-        .filter(|event| event["type"] == "bg_settled" && event["bg_id"] == id.as_str())
+        .filter(|event| event["type"] == "call_settled" && event["id"] == id.as_str())
         .count();
     let wakes = log
         .iter()
@@ -657,7 +657,7 @@ async fn a_tool_child_gets_the_token_and_the_file_does_not_outlive_the_session()
     .await;
     let run = run_task(&mock, &["run", "--json", "go"], &[], None, "").await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    let settled = run.one_event("tool_settled");
+    let settled = run.one_event("call_settled");
     let out_path = settled["out_path"].as_str().expect("the call's out path");
     let out = std::fs::read_to_string(out_path).expect("the call's output file");
     assert!(out.contains("has-token"), "{out}");

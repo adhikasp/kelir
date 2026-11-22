@@ -142,7 +142,7 @@ async fn hostile_output_fails_open_and_stays_bounded() {
         );
         let tool_ok = log
             .iter()
-            .any(|e| e["type"] == "tool_settled" && e["outcome"] == "ok");
+            .any(|e| e["type"] == "call_settled" && e["outcome"] == "ok");
         assert!(
             tool_ok,
             "{mode}: the call must run after a failed-open gate"
@@ -164,7 +164,7 @@ async fn a_huge_reason_is_cut_in_the_log_and_in_what_the_model_reads() {
     let runs = gate_events(&log, "before_tool");
     assert_eq!(runs[0]["decision"], "deny");
     assert!(runs[0]["reason"].as_str().unwrap().chars().count() <= 2100);
-    let settled = log.iter().find(|e| e["type"] == "tool_settled").unwrap();
+    let settled = log.iter().find(|e| e["type"] == "call_settled").unwrap();
     assert_eq!(settled["outcome"], "denied");
     let result = settled["result"].as_str().unwrap();
     assert!(
@@ -302,12 +302,12 @@ before_tool = { name = 'veto', command = \"echo '{\\\"decision\\\":\\\"deny\\\",
     assert!(runs.iter().all(|r| r["decision"] == "deny"), "{kinds:?}");
     let denied = log
         .iter()
-        .filter(|e| e["type"] == "tool_settled" && e["outcome"] == "denied")
+        .filter(|e| e["type"] == "call_settled" && e["outcome"] == "denied")
         .count();
     assert_eq!(denied, n);
     assert!(
         !log.iter()
-            .any(|e| e["type"] == "tool_settled" && e["outcome"] == "ok"),
+            .any(|e| e["type"] == "call_settled" && e["outcome"] == "ok"),
         "a vetoed bash call ran"
     );
     let total: u64 = runs.iter().map(|r| r["ms"].as_u64().unwrap_or(0)).sum();
@@ -523,7 +523,7 @@ async fn the_three_declarations_are_equivalent() {
         let log = sandbox.log(&sandbox.only_session());
         let gate = gate_events(&log, "before_tool");
         assert_eq!(gate.len(), 1, "{how}: {log:?}");
-        let settled = log.iter().find(|e| e["type"] == "tool_settled").unwrap();
+        let settled = log.iter().find(|e| e["type"] == "call_settled").unwrap();
         assert_eq!(settled["outcome"], "denied", "{how}");
         let name = gate[0]["gate"].as_str().unwrap().to_string();
         let result = settled["result"].as_str().unwrap().to_string();

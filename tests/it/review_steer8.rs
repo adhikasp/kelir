@@ -17,7 +17,7 @@ fn sized_turn(text: &str, prompt: u64) -> Vec<Value> {
 }
 
 fn warnings(log: &[Value]) -> Vec<&Value> {
-    log.iter().filter(|e| e["type"] == "warning").collect()
+    log.iter().filter(|e| e["type"] == "note").collect()
 }
 
 async fn status(session: &LiveSession) -> Value {
@@ -78,19 +78,19 @@ async fn status_sees_running_calls_and_bg_jobs() {
         "promote_after = 3\n",
     )
     .await;
-    s.wait_for("tool_started").await;
+    s.wait_for("call_started").await;
     let st = status(&s).await;
     assert_eq!(st["running_calls"].as_array().unwrap().len(), 1, "{st}");
     assert_eq!(st["bg_jobs"], 0);
-    let settled = s.wait_for("tool_settled").await;
+    let settled = s.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "promoted", "{settled}");
-    let started = s.wait_for("bg_started").await;
-    let id = started["bg_id"].as_str().unwrap().to_string();
+    let started = s.wait_for("call_started").await;
+    let id = started["id"].as_str().unwrap().to_string();
     let st = status(&s).await;
     assert_eq!(st["bg_jobs"], 1, "{st}");
     let c = s.ctl(&["cancel", &id]).await;
     assert_eq!(c.code, 0, "{}{}", c.stdout, c.stderr);
-    s.wait_for("bg_settled").await;
+    s.wait_for("call_settled").await;
     let st = status(&s).await;
     assert_eq!(st["bg_jobs"], 0, "{st}");
     let _ = s.end().await;

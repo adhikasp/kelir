@@ -13,7 +13,6 @@ impl Session {
         calls: &[ToolCall],
     ) -> Result<Batch, String> {
         // `before_tool` gates: a deny settles the call as `denied` without running it; a rewrite replaces the
-        // input the call runs with (and that `tool_started` records).
         let mut calls: Vec<ToolCall> = calls.to_vec();
         let mut vetoed: Vec<Option<(String, String)>> = vec![None; calls.len()];
         self.gates_do(|gates, _| gates.add_turn_tool_calls(calls.len() as u32));
@@ -43,25 +42,22 @@ impl Session {
         let calls = &calls[..];
         let mut plan: Vec<(String, ToolCall)> = Vec::with_capacity(calls.len());
         for (index, call) in calls.iter().enumerate() {
-            let started = self.record(EventBody::ToolStarted {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                input: Payload::value(call.args.clone()),
-                pid: None,
-                // The call's own directory name: a resume adopts the call's job
-                // id from the log, not from a directory a child could make
-                dir: Some(format!(
-                    "{}-{}-{}",
-                    self.log.writer.next_seq(),
-                    step,
-                    index + 1
-                )),
-            })?;
+            let dir_name = format!("{}-{}-{}", self.log.writer.next_seq(), step, index + 1);
+            self.record(crate::event::call_start(
+                &call.id,
+                "tool",
+                crate::event::CallInfo {
+                    name: call.name.clone(),
+                    input: Some(Payload::value(call.args.clone())),
+                    dir: Some(dir_name.clone()),
+                    ..crate::event::CallInfo::default()
+                },
+            ))?;
             self.emit(UiEvent::ToolStarted {
                 name: call.name.clone(),
                 input: call.args.clone(),
             });
-            let dir = format!("{}-{}-{}", started.seq, step, index + 1);
+            let dir = dir_name;
             // The job registry: a call's output dir name is the id its `bg` reports carry, so the
             // session registers it before the shim starts.
             let _ = self.trust.issue_call(&dir, &call.id);
@@ -293,16 +289,18 @@ impl Session {
                         crate::util::truncate_bytes(result, self.cfg.spill_limit.max(1024));
                 }
             }
-            self.record(EventBody::ToolSettled {
-                call_id: call.id.clone(),
-                outcome: outcome.outcome.clone(),
-                exit_code: outcome.exit_code,
-                bytes: outcome.bytes,
-                lines: outcome.lines,
-                out_path: outcome.out_path.clone(),
-                spilled: outcome.spilled,
-                result: outcome.result.clone().into(),
-            })?;
+            self.record(crate::event::call_settle(
+                &call.id,
+                "tool",
+                &outcome.outcome,
+                crate::event::CallSettle::default()
+                    .exit_code(outcome.exit_code)
+                    .bytes(outcome.bytes)
+                    .lines(outcome.lines)
+                    .out_path(&outcome.out_path)
+                    .spilled(outcome.spilled)
+                    .result(outcome.result.clone().into()),
+            ))?;
             // A promoted call became a background job at this instant: a reader of the log should see the job, not
             // have to infer it from the `promoted` outcome.
             if outcome.outcome == "promoted" {
@@ -351,7 +349,6 @@ impl Session {
         }
         self.sync();
         // Now that the batch's results are all in the log, a promoted call's job can be recorded
-        // (`bg_started`, and the wake message if it settled while the model was reading the result).
         for dir in promoted {
             if let Some(status) =
                 crate::bg::Status::read(&crate::bg::status_path(&self.log.dir.join("bg"), &dir))
@@ -360,7 +357,6 @@ impl Session {
             }
         }
         // Documented test hook: die with the batch committed, which is where a
-        // crash after `tool_settled` lands.
         crash_at("tool_settled");
         Ok(batch)
     }

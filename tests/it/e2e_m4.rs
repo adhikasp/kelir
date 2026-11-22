@@ -148,7 +148,7 @@ async fn a_call_past_the_limit_is_promoted_and_wakes_the_model_when_it_settles()
     )
     .await;
 
-    let settled = live.wait_for("tool_settled").await;
+    let settled = live.wait_for("call_settled").await;
     assert_eq!(
         settled["outcome"], "promoted",
         "the call was not promoted: {settled}"
@@ -160,11 +160,11 @@ async fn a_call_past_the_limit_is_promoted_and_wakes_the_model_when_it_settles()
     assert!(result.contains("kelir bg wait"), "{result}");
     assert!(result.contains("kelir bg cancel"), "{result}");
 
-    let started = live.wait_for("bg_started").await;
-    assert_eq!(started["bg_id"], id.as_str(), "{started}");
-    assert_eq!(started["call_id"], "call_p", "{started}");
+    let started = live.wait_for("call_started").await;
+    assert_eq!(started["id"], id.as_str(), "{started}");
+
     assert!(
-        text_of(&started, "cmd").contains("sleep 2"),
+        text_of(&started["info"], "cmd").contains("sleep 2"),
         "the job's command line is not in the log: {started}"
     );
 
@@ -173,8 +173,8 @@ async fn a_call_past_the_limit_is_promoted_and_wakes_the_model_when_it_settles()
     assert_eq!(ended["outcome"], "done");
 
     // ...and the job's completion wakes the model as a message from `job`.
-    let settled_event = live.wait_for("bg_settled").await;
-    assert_eq!(settled_event["bg_id"], id.as_str(), "{settled_event}");
+    let settled_event = live.wait_for("call_settled").await;
+    assert_eq!(settled_event["id"], id.as_str(), "{settled_event}");
     assert_eq!(settled_event["state"], "exited", "{settled_event}");
     assert_eq!(settled_event["exit_code"], 0, "{settled_event}");
     let wake = live.wait_for("user").await;
@@ -229,7 +229,6 @@ async fn a_call_past_the_limit_is_promoted_and_wakes_the_model_when_it_settles()
 /// The milestone's headline: kelir is killed (not ended) while a promoted job
 /// runs; the job survives, keeps writing, `kelir bg out`/`wait` still read it
 /// with no session at all, and `kelir resume` folds it into the log as
-/// `bg_settled` plus the message that tells the model.
 #[tokio::test]
 async fn a_promoted_job_survives_a_killed_session_and_resume_folds_it_in() {
     let mock = Mock::start(vec![
@@ -248,7 +247,7 @@ async fn a_promoted_job_survives_a_killed_session_and_resume_folds_it_in() {
         "promote_after = 1\n",
     )
     .await;
-    let settled = live.wait_for("tool_settled").await;
+    let settled = live.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "promoted", "{settled}");
     let id = promoted_id(&settled);
     live.wait_for("turn_ended").await;
@@ -296,9 +295,12 @@ async fn a_promoted_job_survives_a_killed_session_and_resume_folds_it_in() {
         .await;
     assert_eq!(resumed.code, 0, "{}\n{}", resumed.stdout, resumed.stderr);
     let log = sandbox.log(&session_id);
-    let settled_events = events_of(&log, "bg_settled");
+    let settled_events: Vec<_> = events_of(&log, "call_settled")
+        .into_iter()
+        .filter(|event| event["kind"] == "bg")
+        .collect();
     assert_eq!(settled_events.len(), 1, "{log:?}");
-    assert_eq!(settled_events[0]["bg_id"], id.as_str());
+    assert_eq!(settled_events[0]["id"], id.as_str());
     assert_eq!(settled_events[0]["exit_code"], 0);
     let wake = log
         .iter()
@@ -324,7 +326,6 @@ async fn a_promoted_job_survives_a_killed_session_and_resume_folds_it_in() {
 }
 
 /// `kelir bg run` from inside a bash call: the job is detached from the call
-/// (the call returns at once), the session records `bg_started` with the call
 /// id that asked for it, and the wake arrives when it settles.
 #[tokio::test]
 async fn a_job_started_inside_a_call_is_recorded_and_wakes_the_model() {
@@ -340,7 +341,7 @@ async fn a_job_started_inside_a_call_is_recorded_and_wakes_the_model() {
     .await;
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
 
-    let settled = live.wait_for("tool_settled").await;
+    let settled = live.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "ok", "{settled}");
     let result = text_of(&settled, "result");
     assert!(result.contains("kelir bg out"), "{result}");
@@ -352,13 +353,13 @@ async fn a_job_started_inside_a_call_is_recorded_and_wakes_the_model() {
         .to_string();
     assert!(id.starts_with("bg_"), "{result}");
 
-    let started = live.wait_for("bg_started").await;
-    assert_eq!(started["bg_id"], id.as_str(), "{started}");
-    assert_eq!(started["call_id"], "call_bg", "{started}");
+    let started = live.wait_for("call_started").await;
+    assert_eq!(started["id"], id.as_str(), "{started}");
+
     live.wait_for("turn_ended").await;
 
-    let settled_event = live.wait_for("bg_settled").await;
-    assert_eq!(settled_event["bg_id"], id.as_str(), "{settled_event}");
+    let settled_event = live.wait_for("call_settled").await;
+    assert_eq!(settled_event["id"], id.as_str(), "{settled_event}");
     assert_eq!(settled_event["exit_code"], 0, "{settled_event}");
     let wake = live.wait_for("user").await;
     assert_eq!(wake["from"], "job", "{wake}");
@@ -380,7 +381,6 @@ async fn a_job_started_inside_a_call_is_recorded_and_wakes_the_model() {
 }
 
 /// The `bg` verb is the shim's word only: a client cannot fabricate a job, so
-/// the log's `bg_started`/`bg_settled` events can be trusted.
 #[tokio::test]
 async fn a_client_cannot_fabricate_a_background_job() {
     let mock = Mock::start(vec![
@@ -393,7 +393,7 @@ async fn a_client_cannot_fabricate_a_background_job() {
     ])
     .await;
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    live.wait_for("tool_settled").await;
+    live.wait_for("call_settled").await;
     live.wait_for("turn_ended").await;
     let fake = json!({
         "id": "bg_fake",
@@ -413,7 +413,10 @@ async fn a_client_cannot_fabricate_a_background_job() {
         "{answer}"
     );
     assert!(
-        !live.log().iter().any(|event| event["type"] == "bg_started"),
+        !live
+            .log()
+            .iter()
+            .any(|event| event["type"] == "call_started" && event["kind"] == "bg"),
         "a fabricated job reached the log"
     );
     let (code, stderr) = live.end().await;
@@ -529,8 +532,8 @@ async fn a_session_killed_mid_call_leaves_no_orphan_behind() {
     .await;
     // The default promote_after (600 s): this call is never promoted.
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    let started = live.wait_for("tool_started").await;
-    assert_eq!(started["name"], "bash");
+    let started = live.wait_for("call_started").await;
+    assert_eq!(started["info"]["name"], "bash");
     let ticks = live.cwd.join("ticks.txt");
     wait_until("the call to write", CEILING, || bytes_len(&ticks) > 0).await;
 
@@ -563,7 +566,7 @@ async fn a_bg_run_inside_a_call_outlives_a_killed_session() {
     )))])
     .await;
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    let settled = live.wait_for("tool_settled").await;
+    let settled = live.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "ok", "{settled}");
     // A job runs where `kelir bg run` was invoked, even when the shim is
     // started by the session (which is in its own directory) — M4 review F2.
@@ -651,10 +654,10 @@ async fn a_job_whose_shim_is_killed_settles_as_lost_and_wakes_the_model() {
         "promote_after = 1\n",
     )
     .await;
-    let settled = live.wait_for("tool_settled").await;
+    let settled = live.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "promoted", "{settled}");
     let id = promoted_id(&settled);
-    live.wait_for("bg_started").await;
+    live.wait_for("call_started").await;
     live.wait_for("turn_ended").await;
 
     let status_file = live.session_dir.join("bg").join(format!("{id}.status"));
@@ -666,8 +669,8 @@ async fn a_job_whose_shim_is_killed_settles_as_lost_and_wakes_the_model() {
 
     // The watcher notices within its poll and settles the job, which starts the
     // turn that reads the wake message.
-    let lost = live.wait_for("bg_settled").await;
-    assert_eq!(lost["bg_id"], id.as_str(), "{lost}");
+    let lost = live.wait_for("call_settled").await;
+    assert_eq!(lost["id"], id.as_str(), "{lost}");
     assert_eq!(lost["state"], "lost", "{lost}");
     let wake = live.wait_for("user").await;
     assert_eq!(wake["from"], "job", "{wake}");
@@ -707,9 +710,9 @@ async fn a_session_without_a_console_runs_a_bash_call() {
         DETACHED_PROCESS,
     )
     .await;
-    let started = live.wait_for("tool_started").await;
-    assert_eq!(started["name"], "bash", "{started}");
-    let settled = live.wait_for("tool_settled").await;
+    let started = live.wait_for("call_started").await;
+    assert_eq!(started["info"]["name"], "bash", "{started}");
+    let settled = live.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "ok", "{settled}");
     assert!(
         live.cwd.join("call.txt").is_file(),

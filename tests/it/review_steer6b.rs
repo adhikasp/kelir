@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 fn settled<'a>(run: &'a Run, call: &str) -> &'a Value {
     run.events
         .iter()
-        .find(|e| e["type"] == "tool_settled" && e["call_id"] == call)
+        .find(|e| e["type"] == "call_settled" && e["id"] == call)
         .unwrap_or_else(|| panic!("no tool_settled for {call}: {:?}", run.event_types()))
 }
 

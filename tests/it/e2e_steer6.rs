@@ -73,7 +73,7 @@ async fn a_40_kb_heredoc_runs_from_a_file_and_writes_every_line() {
     );
     assert!(written.contains(&format!("line {} of a heredoc", LINES - 1)));
 
-    let settled = run.one_event("tool_settled");
+    let settled = run.one_event("call_settled");
     assert_eq!(settled["outcome"], "ok", "{}", settled["result"]);
     assert!(
         settled["result"]
@@ -120,7 +120,7 @@ async fn a_truncated_heredoc_warning_gets_the_notice() {
     .await;
     let run = run_task(&mock, &["run", "--json", "cut a heredoc"], &[], None, "").await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    let settled = run.one_event("tool_settled");
+    let settled = run.one_event("call_settled");
     let result = settled["result"].as_str().unwrap();
     assert!(
         result.contains("delimited by end-of-file"),
@@ -213,7 +213,7 @@ async fn a_multi_hunk_edit_is_atomic() {
     .await;
     let run = run_task(&mock, &["run", "--json", "edit it"], &[], None, "").await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    let settled = run.one_event("tool_settled");
+    let settled = run.one_event("call_settled");
     assert_eq!(settled["outcome"], "error");
     assert!(
         settled["result"].as_str().unwrap().contains("not found"),
@@ -252,7 +252,7 @@ async fn parallel_tool_calls_is_requested_for_a_capable_model() {
     let run = run_task(&mock, &["run", "--json", "two calls"], &[], None, "").await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert_eq!(mock.requests()[0].body["parallel_tool_calls"], true);
-    assert_eq!(run.events_of("tool_settled").len(), 2);
+    assert_eq!(run.events_of("call_settled").len(), 2);
     assert!(run.cwd.join("a.txt").is_file());
     assert!(run.cwd.join("b.txt").is_file());
 }
@@ -509,7 +509,7 @@ async fn a_400_naming_the_effort_is_retried_once_without_it() {
             .contains("retrying without")
     );
     // The session finished its work: the tool call ran.
-    assert_eq!(run.events_of("tool_settled").len(), 1);
+    assert_eq!(run.events_of("call_settled").len(), 1);
 }
 
 /// S3: the default `medium` does not go to a model the provider's list says
@@ -572,7 +572,7 @@ async fn a_powershell_shell_runs_its_ps1_through_minus_file() {
     )
     .await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    let settled = run.one_event("tool_settled");
+    let settled = run.one_event("call_settled");
     assert_eq!(settled["outcome"], "ok", "the ps1 did not run: {settled}");
     let written = std::fs::read_to_string(run.cwd.join("ps.txt")).unwrap_or_default();
     assert!(

@@ -1,7 +1,6 @@
 //! Continuing a session from its log.
 //! `resume` never replays a tool call.
 //! A call the log shows as requested (an assistant message's `tool_calls`) or started
-//! (`tool_started`) but never settled gets one synthetic `tool_settled` whose result tells the
 //! model the outcome is unknown, so it can check rather than repeat a `rm -rf`.
 
 use crate::event::{EventBody, LogEvent, LogRead};
@@ -15,7 +14,6 @@ running; it may or may not have completed. Check before retrying.";
 pub struct UnsettledCall {
     pub call_id: String,
     pub name: String,
-    /// A `tool_started` was written, so the process may have run.
     pub started: bool,
 }
 
@@ -33,7 +31,9 @@ pub fn unsettled(events: &[LogEvent]) -> Vec<UnsettledCall> {
                     });
                 }
             }
-            EventBody::ToolStarted { call_id, name, .. } => {
+            EventBody::CallStarted(start) if start.kind == "tool" => {
+                let call_id = &start.id;
+                let name = &start.info.name;
                 match open
                     .iter_mut()
                     .find(|call| call.call_id == *call_id && !call.started)
@@ -46,8 +46,8 @@ pub fn unsettled(events: &[LogEvent]) -> Vec<UnsettledCall> {
                     }),
                 }
             }
-            EventBody::ToolSettled { call_id, .. } => {
-                if let Some(index) = open.iter().position(|call| call.call_id == *call_id) {
+            EventBody::CallSettled(settle) if settle.kind == "tool" => {
+                if let Some(index) = open.iter().position(|call| call.call_id == settle.id) {
                     open.remove(index);
                 }
             }
@@ -73,9 +73,9 @@ pub fn turn_in_flight(events: &[LogEvent]) -> bool {
                 EventBody::User { .. }
                     | EventBody::StepStarted { .. }
                     | EventBody::Assistant { .. }
-                    | EventBody::Usage { .. }
-                    | EventBody::ToolStarted { .. }
-                    | EventBody::ToolSettled { .. }
+                    | EventBody::StepUsage(_)
+                    | EventBody::CallStarted(_)
+                    | EventBody::CallSettled(_)
             )
         })
 }
@@ -184,6 +184,7 @@ mod tests {
                     })
                     .collect(),
                 finish_reason: Some("tool_calls".into()),
+                usage: None,
             },
         )
     }
@@ -191,29 +192,36 @@ mod tests {
     fn started(seq: u64, id: &str) -> LogEvent {
         LogEvent::new(
             seq,
-            EventBody::ToolStarted {
-                call_id: id.into(),
-                name: "bash".into(),
-                input: Payload::value(json!({"command": "ls"})),
-                pid: Some(7),
-                dir: Some("7-1-1".into()),
-            },
+            crate::event::call_start(
+                id.to_string(),
+                "tool",
+                crate::event::CallInfo {
+                    name: "bash".into(),
+                    input: Some(json!({"command": "ls"}).into()),
+                    dir: Some("7-1-1".into()),
+                    ..crate::event::CallInfo::default()
+                },
+            ),
         )
     }
 
     fn settled(seq: u64, id: &str) -> LogEvent {
         LogEvent::new(
             seq,
-            EventBody::ToolSettled {
-                call_id: id.into(),
-                outcome: "ok".into(),
-                exit_code: Some(0),
-                bytes: 2,
-                lines: 1,
-                out_path: "out".into(),
-                spilled: false,
-                result: "hi".into(),
-            },
+            crate::event::call_settle(
+                id.to_string(),
+                "tool",
+                "ok",
+                crate::event::CallSettle {
+                    exit_code: Some(0),
+                    bytes: Some(2),
+                    lines: Some(1),
+                    out_path: Some("out".into()),
+                    spilled: Some(false),
+                    result: Some("hi".into()),
+                    ..crate::event::CallSettle::default()
+                },
+            ),
         )
     }
 
@@ -265,7 +273,6 @@ mod tests {
 
     #[test]
     fn a_called_but_never_started_call_is_also_unsettled() {
-        // The crash after `usage`, before `tool_started`: the request must not
         // be left with an assistant tool call and no result.
         let events = vec![assistant(1, &[("a", "bash"), ("b", "edit")])];
         let calls = unsettled(&events);

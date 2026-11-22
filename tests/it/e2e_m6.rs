@@ -105,11 +105,11 @@ async fn one_shot(files: &Files, toml: &str, args: &[&str], env: &[(&str, &str)]
     sandbox.kelir("http://127.0.0.1:9/v1", &argv, &full).await
 }
 
-fn event_index(events: &[Value], event_type: &str) -> usize {
+fn call_index(events: &[Value], event_type: &str, kind: &str) -> usize {
     events
         .iter()
-        .position(|event| event["type"] == event_type)
-        .unwrap_or_else(|| panic!("no {event_type} event in {:?}", types(events)))
+        .position(|event| event["type"] == event_type && event["kind"] == kind)
+        .unwrap_or_else(|| panic!("no {event_type}/{kind} event in {:?}", types(events)))
 }
 
 fn types(events: &[Value]) -> Vec<String> {
@@ -119,7 +119,6 @@ fn types(events: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// The text a `tool_settled` (or any `Payload`) holds, spilled or not.
 fn payload_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -423,24 +422,23 @@ async fn a_call_inside_a_bash_call_is_logged_between_its_start_and_settle() {
     .await;
     let kinds = types(&run.events);
     let (a, b, c, d) = (
-        event_index(&run.events, "tool_started"),
-        event_index(&run.events, "mcp_started"),
-        event_index(&run.events, "mcp_settled"),
-        event_index(&run.events, "tool_settled"),
+        call_index(&run.events, "call_started", "tool"),
+        call_index(&run.events, "call_started", "mcp"),
+        call_index(&run.events, "call_settled", "mcp"),
+        call_index(&run.events, "call_settled", "tool"),
     );
     assert!(a < b && b < c && c < d, "{kinds:?}");
 
-    let started = run.one_event("mcp_started");
-    assert_eq!(started["server"], "demo");
-    assert_eq!(started["tool"], "echo");
-    // The shape, never the values (m6m): the text is in the bash call's tool_started.
-    assert_eq!(started["args"], json!({"text": "<string, 14 bytes>"}));
-    assert_eq!(started["parent_call_id"], "call_m");
-    let settled = run.one_event("mcp_settled");
-    assert_eq!(settled["mcp_id"], started["mcp_id"]);
+    let started = run.one_call("call_started", "mcp");
+    assert_eq!(started["info"]["name"], "demo/echo");
+    assert_eq!(
+        started["info"]["input"],
+        json!({"text": "<string, 14 bytes>"})
+    );
+    let settled = run.one_call("call_settled", "mcp");
+    assert_eq!(settled["id"], started["id"]);
     assert_eq!(settled["outcome"], "ok");
     assert_eq!(settled["exit_code"], 0);
-    assert_eq!(settled["parent_call_id"], "call_m");
     let out_path = settled["out_path"].as_str().unwrap();
     assert!(
         out_path.contains("commands"),
@@ -448,7 +446,7 @@ async fn a_call_inside_a_bash_call_is_logged_between_its_start_and_settle() {
     );
     assert_eq!(std::fs::read_to_string(out_path).unwrap(), "from-the-model");
 
-    let tool = run.one_event("tool_settled");
+    let tool = run.one_call("call_settled", "tool");
     assert!(
         payload_text(&tool["result"]).contains("from-the-model"),
         "{tool}"
@@ -460,20 +458,20 @@ async fn a_big_result_spills_and_still_pipes_whole() {
     let files = Files::new();
     // Piped: the consumer sees every byte, so `| jq` works on big results.
     let run = session_run(&files, &server(""), "\"$KELIR_BIN\" mcp demo big | wc -c").await;
-    let tool = run.one_event("tool_settled");
+    let tool = run.one_call("call_settled", "tool");
     let counted: u64 = payload_text(&tool["result"])
         .trim()
         .parse()
         .unwrap_or_else(|_| panic!("wc -c printed {}", payload_text(&tool["result"])));
     assert!(counted >= 20_000, "{counted}");
-    let settled = run.one_event("mcp_settled");
+    let settled = run.one_call("call_settled", "mcp");
     assert!(settled["bytes"].as_u64().unwrap() >= 20_000, "{settled}");
     let full = std::fs::read_to_string(settled["out_path"].as_str().unwrap()).unwrap();
     assert!(full.len() >= 20_000);
 
     // Not piped: the bash call's own 10 KB rule gives the model a notice.
     let run = session_run(&files, &server(""), "\"$KELIR_BIN\" mcp demo big").await;
-    let tool = run.one_event("tool_settled");
+    let tool = run.one_call("call_settled", "tool");
     assert_eq!(tool["spilled"], true, "{tool}");
     assert!(
         payload_text(&tool["result"]).contains("output spilled"),
@@ -491,7 +489,7 @@ async fn the_broker_keeps_one_server_for_the_session_and_it_dies_with_it() {
         "\"$KELIR_BIN\" mcp ls; \"$KELIR_BIN\" mcp demo pid; \"$KELIR_BIN\" mcp demo pid;          \"$KELIR_BIN\" mcp demo echo text=x; \"$KELIR_BIN\" mcp ls",
     )
     .await;
-    let result = payload_text(&run.one_event("tool_settled")["result"]);
+    let result = payload_text(&run.one_call("call_settled", "tool")["result"]);
     let pids: Vec<u32> = result
         .lines()
         .filter_map(|line| line.trim().parse().ok())
@@ -506,8 +504,20 @@ async fn the_broker_keeps_one_server_for_the_session_and_it_dies_with_it() {
         "{states:?}"
     );
     assert_eq!(pids[0], pids[1], "one server for the whole session");
-    assert_eq!(run.events_of("mcp_started").len(), 3);
-    assert_eq!(run.events_of("mcp_settled").len(), 3);
+    assert_eq!(
+        run.events_of("call_started")
+            .iter()
+            .filter(|e| e["kind"] == "mcp")
+            .count(),
+        3
+    );
+    assert_eq!(
+        run.events_of("call_settled")
+            .iter()
+            .filter(|e| e["kind"] == "mcp")
+            .count(),
+        3
+    );
     // The session has exited: so has the server.
     wait_gone(pids[0]).await;
 }
@@ -526,9 +536,9 @@ async fn timeout_is_exit_4_and_the_call_is_not_retried_in_a_session() {
         "\"$KELIR_BIN\" mcp demo slow seconds=10; echo rc=$?",
     )
     .await;
-    let result = payload_text(&run.one_event("tool_settled")["result"]);
+    let result = payload_text(&run.one_call("call_settled", "tool")["result"]);
     assert!(result.contains("rc=4"), "{result}");
-    let settled = run.one_event("mcp_settled");
+    let settled = run.one_call("call_settled", "mcp");
     assert_eq!(settled["outcome"], "timeout", "{settled}");
     assert_eq!(settled["exit_code"], 4);
     let slow = files
@@ -548,15 +558,16 @@ async fn a_crashed_server_is_exit_3_and_the_next_call_restarts_it() {
         "\"$KELIR_BIN\" mcp demo crash; echo rc=$?; \"$KELIR_BIN\" mcp demo echo text=back; echo rc=$?",
     )
     .await;
-    let result = payload_text(&run.one_event("tool_settled")["result"]);
+    let result = payload_text(&run.one_call("call_settled", "tool")["result"]);
     assert!(result.contains("rc=3"), "{result}");
     assert!(
         result.contains("back") && result.contains("rc=0"),
         "{result}"
     );
     let outcomes: Vec<String> = run
-        .events_of("mcp_settled")
+        .events_of("call_settled")
         .iter()
+        .filter(|e| e["kind"] == "mcp")
         .map(|e| e["outcome"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(outcomes, ["unavailable", "ok"], "{result}");
@@ -597,12 +608,12 @@ async fn a_tool_error_in_a_session_is_exit_1_and_logged_as_error() {
         "\"$KELIR_BIN\" mcp demo fail; echo rc=$?",
     )
     .await;
-    let result = payload_text(&run.one_event("tool_settled")["result"]);
+    let result = payload_text(&run.one_call("call_settled", "tool")["result"]);
     assert!(
         result.contains("the tool says no") && result.contains("rc=1"),
         "{result}"
     );
-    assert_eq!(run.one_event("mcp_settled")["outcome"], "error");
+    assert_eq!(run.one_call("call_settled", "mcp")["outcome"], "error");
 }
 
 #[tokio::test]
@@ -655,7 +666,7 @@ async fn a_server_does_not_outlive_a_session_that_is_killed() {
     .await;
     let mut live =
         LiveSession::start_with_mcp(&mock, &["run", "--keep", "--json", "go"], "", &toml).await;
-    live.wait_for("mcp_settled").await;
+    live.wait_for("call_settled").await;
     let pid: u32 = std::fs::read_to_string(&pidfile)
         .expect("the server wrote its pid")
         .trim()
@@ -810,7 +821,11 @@ async fn list_changed_refreshes_the_tools() {
         "\"$KELIR_BIN\" mcp demo echo text=a; sleep 1; \"$KELIR_BIN\" mcp demo late",
     )
     .await;
-    let settled = run.events_of("mcp_settled");
+    let settled: Vec<_> = run
+        .events_of("call_settled")
+        .into_iter()
+        .filter(|e| e["kind"] == "mcp")
+        .collect();
     assert_eq!(settled.len(), 2, "{:?}", run.event_types());
     assert!(settled.iter().all(|e| e["outcome"] == "ok"), "{settled:?}");
 }
@@ -883,7 +898,7 @@ async fn a_lost_session_after_the_send_is_exit_4_and_not_run_again() {
 }
 
 /// F8: a session killed while a server was running a tool leaves
-/// `mcp_started` without `mcp_settled`; the resume settles it as unknown.
+/// `call_started/mcp` without `call_settled/mcp`; the resume settles it as unknown.
 #[tokio::test]
 async fn resume_settles_an_orphaned_mcp_call_as_unknown() {
     let toml = server("");
@@ -895,8 +910,8 @@ async fn resume_settles_an_orphaned_mcp_call_as_unknown() {
     .await;
     let mut live =
         LiveSession::start_with_mcp(&mock, &["run", "--keep", "--json", "go"], "", &toml).await;
-    let started = live.wait_for("mcp_started").await;
-    let mcp_id = started["mcp_id"].as_str().unwrap().to_string();
+    let started = live.wait_for_call("call_started", "mcp").await;
+    let mcp_id = started["id"].as_str().unwrap().to_string();
     let session = live.pid();
     #[cfg(windows)]
     let _ = std::process::Command::new("taskkill")
@@ -919,14 +934,14 @@ async fn resume_settles_an_orphaned_mcp_call_as_unknown() {
     let mock2 = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
     let mut resumed =
         LiveSession::start_reusing(state, &mock2, &["resume", "--json", id.as_str()], "").await;
-    let settled = resumed.wait_for("mcp_settled").await;
-    assert_eq!(settled["mcp_id"], json!(mcp_id));
+    let settled = resumed.wait_for_call("call_settled", "mcp").await;
+    assert_eq!(settled["id"], json!(mcp_id));
     assert_eq!(settled["outcome"], "unknown", "{settled}");
     assert_eq!(settled["exit_code"], 4);
     let log = live.log();
     let settlements = log
         .iter()
-        .filter(|e| e["type"] == "mcp_settled" && e["mcp_id"] == json!(mcp_id))
+        .filter(|e| e["type"] == "call_settled" && e["kind"] == "mcp" && e["id"] == json!(mcp_id))
         .count();
     assert_eq!(settlements, 1, "exactly one settlement");
     drop(resumed);
@@ -985,7 +1000,7 @@ async fn broker_requests_need_the_session_token_and_no_canary_leaks() {
     }
     let before = std::fs::read_to_string(live.session_dir.join("events.jsonl")).unwrap();
     assert!(
-        !before.contains("mcp_started"),
+        !before.contains("\"kind\":\"mcp\""),
         "a refused request was logged"
     );
     // With the token: the call runs.
@@ -997,10 +1012,7 @@ async fn broker_requests_need_the_session_token_and_no_canary_leaks() {
     assert_eq!(answer["ok"], true, "{answer}");
     answers.push(answer.to_string());
     let log = std::fs::read_to_string(live.session_dir.join("events.jsonl")).unwrap();
-    assert!(
-        log.contains("mcp_started") && log.contains("mcp_settled"),
-        "{log}"
-    );
+    assert!(log.contains("\"kind\":\"mcp\""), "{log}");
     let files = tree_text(&live.session_dir);
     let stderr = live.stderr();
     let (_, stdout) = live.end().await;
@@ -1032,12 +1044,16 @@ async fn the_cli_without_the_token_is_refused_by_the_session() {
         "env -u KELIR_TOKEN \"$KELIR_BIN\" mcp demo pid; echo \"code=$?\"",
     )
     .await;
-    let result = payload_text(&run.one_event("tool_settled")["result"]);
+    let result = payload_text(&run.one_call("call_settled", "tool")["result"]);
     assert!(
         result.contains("refused") && result.contains("token"),
         "{result}"
     );
-    assert!(run.events_of("mcp_started").is_empty());
+    assert!(
+        run.events_of("call_started")
+            .iter()
+            .all(|e| e["kind"] != "mcp")
+    );
 }
 
 // ------------------------------------------------------------------- m6m2

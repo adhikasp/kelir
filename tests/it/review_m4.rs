@@ -421,8 +421,8 @@ async fn r8_invalid_command_and_missing_shell() {
     let settled = run
         .json_lines()
         .into_iter()
-        .find(|event| event["type"] == "tool_settled")
-        .expect("tool_settled");
+        .find(|event| event["type"] == "call_settled")
+        .expect("call_settled");
     assert_eq!(settled["outcome"], "error", "{settled}");
     assert!(
         settled["result"]
@@ -494,8 +494,8 @@ async fn r10_a_very_long_command_still_runs() {
     let settled = run
         .json_lines()
         .into_iter()
-        .find(|event| event["type"] == "tool_settled")
-        .expect("tool_settled");
+        .find(|event| event["type"] == "call_settled")
+        .expect("call_settled");
     assert_eq!(settled["outcome"], "ok", "{settled}");
 }
 
@@ -556,7 +556,7 @@ async fn r12_a_graceful_exit_leaves_a_promoted_job_running() {
         "promote_after = 1\n",
     )
     .await;
-    let settled = live.wait_for("tool_settled").await;
+    let settled = live.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "promoted", "{settled}");
     live.wait_for("turn_ended").await;
     let out_path = settled["out_path"].as_str().unwrap_or("").to_string();
@@ -707,7 +707,7 @@ async fn r16_a_torn_or_deleted_status_mid_job_does_not_break_the_session() {
         "promote_after = 1\n",
     )
     .await;
-    let settled = live.wait_for("tool_settled").await;
+    let settled = live.wait_for("call_settled").await;
     assert_eq!(settled["outcome"], "promoted", "{settled}");
     live.wait_for("turn_ended").await;
     let out_path = settled["out_path"].as_str().unwrap_or("").to_string();
@@ -723,7 +723,7 @@ async fn r16_a_torn_or_deleted_status_mid_job_does_not_break_the_session() {
     std::fs::remove_file(&status_file).unwrap();
     tokio::time::sleep(Duration::from_millis(600)).await;
     // The job finishes on its own and writes the file again.
-    let wake = live.wait_for("bg_settled").await;
+    let wake = live.wait_for("call_settled").await;
     assert_eq!(wake["exit_code"], 0, "{wake}");
     let user = live.wait_for("user").await;
     assert_eq!(user["from"], "job", "{user}");
@@ -734,7 +734,6 @@ async fn r16_a_torn_or_deleted_status_mid_job_does_not_break_the_session() {
 
 /// R17: per-call overhead of running every call under the shim. Not an
 /// assertion about speed (there is no budget in the spec), it prints the mean
-/// tool_started -> tool_settled time of 20 trivial calls.
 #[tokio::test]
 async fn r17_trivial_call_latency() {
     let mut script = Vec::new();
@@ -764,11 +763,11 @@ async fn r17_trivial_call_latency() {
     let mut count = 0u32;
     for started in events
         .iter()
-        .filter(|event| event["type"] == "tool_started")
+        .filter(|event| event["type"] == "call_started")
     {
         let settled = events
             .iter()
-            .find(|event| event["type"] == "tool_settled" && event["call_id"] == started["call_id"])
+            .find(|event| event["type"] == "call_settled" && event["id"] == started["id"])
             .expect("settled");
         total += Duration::from_secs_f64((parse(settled) - parse(started)).as_seconds_f64());
         count += 1;
@@ -832,7 +831,7 @@ async fn r18_a_killed_session_takes_exec_grandchildren_with_it() {
     )))])
     .await;
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], "").await;
-    live.wait_for("tool_started").await;
+    live.wait_for("call_started").await;
     wait_until("the grandchildren to exist", CEILING, || {
         pids_with("7311").len() + pids_with("7312").len() + pids_with("7313").len() >= 3
     })

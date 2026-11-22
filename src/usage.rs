@@ -86,25 +86,20 @@ impl Tally {
 
     pub fn observe(&mut self, seq: u64, body: &EventBody) {
         match body {
-            EventBody::Usage {
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-                cache_write_tokens,
-                kind,
-                ..
-            } => {
-                self.prompt += prompt_tokens;
-                self.completion += completion_tokens;
-                self.cached += cached_tokens;
-                self.cache_write += cache_write_tokens;
+            EventBody::Assistant { .. } | EventBody::StepUsage(_)
+                if let Some(usage) = body.usage() =>
+            {
+                self.prompt += usage.prompt_tokens;
+                self.completion += usage.completion_tokens;
+                self.cached += usage.cached_tokens;
+                self.cache_write += usage.cache_write_tokens;
                 // A summary is not a step, and not the context the next request carries.
-                if kind.is_none() {
+                if usage.kind.is_none() {
                     self.requests += 1;
                     self.last = Some(LastUsage {
-                        prompt: *prompt_tokens,
-                        cached: *cached_tokens,
-                        completion: *completion_tokens,
+                        prompt: usage.prompt_tokens,
+                        cached: usage.cached_tokens,
+                        completion: usage.completion_tokens,
                     });
                     self.last_usage_seq = seq;
                 }
@@ -136,11 +131,11 @@ impl Tally {
                     attempt: *attempt,
                 });
             }
-            EventBody::BgStarted { bg_id, .. } => {
-                self.open_jobs.insert(bg_id.clone());
+            EventBody::CallStarted(start) if start.kind == "bg" => {
+                self.open_jobs.insert(start.id.clone());
             }
-            EventBody::BgSettled { bg_id, .. } => {
-                self.open_jobs.remove(bg_id);
+            EventBody::CallSettled(settle) if settle.kind == "bg" => {
+                self.open_jobs.remove(&settle.id);
             }
             EventBody::SessionStarted { .. } if self.state.is_empty() => {
                 self.state = "idle".into();
@@ -462,15 +457,14 @@ mod tests {
     use super::*;
 
     fn usage(prompt: u64, cached: u64, kind: Option<&str>) -> EventBody {
-        EventBody::Usage {
-            step: 1,
+        EventBody::StepUsage(crate::event::Usage {
             prompt_tokens: prompt,
             completion_tokens: 10,
             cached_tokens: cached,
             cache_write_tokens: 0,
             allowance: None,
             kind: kind.map(str::to_string),
-        }
+        })
     }
 
     #[test]

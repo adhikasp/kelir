@@ -182,10 +182,16 @@ async fn notify_hook_fires_once_on_turn_done() {
         body.contains("turn_done"),
         "the hook saw KELIR_NOTIFY_EVENT (body={body:?}): {body}"
     );
-    let events = run.events_of("notify");
+    let events = run.events_of("note");
     assert_eq!(events.len(), 1, "one notify event in the log");
-    assert_eq!(events[0]["event"], "turn_done");
-    assert_eq!(events[0]["hooks"], 1);
+    assert_eq!(events[0]["kind"], "notify");
+    assert!(
+        events[0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("turn_done")),
+        "notify note must name the hook event: {}",
+        events[0]
+    );
 }
 
 /// A command that writes the event name to `marker`, using only the configured

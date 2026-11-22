@@ -265,7 +265,6 @@ impl Session {
     // ---------------------------------------------------- the root's registry
 
     /// Settle the children whose process is gone (a crashed child must not keep
-    /// its slot) and write `child_settled` for each.
     pub(crate) fn reap_children(&mut self) {
         let reaped = self.kids.registry.reap(
             &|entry| child::process_alive(entry.pid.unwrap_or(0), entry.started_ms),
@@ -305,18 +304,27 @@ impl Session {
             }
             "up-local" => self.registry_up(&self.log.id.clone(), args),
             "settle-local" => self.registry_settle(&self.log.id.clone(), args),
-            // A non-root parent writes its own `child_started`.
             "note-started" => {
-                let body = EventBody::ChildStarted {
-                    child_id: text("child_id"),
-                    session: text("session"),
-                    parent: self.log.id.clone(),
-                    depth: args.get("depth").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    kind: text("kind"),
-                    task: Payload::text(text("task")),
-                    background: args.get("background").and_then(Value::as_bool) == Some(true),
-                    model: text("model"),
-                };
+                let child_id = text("child_id");
+                let session = text("session");
+                let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(0) as u32;
+                let kind = text("kind");
+                let task = Payload::text(text("task"));
+                let background = args.get("background").and_then(Value::as_bool) == Some(true);
+                let model = text("model");
+                let body = crate::event::call_start(
+                    &child_id,
+                    "child",
+                    crate::event::CallInfo::child(
+                        task,
+                        &session,
+                        &self.log.id,
+                        depth,
+                        &kind,
+                        background,
+                        &model,
+                    ),
+                );
                 match self.record(body) {
                     Ok(_) => {
                         self.sync();
@@ -404,16 +412,19 @@ impl Session {
             Ok(admission) => admission,
             Err(refusal) => return Response::error(refusal.message()),
         };
-        let body = EventBody::ChildStarted {
-            child_id: admission.child_id.clone(),
-            session: admission.session.clone(),
-            parent: parent.to_string(),
-            depth: admission.depth,
-            kind: kind.to_string(),
-            task: Payload::text(task),
-            background,
-            model,
-        };
+        let body = crate::event::call_start(
+            &admission.child_id,
+            "child",
+            crate::event::CallInfo::child(
+                Payload::text(task),
+                &admission.session,
+                parent,
+                admission.depth,
+                kind,
+                background,
+                &model,
+            ),
+        );
         if let Err(error) = self.record(body) {
             // The slot was taken for a child that will never run.
             self.kids.registry.settle(&admission.child_id, "error");
@@ -501,15 +512,14 @@ impl Session {
         exit_code: Option<i32>,
         result: &str,
     ) {
-        let body = EventBody::ChildSettled {
-            child_id: entry.child_id.clone(),
-            session: entry.session.clone(),
-            parent: entry.parent.clone(),
-            depth: entry.depth,
-            outcome: outcome.to_string(),
-            exit_code,
-            result: Payload::text(result),
-        };
+        let body = crate::event::call_settle(
+            &entry.child_id,
+            "child",
+            outcome,
+            crate::event::CallSettle::default()
+                .exit_code(exit_code)
+                .result(Payload::text(result)),
+        );
         if self.record(body).is_ok() {
             self.sync();
         }
@@ -542,22 +552,21 @@ impl Session {
         });
     }
 
-    /// Apply a settlement at a boundary: the `child_settled` event (unless the registry already wrote it)
     /// and, for a background child, the message that wakes the model.
     pub(crate) fn note_child(&mut self, note: &ChildNote) -> Result<bool, String> {
         let settled = self.log.events.iter().any(|event| {
-            matches!(&event.body, EventBody::ChildSettled { child_id, .. } if child_id == &note.child_id)
+            matches!(&event.body, EventBody::CallSettled(settle)
+                if settle.kind == "child" && settle.id == note.child_id)
         });
         if !settled {
-            self.record(EventBody::ChildSettled {
-                child_id: note.child_id.clone(),
-                session: note.session.clone(),
-                parent: note.parent.clone(),
-                depth: note.depth,
-                outcome: note.outcome.clone(),
-                exit_code: note.exit_code,
-                result: Payload::text(note.result.clone()),
-            })?;
+            self.record(crate::event::call_settle(
+                &note.child_id,
+                "child",
+                &note.outcome,
+                crate::event::CallSettle::default()
+                    .exit_code(note.exit_code)
+                    .result(Payload::text(note.result.clone())),
+            ))?;
             self.notify("child_settled", &note.child_id);
         }
         if !note.background || note.parent != self.log.id {

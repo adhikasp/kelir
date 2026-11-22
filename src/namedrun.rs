@@ -612,6 +612,7 @@ mod tests {
             seq: 1,
             ts: ts.into(),
             body: EventBody::SessionStarted {
+                format: 1,
                 id: "ses_x".into(),
                 parent: None,
                 depth: 0,

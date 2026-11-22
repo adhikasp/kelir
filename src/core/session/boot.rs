@@ -586,6 +586,7 @@ pub(crate) async fn reopen(
         .iter()
         .find_map(|event| match &event.body {
             EventBody::SessionStarted {
+                format: 1,
                 provider,
                 model,
                 tools,

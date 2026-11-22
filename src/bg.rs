@@ -751,7 +751,7 @@ pub fn wake_text(status: &Status) -> String {
         }
     }
     text.push_str(&format!(
-        "read it with `kelir bg out {}`; the log records it as `bg_settled`",
+        "read it with `kelir bg out {}`; the log records it as `call_settled{{kind:\"bg\"}}`",
         status.id
     ));
     text
@@ -988,7 +988,6 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     if let Err(error) = status.write(&status_path(&dir, &args.id)) {
         eprintln!("kelir bg-shim: cannot write the status file: {error}");
     }
-    // Tell the session about a job over its socket, so it records `bg_started` straight away instead of
     // noticing the file on its next poll. The token comes from the environment, as for every child.
     if let Some(sock) = args.sock.as_deref()
         && args.kind == KIND_JOB
@@ -1352,7 +1351,6 @@ fn session_socket() -> Option<String> {
         .filter(|sock| !sock.is_empty())
 }
 
-/// Tell the session about a job over its socket, so it records `bg_started` straight away instead of
 /// noticing the file on its next poll.
 async fn notify(status: &Status, sock: &str) {
     let args = match serde_json::to_value(status) {
@@ -1830,26 +1828,25 @@ fn stop_lost(status: &Status, out: &mut dyn CancelOut) -> u8 {
     1
 }
 
-/// The `bg_started`/`bg_settled` payloads for the log, from a status file.
+/// The `call_started`/`call_settled` payloads for a background job, from a status file.
 pub fn started_body(status: &Status) -> crate::event::EventBody {
-    crate::event::EventBody::BgStarted {
-        bg_id: status.id.clone(),
-        call_id: status.call.clone(),
-        cmd: Payload::text(status.cmd.clone()),
-        pid: status.pid,
-        out_path: status.out.clone(),
-    }
+    crate::event::call_start(
+        &status.id,
+        "bg",
+        crate::event::CallInfo::bg(Payload::text(status.cmd.clone())),
+    )
 }
 
 pub fn settled_body(status: &Status) -> crate::event::EventBody {
-    crate::event::EventBody::BgSettled {
-        bg_id: status.id.clone(),
-        call_id: status.call.clone(),
-        cmd: Payload::text(status.cmd.clone()),
-        exit_code: status.exit_code,
-        state: status.state.clone(),
-        out_path: status.out.clone(),
-    }
+    crate::event::call_settle(
+        &status.id,
+        "bg",
+        "exited",
+        crate::event::CallSettle::default()
+            .exit_code(status.exit_code)
+            .state(&status.state)
+            .out_path(&status.out),
+    )
 }
 
 #[cfg(test)]
@@ -2261,25 +2258,20 @@ mod tests {
         status.call = Some("call_9".into());
         let started = started_body(&status);
         match &started {
-            crate::event::EventBody::BgStarted {
-                bg_id,
-                call_id,
-                pid,
-                ..
-            } => {
-                assert_eq!(bg_id, "bg_7");
-                assert_eq!(call_id.as_deref(), Some("call_9"));
-                assert_eq!(*pid, Some(4242));
+            crate::event::EventBody::CallStarted(start) => {
+                assert_eq!(start.id, "bg_7");
+                assert_eq!(
+                    start.info.cmd.as_ref().and_then(Payload::inline_str),
+                    Some("sleep 60")
+                );
             }
             other => panic!("unexpected {other:?}"),
         }
         let settled = settled_body(&status);
         match &settled {
-            crate::event::EventBody::BgSettled {
-                exit_code, state, ..
-            } => {
-                assert_eq!(*exit_code, Some(3));
-                assert_eq!(state, "exited");
+            crate::event::EventBody::CallSettled(settle) => {
+                assert_eq!(settle.exit_code, Some(3));
+                assert_eq!(settle.state.as_deref(), Some("exited"));
             }
             other => panic!("unexpected {other:?}"),
         }

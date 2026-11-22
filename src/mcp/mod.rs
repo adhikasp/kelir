@@ -2,7 +2,6 @@
 //! The model never gets MCP tool schemas in its request.
 //! It runs `kelir mcp <server> <tool> k=v` in a bash call; inside a session that call reaches the
 //! **broker** in the session process over `KELIR_SOCK`, which keeps each server alive for the
-//! session and writes `mcp_started`/`mcp_settled`.
 
 pub mod args;
 pub mod broker;
@@ -106,7 +105,6 @@ pub async fn run_call(
     output
 }
 
-/// What `mcp_started` records of a call's arguments: their shape, never their values.
 pub fn loggable_args(args: &Value) -> Value {
     match args {
         Value::Object(map) => Value::Object(

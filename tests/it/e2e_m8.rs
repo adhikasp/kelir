@@ -242,7 +242,7 @@ async fn crashing_garbage_and_silent_gates_fail_open() {
     ]);
     let done = drive(&mock, &config, "go", &[]).await;
     assert_eq!(done.out.code, 0, "{}", done.out.stderr);
-    let settled = done.events("tool_settled");
+    let settled = done.events("call_settled");
     assert_eq!(settled[0]["outcome"], "ok");
     assert!(settled[0]["result"].as_str().unwrap().contains("still-ran"));
 
@@ -287,7 +287,7 @@ async fn a_gate_that_hangs_times_out_within_the_limit_and_its_tree_dies() {
         runs[0]
     );
     assert!(runs[0]["ms"].as_u64().unwrap() < 15_000, "{}", runs[0]);
-    assert_eq!(done.events("tool_settled")[0]["outcome"], "ok");
+    assert_eq!(done.events("call_settled")[0]["outcome"], "ok");
     // The gate's child would write the flag 3 s after it started.
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert!(
@@ -403,9 +403,9 @@ async fn before_tool_can_rewrite_a_calls_input() {
     )
     .await;
     assert_eq!(done.out.code, 0, "{}", done.out.stderr);
-    let started = done.events("tool_started");
-    assert_eq!(started[0]["input"]["command"], "echo rewritten");
-    let settled = done.events("tool_settled");
+    let started = done.events("call_started");
+    assert_eq!(started[0]["info"]["input"]["command"], "echo rewritten");
+    let settled = done.events("call_settled");
     assert_eq!(settled[0]["result"], "rewritten\n");
     // What the model asked for is still what its own message says.
     let assistant = done.events("assistant");
@@ -422,7 +422,7 @@ async fn before_tool_deny_returns_the_gate_and_the_reason_and_runs_nothing() {
     let probe = Probe::new(json!({"before_tool": {"mode": "deny", "reason": "no writes today"}}));
     let done = drive(&mock, &probe.config(&[("before_tool", None)]), "go", &[]).await;
     assert_eq!(done.out.code, 0, "{}", done.out.stderr);
-    let settled = done.events("tool_settled");
+    let settled = done.events("call_settled");
     assert_eq!(settled[0]["outcome"], "denied");
     let result = settled[0]["result"].as_str().unwrap();
     assert!(
@@ -448,7 +448,7 @@ async fn after_tool_can_replace_the_result_or_append_a_note() {
     let probe =
         Probe::new(json!({"after_tool": {"mode": "rewrite", "input": {"note": "mind the typo"}}}));
     let done = drive(&mock, &probe.config(&[("after_tool", None)]), "go", &[]).await;
-    let result = done.events("tool_settled")[0]["result"]
+    let result = done.events("call_settled")[0]["result"]
         .as_str()
         .unwrap()
         .to_string();
@@ -462,7 +462,7 @@ async fn after_tool_can_replace_the_result_or_append_a_note() {
     let probe =
         Probe::new(json!({"after_tool": {"mode": "rewrite", "input": {"result": "replaced"}}}));
     let done = drive(&mock, &probe.config(&[("after_tool", None)]), "go", &[]).await;
-    assert_eq!(done.events("tool_settled")[0]["result"], "replaced");
+    assert_eq!(done.events("call_settled")[0]["result"], "replaced");
 }
 
 // --------------------------------------------------------------- prompt_submit
@@ -982,9 +982,18 @@ async fn mcp_calls_are_gated_as_mcp_server_dot_tool() {
         after["result"], "rewritten-arg",
         "the rewritten input reached the server"
     );
-    let result = log.iter().find(|e| e["type"] == "tool_settled").unwrap()["result"]
+    let result = log
+        .iter()
+        .find(|e| e["type"] == "call_settled" && !e["result"].is_null())
+        .unwrap()["result"]
         .as_str()
-        .unwrap()
+        .unwrap_or_else(|| {
+            log.iter()
+                .find(|e| e["type"] == "call_settled" && !e["result"].is_null())
+                .unwrap()["result"]["text"]
+                .as_str()
+                .unwrap_or("")
+        })
         .to_string();
     assert!(
         result.contains("rewritten-arg") && result.contains("mcp noted"),
@@ -1012,15 +1021,24 @@ async fn mcp_calls_are_gated_as_mcp_server_dot_tool() {
         .await;
     assert_eq!(out.code, 0, "{}", out.stderr);
     let log = sandbox.log(&sandbox.only_session());
-    let result = log.iter().find(|e| e["type"] == "tool_settled").unwrap()["result"]
+    let result = log
+        .iter()
+        .find(|e| e["type"] == "call_settled" && !e["result"].is_null())
+        .unwrap()["result"]
         .as_str()
-        .unwrap()
+        .unwrap_or_else(|| {
+            log.iter()
+                .find(|e| e["type"] == "call_settled" && !e["result"].is_null())
+                .unwrap()["result"]["text"]
+                .as_str()
+                .unwrap_or("")
+        })
         .to_string();
     assert!(
         result.contains("denied by gate gate_probe: servers are closed"),
         "{result}"
     );
-    let settled = log.iter().find(|e| e["type"] == "mcp_settled").unwrap();
+    let settled = log.iter().find(|e| e["type"] == "call_settled").unwrap();
     assert_eq!(settled["outcome"], "denied");
 }
 
@@ -1181,7 +1199,7 @@ async fn a_child_session_runs_its_own_scrubbed_gates_and_status_and_observe_show
     let root_log = &logs.iter().find(|(id, _)| *id != child_id).unwrap().1;
     let status = root_log
         .iter()
-        .filter(|e| e["type"] == "tool_settled")
+        .filter(|e| e["type"] == "call_settled")
         .map(|e| e.to_string())
         .find(|text| text.contains("failed open"))
         .unwrap_or_else(|| {
@@ -1189,7 +1207,7 @@ async fn a_child_session_runs_its_own_scrubbed_gates_and_status_and_observe_show
                 "no gate counters in ctl status: {:?}",
                 root_log
                     .iter()
-                    .filter(|e| e["type"] == "tool_settled")
+                    .filter(|e| e["type"] == "call_settled")
                     .collect::<Vec<_>>()
             )
         });

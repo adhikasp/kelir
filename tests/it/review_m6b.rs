@@ -242,7 +242,7 @@ async fn another_sessions_token_and_a_missing_key_are_refused() {
     }
     let log = std::fs::read_to_string(a.session_dir.join("events.jsonl")).unwrap();
     assert!(
-        !log.contains("mcp_started") && !log.contains("FORGED"),
+        !log.contains("\"kind\":\"mcp\"") && !log.contains("FORGED"),
         "{log}"
     );
     assert!(
@@ -271,7 +271,7 @@ async fn a_bash_child_needs_the_token_and_never_falls_back_silently() {
         KELIR_TOKEN=wrong \"$KELIR_BIN\" mcp s echo text=wt 2>&1; echo wrongtoken_rc=$?; \
         KELIR_TOKEN= \"$KELIR_BIN\" mcp ls 2>&1; echo emptytoken_rc=$?";
     let run = session_run(&files, &toml, command).await;
-    let result = match &run.one_event("tool_settled")["result"] {
+    let result = match &run.one_call("call_settled", "tool")["result"] {
         Value::String(text) => text.clone(),
         other => other["preview"].as_str().unwrap_or("").to_string(),
     };
@@ -280,7 +280,10 @@ async fn a_bash_child_needs_the_token_and_never_falls_back_silently() {
     assert!(result.contains("wrongtoken_rc=3"), "{result}");
     assert!(result.contains("emptytoken_rc=3"), "{result}");
     assert_eq!(
-        run.events_of("mcp_started").len(),
+        run.events_of("call_started")
+            .iter()
+            .filter(|e| e["kind"] == "mcp")
+            .count(),
         1,
         "only the authenticated call is logged"
     );
@@ -297,8 +300,6 @@ async fn a_bash_child_needs_the_token_and_never_falls_back_silently() {
 ///  - env: nowhere (not in kelir output, not in any file, not in the server's argv);
 ///  - server args: nowhere in kelir output (the server's own argv has it, by
 ///    construction);
-///  - tool argument: only in the bash call that carried it (`tool_started`,
-///    its out file); never in `mcp_started` / `mcp_settled`;
 ///  - tool result: only in the bash call's output and the spilled file.
 #[tokio::test]
 async fn canaries_stay_in_their_own_channels() {
@@ -337,12 +338,16 @@ async fn canaries_stay_in_their_own_channels() {
         let text = event.to_string();
         if text.contains(tool_c) {
             assert!(
-                matches!(kind, "tool_started" | "tool_settled" | "assistant"),
+                matches!(kind, "call_started" | "call_settled" | "assistant"),
                 "tool-arg canary in a `{kind}` event: {text}"
             );
         }
     }
-    for event in run.events_of("mcp_started") {
+    for event in run
+        .events_of("call_started")
+        .into_iter()
+        .filter(|e| e["kind"] == "mcp")
+    {
         assert!(!event.to_string().contains(tool_c), "{event}");
     }
     // Session files: the env and server-arg canaries are in none of them.
@@ -370,7 +375,7 @@ async fn the_servers_command_line_has_no_env_values() {
     .await;
     let mut live =
         LiveSession::start_with_mcp(&mock, &["run", "--keep", "--json", "go"], "", &toml).await;
-    live.wait_for("mcp_settled").await;
+    live.wait_for_call("call_settled", "mcp").await;
     let pid = read_pid(Path::new(&pidfile)).await;
     #[cfg(windows)]
     let cmdline = String::from_utf8_lossy(
@@ -512,8 +517,8 @@ async fn a_killed_session_leaves_no_server_and_no_grandchild() {
     .await;
     let mut live =
         LiveSession::start_with_mcp(&mock, &["run", "--keep", "--json", "go"], "", &toml).await;
-    live.wait_for("mcp_settled").await; // spawnkid
-    live.wait_for("mcp_started").await; // hold is running
+    live.wait_for_call("call_settled", "mcp").await; // spawnkid
+    live.wait_for_call("call_started", "mcp").await; // hold is running
     let server = read_pid(Path::new(&pidfile)).await;
     let kid = read_pid(Path::new(&kidfile)).await;
     assert!(pid_alive(server) && pid_alive(kid));

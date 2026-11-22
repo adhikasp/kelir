@@ -57,7 +57,6 @@ impl Session {
         }
     }
 
-    /// Record what a job's status file says: `bg_started` once, and — when it settled — `bg_settled` plus
     /// the `user` message from `job` that wakes the agent.
     pub(crate) fn note_bg(&mut self, reported: &crate::bg::Status) -> Result<bool, String> {
         let id = reported.id.clone();
@@ -81,7 +80,8 @@ impl Session {
         }
         let status = crate::bg::observed_in(&dir, candidate);
         let started = self.log.events.iter().any(|event| {
-            matches!(&event.body, EventBody::BgStarted { bg_id, .. } if bg_id == &status.id)
+            matches!(&event.body, EventBody::CallStarted(start)
+                if start.kind == "bg" && start.id == status.id)
         });
         if !started {
             self.record(crate::bg::started_body(&status))?;
@@ -91,10 +91,10 @@ impl Session {
             return Ok(false);
         }
         // Settle once. The log is the record: a repeated report (a stale watcher pass, a child
-        // replaying a settled status 50 times) finds `bg_settled` here and writes nothing — no
         // second event, no second wake message.
         let settled = self.log.events.iter().any(|event| {
-            matches!(&event.body, EventBody::BgSettled { bg_id, .. } if bg_id == &status.id)
+            matches!(&event.body, EventBody::CallSettled(settle)
+                if settle.kind == "bg" && settle.id == status.id)
         });
         if settled {
             return Ok(false);

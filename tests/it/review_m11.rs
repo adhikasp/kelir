@@ -336,7 +336,6 @@ async fn r4_a_viewer_disconnect_never_stops_the_session() {
     assert_eq!(code, 0, "session died with its viewer");
 }
 
-/// A real bg job settling must fire the `bg_settled` notification (M11 Build 4).
 /// This was the blocker proof for M11 B1: it failed deterministically before the
 /// `note_bg` dispatch was added, and is part of the normal suite again.
 #[tokio::test]
@@ -363,7 +362,7 @@ async fn r5_a_settled_bg_job_fires_its_notify_hook() {
     ])
     .await;
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], &config).await;
-    let settled = live.wait_for("bg_settled").await;
+    let settled = live.wait_for_call("call_settled", "bg").await;
     assert_eq!(settled["state"], "exited", "{settled}");
     let started = Instant::now();
     while !marker.exists() && started.elapsed() < Duration::from_secs(8) {
@@ -373,23 +372,26 @@ async fn r5_a_settled_bg_job_fires_its_notify_hook() {
     let notify_events: Vec<_> = live
         .log()
         .into_iter()
-        .filter(|e| e["type"] == "notify")
+        .filter(|e| e["type"] == "note")
         .collect();
     assert_eq!(
         notify_events.len(),
         1,
         "exactly one notify event for the settled job: {notify_events:?}"
     );
-    assert_eq!(notify_events[0]["event"], "bg_settled", "{notify_events:?}");
+    assert!(
+        notify_events[0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("bg_settled")),
+        "{notify_events:?}"
+    );
     let (code, _stderr) = live.end().await;
     assert_eq!(code, 0, "session exited badly");
     assert!(fired, "bg_settled produced no notify event");
 }
 
 /// Regression for B1's double-dispatch risk: a settled job must fire exactly one
-/// `bg_settled` notify even when its wake message starts another turn. The script
 /// drives two turns, so there are two `turn_done` notifies (one per turn); the
-/// invariant is one `bg_settled` for the job and one `turn_done` per turn.
 #[tokio::test]
 async fn r9_a_settled_job_and_its_turn_notify_once_each() {
     init();
@@ -408,14 +410,28 @@ async fn r9_a_settled_job_and_its_turn_notify_once_each() {
     ])
     .await;
     let mut live = LiveSession::start(&mock, &["run", "--keep", "--json", "go"], config).await;
-    let settled = live.wait_for("bg_settled").await;
+    let settled = live.wait_for_call("call_settled", "bg").await;
     assert_eq!(settled["state"], "exited", "{settled}");
     let started = Instant::now();
     let (bg, turn, done_turns) = loop {
         let log = live.log();
-        let events: Vec<_> = log.iter().filter(|e| e["type"] == "notify").collect();
-        let bg = events.iter().filter(|e| e["event"] == "bg_settled").count();
-        let turn = events.iter().filter(|e| e["event"] == "turn_done").count();
+        let events: Vec<_> = log.iter().filter(|e| e["type"] == "note").collect();
+        let bg = events
+            .iter()
+            .filter(|e| {
+                e["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("bg_settled"))
+            })
+            .count();
+        let turn = events
+            .iter()
+            .filter(|e| {
+                e["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("turn_done"))
+            })
+            .count();
         let done_turns = log
             .iter()
             .filter(|e| e["type"] == "turn_ended" && e["outcome"] == "done")
@@ -425,7 +441,6 @@ async fn r9_a_settled_job_and_its_turn_notify_once_each() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    // The core B1 claim: a settled job fires exactly one `bg_settled` notify,
     // never a duplicate, even as its wake starts another turn. The script drives
     // two turns (the tool turn and the bg-wake turn), so there can legitimately
     // be more than one `turn_done`; assert one per completed turn rather than a
@@ -490,8 +505,12 @@ async fn r6_a_failed_turn_fires_its_notify_hook() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(marker.exists(), "error notification never fired");
-    assert_eq!(run.events_of("notify").len(), 1, "one notify event");
-    assert_eq!(run.events_of("notify")[0]["event"], "error");
+    assert_eq!(run.events_of("note").len(), 1, "one notify event");
+    assert!(
+        run.events_of("note")[0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("error"))
+    );
 }
 
 /// A turn paused at an explicit step cap must fire `paused`.

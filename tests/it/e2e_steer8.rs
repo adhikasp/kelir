@@ -162,11 +162,19 @@ async fn the_prompt_warning_fires_once_per_crossing() {
         session.wait_for("turn_ended").await;
     }
     let log = session.log();
-    let warnings = of_type(&log, "warning");
+    let warnings = of_type(&log, "note");
     assert_eq!(warnings.len(), 2, "{warnings:#?}");
     assert_eq!(warnings[0]["kind"], "prompt_tokens");
-    assert_eq!(warnings[0]["value"], 500.0);
-    assert_eq!(warnings[1]["value"], 700.0);
+    assert!(
+        warnings[0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("500"))
+    );
+    assert!(
+        warnings[1]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("700"))
+    );
     for request in mock.requests() {
         assert!(
             !request.body.to_string().contains("warning"),

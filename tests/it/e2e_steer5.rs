@@ -230,7 +230,7 @@ async fn a_mid_stream_disconnect_after_a_tool_call_is_not_retried() {
     assert_eq!(run.one_event("turn_ended")["outcome"], "error");
     // No tool ever ran: a half-read call is not a request the next step could
     // make, and nothing was started.
-    assert!(run.events_of("tool_started").is_empty());
+    assert!(run.events_of("call_started").is_empty());
 }
 
 /// `stop` during a wait ends the turn **stopped**, at once, not after the wait.

@@ -4,7 +4,7 @@
 (`kelir mcp` from a bash call): the commands, the exit codes, the broker in the
 session process, what is logged, channel servers.
 **Read this when:** you are adding or debugging an MCP server, reading
-`mcp_started`/`mcp_settled` in a log, or wondering why a call came back with
+`call_started{kind:"mcp"}` / `call_settled{kind:"mcp"}` in a log, or wondering why a call came back with
 exit 3 or 4 (`src/mcp/`: `config.rs`, `rpc.rs`, `broker.rs`, `cli.rs`).
 
 The model gets no MCP tool schemas in its request. It runs a CLI from `bash`,
@@ -115,16 +115,15 @@ Inside a session `KELIR_SOCK` is set, and `kelir mcp` sends every request to the
 - A request that fails after it reached the session (the session died or
   closed the socket mid-call) is exit 4, not a one-shot retry: the tool may
   have run. Only a failed *connect* falls back to starting the server in the
-  CLI. A session that is killed mid-call and resumed gets `mcp_settled` with
-  `outcome: "unknown"` (exit 4) for the call, and the call is not re-run.
+  CLI. A session that is killed mid-call and resumed gets `call_settled` with
+  `kind: "mcp"` and `outcome: "unknown"` (exit 4) for the call, and the call is not re-run.
 - A server that dies while starting is exit 3 with the last line of its
   stderr in the message (`(server stderr: …)`), the one place it says why.
 - `notifications/tools/list_changed` makes the broker read the tool list again
   at the next request.
-- Each call is an `mcp_started` / `mcp_settled` pair in the log, written by the
-  session (the only writer). `parent_call_id` is the bash call it was made from,
-  so a log reads `tool_started → mcp_started → mcp_settled → tool_settled`.
-  `mcp_settled.out_path` is the file holding the whole result (a result over
+- Each call is a `call_started` / `call_settled` pair in the log, written by the
+  session (the only writer), with `kind: "mcp"` and `info.name = "<server>/<tool>"`.
+  `call_settled.out_path` is the file holding the whole result (a result over
   10 KB is never inline in the log); the CLI still prints the whole result, so a
   pipe sees every byte, and the bash call's own 10 KB rule gives the model a
   spill notice when the output is not piped.
@@ -141,10 +140,10 @@ Inside a session `KELIR_SOCK` is set, and `kelir mcp` sends every request to the
   there is no token and none is needed. `mcp-settle` and `mcp-notify` travel
   in-process, not through the listener, and keep their key as the second layer.
 - **Secrets.** The `env` table of `mcp.toml` goes to the server child only; it
-  is never printed, logged or echoed in an error. `mcp_started.args` records the
-  *shape* of the arguments (keys kept, strings replaced by `<string, N bytes>`),
-  never their values: the values are in the `tool_started` of the bash call that
-  carried them. A server is started with an allow-listed environment (no
+  is never printed, logged or echoed in an error. `call_started.info.input` records
+  the *shape* of the arguments (keys kept, strings replaced by `<string, N bytes>`),
+  never their values: the values are in the enclosing bash call's `call_started`
+  event. A server is started with an allow-listed environment (no
   `KELIR_*`, so no token or socket), no secret on its command line, and dies
   with the session.
 - `kelir ctl <session> tools '{"disable":"mcp:<server>.<tool>"}'` (or

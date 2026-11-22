@@ -1,7 +1,5 @@
 //! The MCP feature: broker lifecycle, the `kelir mcp` internal verbs, and channel
 //! notifications. The broker owns servers; this feature owns the *log-side* half of a
-//! call: the `mcp_started` record, the pending client reply, and the matching
-//! `mcp_settled` record. Nothing here talks to the model.
 //!
 //! The session implements `McpCore` for the narrow set of core operations this feature
 //! needs (record, sync, gate-run logging, disabled tools, live-call ids, turn). The feature
@@ -17,13 +15,8 @@ use crate::core::boundary::Feature;
 use crate::event::{EventBody, Payload};
 use crate::ipc::{Incoming, Request, Response};
 
-/// A `kelir mcp` call that is logged (`mcp_started`) and running on a broker task; its
-/// client is answered when `mcp_settled` is written.
 struct McpPending {
     reply: oneshot::Sender<Response>,
-    server: String,
-    tool: String,
-    parent: Option<String>,
 }
 
 /// The core operations the MCP feature needs. `Session` implements this; the feature
@@ -88,7 +81,6 @@ impl Mcp {
         }
     }
 
-    /// Start a call: log `mcp_started`, register the reply, run the gates on a task,
     /// and hand the result back through the inbox for the loop to settle.
     fn request<C: McpCore>(
         &mut self,
@@ -123,32 +115,21 @@ impl Mcp {
         }
         let arguments = args.get("args").cloned().unwrap_or_else(|| json!({}));
         let envelope = args.get("envelope").and_then(Value::as_bool) == Some(true);
-        let parent = args
-            .get("parent_call_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
         let mcp_id = format!("mcp_{}", ulid::Ulid::generate().to_string().to_lowercase());
-        if let Err(message) = core.record(EventBody::McpStarted {
-            mcp_id: mcp_id.clone(),
-            server: server.clone(),
-            tool: tool.clone(),
-            // The shape only: a tool argument can be a secret.
-            args: Payload::value(crate::mcp::loggable_args(&arguments)),
-            parent_call_id: parent.clone(),
-        }) {
+        if let Err(message) = core.record(crate::event::call_start(
+            &mcp_id,
+            "mcp",
+            crate::event::CallInfo::mcp(
+                &server,
+                &tool,
+                Payload::value(crate::mcp::loggable_args(&arguments)),
+            ),
+        )) {
             let _ = reply.send(Response::error(message));
             return;
         }
         core.sync();
-        self.pending.insert(
-            mcp_id.clone(),
-            McpPending {
-                reply,
-                server: server.clone(),
-                tool: tool.clone(),
-                parent,
-            },
-        );
+        self.pending.insert(mcp_id.clone(), McpPending { reply });
         let Some(inbox) = core.inbox() else {
             let output = crate::mcp::CallOutput::failed(
                 crate::mcp::render::EXIT_UNAVAILABLE,
@@ -204,7 +185,6 @@ impl Mcp {
         });
     }
 
-    /// Record `mcp_settled` and only then answer the client.
     fn settle<C: McpCore>(&mut self, core: &mut C, args: &Value) {
         let Some(id) = args.get("mcp_id").and_then(Value::as_str) else {
             return;
@@ -242,16 +222,15 @@ impl Mcp {
                 });
             }
         }
-        let recorded = core.record(EventBody::McpSettled {
-            mcp_id: id.to_string(),
-            server: pending.server,
-            tool: pending.tool,
-            outcome: output.outcome.clone(),
-            exit_code: output.exit_code,
-            bytes: output.bytes,
-            out_path: output.out_path.clone(),
-            parent_call_id: pending.parent,
-        });
+        let recorded = core.record(crate::event::call_settle(
+            id,
+            "mcp",
+            &output.outcome,
+            crate::event::CallSettle::default()
+                .exit_code(Some(output.exit_code))
+                .bytes(output.bytes)
+                .out_path(&output.out_path),
+        ));
         core.sync();
         let answer = match recorded {
             Ok(_) => Response::ok(

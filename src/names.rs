@@ -348,6 +348,7 @@ pub fn summarize(id: &str, names: &std::collections::HashMap<String, String>) ->
     for event in &events {
         match &event.body {
             crate::event::EventBody::SessionStarted {
+                format: 1,
                 model: m,
                 parent: p,
                 ..

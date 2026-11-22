@@ -186,15 +186,14 @@ impl Gates {
             });
         }
         for usage in &chain.usages {
-            let _ = core.record(EventBody::Usage {
-                step: 0,
+            let _ = core.record(EventBody::StepUsage(crate::event::Usage {
                 prompt_tokens: usage.1.prompt_tokens,
                 completion_tokens: usage.1.completion_tokens,
                 cached_tokens: usage.1.cached_tokens,
                 cache_write_tokens: usage.1.cache_write_tokens,
                 allowance: None,
                 kind: Some(usage.0.clone()),
-            });
+            }));
         }
         if event == crate::gates::Event::PromptSubmit {
             self.pending_context.extend(chain.contexts);

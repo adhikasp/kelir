@@ -81,12 +81,9 @@ pub struct Plan {
 
 fn bears_a_message(event: &LogEvent) -> bool {
     matches!(
-        event.body,
-        EventBody::User { .. }
-            | EventBody::Source { .. }
-            | EventBody::Assistant { .. }
-            | EventBody::ToolSettled { .. }
-    )
+        &event.body,
+        EventBody::User { .. } | EventBody::Source { .. } | EventBody::Assistant { .. }
+    ) || matches!(&event.body, EventBody::CallSettled(settle) if settle.kind == "tool")
 }
 
 /// A message typed by a human (as opposed to a job wake, a gate note or a
@@ -107,7 +104,7 @@ pub fn plan(events: &[LogEvent], keep: usize) -> Option<Plan> {
     let mut cut = bearing.len().saturating_sub(keep);
     while cut > 0
         && cut < bearing.len()
-        && matches!(bearing[cut].body, EventBody::ToolSettled { .. })
+        && matches!(&bearing[cut].body, EventBody::CallSettled(settle) if settle.kind == "tool")
     {
         cut -= 1;
     }
@@ -133,7 +130,7 @@ pub fn plan(events: &[LogEvent], keep: usize) -> Option<Plan> {
     // With the floor in force the tail can no longer be pulled back, so drop the orphan risk the
     // other way: a tool result right after the cut moves into the range with it.
     while let Some(next) = bearing.iter().find(|event| event.seq > through_seq) {
-        if !matches!(next.body, EventBody::ToolSettled { .. }) {
+        if !matches!(&next.body, EventBody::CallSettled(settle) if settle.kind == "tool") {
             break;
         }
         through_seq = next.seq;
@@ -182,13 +179,11 @@ pub fn queued_compaction(events: &[LogEvent], session_dir: &Path) -> Option<Opti
                     focus_by_call.insert(call.id.clone(), focus);
                 }
             }
-            EventBody::ToolSettled {
-                call_id,
-                outcome,
-                result,
-                ..
-            } if outcome == "ok" => {
-                let Some(focus) = focus_by_call.get(call_id) else {
+            EventBody::CallSettled(settle) if settle.kind == "tool" && settle.outcome == "ok" => {
+                let Some(result) = &settle.result else {
+                    continue;
+                };
+                let Some(focus) = focus_by_call.get(&settle.id) else {
                     continue;
                 };
                 let queued = result
@@ -266,6 +261,7 @@ mod tests {
             1,
             EventBody::SessionStarted {
                 id: "ses_1".into(),
+                format: 1,
                 parent: None,
                 depth: 0,
                 cwd: "/tmp".into(),
@@ -310,6 +306,7 @@ mod tests {
                     args: Payload::value(json!({"command": "ls"})),
                 }],
                 finish_reason: Some("tool_calls".into()),
+                usage: None,
             },
         )
     }
@@ -317,16 +314,20 @@ mod tests {
     fn settled(seq: u64, id: &str) -> LogEvent {
         LogEvent::new(
             seq,
-            EventBody::ToolSettled {
-                call_id: id.into(),
-                outcome: "ok".into(),
-                exit_code: Some(0),
-                bytes: 2,
-                lines: 1,
-                out_path: "out".into(),
-                spilled: false,
-                result: "hi".into(),
-            },
+            crate::event::call_settle(
+                id,
+                "tool",
+                "ok",
+                crate::event::CallSettle {
+                    exit_code: Some(0),
+                    bytes: Some(2),
+                    lines: Some(1),
+                    out_path: Some("out".into()),
+                    spilled: Some(false),
+                    result: Some("hi".into()),
+                    ..crate::event::CallSettle::default()
+                },
+            ),
         )
     }
 
@@ -339,6 +340,7 @@ mod tests {
                 reasoning: None,
                 tool_calls: vec![],
                 finish_reason: Some("stop".into()),
+                usage: None,
             },
         )
     }
@@ -505,20 +507,25 @@ mod tests {
                         args: Payload::value(json!({"focus": "the api shape"})),
                     }],
                     finish_reason: Some("tool_calls".into()),
+                    usage: None,
                 },
             ),
             LogEvent::new(
                 4,
-                EventBody::ToolSettled {
-                    call_id: "call_c".into(),
-                    outcome: "ok".into(),
-                    exit_code: Some(0),
-                    bytes: 10,
-                    lines: 1,
-                    out_path: "out".into(),
-                    spilled: false,
-                    result: "compaction queued: …".into(),
-                },
+                crate::event::call_settle(
+                    "call_c",
+                    "tool",
+                    "ok",
+                    crate::event::CallSettle {
+                        exit_code: Some(0),
+                        bytes: Some(10),
+                        lines: Some(1),
+                        out_path: Some("out".into()),
+                        spilled: Some(false),
+                        result: Some("compaction queued: …".into()),
+                        ..crate::event::CallSettle::default()
+                    },
+                ),
             ),
         ];
         assert_eq!(
@@ -558,20 +565,25 @@ mod tests {
                         args: Payload::value(json!({})),
                     }],
                     finish_reason: Some("tool_calls".into()),
+                    usage: None,
                 },
             ),
             LogEvent::new(
                 4,
-                EventBody::ToolSettled {
-                    call_id: "call_c".into(),
-                    outcome: "disabled".into(),
-                    exit_code: None,
-                    bytes: 4,
-                    lines: 1,
-                    out_path: "out".into(),
-                    spilled: false,
-                    result: "disabled by user: compact".into(),
-                },
+                crate::event::call_settle(
+                    "call_c",
+                    "tool",
+                    "disabled",
+                    crate::event::CallSettle {
+                        exit_code: None,
+                        bytes: Some(4),
+                        lines: Some(1),
+                        out_path: Some("out".into()),
+                        spilled: Some(false),
+                        result: Some("disabled by user: compact".into()),
+                        ..crate::event::CallSettle::default()
+                    },
+                ),
             ),
         ];
         assert_eq!(queued_compaction(&events, std::path::Path::new("")), None);

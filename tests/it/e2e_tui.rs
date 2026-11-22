@@ -939,7 +939,7 @@ async fn the_tui_runs_a_turn_in_a_pty() {
     assert_eq!(user["text"], "hello there");
     assert_eq!(user["from"], "tui", "the message came from the TUI");
     assert!(types.contains(&"assistant"), "{types:?}");
-    assert!(types.contains(&"usage"), "{types:?}");
+    assert!(types.contains(&"assistant"), "{types:?}");
     assert!(types.contains(&"turn_ended"), "{types:?}");
     assert_eq!(types.last(), Some(&"session_ended"), "{types:?}");
     let ended = events

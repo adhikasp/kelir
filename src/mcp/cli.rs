@@ -229,10 +229,9 @@ impl Backend {
         envelope: bool,
     ) -> Result<CallOutput, Fail> {
         if let Backend::Session(address) = self {
-            let parent = crate::envs::var("KELIR_CALL_ID").filter(|id| !id.trim().is_empty());
             let request = json!({
                 "op": "call", "server": server, "tool": tool, "args": arguments,
-                "envelope": envelope, "parent_call_id": parent,
+                "envelope": envelope,
             });
             match Self::ask(address, request, false).await? {
                 Some(state) => {

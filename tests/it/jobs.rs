@@ -131,7 +131,6 @@ async fn named_single_flight_runs_resume_one_session_and_write_status() {
     let id = sb.only_session();
     let log = sb.log(&id);
     assert_eq!(of_type(&log, "session_started").len(), 1);
-    assert_eq!(of_type(&log, "resumed").len(), 1);
     let users = of_type(&log, "user");
     assert_eq!(users.len(), 2);
     assert_eq!(users[0]["from"], "cli");
@@ -869,14 +868,14 @@ async fn a_cap_th_answer_after_a_tool_pauses_after_the_tool_result() {
     assert_eq!(ended["outcome"], "paused");
     assert_eq!(ended["reason"], "steps");
     assert_eq!(ended["final_text"], answer, "the cap-th answer is kept");
-    assert_eq!(of_type(&log, "tool_settled").len(), 2, "both calls settled");
+    assert_eq!(of_type(&log, "call_settled").len(), 2, "both calls settled");
     let types: Vec<&str> = log
         .iter()
         .map(|event| event["type"].as_str().unwrap_or(""))
         .collect();
     let last_tool = types
         .iter()
-        .rposition(|kind| *kind == "tool_settled")
+        .rposition(|kind| *kind == "call_settled")
         .unwrap();
     let turn_end = types
         .iter()

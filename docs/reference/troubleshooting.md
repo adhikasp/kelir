@@ -9,7 +9,7 @@ short list of causes before reading source.
 Start with two commands: `kelir doctor` (which key each provider would use, never
 the key) and the session's own log (`<state>/sessions/<id>/events.jsonl`, or
 `kelir run --json`). Almost every question below is answered by one `error`,
-`turn_ended` or `tool_settled` event.
+`turn_ended` or `call_settled` event.
 
 ## "It says rate limited and waits"
 
@@ -34,25 +34,25 @@ unset both mean no cap).
 The session socket is a file on Unix and a pipe name on Windows; a session that
 was killed leaves the file behind. `kelir ctl` says the session is not running
 and exits 1 — it does not wait. Pick the session up with `kelir resume <id>`: it
-binds the socket afresh and replaces a stale one. The log will hold one
-`resumed` event naming any call that was started and never settled; such a call
-is reported to the model as an unknown outcome and **never re-run**.
+binds the socket afresh and replaces a stale one. A call that was started and never settled is
+settled in the log as `call_settled{kind:…, outcome:"unknown"}`; it is reported to the model
+as an unknown outcome and **never re-run**.
 
 ## "A background job I started is gone"
 
 A job outlives the session on purpose: its shim writes `bg/<id>.status`, and
 nothing wakes a stopped session. `kelir bg ls` (inside a session) and
 `kelir bg out <id>` read it; the next `resume` folds the settled job into the log
-as `bg_settled` plus the wake-up message. A job killed with the machine is the
+as `call_settled{kind:"bg"}` plus the wake-up message. A job killed with the machine is the
 one case with no status file: `bg ls` does not list it at all (no status file, no row) and the log has a
-`bg_started` with no settle.
+`call_started{kind:"bg"}` with no settle.
 
 ## "A child start was refused" or "a child is gone"
 
 `kelir run --child` exits 3 with `refused: …` and the count when a cap is full
 (`max_child_depth`, `max_children`, `max_live_descendants`; `docs/reference/children.md`).
 `kelir ls` shows what is live; `kelir kill <session>` frees a slot. A child whose process
-died shows `lost` (or `killed`) in `kelir ls` and in the root's `child_settled`. A child
+died shows `lost` (or `killed`) in `kelir ls` and in the root's `call_settled{kind:"child"}`. A child
 ends with its parent: after `kill -9` of a Unix parent it takes up to a second to notice.
 Read a child's trouble in `<state>/sessions/<child>/host.err` and its own log.
 
@@ -68,7 +68,7 @@ contain it — that is the cache working as intended.
 ## "A tool call's output was cut"
 
 It was not: the whole output is `commands/<call-id>/out` from the first byte, and
-what the model saw is `tool_settled.result`, which is a head/tail excerpt once the
+what the model saw is `call_settled.result`, which is a head/tail excerpt once the
 output passes `spill_limit` (10 KB). `spilled: true` and `out_path` in the same
 event say so. The model is told the path; a `bash` call can read the rest.
 
@@ -121,7 +121,7 @@ type or environment variable exists there but is missing from the reference.
 
 There is no print command. The request is the fold of `events.jsonl`:
 `session_started.system` is the frozen system prompt (with its `sources[]`),
-then the `user`/`assistant`/`tool_settled` events in order, minus what a
+then the `user`/`assistant`/`call_settled` events in order, minus what a
 `compacted` event replaced. Read the log (`kelir docs files`) to see it.
 
 ## "Rotate or replace a credential"

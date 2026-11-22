@@ -3,7 +3,7 @@
 **Summary:** how an agent starts, watches, asks and stops other kelir sessions from
 `bash`: foreground and background children, the caps, the registry, `brief`, and
 what the tree looks like in the logs.
-**Read this when:** you are delegating work, reading `child_started`/`child_settled`,
+**Read this when:** you are delegating work, reading `call_started{kind:"child"}` / `call_settled{kind:"child"}`,
 wondering why a start was refused (exit 3), or checking what a killed parent leaves
 behind (`src/child.rs`, `src/childcli.rs`, `src/session/children.rs`).
 
@@ -26,7 +26,7 @@ kelir kill --tree             # every descendant of this session
   `error`/`killed`/`lost`/`stopped`. If the `bash` call is stopped, its child is stopped
   with it (outcome `stopped`).
 - **Background** (`--background`): prints a handle at once (the child id and its
-  session). The child's completion is a `child_settled` event and a `user` message from
+  session). The child's completion is a `call_settled` with `kind: "child"` event and a `user` message from
   `child` (`[child ses_… done]` and its answer, cut at 8 KB with a pointer to the child's
   log) at the next boundary, which wakes the parent like a settled `bg` job. A parent
   that ends first takes its running children with it: wait for what you need.
@@ -91,7 +91,7 @@ the prefix hits the parent's cache. `edit` and `compact` are refused by result
 starts no work; exit 3); `bash` works. In `kelir ls` it is kind `brief` with its own question
 as the task, and its tokens count only what it added after the snapshot (the copied prefix is
 the parent's, counted there). The parent's history is untouched: its log
-gains only the `child_started`/`child_settled` pair, and the answer is the command's
+gains only the `call_started`/`call_settled` pair with `kind: "child"`, and the answer is the command's
 stdout. The tool call that runs `kelir brief` is itself not in the snapshot (its result
 does not exist yet).
 
@@ -117,7 +117,7 @@ Not defended: a process of the same user that reads the root's token **file** ca
 
 ## Events
 
-`child_started` and `child_settled` (see `events`). The root writes both for **every**
+`call_started` and `call_settled` with `kind: "child"` (see `events`). The root writes both for **every**
 descendant it admits; a parent that is not the root writes the same pair for its own
 direct children, because that is where it wakes and resumes from. A resumed root settles
 the children its log shows as unsettled `lost`: nothing outlives its parent.

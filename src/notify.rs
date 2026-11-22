@@ -345,18 +345,6 @@ pub async fn wait_outstanding(limit: Duration) {
     .await;
 }
 
-/// One `notify` event's fields, for the session to record.
-impl Dispatch {
-    pub fn outcome(&self) -> &'static str {
-        match self.error.as_deref() {
-            Some("rate limited") => "rate_limited",
-            Some(_) => "failed",
-            None if self.hooks == 0 && !self.terminal => "no_hooks",
-            None => "ok",
-        }
-    }
-}
-
 #[cfg(test)]
 mod m11_tests {
     use super::*;
@@ -414,16 +402,5 @@ mod m11_tests {
         assert!(!cfg.enabled("error"));
         cfg.terminal = true;
         assert!(cfg.enabled("error"));
-    }
-
-    #[test]
-    fn dispatch_outcome_reflects_the_rate_limit() {
-        let d = Dispatch {
-            kind: "error".into(),
-            hooks: 1,
-            terminal: false,
-            error: Some("rate limited".into()),
-        };
-        assert_eq!(d.outcome(), "rate_limited");
     }
 }

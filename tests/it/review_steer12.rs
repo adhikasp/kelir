@@ -62,18 +62,20 @@ fn log_with(commands: &[&str]) -> String {
         seq += 1;
         push(
             serde_json::json!({"seq": seq, "ts": format!("2026-11-20T00:00:{second:02}.5Z"),
-            "type": "usage", "step": step, "prompt_tokens": 100, "completion_tokens": 10,
-            "cached_tokens": 0, "cache_write_tokens": 0}),
+"type": "assistant", "step": step, "text": "", "tool_calls": [],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10,
+            "cached_tokens": 0, "cache_write_tokens": 0}}),
         );
         seq += 1;
         push(
             serde_json::json!({"seq": seq, "ts": format!("2026-11-20T00:00:{second:02}.6Z"),
-            "type": "tool_started", "call_id": call, "name": "bash", "input": {"command": command}}),
+"type": "call_started", "id": call, "kind": "tool",
+            "info": {"name": "bash", "input": {"command": command}}}),
         );
         seq += 1;
         push(
             serde_json::json!({"seq": seq, "ts": format!("2026-11-20T00:00:{second:02}.9Z"),
-            "type": "tool_settled", "call_id": call, "outcome": "ok", "exit_code": 0,
+"type": "call_settled", "id": call, "kind": "tool", "outcome": "ok", "exit_code": 0,
             "bytes": 1, "lines": 1, "spilled": false, "result": "x"}),
         );
     }

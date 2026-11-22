@@ -331,10 +331,10 @@ async fn kelir_view_handles_awkward_paths_without_panicking() {
     let log = session.log();
     let call = log
         .iter()
-        .find(|e| e["type"] == "tool_settled")
+        .find(|e| e["type"] == "call_settled")
         .expect("settled");
     let out = call.to_string();
-    let spilled = log.iter().filter(|e| e["type"] == "tool_settled").count();
+    let spilled = log.iter().filter(|e| e["type"] == "call_settled").count();
     eprintln!(
         "---- settled event ({spilled}) ----
 {out}
@@ -372,7 +372,7 @@ async fn kelir_view_refuses_when_the_model_cannot_take_images() {
     let log = session.log();
     let settled = log
         .iter()
-        .find(|e| e["type"] == "tool_settled")
+        .find(|e| e["type"] == "call_settled")
         .expect("settled");
     let result = settled["result"].as_str().unwrap_or_default();
     assert!(

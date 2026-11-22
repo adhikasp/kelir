@@ -189,18 +189,17 @@ impl Session {
                     })
                     .collect(),
                 finish_reason: assembler.finish_reason.clone(),
-            })?;
-            self.emit(UiEvent::Assistant { text: text.clone() });
-            if let Some(usage) = &assembler.usage {
-                self.record(EventBody::Usage {
-                    step,
+                usage: assembler.usage.as_ref().map(|usage| crate::event::Usage {
                     prompt_tokens: usage.prompt_tokens,
                     completion_tokens: usage.completion_tokens,
                     cached_tokens: usage.cached_tokens,
                     cache_write_tokens: usage.cache_write_tokens,
                     allowance: usage.allowance.clone(),
                     kind: None,
-                })?;
+                }),
+            })?;
+            self.emit(UiEvent::Assistant { text: text.clone() });
+            if let Some(usage) = &assembler.usage {
                 // The size of the context the provider just saw: what the auto
                 // trigger compares to the window.
                 self.compact.last_prompt_tokens = Some(usage.prompt_tokens);

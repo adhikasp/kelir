@@ -204,8 +204,7 @@ async fn resume_continues_a_paused_turn() {
         .collect();
     assert_eq!(outcomes, vec!["paused", "done"]);
     // The resume marked the log and never re-ran a call.
-    assert_eq!(of_type(&log, "resumed").len(), 1);
-    assert_eq!(of_type(&log, "tool_started").len(), 2);
+    assert_eq!(of_type(&log, "call_started").len(), 2);
 }
 
 /// `--max-steps` overrides the file, and `0` there means "no cap" as it does in

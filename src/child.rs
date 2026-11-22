@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::event::{EventBody, LogEvent};
+use crate::event::{EventBody, LogEvent, Payload};
 
 pub const DEFAULT_MAX_DEPTH: u32 = 3;
 pub const DEFAULT_MAX_CHILDREN: u32 = 10;
@@ -360,33 +360,32 @@ impl Registry {
         let mut open: Vec<Entry> = Vec::new();
         for event in events {
             match &event.body {
-                EventBody::ChildStarted {
-                    child_id,
-                    session,
-                    parent,
-                    depth,
-                    kind,
-                    task,
-                    background,
-                    model,
-                } => open.push(Entry {
-                    child_id: child_id.clone(),
-                    session: session.clone(),
-                    parent: parent.clone(),
-                    depth: *depth,
-                    kind: kind.clone(),
-                    background: *background,
-                    task: task.inline_str().unwrap_or("").to_string(),
-                    model: model.clone(),
-                    pid: None,
-                    started_ms: None,
-                    outcome: None,
-                    killed: false,
-                    admitted: Instant::now(),
-                    dead_since: None,
-                }),
-                EventBody::ChildSettled { child_id, .. } => {
-                    open.retain(|entry| &entry.child_id != child_id);
+                EventBody::CallStarted(start) if start.kind == "child" => {
+                    let info = &start.info;
+                    open.push(Entry {
+                        child_id: start.id.clone(),
+                        session: info.session.clone().unwrap_or_default(),
+                        parent: info.parent.clone().unwrap_or_default(),
+                        depth: info.depth.unwrap_or(0),
+                        kind: info.name.clone(),
+                        background: info.background.unwrap_or(false),
+                        task: info
+                            .input
+                            .as_ref()
+                            .and_then(Payload::inline_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        model: info.model.clone().unwrap_or_default(),
+                        pid: None,
+                        started_ms: None,
+                        outcome: None,
+                        killed: false,
+                        admitted: Instant::now(),
+                        dead_since: None,
+                    });
+                }
+                EventBody::CallSettled(settle) if settle.kind == "child" => {
+                    open.retain(|entry| entry.child_id != settle.id);
                 }
                 _ => {}
             }
@@ -620,7 +619,7 @@ pub fn snapshot_cut(events: &[LogEvent]) -> usize {
     let settled: std::collections::HashSet<&str> = events
         .iter()
         .filter_map(|event| match &event.body {
-            EventBody::ToolSettled { call_id, .. } => Some(call_id.as_str()),
+            EventBody::CallSettled(settle) if settle.kind == "tool" => Some(settle.id.as_str()),
             _ => None,
         })
         .collect();
@@ -669,6 +668,7 @@ pub fn seed_snapshot(
     for event in &events[..cut] {
         let mut event = event.clone();
         if let EventBody::SessionStarted {
+            format: 1,
             id,
             parent: was_parent,
             depth: was_depth,
@@ -994,29 +994,34 @@ mod tests {
         let started = |child: &str, seq: u64| {
             LogEvent::new(
                 seq,
-                EventBody::ChildStarted {
-                    child_id: child.into(),
-                    session: format!("ses_{child}"),
-                    parent: "root".into(),
-                    depth: 1,
-                    kind: KIND_CHILD.into(),
-                    task: "t".into(),
-                    background: true,
-                    model: "m".into(),
-                },
+                crate::event::call_start(
+                    child.to_string(),
+                    "child",
+                    crate::event::CallInfo {
+                        session: Some(format!("ses_{child}")),
+                        parent: Some("root".into()),
+                        depth: Some(1),
+                        background: Some(true),
+                        model: Some("m".into()),
+                        name: KIND_CHILD.into(),
+                        input: Some("t".into()),
+                        ..crate::event::CallInfo::default()
+                    },
+                ),
             )
         };
         let settled = LogEvent::new(
             3,
-            EventBody::ChildSettled {
-                child_id: "a".into(),
-                session: "ses_a".into(),
-                parent: "root".into(),
-                depth: 1,
-                outcome: "done".into(),
-                exit_code: Some(0),
-                result: "ok".into(),
-            },
+            crate::event::call_settle(
+                "a",
+                "child",
+                "done",
+                crate::event::CallSettle {
+                    exit_code: Some(0),
+                    result: Some("ok".into()),
+                    ..crate::event::CallSettle::default()
+                },
+            ),
         );
         let events = vec![started("a", 1), started("b", 2), settled];
         let (registry, lost) = Registry::from_log("root", Caps::default(), &events);
@@ -1057,6 +1062,7 @@ mod tests {
                     })
                     .collect(),
                 finish_reason: None,
+                usage: None,
             },
         )
     }
@@ -1064,16 +1070,20 @@ mod tests {
     fn tool_settled(seq: u64, call: &str) -> LogEvent {
         LogEvent::new(
             seq,
-            EventBody::ToolSettled {
-                call_id: call.into(),
-                outcome: "ok".into(),
-                exit_code: Some(0),
-                bytes: 0,
-                lines: 0,
-                out_path: String::new(),
-                spilled: false,
-                result: "".into(),
-            },
+            crate::event::call_settle(
+                call.to_string(),
+                "tool",
+                "ok",
+                crate::event::CallSettle {
+                    exit_code: Some(0),
+                    bytes: Some(0),
+                    lines: Some(0),
+                    out_path: Some(String::new()),
+                    spilled: Some(false),
+                    result: Some("".into()),
+                    ..crate::event::CallSettle::default()
+                },
+            ),
         )
     }
 
@@ -1100,6 +1110,7 @@ mod tests {
         LogEvent::new(
             1,
             EventBody::SessionStarted {
+                format: 1,
                 id: id.into(),
                 parent: None,
                 depth: 0,
@@ -1145,6 +1156,7 @@ mod tests {
             .collect();
         match &child[0].body {
             EventBody::SessionStarted {
+                format: 1,
                 id,
                 parent,
                 depth,
@@ -1236,14 +1248,13 @@ mod tests {
     fn usage_event(seq: u64) -> LogEvent {
         LogEvent::new(
             seq,
-            EventBody::Usage {
+            EventBody::Assistant {
                 step: 1,
-                prompt_tokens: 1000,
-                completion_tokens: 10,
-                cached_tokens: 500,
-                cache_write_tokens: 0,
-                allowance: None,
-                kind: None,
+                text: "".into(),
+                reasoning: None,
+                tool_calls: vec![],
+                finish_reason: None,
+                usage: Some(crate::event::test_usage(1000, 10, 500, None)),
             },
         )
     }
