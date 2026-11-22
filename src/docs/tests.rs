@@ -442,3 +442,71 @@ and `kelir run --warp`
     );
     assert_eq!(found[2].2, vec!["--warp".to_string()]);
 }
+
+/// Flat config names retired by P4B. A doc or shipped live script that still
+/// teaches one of these is describing a surface `config.rs` rejects, so the
+/// generated reference, the spec and the scripts must use grouped spellings.
+const RETIRED_CONFIG_NAMES: &[&str] = &[
+    "auto_compact_at",
+    "compact_at_tokens",
+    "compact_prompt",
+    "compact_keep",
+    "retry_base_ms",
+    "retry_cap_ms",
+    "retry_max_wait",
+    "retry_max_attempts",
+    "max_child_depth",
+    "max_children",
+    "channel_max_active",
+    "channel_per_conversation_rpm",
+    "channel_global_rpm",
+    "channel_fallback",
+    "channel_spool_limit",
+    "ctx_est_base",
+    "ctx_est_per_msg",
+    "ctx_est_per_tool_result",
+    "ctx_est_tool_result_cap",
+    "mcp_start_timeout_ms",
+    "bg_process_cleanup_timeout_ms",
+];
+
+const M3_LIVE: &str = include_str!("../../scripts/live/m3_compact.sh");
+const STEER5_LIVE: &str = include_str!("../../scripts/live/steer5_live.sh");
+const STEER5B_DRIVE: &str = include_str!("../../scripts/live/steer5b_drive.py");
+const TUI2B_SPECS: &str = include_str!("../../scripts/live/tui2b_specs.py");
+const TUI2C_SPECS: &str = include_str!("../../scripts/live/tui2c_specs.py");
+const TUI3_SPECS: &str = include_str!("../../scripts/live/tui3_specs.py");
+
+fn mentions_name(body: &str, name: &str) -> bool {
+    body.match_indices(name).any(|(at, _)| {
+        let before = body[..at].chars().next_back();
+        let after = body[at + name.len()..].chars().next();
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        !word(before) && !word(after)
+    })
+}
+
+#[test]
+fn generated_reference_has_no_retired_flat_config_names() {
+    let docs: Vec<(&str, &str)> = TOPICS
+        .iter()
+        .map(|topic| (topic.name, topic.body))
+        .chain([
+            ("SPEC", SPEC),
+            ("live/m3_compact.sh", M3_LIVE),
+            ("live/steer5_live.sh", STEER5_LIVE),
+            ("live/steer5b_drive.py", STEER5B_DRIVE),
+            ("live/tui2b_specs.py", TUI2B_SPECS),
+            ("live/tui2c_specs.py", TUI2C_SPECS),
+            ("live/tui3_specs.py", TUI3_SPECS),
+        ])
+        .collect();
+    for name in RETIRED_CONFIG_NAMES {
+        for (doc, body) in &docs {
+            assert!(
+                !mentions_name(body, name),
+                "{doc} still teaches the retired flat config name {name}"
+            );
+        }
+    }
+}

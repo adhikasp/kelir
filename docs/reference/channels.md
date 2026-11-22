@@ -37,7 +37,7 @@ Every inbound message is appended to `spool/<server>.jsonl` and fsync'd before
 anything else happens to it. Records are append-only: `inbound`, `claimed`,
 `done`. A restart replays unfinished messages, deduped by message id; a turn
 whose user event was already logged is not re-run. The file is compacted when it
-passes `channel_spool_limit`, keeping unfinished messages and one `done` record
+passes `[channel] spool_limit`, keeping unfinished messages and one `done` record
 per id; a `done` id stays deduped after compaction and restart. A torn tail is repaired on open and kept beside the spool.
 
 ## Trust

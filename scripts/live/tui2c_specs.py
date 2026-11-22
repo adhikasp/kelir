@@ -23,9 +23,9 @@ for c in (80, 40):
         w("s1b_%s_%d" % (nm, c), dict(turns=[[{"text": md, "chunk": 16, "delay": 0.06}]], rows=40, cols=c, timeout=240,
           steps=start + say("go") + [{"wait": 2.0}, {"snap": "mid1"}, {"wait": 2.5}, {"snap": "mid2"}, {"wait_for": endm, "timeout": 90}, {"wait": 1.5}, {"snap": "done"}] + quit_))
 rl = [{"status": 429, "body": "{\"error\":{\"message\":\"slow\"}}"}]
-w("r5_stop", dict(turns=[rl, rl, [{"text": "never shown\n"}]], cfg="retry_base_ms = 8000\nretry_cap_ms = 8000\n", rows=30, cols=100, timeout=120,
+w("r5_stop", dict(turns=[rl, rl, [{"text": "never shown\n"}]], cfg="[retry]\nbase_ms = 8000\ncap_ms = 8000\n", rows=30, cols=100, timeout=120,
   steps=start + say("hi") + [{"wait": 2.5}, {"snap": "w1"}, {"send": "\u001b"}, {"wait": 1.5}, {"snap": "stopped"}] + quit_))
-w("r5_say", dict(turns=[rl, [{"text": "answer after the retry\n"}]], cfg="retry_base_ms = 5000\nretry_cap_ms = 5000\n", rows=30, cols=100, timeout=120,
+w("r5_say", dict(turns=[rl, [{"text": "answer after the retry\n"}]], cfg="[retry]\nbase_ms = 5000\ncap_ms = 5000\n", rows=30, cols=100, timeout=120,
   steps=start + say("hi") + [{"wait": 1.5}, {"snap": "w1"}] + quit_))
 png = io.BytesIO(); Image.new("RGB", (32, 32), (200, 30, 30)).save(png, "PNG")
 jpg = io.BytesIO(); Image.new("RGB", (32, 32), (30, 30, 200)).save(jpg, "JPEG")

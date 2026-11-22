@@ -43,7 +43,7 @@ w("err401", dict(turns=[[{"status": 401, "body": "{\"error\":{\"message\":\"bad 
 w("stopped", dict(turns=[[tool("s1", "echo s1"), tool("s2", "sleep 20")], [text("never\n")]], rows=30, cols=80, timeout=60,
                   steps=start + say("go") + [{"wait": 3}, {"snap": "run"}, {"send": "\u001b"}, {"wait": 2}, {"snap": "stopped"}] + quit_))
 rl = [{"status": 429, "body": "{\"error\":{\"message\":\"slow\"}}"}]
-w("rl", dict(turns=[rl, rl, [{"text": "never shown\n"}]], cfg="retry_base_ms = 8000\nretry_cap_ms = 8000\n", rows=30, cols=80, timeout=60,
+w("rl", dict(turns=[rl, rl, [{"text": "never shown\n"}]], cfg="[retry]\nbase_ms = 8000\ncap_ms = 8000\n", rows=30, cols=80, timeout=60,
              steps=start + say("hi") + [{"wait": 2.5}, {"snap": "w1"}, {"send": "\u001b"}, {"wait": 1.5}, {"snap": "stopped"}] + quit_))
 w("resize", dict(turns=three, rows=40, cols=100, steps=start + say("run three") + [{"wait_for": "All three ran", "timeout": 30}, {"wait": 1.0}, {"snap": "a100"}, {"resize": [40, 40]}, {"wait": 1.0}, {"snap": "b40"}, {"resize": [40, 100]}, {"wait": 1.0}, {"snap": "c100"}] + quit_))
 w("nocolor", dict(turns=three, rows=40, cols=80, env={"NO_COLOR": "1"}, steps=done3))

@@ -20,13 +20,13 @@ pub const HINT_FLOOR: Duration = Duration::from_millis(250);
 /// How many provider requests one budget allows.
 pub const MAX_ATTEMPTS: u32 = 60;
 
-/// The backoff schedule (`retry_base_ms`, `retry_cap_ms`, `retry_max_wait`,
-/// `retry_max_attempts` in `config.toml`).
+/// The backoff schedule (`[retry] base_ms`, `cap_ms`, `max_wait`,
+/// `max_attempts` in `config.toml`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
     pub base_ms: u64,
     pub cap_ms: u64,
-    /// Total waiting allowed per request. `None` is `retry_max_wait = 0`: wait
+    /// Total waiting allowed per request. `None` is `[retry] max_wait = 0`: wait
     /// as long as the provider needs.
     pub max_wait: Option<Duration>,
     pub max_attempts: Option<u32>,

@@ -83,7 +83,7 @@ pub struct Config {
     /// An absolute soft target in tokens: compaction triggers at `min(window * auto_compact_at,
     /// compact_at_tokens)`, so a huge window does not carry a 400K-token context.
     pub compact_at_tokens: u64,
-    /// The summary prompt (`compact_prompt`/`compact.md`, else embedded).
+    /// The summary prompt (`[compaction] prompt`/`compact.md`, else embedded).
     pub compact_prompt: String,
     /// Extra skills directories (`skills_dirs`), machine layer: they are named
     /// in the base prompt and searched read-only.
@@ -906,7 +906,7 @@ fn load_prompt(configured: Option<&str>) -> Result<(String, Option<PathBuf>), Co
     Ok((DEFAULT_PROMPT.to_string(), None))
 }
 
-/// The compaction prompt: `compact_prompt` (a path), else `compact.md` in the
+/// The compaction prompt: `[compaction] prompt` (a path), else `compact.md` in the
 /// config dir, else the embedded default.
 fn load_compact_prompt(configured: Option<&str>) -> Result<String, ConfigError> {
     if let Some(path) = configured {

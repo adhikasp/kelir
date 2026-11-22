@@ -11,7 +11,7 @@ use crate::chat::ChatMessage;
 use crate::event::{EventBody, LogEvent};
 use crate::provider::{BuiltRequest, Client};
 
-/// The summary prompt, embedded; `compact_prompt` in the config (or
+/// The summary prompt, embedded; `[compaction] prompt` in the config (or
 /// `compact.md` in the config dir) replaces it.
 pub const DEFAULT_COMPACT_PROMPT: &str = "\
 You are compacting the conversation of an autonomous coding agent so it can keep \

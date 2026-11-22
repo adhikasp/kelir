@@ -287,7 +287,7 @@ capability. Inbound `notifications/claude/channel` messages (message id, convers
 sender, text, optional attachments, reply-to) are fsync'd into
 `spool/<server>.jsonl` before anything else happens; replay after a crash dedupes by
 message id and resumes unfinished turns. Each conversation is a named M9 session
-(`chan-<server>-<conversation>`), single-flight and bounded by `channel_max_active`;
+(`chan-<server>-<conversation>`), single-flight and bounded by `[channel] max_active`;
 per-conversation and global rate limits keep a flood bounded. A turn's reply goes once
 through the configured `reply_tool` (`reply` by default) with the message id as an
 idempotency key; errors, pauses and timeouts get one configurable fallback reply, and
@@ -516,7 +516,7 @@ key.
 are retried: `Retry-After` (seconds or HTTP-date) and the reset headers
 (`x-ratelimit-reset*`, `anthropic-ratelimit-*-reset`) are honoured when present,
 otherwise exponential with full jitter (base 2 s, factor 2, cap 120 s). The whole
-request works inside one waiting budget (`retry_max_wait`, default 30 min, `0` =
+request works inside one waiting budget (`[retry] max_wait`, default 30 min, `0` =
 unlimited); when it runs out the turn is **paused** (`turn_ended` outcome
 `paused` with `reason: "provider"`, "provider unavailable …; say `continue` to
 retry"), never failed, and the next `say` retries from the same fold. A hint

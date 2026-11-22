@@ -53,7 +53,7 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_SESSION_DIR` | the session's directory |
 | `KELIR_ROOT` | the root session of the tree this tool call runs in (its own id when it is the root) |
 | `KELIR_PARENT` | the session this tool call runs in: the parent of any child it starts (`kelir run --child`) |
-| `KELIR_DEPTH` | that session's depth in the tree (the root is 0); a start past `max_child_depth` is refused |
+| `KELIR_DEPTH` | that session's depth in the tree (the root is 0); a start past `[children] max_depth` is refused |
 | `KELIR_CALL_ID` | the provider call id of the bash call |
 | `KELIR_BIN` | the kelir binary, so `kelir bg`/`kelir view` work off `PATH` |
 | `KELIR_GATE_EVENT` | set for a gate only: the event it was started for (`turn_end`, …); a gate never gets `KELIR_TOKEN`, `KELIR_SOCK` or a provider key |

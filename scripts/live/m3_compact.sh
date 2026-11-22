@@ -2,7 +2,7 @@
 # M3 live drive: compact a real session with a focus, then ask a question that needs the
 # pinned first task and the human messages; read cached_tokens afterwards.
 # Usage: m3_compact.sh <scratch-dir> [keep]     (OPENROUTER_API_KEY must be in the environment)
-#   keep = the compact_keep to run with (default: the product default, 4)
+#   keep = the `[compaction] keep` value to run with (default: the product default, 4)
 #
 # A pass-through logging proxy (scripts/live/logging_proxy.py) records the request bodies
 # (never headers) so the order of the messages after the compaction can be read back.
@@ -17,7 +17,7 @@ rm -rf "$S/state" "$S/work" "$S/requests.jsonl" "$S/cfg"
 mkdir -p "$S/work" "$S/cfg"
 # $3 = extra config lines (e.g. "window = 1250" to make the auto trigger fire early)
 : > "$S/cfg/config.toml"
-if [ -n "$KEEP" ]; then printf 'compact_keep = %s\n' "$KEEP" >> "$S/cfg/config.toml"; fi
+if [ -n "$KEEP" ]; then printf '[compaction]\nkeep = %s\n' "$KEEP" >> "$S/cfg/config.toml"; fi
 if [ -n "${3:-}" ]; then printf '%s\n' "$3" >> "$S/cfg/config.toml"; fi
 DRV="$S/driver.log"
 : > "$DRV"
