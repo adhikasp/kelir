@@ -222,13 +222,13 @@ impl Session {
         }
         let provider = Some(text("provider"))
             .filter(|provider| !provider.trim().is_empty())
-            .unwrap_or_else(|| self.provider_name.clone());
+            .unwrap_or_else(|| self.provider.provider_name.clone());
         let model = Some(text("model"))
             .filter(|model| !model.trim().is_empty())
-            .unwrap_or_else(|| self.model.clone());
+            .unwrap_or_else(|| self.provider.model.clone());
         let snapshot = brief.then(|| {
-            let cut = child::snapshot_cut(&self.events);
-            (self.dir.clone(), self.events[..cut].to_vec())
+            let cut = child::snapshot_cut(&self.log.events);
+            (self.log.dir.clone(), self.log.events[..cut].to_vec())
         });
         let (root_sock, root_token) = match &self.kids.root {
             Some(link) => (link.sock.clone(), link.token.clone()),
@@ -241,7 +241,7 @@ impl Session {
             provider,
             model,
             cwd,
-            me: self.id.clone(),
+            me: self.log.id.clone(),
             inbox,
             key: self.kids.key.clone(),
             root: self.kids.lineage.root.clone(),
@@ -283,7 +283,7 @@ impl Session {
         };
         match op {
             "admit-local" => {
-                let me = self.id.clone();
+                let me = self.log.id.clone();
                 self.registry_admit(&me, args)
             }
             "reap" => {
@@ -294,14 +294,14 @@ impl Session {
                 self.kids.running.insert(text("child_id"), text("session"));
                 Response::ok(child::VERB, 0, "now", json!({}))
             }
-            "up-local" => self.registry_up(&self.id.clone(), args),
-            "settle-local" => self.registry_settle(&self.id.clone(), args),
+            "up-local" => self.registry_up(&self.log.id.clone(), args),
+            "settle-local" => self.registry_settle(&self.log.id.clone(), args),
             // A non-root parent writes its own `child_started`.
             "note-started" => {
                 let body = EventBody::ChildStarted {
                     child_id: text("child_id"),
                     session: text("session"),
-                    parent: self.id.clone(),
+                    parent: self.log.id.clone(),
                     depth: args.get("depth").and_then(Value::as_u64).unwrap_or(0) as u32,
                     kind: text("kind"),
                     task: Payload::text(text("task")),
@@ -321,7 +321,7 @@ impl Session {
                 let note = ChildNote {
                     child_id: text("child_id"),
                     session: text("session"),
-                    parent: self.id.clone(),
+                    parent: self.log.id.clone(),
                     depth: args.get("depth").and_then(Value::as_u64).unwrap_or(0) as u32,
                     background: args.get("background").and_then(Value::as_bool) == Some(true),
                     outcome: text("outcome"),
@@ -355,7 +355,7 @@ impl Session {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        if !self.kids.registry.is_descendant(&self.id, &who) {
+        if !self.kids.registry.is_descendant(&self.log.id, &who) {
             return Response::error("refused: this session is not a child of this root");
         }
         match op {
@@ -513,7 +513,7 @@ impl Session {
         exit_code: Option<i32>,
         result: &str,
     ) {
-        if entry.parent != self.id {
+        if entry.parent != self.log.id {
             return;
         }
         self.kids.running.remove(&entry.child_id);
@@ -536,7 +536,7 @@ impl Session {
     /// Apply a settlement at a boundary: the `child_settled` event (unless the registry already wrote it)
     /// and, for a background child, the message that wakes the model.
     pub(super) fn note_child(&mut self, note: &ChildNote) -> Result<bool, String> {
-        let settled = self.events.iter().any(|event| {
+        let settled = self.log.events.iter().any(|event| {
             matches!(&event.body, EventBody::ChildSettled { child_id, .. } if child_id == &note.child_id)
         });
         if !settled {
@@ -551,7 +551,7 @@ impl Session {
             })?;
             self.notify("child_settled", &note.child_id);
         }
-        if !note.background || note.parent != self.id {
+        if !note.background || note.parent != self.log.id {
             self.sync();
             return Ok(false);
         }
@@ -585,7 +585,7 @@ impl Session {
         let mut tree = args.get("tree").and_then(Value::as_bool) == Some(true);
         // A human naming the root they are steering means everything below it.
         if args.get("human").and_then(Value::as_bool) == Some(true)
-            && target.as_deref() == Some(self.id.as_str())
+            && target.as_deref() == Some(self.log.id.as_str())
         {
             tree = true;
         }
@@ -599,9 +599,9 @@ impl Session {
             let asker = args
                 .get("session")
                 .and_then(Value::as_str)
-                .unwrap_or(self.id.as_str())
+                .unwrap_or(self.log.id.as_str())
                 .to_string();
-            if asker != self.id && !self.kids.registry.is_descendant(&self.id, &asker) {
+            if asker != self.log.id && !self.kids.registry.is_descendant(&self.log.id, &asker) {
                 let _ = reply.send(Response::error(
                     "refused: this session is not a child of this root",
                 ));
@@ -618,7 +618,7 @@ impl Session {
             return;
         };
         let forwarded =
-            json!({"op": "kill", "target": target, "tree": tree, "session": self.id.clone()});
+            json!({"op": "kill", "target": target, "tree": tree, "session": self.log.id.clone()});
         tokio::spawn(async move {
             let request =
                 Request::new(child::VERB, forwarded, "child").with_token(Some(link.token));
@@ -1056,7 +1056,7 @@ impl Session {
             if crate::channel::is_channel_mode() {
                 return "channel";
             }
-            self.task_from
+            self.run.task_from
         } else if self.kids.brief {
             "brief"
         } else {
@@ -1092,7 +1092,8 @@ impl Session {
         if !self.kids.is_root() {
             return;
         }
-        let (registry, lost) = Registry::from_log(&self.id, self.cfg.children, &self.events);
+        let (registry, lost) =
+            Registry::from_log(&self.log.id, self.cfg.children, &self.log.events);
         self.kids.registry = registry;
         for entry in lost {
             self.log_child_settled(

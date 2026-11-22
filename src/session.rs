@@ -371,101 +371,95 @@ struct Reopened {
     cwd: PathBuf,
 }
 
-struct Session {
-    id: String,
-    dir: PathBuf,
-    /// Machine config dir, passed to built-in gates for machine-level skills.
-    config_dir: PathBuf,
-    writer: EventLog,
+/// The log and its identity: the one writer, its blobs, the folded events and
+/// whether the session was reopened and already named.
+struct Log {
+    writer: crate::event::EventLog,
     blobs: Blobs,
     events: Vec<LogEvent>,
-    cfg: Config,
+    id: String,
+    dir: PathBuf,
+    config_dir: PathBuf,
+    titled: bool,
+}
+
+/// The provider side of a session: the client, the active config and the
+/// provider-fields a 400 has taught us to drop.
+struct Provider {
+    client: Client,
+    active_provider: crate::config::ProviderConfig,
     provider_name: String,
     model: String,
-    client: Client,
-    /// The config of the provider the client is talking to, with its key: the one a re-read or a `model`
-    /// verb starts from.
-    active_provider: crate::config::ProviderConfig,
-    ctx: Ctx,
+    refused_fields: BTreeSet<String>,
+    governor: Option<crate::governor::Governor>,
+}
+
+/// Where a session's output goes: stdout shapes, the UI sink and the Herdr status.
+struct Out {
     json: bool,
     echo_assistant: bool,
     keep: bool,
-    /// Interactive: output goes to the inline viewport, not to stdout.
     tui: bool,
-    /// The UI, when one is attached. Every event is best-effort: a dead UI
-    /// never fails a turn.
     ui: Option<mpsc::UnboundedSender<UiEvent>>,
-    /// Herdr's OSC 7501 status, when this session reports one.
     herdr: Option<Herdr>,
-    /// A task was given on the command line (the TUI starts with none).
+}
+
+/// The compaction request and the context-size bookkeeping behind it.
+struct CompactState {
+    request: Option<CompactRequest>,
+    last_prompt_tokens: Option<u64>,
+    floor: Option<u64>,
+}
+
+/// The run as a whole: the task, its delivery and the resume/in-flight flags.
+struct Run {
+    /// Session-wide step counter, turn number and steps taken in this turn.
+    step: u32,
+    turn: u32,
+    turn_steps: u32,
     has_task: bool,
     final_text: String,
-    /// Session-wide step counter: every `step_started` in a `--keep` session
-    /// keeps counting, so step numbers stay unique in one log.
-    step: u32,
-    /// The turn being run (0 before the first one).
-    turn: u32,
-    /// Steps taken in the turn now running, reset at every turn start: an
-    /// explicit `max_steps` cap counts these, not the session-wide `step`.
-    turn_steps: u32,
+    run_sources: Vec<EventBody>,
+    task_from: &'static str,
+    step_cap: Option<u32>,
+    resumed: bool,
+    in_flight: bool,
+    retryable_failure: bool,
+    pending_task: String,
+}
+
+/// The tools frozen at session start and the calls live in this batch.
+struct ToolState {
+    names: Vec<String>,
+    disabled: BTreeSet<String>,
+    live_calls: Vec<String>,
+}
+
+struct Session {
+    /// The log, the folded events and the identity they belong to.
+    log: Log,
+    cfg: Config,
+    provider: Provider,
+    /// The frozen tool context of skills and sources.
+    ctx: Ctx,
+    out: Out,
     /// The loop's own inbox sender: broker tasks, children and bg jobs hand
     /// finished work back through it.
     inbox: Option<mpsc::UnboundedSender<Incoming>>,
-    /// Tools turned off for the rest of the session. The list sent to the
-    /// provider never changes.
-    disabled: BTreeSet<String>,
-    /// The provider call ids of this batch that have **not** settled yet, so a
-    /// `stop --call` for a call that is done is refused.
-    live_calls: Vec<String>,
     scheduler: Scheduler,
-    /// A compaction waiting for its boundary (`before_step`).
-    compact_request: Option<CompactRequest>,
-    /// The last `usage.prompt_tokens` for the current model: the honest size of the context the auto
-    /// trigger compares to the window.
-    last_prompt_tokens: Option<u64>,
-    /// The size at which an automatic compaction was declined because it would not shrink the context.
-    compact_floor: Option<u64>,
-    /// The tool names frozen at `session_started`; a resumed session sends the
-    /// same list, so its cache prefix is unchanged.
-    tool_names: Vec<String>,
-    /// Sources a scheduled run passes in explicitly (a `--fresh` carry hand-over).
-    run_sources: Vec<EventBody>,
-    /// Who a task's `user` event says it came from.
-    task_from: &'static str,
-    /// The session-wide step cap a scheduled run declared, if any.
-    step_cap: Option<u32>,
-    /// This process reopened the log instead of writing `session_started`.
-    resumed: bool,
-    /// The log was not closed cleanly: a turn is continued on resume.
-    in_flight: bool,
-    /// The last streamed step failed with an error the provider called
-    /// retryable: a resumed turn may try the turn again (see [`Session::run`]).
-    retryable_failure: bool,
-    /// The task words from the command line, for the `user` event a resume
-    /// adds when it is given a new message.
-    pending_task: String,
+    compact: CompactState,
+    tools: ToolState,
+    run: Run,
     /// Every feature's state, dispatched through the `Feature` boundaries.
     features: crate::features::Features,
-    /// Body fields a provider refused with a 400 during this session, by the field name: the retry leaves
-    /// them out and the session remembers, so the same 400 is not paid twice.
-    refused_fields: BTreeSet<String>,
-    /// The client-side concurrency governor, when the provider config asks for
-    /// one (`max_concurrent_requests`). `None` is off, the default.
-    governor: Option<crate::governor::Governor>,
-    /// This session's socket trust boundary: its token and the jobs it owns. The `bg`, `cancel` and `bg-spawn` verbs are refused here
-    /// when they name a job this session did not start.
+    /// This session's socket trust boundary: its token and the jobs it owns.
     trust: std::sync::Arc<crate::trust::Trust>,
-    /// What this session has spent and what state it is in, folded from the log as it is written:
-    /// the `status` verb's answer, and what the warnings are decided from.
+    /// What this session has spent, folded from the log as it is written.
     tally: crate::usage::Tally,
-    /// This session's place in the family of sessions and its registry of
+    /// This session's place in the family of sessions and its registry of children.
     kids: children::Kids,
-    /// The retry or slot wait in progress, for `status`: when it ends, the status and attempt, and whether
-    /// it is a slot wait.
+    /// The retry or slot wait in progress, for `status`.
     retry_wait: std::cell::Cell<Option<RetryWait>>,
-    /// Whether a `session_title` event has been written (or was present on
-    /// resume). The first human prompt names the session; later ones do not.
-    titled: bool,
 }
 
 /// A retry or slot wait in progress: ends at, status, attempt, is-a-slot-wait.
@@ -663,7 +657,7 @@ impl RequestFor<'_> {
             RequestFor::Step => {
                 // The fold cannot fail here for a reason a rebuild would fix;
                 // an unreadable blob is the parser's error to report.
-                let messages = crate::fold::fold(&session.events, &session.dir)
+                let messages = crate::fold::fold(&session.log.events, &session.log.dir)
                     .map(|folded| folded.request_messages())
                     .unwrap_or_default();
                 // The same builder `drive_turn` used for the first attempt, so a retry keeps's capability decisions
@@ -815,7 +809,7 @@ async fn drive(opts: Options) -> u8 {
     ipc::serve(listener, trust.clone(), tx.clone());
     // Background jobs: `kelir bg run` reports itself over the socket, and this watcher is the safety net
     // that also catches a promoted call settling while the session runs.
-    watch_bg(session.dir.join("bg"), tx.clone());
+    watch_bg(session.log.dir.join("bg"), tx.clone());
     // MCP: broker tasks report back through the same channel, and channel
     // servers connect now.
     session.inbox = Some(tx.clone());
@@ -852,7 +846,7 @@ async fn drive(opts: Options) -> u8 {
         let mut banner = vec![
             tui::BannerLine::plain(format!(
                 "kelir · {} · {}",
-                session.provider_name, session.model
+                session.provider.provider_name, session.provider.model
             )),
             tui::BannerLine::plain(format!(
                 "cwd {}",
@@ -873,11 +867,11 @@ async fn drive(opts: Options) -> u8 {
                 "step cap {cap} per turn · reaching it pauses the turn (say continue)"
             )));
         }
-        if session.resumed {
+        if session.run.resumed {
             banner.push(tui::BannerLine::plain(format!(
                 "resumed from the event log · {} turn(s) recorded{}",
-                session.turn,
-                if session.in_flight {
+                session.run.turn,
+                if session.run.in_flight {
                     " · continuing the turn that was cut off"
                 } else {
                     ""
@@ -898,17 +892,22 @@ async fn drive(opts: Options) -> u8 {
             Ok(mut handle) => {
                 // The session dir is where a pasted image is saved, and where
                 // `attachments/…` in a prompt resolves.
-                handle.app.set_session_dir(session.dir.clone());
-                handle.app.set_session_id(session.id.clone());
+                handle.app.set_session_dir(session.log.dir.clone());
+                handle.app.set_session_id(session.log.id.clone());
                 // A resumed session's title was written when its first prompt arrived; show it from the
                 // first frame instead of waiting for a new prompt (which may never come).
-                if let Some(title) = session.events.iter().find_map(|event| match &event.body {
-                    crate::event::EventBody::SessionTitle { title } => Some(title.clone()),
-                    _ => None,
-                }) {
+                if let Some(title) = session
+                    .log
+                    .events
+                    .iter()
+                    .find_map(|event| match &event.body {
+                        crate::event::EventBody::SessionTitle { title } => Some(title.clone()),
+                        _ => None,
+                    })
+                {
                     handle.app.set_title(title);
                 }
-                session.ui = Some(to_tui.clone());
+                session.out.ui = Some(to_tui.clone());
                 let task = tokio::spawn(handle.run());
                 // If the UI dies (a panic, a terminal error) the session ends the same way `/quit` ends it,
                 // instead of running forever with nobody watching.
@@ -945,8 +944,8 @@ async fn drive(opts: Options) -> u8 {
         let _ = to_tui.send(UiEvent::Quit);
         let _ = watchdog.await;
     }
-    if opts.ask && !session.final_text.is_empty() {
-        println!("{}", session.final_text);
+    if opts.ask && !session.run.final_text.is_empty() {
+        println!("{}", session.run.final_text);
     }
     session.print_result(code);
     code
@@ -1454,13 +1453,13 @@ impl crate::features::mcp::McpCore for Session {
         Session::sync(self);
     }
     fn disabled(&self) -> &BTreeSet<String> {
-        &self.disabled
+        &self.tools.disabled
     }
     fn live_calls(&self) -> &[String] {
-        &self.live_calls
+        &self.tools.live_calls
     }
     fn turn(&self) -> u32 {
-        self.turn
+        self.run.turn
     }
     fn gates(&self) -> Option<Arc<crate::gates::Runner>> {
         self.features.gates.as_ref().and_then(|g| g.runner())
@@ -1481,10 +1480,10 @@ impl crate::features::gates::GatesCore for Session {
         Session::emit(self, event);
     }
     fn turn(&self) -> u32 {
-        self.turn
+        self.run.turn
     }
     fn tui(&self) -> bool {
-        self.tui
+        self.out.tui
     }
     fn task_from(&self) -> &'static str {
         Session::task_from(self)
@@ -1498,15 +1497,15 @@ impl crate::features::gates::GatesCore for Session {
             project_gates: &self.cfg.project_gates,
             skills_dirs: &self.cfg.skills_dirs,
             trusted_projects: &self.cfg.trusted_projects,
-            config_dir: Some(&self.config_dir),
+            config_dir: Some(&self.log.config_dir),
             cwd: &self.ctx.cwd,
             shell: &self.cfg.shell,
-            id: &self.id,
-            dir: &self.dir,
+            id: &self.log.id,
+            dir: &self.log.dir,
         }
     }
     fn events(&self) -> &[LogEvent] {
-        &self.events
+        &self.log.events
     }
 }
 
@@ -1557,8 +1556,11 @@ impl Session {
     }
 
     async fn gates_start(&mut self) -> bool {
-        let (provider, model, resumed) =
-            (self.provider_name.clone(), self.model.clone(), self.resumed);
+        let (provider, model, resumed) = (
+            self.provider.provider_name.clone(),
+            self.provider.model.clone(),
+            self.run.resumed,
+        );
         let mut gates = self.features.gates.take().expect("gates feature");
         let result = gates.start(self, &provider, &model, resumed).await;
         self.features.gates = Some(gates);
@@ -1574,9 +1576,9 @@ impl Session {
     /// The date the session's frozen system prompt was rendered with (the
     /// `date:` line in its Environment block).
     fn rendered_date(&self) -> Option<String> {
-        let text = self.events.iter().find_map(|event| {
+        let text = self.log.events.iter().find_map(|event| {
             if let EventBody::SessionStarted { system, .. } = &event.body {
-                system.text.resolve_text(&self.dir).ok()
+                system.text.resolve_text(&self.log.dir).ok()
             } else {
                 None
             }
@@ -1599,14 +1601,14 @@ impl Session {
         if resumed
             && self.kids.root.is_none()
             && let Some(clock) = crate::namedrun::clock_source_from(
-                &self.events,
+                &self.log.events,
                 &today(),
                 self.rendered_date().as_deref(),
             )
         {
             sources.push(clock);
         }
-        sources.extend(self.run_sources.clone());
+        sources.extend(self.run.run_sources.clone());
         for source in sources {
             self.record(source)?;
         }
@@ -1617,22 +1619,28 @@ impl Session {
     /// delegation, so a verb remains a core decision and the state lives in the feature.
     fn swap_model(&mut self, target: &str) -> Result<(), String> {
         let Session {
-            writer,
-            blobs,
-            events,
-            ui,
+            log:
+                Log {
+                    writer,
+                    blobs,
+                    events,
+                    dir,
+                    id,
+                    ..
+                },
+            provider:
+                Provider {
+                    model,
+                    provider_name,
+                    client,
+                    active_provider,
+                    governor,
+                    ..
+                },
+            out: Out { ui, json, tui, .. },
             cfg,
-            dir,
-            id,
-            model,
-            provider_name,
-            client,
-            active_provider,
-            governor,
             ctx,
             tally,
-            json,
-            tui,
             features,
             ..
         } = self;
@@ -1682,62 +1690,75 @@ impl Session {
         };
         let reopened = prepared.resume.is_some();
         let mut session = Session {
-            id: prepared.id.clone(),
-            dir: prepared.dir.clone(),
-            config_dir: crate::paths::config_dir(),
-            writer,
-            blobs: Blobs::new(&prepared.dir),
-            events: prepared
-                .resume
-                .as_ref()
-                .map(|read| read.events.clone())
-                .unwrap_or_default(),
-            titled: prepared.resume.as_ref().is_some_and(|read| {
-                read.events
-                    .iter()
-                    .any(|event| matches!(event.body, EventBody::SessionTitle { .. }))
-            }),
+            log: Log {
+                writer,
+                blobs: Blobs::new(&prepared.dir),
+                events: prepared
+                    .resume
+                    .as_ref()
+                    .map(|read| read.events.clone())
+                    .unwrap_or_default(),
+                id: prepared.id.clone(),
+                dir: prepared.dir.clone(),
+                config_dir: crate::paths::config_dir(),
+                titled: prepared.resume.as_ref().is_some_and(|read| {
+                    read.events
+                        .iter()
+                        .any(|event| matches!(event.body, EventBody::SessionTitle { .. }))
+                }),
+            },
+            provider: Provider {
+                client: prepared.client.clone(),
+                active_provider: prepared.provider_cfg.clone(),
+                provider_name: prepared.provider_name.clone(),
+                model: prepared.model.clone(),
+                refused_fields: BTreeSet::new(),
+                governor: prepared.governor,
+            },
+            out: Out {
+                json: prepared.json,
+                echo_assistant: !prepared.ask && !prepared.tui,
+                keep: prepared.keep,
+                tui: prepared.tui,
+                ui: None,
+                herdr: prepared.herdr,
+            },
+            compact: CompactState {
+                request: None,
+                last_prompt_tokens: None,
+                floor: None,
+            },
+            tools: ToolState {
+                names: prepared
+                    .resume
+                    .as_ref()
+                    .map(|read| read.tools.clone())
+                    .unwrap_or_else(tools::names),
+                disabled: BTreeSet::new(),
+                live_calls: Vec::new(),
+            },
+            run: Run {
+                step: prepared.resume.as_ref().map(|read| read.step).unwrap_or(0),
+                turn: prepared.resume.as_ref().map(|read| read.turns).unwrap_or(0),
+                turn_steps: 0,
+                has_task: !prepared.task.trim().is_empty(),
+                final_text: String::new(),
+                run_sources: prepared.run_sources.clone(),
+                task_from: prepared.task_from,
+                step_cap: prepared.step_cap,
+                resumed: reopened,
+                in_flight: prepared
+                    .resume
+                    .as_ref()
+                    .map(|read| read.in_flight)
+                    .unwrap_or(false),
+                retryable_failure: false,
+                pending_task: prepared.task.clone(),
+            },
             cfg: prepared.cfg.clone(),
-            provider_name: prepared.provider_name.clone(),
-            model: prepared.model.clone(),
-            client: prepared.client.clone(),
-            active_provider: prepared.provider_cfg.clone(),
             ctx,
-            json: prepared.json,
-            echo_assistant: !prepared.ask && !prepared.tui,
-            keep: prepared.keep,
-            tui: prepared.tui,
-            ui: None,
-            herdr: prepared.herdr,
-            has_task: !prepared.task.trim().is_empty(),
-            final_text: String::new(),
-            step: prepared.resume.as_ref().map(|read| read.step).unwrap_or(0),
-            turn: prepared.resume.as_ref().map(|read| read.turns).unwrap_or(0),
-            turn_steps: 0,
-            disabled: BTreeSet::new(),
             inbox: None,
-            refused_fields: BTreeSet::new(),
-            live_calls: Vec::new(),
             scheduler: Scheduler::default(),
-            compact_request: None,
-            last_prompt_tokens: None,
-            compact_floor: None,
-            tool_names: prepared
-                .resume
-                .as_ref()
-                .map(|read| read.tools.clone())
-                .unwrap_or_else(tools::names),
-            resumed: reopened,
-            run_sources: prepared.run_sources.clone(),
-            task_from: prepared.task_from,
-            step_cap: prepared.step_cap,
-            in_flight: prepared
-                .resume
-                .as_ref()
-                .map(|read| read.in_flight)
-                .unwrap_or(false),
-            retryable_failure: false,
-            pending_task: prepared.task.clone(),
             features: crate::features::Features {
                 models: models::Models::new(
                     prepared.window,
@@ -1757,7 +1778,6 @@ impl Session {
                 gates: Some(crate::features::gates::Gates::new()),
                 sources: crate::features::sources::Sources::new(crate::sources::Watch::default()),
             },
-            governor: prepared.governor,
             trust,
             tally: crate::usage::Tally::default(),
             kids: children::Kids::new(&prepared.id, prepared.cfg.children, prepared.child.as_ref()),
@@ -1768,15 +1788,15 @@ impl Session {
         }
         session.gates_do(|gates, session| gates.build(session));
         crate::child::set_lineage(session.kids.lineage.clone());
-        session.tally = crate::usage::Tally::from_events(&session.events, session.warn());
+        session.tally = crate::usage::Tally::from_events(&session.log.events, session.warn());
         // The watcher re-checks the sources the frozen system was rendered from; on a resume it is rebuilt
         // from the log's `sources[]` *and* the `source` events it already carries, so a source the verb added
         if let Some(read) = prepared.resume {
             session.features.sources = crate::features::sources::Sources::new(
-                crate::sources::Watch::rebuild(&read.events, &session.dir),
+                crate::sources::Watch::rebuild(&read.events, &session.log.dir),
             );
             // A turn that was in flight continues without a new task.
-            session.has_task |= read.in_flight;
+            session.run.has_task |= read.in_flight;
             session.reopen(read)?;
             session.settle_lost_children();
             return Ok(session);
@@ -1798,7 +1818,7 @@ impl Session {
                 hash: prepared.system.hash.clone(),
             },
             sources: prepared.system.sources.clone(),
-            tools: session.tool_names.clone(),
+            tools: session.tools.names.clone(),
             // What the loop will ask this model for: the configured effort, unless the provider's list says the
             // model does not take the parameter.
             reasoning_effort: session.first_effort(),
@@ -1817,7 +1837,7 @@ impl Session {
                 retry_in_ms: None,
             })?;
         }
-        if session.has_task {
+        if session.run.has_task {
             session.record_plan_sources(false)?;
             session.gates_do(|gates, session| {
                 gates.submit_task(session, prepared.task.clone(), "now")
@@ -1833,6 +1853,7 @@ impl Session {
         // Gaps in the log first: a torn last line and every line that never parsed are reported, never dropped
         // silently — but a gap that a previous resume already reported is not reported again.
         let reported: Vec<String> = self
+            .log
             .events
             .iter()
             .filter_map(|event| match &event.body {
@@ -1892,6 +1913,7 @@ impl Session {
         // The same for `kelir mcp` calls: `mcp_started` with no `mcp_settled` means the session died while the
         // server was running the tool.
         let settled: std::collections::HashSet<String> = self
+            .log
             .events
             .iter()
             .filter_map(|event| match &event.body {
@@ -1900,6 +1922,7 @@ impl Session {
             })
             .collect();
         let orphans: Vec<(String, String, String, Option<String>)> = self
+            .log
             .events
             .iter()
             .filter_map(|event| match &event.body {
@@ -1938,10 +1961,10 @@ impl Session {
         }
         // An agent-called compaction that was settled but never applied — a kill between the tool's
         // `compaction queued` result and the boundary that summarises — is queued again here, so the model's
-        if self.compact_request.is_none()
-            && let Some(focus) = compact::queued_compaction(&self.events, &self.dir)
+        if self.compact.request.is_none()
+            && let Some(focus) = compact::queued_compaction(&self.log.events, &self.log.dir)
         {
-            self.compact_request = Some(CompactRequest {
+            self.compact.request = Some(CompactRequest {
                 by: "agent",
                 focus,
                 immediate: false,
@@ -1952,7 +1975,7 @@ impl Session {
         }
         // Background jobs that started or settled while no session was running: the shim's status file is the
         // record, and this is where it reaches the log (`bg_started`, `bg_settled` and the message that wakes
-        for event in &self.events {
+        for event in &self.log.events {
             match &event.body {
                 EventBody::BgStarted { bg_id, .. } => self.trust.adopt(bg_id),
                 EventBody::ToolStarted { dir: Some(dir), .. } => self.trust.adopt(dir),
@@ -1960,7 +1983,7 @@ impl Session {
             }
         }
         let mut woke = false;
-        for status in crate::bg::list(&self.dir.join("bg")) {
+        for status in crate::bg::list(&self.log.dir.join("bg")) {
             if !status.is_job() {
                 continue;
             }
@@ -1969,19 +1992,19 @@ impl Session {
         if woke {
             // A job settling while the session was down *is* something to do:
             // the resumed turn reads the message like any other.
-            self.has_task = true;
+            self.run.has_task = true;
             self.emit(UiEvent::Info(
                 "kelir: resumed · a background job settled while this session was not running"
                     .to_string(),
             ));
         }
-        if !self.pending_task.trim().is_empty() || read.in_flight {
+        if !self.run.pending_task.trim().is_empty() || read.in_flight {
             self.record_plan_sources(true)?;
         }
-        if !self.pending_task.trim().is_empty() {
+        if !self.run.pending_task.trim().is_empty() {
             // `kelir resume <id> <task>`: a new message on the existing log.
             let delivery = if read.in_flight { "next" } else { "now" };
-            let task = self.pending_task.clone();
+            let task = self.run.pending_task.clone();
             self.gates_do(|gates, session| gates.submit_task(session, task, delivery))?;
         } else {
             self.continue_a_turn_that_ends_on_an_answer()?;
@@ -1993,22 +2016,23 @@ impl Session {
     /// a kill can leave a log whose last message is the assistant's final answer, and a request may not
     /// end on one — providers read a trailing assistant message as prefill or refuse it.
     fn continue_a_turn_that_ends_on_an_answer(&mut self) -> Result<(), String> {
-        if !self.pending_task.trim().is_empty() {
+        if !self.run.pending_task.trim().is_empty() {
             return Ok(());
         }
         let closed = self
+            .log
             .events
             .iter()
             .any(|event| matches!(event.body, EventBody::SessionEnded { .. }));
         let continuing = !closed
             || matches!(
-                resume::last_turn_outcome(&self.events).as_deref(),
+                resume::last_turn_outcome(&self.log.events).as_deref(),
                 Some("stopped") | Some("paused") | Some("error")
             );
         if !continuing {
             return Ok(());
         }
-        let folded = crate::fold::fold(&self.events, &self.dir)?;
+        let folded = crate::fold::fold(&self.log.events, &self.log.dir)?;
         if folded.messages.last().map(|message| message.role.as_str()) != Some("assistant") {
             return Ok(());
         }
@@ -2018,7 +2042,7 @@ impl Session {
             delivery: "now".into(),
             attachments: Vec::new(),
         })?;
-        self.has_task = true;
+        self.run.has_task = true;
         Ok(())
     }
 
@@ -2030,6 +2054,7 @@ impl Session {
         }
         // The last start for this id, in case a provider reuses call ids.
         let seq = self
+            .log
             .events
             .iter()
             .rev()
@@ -2040,7 +2065,7 @@ impl Session {
                 _ => None,
             })?;
         let prefix = format!("{seq}-");
-        let entry = std::fs::read_dir(self.dir.join("commands"))
+        let entry = std::fs::read_dir(self.log.dir.join("commands"))
             .ok()?
             .flatten()
             .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))?;
@@ -2058,15 +2083,15 @@ impl Session {
         // The built-in hint must see machine-level skills, just as the old
         // core hint did (`places(&ctx.cwd, &cfg.skills_dirs, Some(config_dir()))`).
         crate::gates::GateCtx {
-            client: &self.client,
-            provider: &self.active_provider,
+            client: &self.provider.client,
+            provider: &self.provider.active_provider,
             config: &self.cfg,
-            provider_name: &self.provider_name,
+            provider_name: &self.provider.provider_name,
             note: &|_message| {},
-            events: &self.events,
-            dir: &self.dir,
+            events: &self.log.events,
+            dir: &self.log.dir,
             skills_dirs: &self.cfg.skills_dirs,
-            config_dir: Some(&self.config_dir),
+            config_dir: Some(&self.log.config_dir),
             cwd: &self.ctx.cwd,
         }
     }
@@ -2074,8 +2099,8 @@ impl Session {
     /// Append one event. Oversized payloads go to `blobs/` first, named by the
     /// seq the event is about to get.
     fn record(&mut self, body: EventBody) -> Result<LogEvent, String> {
-        let seq = self.writer.next_seq();
-        let title = if !self.titled
+        let seq = self.log.writer.next_seq();
+        let title = if !self.log.titled
             && let EventBody::User { text, from, .. } = &body
             && from != "cli"
         {
@@ -2085,12 +2110,13 @@ impl Session {
         } else {
             None
         };
-        let body = spill_payloads(body, &self.blobs, seq)?;
+        let body = spill_payloads(body, &self.log.blobs, seq)?;
         let event = self
+            .log
             .writer
             .append(body)
             .map_err(|error| format!("cannot append to the event log: {error}"))?;
-        if self.json {
+        if self.out.json {
             let stdout = std::io::stdout();
             let mut lock = stdout.lock();
             let _ = writeln!(
@@ -2101,11 +2127,11 @@ impl Session {
             let _ = lock.flush();
         }
         self.tally.observe(event.seq, &event.body);
-        self.events.push(event.clone());
+        self.log.events.push(event.clone());
         // Name the session from its first human prompt. Deterministic, no model call (design note
         // §9).
         if let Some(title) = title {
-            self.titled = true;
+            self.log.titled = true;
             self.record(EventBody::SessionTitle {
                 title: title.clone(),
             })?;
@@ -2132,7 +2158,7 @@ impl Session {
                 threshold: warning.threshold,
             });
             self.emit(UiEvent::Info(format!("» warning: {}", warning.message)));
-            if !self.json && !self.tui {
+            if !self.out.json && !self.out.tui {
                 eprintln!("kelir: warning: {}", warning.message);
             }
         }
@@ -2150,19 +2176,19 @@ impl Session {
                     slot,
                 });
         let live = crate::usage::Live {
-            id: &self.id,
-            provider: &self.provider_name,
-            model: &self.model,
-            turn: self.turn,
-            turn_steps: self.turn_steps,
+            id: &self.log.id,
+            provider: &self.provider.provider_name,
+            model: &self.provider.model,
+            turn: self.run.turn,
+            turn_steps: self.run.turn_steps,
             max_steps: self.cfg.max_steps,
-            session_steps: self.step,
+            session_steps: self.run.step,
             // Until the model list answers (or a window is configured) the
             // number is a guess, and a guess is `null`, not 128000.
             window: (self.features.models.window_source != "default")
                 .then_some(self.features.models.window),
             window_source: self.features.models.window_source,
-            running: &self.live_calls,
+            running: &self.tools.live_calls,
             retry,
             warn: self.warn(),
         };
@@ -2201,7 +2227,7 @@ impl Session {
     }
 
     fn sync(&mut self) {
-        let _ = self.writer.sync();
+        let _ = self.log.writer.sync();
     }
 
     /// Tell the UI what happened. A closed UI is not an error: the session is
@@ -2222,20 +2248,20 @@ impl Session {
             UiEvent::RetryingDone => self.retry_wait.set(None),
             _ => {}
         }
-        if let Some(ui) = &self.ui {
+        if let Some(ui) = &self.out.ui {
             let _ = ui.send(event);
         }
     }
 
     /// Report Herdr status (no-op unless a writer was opened).
     fn report(&mut self, state: HerdrState) {
-        let Some(herdr) = &self.herdr else {
+        let Some(herdr) = &self.out.herdr else {
             return;
         };
         let state = crate::herdr::state_for(state, herdr.telegram());
-        if self.tui {
+        if self.out.tui {
             self.emit(UiEvent::Herdr { state });
-        } else if let Some(herdr) = &mut self.herdr {
+        } else if let Some(herdr) = &mut self.out.herdr {
             herdr.report(state);
         }
     }
@@ -2243,13 +2269,13 @@ impl Session {
     /// Set the Herdr pane title from the session title. In the TUI the record travels with the
     /// other status records and is written between paints; non-TUI paths write it here.
     fn report_title(&mut self, title: &str) {
-        if self.herdr.is_none() {
+        if self.out.herdr.is_none() {
             return;
         }
         let record = crate::herdr::title_record(title);
-        if self.tui {
+        if self.out.tui {
             self.emit(UiEvent::TitleRecord(record));
-        } else if let Some(herdr) = &mut self.herdr {
+        } else if let Some(herdr) = &mut self.out.herdr {
             herdr.write_record(&record);
         }
     }
@@ -2258,7 +2284,7 @@ impl Session {
         let dispatch = crate::notify::fire(
             &self.cfg.notify,
             &std::collections::BTreeMap::new(),
-            &self.dir,
+            &self.log.dir,
             &self.ctx.shell,
             kind,
             detail,
@@ -2278,7 +2304,7 @@ impl Session {
     fn finish_turn(&mut self, outcome: &str) {
         self.emit(UiEvent::TurnEnded {
             outcome: outcome.to_string(),
-            final_text: self.final_text.clone(),
+            final_text: self.run.final_text.clone(),
         });
         let state = match outcome {
             "done" => HerdrState::Done,
@@ -2291,7 +2317,7 @@ impl Session {
         self.report(state);
         // Notifications are last: the log already has the outcome, so a hook that reads it sees a
         // complete turn. Clone the detail first: `notify` records an event, which needs `&mut self`.
-        let detail = self.final_text.clone();
+        let detail = self.run.final_text.clone();
         match outcome {
             "done" => self.notify("turn_done", &detail),
             "error" => self.notify("error", &detail),
@@ -2301,16 +2327,18 @@ impl Session {
     }
 
     fn print_result(&self, exit_code: u8) {
-        if !self.json {
+        if !self.out.json {
             return;
         }
         let steps = self
+            .log
             .events
             .iter()
             .filter(|event| matches!(event.body, EventBody::StepStarted { .. }))
             .count();
         // The last turn's outcome, so a stopped turn is reported as such.
         let outcome = self
+            .log
             .events
             .iter()
             .rev()
@@ -2328,24 +2356,24 @@ impl Session {
         print_result_event(
             &outcome,
             exit_code,
-            &self.final_text,
+            &self.run.final_text,
             steps,
-            Some((&self.id, &self.dir)),
+            Some((&self.log.id, &self.log.dir)),
             None,
         );
     }
 
     fn state(&self) -> Value {
         json!({
-            "turn": self.turn,
-            "step": self.step,
+            "turn": self.run.turn,
+            "step": self.run.step,
             // The turn's own count and its cap, so a steering human sees a pause coming (FINDINGS: "a status line
             // with steps used/limit would have shown it coming").
-            "turn_steps": self.turn_steps,
+            "turn_steps": self.run.turn_steps,
             "max_steps": self.cfg.max_steps,
-            "running": self.live_calls,
-            "provider": self.provider_name,
-            "model": self.model,
+            "running": self.tools.live_calls,
+            "provider": self.provider.provider_name,
+            "model": self.provider.model,
             "window": self.features.models.window,
             "window_source": self.features.models.window_source,
             // Why this start does not have the provider's window, when it does not: `http 401`,
@@ -2358,7 +2386,7 @@ impl Session {
                 .fetch
                 .as_ref()
                 .is_some_and(Fetch::is_running),
-            "disabled": self.disabled.iter().cloned().collect::<Vec<_>>(),
+            "disabled": self.tools.disabled.iter().cloned().collect::<Vec<_>>(),
         })
     }
 
@@ -2536,7 +2564,7 @@ impl Session {
         }
         // Only `cmd`, `shell`, `cwd` and a filtered `env` are the caller's; the kind, the socket,
         // the token, the job name and the call are the session's own.
-        let call_is_live = |call: &str| self.live_calls.iter().any(|live| live == call);
+        let call_is_live = |call: &str| self.tools.live_calls.iter().any(|live| live == call);
         match crate::trust::spawn_request(request).and_then(|spawn| {
             let spawn = spawn.pinned(&self.ctx.sock, &self.ctx.token, call_is_live);
             crate::bg::spawn_shim_for_client(&self.trust, &spawn)
@@ -2592,7 +2620,7 @@ impl Session {
         if let Verb::Stop {
             call: Some(call), ..
         } = &parsed
-            && !self.live_calls.iter().any(|id| id == call)
+            && !self.tools.live_calls.iter().any(|id| id == call)
         {
             return Err(format!("no running call with id `{call}`"));
         }
@@ -2703,10 +2731,10 @@ impl Session {
                 }
                 Verb::Tools { disable, enable } => {
                     for name in disable {
-                        self.disabled.insert(name);
+                        self.tools.disabled.insert(name);
                     }
                     for name in enable {
-                        self.disabled.remove(&name);
+                        self.tools.disabled.remove(&name);
                     }
                 }
                 Verb::View { path } => {
@@ -2740,8 +2768,8 @@ impl Session {
                         Some(focus) => format!("» compact: {focus}"),
                         None => "» compact".to_string(),
                     }));
-                    if self.compact_request.is_none() {
-                        self.compact_request = Some(CompactRequest {
+                    if self.compact.request.is_none() {
+                        self.compact.request = Some(CompactRequest {
                             by: "user",
                             focus: focus.clone(),
                             immediate: true,
@@ -2787,22 +2815,28 @@ impl Session {
                     text,
                 } => {
                     let Self {
-                        writer,
-                        blobs,
-                        events,
-                        ui,
+                        log:
+                            Log {
+                                writer,
+                                blobs,
+                                events,
+                                dir,
+                                id,
+                                ..
+                            },
+                        provider:
+                            Provider {
+                                model,
+                                provider_name,
+                                client,
+                                active_provider,
+                                governor,
+                                ..
+                            },
+                        out: Out { ui, json, tui, .. },
                         cfg,
-                        dir,
-                        id,
-                        model,
-                        provider_name,
-                        client,
-                        active_provider,
-                        governor,
                         ctx,
                         tally,
-                        json,
-                        tui,
                         features,
                         ..
                     } = self;
@@ -2924,7 +2958,7 @@ impl Session {
             return Ok(false);
         }
         let status = crate::bg::observed_in(&dir, candidate);
-        let started = self.events.iter().any(|event| {
+        let started = self.log.events.iter().any(|event| {
             matches!(&event.body, EventBody::BgStarted { bg_id, .. } if bg_id == &status.id)
         });
         if !started {
@@ -2937,7 +2971,7 @@ impl Session {
         // Settle once. The log is the record: a repeated report (a stale watcher pass, a child
         // replaying a settled status 50 times) finds `bg_settled` here and writes nothing — no
         // second event, no second wake message.
-        let settled = self.events.iter().any(|event| {
+        let settled = self.log.events.iter().any(|event| {
             matches!(&event.body, EventBody::BgSettled { bg_id, .. } if bg_id == &status.id)
         });
         if settled {
@@ -2980,8 +3014,8 @@ impl Session {
         // Audio and video are stored with a note, never sent: a `source` event
         // of kind `attachment-note` whose text says where the file is.
         if let Some(kind) = crate::attachments::media_kind(&path) {
-            let seq = crate::attachments::next_seq(&self.dir);
-            let rel = crate::attachments::save_media(&self.dir, seq, &path)
+            let seq = crate::attachments::next_seq(&self.log.dir);
+            let rel = crate::attachments::save_media(&self.log.dir, seq, &path)
                 .map_err(|error| format!("view: {error}"))?;
             self.record(EventBody::Source {
                 kind: crate::attachments::MEDIA_SOURCE_KIND.to_string(),
@@ -3010,7 +3044,7 @@ impl Session {
     /// Resolve and validate a `view` path without side effects: the same check
     /// the ack runs, so the CLI's answer is the truth.
     fn check_view(&self, named: &str) -> Result<std::path::PathBuf, String> {
-        let path = crate::attachments::resolve(&self.dir, &self.ctx.cwd, named);
+        let path = crate::attachments::resolve(&self.log.dir, &self.ctx.cwd, named);
         if !path.is_file() {
             return Err(format!(
                 "view: no such image: {}",
@@ -3072,7 +3106,7 @@ impl Session {
         if self.vision_support() == Some(false) {
             return Err(format!(
                 "view: {} cannot take images: it is a text-only model, so the image would be refused by the provider (pick a vision model with `/model`, or `--model`). The conversation is unchanged.",
-                self.model
+                self.provider.model
             ));
         }
         Ok(path)
@@ -3085,24 +3119,24 @@ impl Session {
             .models
             .models
             .as_ref()
-            .and_then(|models| models.vision_for(&self.model))
+            .and_then(|models| models.vision_for(&self.provider.model))
     }
 
     /// Copy one image into `<session>/attachments/` and return its relative
     /// path. Content that is already there is not copied twice.
     fn import_attachment(&self, path: &Path) -> Result<String, String> {
-        let dir = crate::attachments::dir(&self.dir);
+        let dir = crate::attachments::dir(&self.log.dir);
         std::fs::create_dir_all(&dir)
             .map_err(|error| format!("view: cannot create {}: {error}", dir.display()))?;
         // Keep the file where it is when it already lives in the session's
         // attachments (a prompt pointer names exactly that).
-        if let Ok(rest) = path.strip_prefix(&self.dir) {
+        if let Ok(rest) = path.strip_prefix(&self.log.dir) {
             return Ok(crate::util::path_string(rest));
         }
         // The sequence number counts the session's copies, so two different files get two numbers.
         let mut seen = std::collections::HashMap::new();
-        let seq = crate::attachments::next_seq(&self.dir);
-        let saved = crate::attachments::save(&self.dir, seq, path, &mut seen)
+        let seq = crate::attachments::next_seq(&self.log.dir);
+        let saved = crate::attachments::save(&self.log.dir, seq, path, &mut seen)
             .map_err(|error| format!("view: {error}"))?;
         Ok(saved.rel)
     }
@@ -3151,7 +3185,7 @@ impl Session {
             return None;
         }
         self.cfg
-            .provider(&self.provider_name)
+            .provider(&self.provider.provider_name)
             .ok()
             .and_then(|provider| provider.reasoning_effort)
     }
@@ -3165,7 +3199,7 @@ impl Session {
                 .models
                 .as_ref()
                 .map(|cache| cache.models.as_slice()),
-            &self.model,
+            &self.provider.model,
         )
     }
 
@@ -3174,7 +3208,7 @@ impl Session {
     fn effort_allowed(&self) -> bool {
         let explicit = self
             .cfg
-            .provider(&self.provider_name)
+            .provider(&self.provider.provider_name)
             .map(|provider| provider.reasoning_effort_explicit)
             .unwrap_or(false);
         crate::models::reasoning_effort_allowed(
@@ -3183,15 +3217,15 @@ impl Session {
                 .models
                 .as_ref()
                 .map(|cache| cache.models.as_slice()),
-            &self.model,
+            &self.provider.model,
             explicit,
         )
     }
 
     /// The request for one step, with the two capability decisions applied.
     fn step_request(&self, messages: &[crate::chat::ChatMessage]) -> provider::BuiltRequest {
-        self.capabilities(self.client.build_with(
-            &self.model,
+        self.capabilities(self.provider.client.build_with(
+            &self.provider.model,
             messages,
             &self.tool_specs(),
             self.parallel_calls(),
@@ -3205,7 +3239,7 @@ impl Session {
         if !self.effort_allowed() {
             request = request.without_field("reasoning_effort");
         }
-        for field in &self.refused_fields {
+        for field in &self.provider.refused_fields {
             request = request.without_field(field);
         }
         request
@@ -3215,7 +3249,8 @@ impl Session {
     /// order.
     fn tool_specs(&self) -> Vec<Value> {
         let all = tools::specs();
-        self.tool_names
+        self.tools
+            .names
             .iter()
             .filter_map(|name| {
                 all.iter()
@@ -3228,24 +3263,26 @@ impl Session {
     /// Compact the context if something asked for it: the `compact` tool, the `compact` verb, or
     /// the auto trigger at the configured fraction of the model's window.
     async fn maybe_compact(&mut self, rx: &mut Inbox) -> Result<Option<TurnEnd>, String> {
-        if self.compact_request.is_none() {
+        if self.compact.request.is_none() {
             // Nothing to compact before the first step: the estimate would be little more than the
             // system prompt, and the "conversation" is the task alone.
             let has_history = self
+                .log
                 .events
                 .iter()
                 .any(|event| matches!(event.body, EventBody::StepStarted { .. }));
-            if has_history && compact::plan(&self.events, self.cfg.compact_keep).is_some() {
-                let folded = crate::fold::fold(&self.events, &self.dir)?;
+            if has_history && compact::plan(&self.log.events, self.cfg.compact_keep).is_some() {
+                let folded = crate::fold::fold(&self.log.events, &self.log.dir)?;
                 let estimate = compact::estimate_tokens(&folded.request_messages());
                 // The provider's own count is the honest size; the estimate
                 // covers the step after a compaction.
-                let tokens = self.last_prompt_tokens.unwrap_or(estimate);
+                let tokens = self.compact.last_prompt_tokens.unwrap_or(estimate);
                 let window = self.features.models.window;
                 // After a compaction that did not shrink anything, wait for the context to grow past it
                 // instead of paying for a summary on every step.
                 let above_floor = self
-                    .compact_floor
+                    .compact
+                    .floor
                     .map(|floor| tokens > floor)
                     .unwrap_or(true);
                 if above_floor
@@ -3256,7 +3293,7 @@ impl Session {
                         tokens,
                     )
                 {
-                    self.compact_request = Some(CompactRequest {
+                    self.compact.request = Some(CompactRequest {
                         by: "auto",
                         focus: None,
                         immediate: false,
@@ -3264,7 +3301,7 @@ impl Session {
                 }
             }
         }
-        let Some(request) = self.compact_request.take() else {
+        let Some(request) = self.compact.request.take() else {
             return Ok(None);
         };
         self.run_compact(rx, &request).await
@@ -3298,8 +3335,8 @@ impl Session {
             Ok(CompactRun::Skipped { before, would_be }) => {
                 // A summary that cannot shrink the context buys nothing, so it is not requested
                 // again until the context grows.
-                let first_refusal = self.compact_floor.is_none();
-                self.compact_floor = Some(self.last_prompt_tokens.unwrap_or(before));
+                let first_refusal = self.compact.floor.is_none();
+                self.compact.floor = Some(self.compact.last_prompt_tokens.unwrap_or(before));
                 let message = format!(
                     "automatic compaction skipped: the summary and pins would not be smaller \
                      than the range they replace (~{before} → ~{would_be} tokens)"
@@ -3340,9 +3377,9 @@ impl Session {
 
     /// The size of the request the fold would build with `preview` appended.
     fn preview_tokens(&self, preview: &EventBody, seq: u64) -> Result<u64, String> {
-        let mut events = self.events.clone();
+        let mut events = self.log.events.clone();
         events.push(LogEvent::new(seq, preview.clone()));
-        let folded = crate::fold::fold(&events, &self.dir)?;
+        let folded = crate::fold::fold(&events, &self.log.dir)?;
         Ok(compact::estimate_tokens(&folded.request_messages()))
     }
 
@@ -3352,17 +3389,17 @@ impl Session {
         rx: &mut Inbox,
         request: &CompactRequest,
     ) -> Result<CompactRun, String> {
-        let Some(plan) = compact::plan(&self.events, self.cfg.compact_keep) else {
+        let Some(plan) = compact::plan(&self.log.events, self.cfg.compact_keep) else {
             return Ok(CompactRun::Nothing);
         };
         // The transcript is the fold of the range, not the raw events: a compaction that covers an
         // earlier one summarises its summary instead of losing it .
-        let range = crate::fold::range_events(&self.events, plan.through_seq);
-        let folded_range = crate::fold::fold(&range, &self.dir)?;
+        let range = crate::fold::range_events(&self.log.events, plan.through_seq);
+        let folded_range = crate::fold::fold(&range, &self.log.dir)?;
         let transcript = compact::render_transcript(&folded_range.messages);
         // Both numbers describe the whole request the provider sees, so asking
         // "did it shrink?" is a real question about the context.
-        let whole = crate::fold::fold(&self.events, &self.dir)?;
+        let whole = crate::fold::fold(&self.log.events, &self.log.dir)?;
         let tokens_before = compact::estimate_tokens(&whole.request_messages());
         let mut body = EventBody::Compacted {
             through_seq: plan.through_seq,
@@ -3375,7 +3412,7 @@ impl Session {
         };
         // The smallest possible result: an empty summary. If even that is not smaller, no summary
         // can be, so an automatic compaction declines before paying for one.
-        let smallest = self.preview_tokens(&body, self.writer.next_seq())?;
+        let smallest = self.preview_tokens(&body, self.log.writer.next_seq())?;
         if request.by == "auto" && smallest >= tokens_before {
             return Ok(CompactRun::Skipped {
                 before: tokens_before,
@@ -3390,8 +3427,8 @@ impl Session {
             tokens_before
         )));
         let summarising = self.capabilities(compact::summarise_request(
-            &self.client,
-            &self.model,
+            &self.provider.client,
+            &self.provider.model,
             &self.cfg.compact_prompt,
             &transcript,
             request.focus.as_deref(),
@@ -3411,7 +3448,7 @@ impl Session {
         // reader (and `kelir ls`) can tell it is not a step of the turn
         if let Some(usage) = &assembler.usage {
             self.record(EventBody::Usage {
-                step: self.step,
+                step: self.run.step,
                 prompt_tokens: usage.prompt_tokens,
                 completion_tokens: usage.completion_tokens,
                 cached_tokens: usage.cached_tokens,
@@ -3436,7 +3473,7 @@ impl Session {
         }
         // The size after: fold the log as it *will* be, so the number in the
         // event is the one the next request is built from.
-        let tokens_after = self.preview_tokens(&body, self.writer.next_seq())?;
+        let tokens_after = self.preview_tokens(&body, self.log.writer.next_seq())?;
         if request.by == "auto" && tokens_after >= tokens_before {
             return Ok(CompactRun::Skipped {
                 before: tokens_before,
@@ -3454,12 +3491,12 @@ impl Session {
         // the file holds at the next boundary, even when its bytes did not change.
         self.features
             .sources
-            .forget_folded(&self.events, plan.through_seq, &plan.pinned_seqs);
+            .forget_folded(&self.log.events, plan.through_seq, &plan.pinned_seqs);
         self.record(body)?;
         self.sync();
         // The next trigger measures the compacted fold, not the old size.
-        self.last_prompt_tokens = None;
-        self.compact_floor = None;
+        self.compact.last_prompt_tokens = None;
+        self.compact.floor = None;
         Ok(CompactRun::Applied(CompactedInfo {
             through_seq: plan.through_seq,
             tokens_before,
@@ -3479,7 +3516,7 @@ impl Session {
         let mut reason: String;
         // A resumed session with nothing in flight and nothing new has no turn to run: `kelir resume <id>` on
         // a finished session reports and leaves.
-        if self.resumed && !self.in_flight && !self.has_task && !self.keep {
+        if self.run.resumed && !self.run.in_flight && !self.run.has_task && !self.out.keep {
             let _ = self.record(EventBody::SessionEnded {
                 reason: "resumed".into(),
             });
@@ -3489,7 +3526,7 @@ impl Session {
         // `session_start` gates, then the command-line task through `prompt_submit`. A task a gate
         // dropped ends a one-shot run (exit 1) and leaves a TUI waiting for the next message.
         let task_kept = self.gates_start().await;
-        if !task_kept && !self.keep {
+        if !task_kept && !self.out.keep {
             self.gates_end("denied").await;
             let _ = self.record(EventBody::SessionEnded {
                 reason: "denied".into(),
@@ -3499,7 +3536,7 @@ impl Session {
             return 1;
         }
         // A TUI session starts with no task: wait for the first message.
-        if (!self.has_task || !task_kept) && self.keep {
+        if (!self.run.has_task || !task_kept) && self.out.keep {
             match self.idle(rx).await {
                 Idle::Turn => {}
                 Idle::End => {
@@ -3514,14 +3551,14 @@ impl Session {
         }
         let mut turn_retries = 0u32;
         loop {
-            self.turn += 1;
+            self.run.turn += 1;
             let end = self.drive_turn(rx).await;
             let failed = match &end {
                 Ok(TurnEnd::Done) => {
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "done".into(),
                         reason: None,
-                        final_text: self.final_text.clone().into(),
+                        final_text: self.run.final_text.clone().into(),
                     });
                     self.finish_turn("done");
                     code = 0;
@@ -3529,13 +3566,13 @@ impl Session {
                     false
                 }
                 Ok(TurnEnd::Stopped(why)) => {
-                    if !self.json && !self.tui && !why.is_empty() {
+                    if !self.out.json && !self.out.tui && !why.is_empty() {
                         eprintln!("→ turn stopped: {why}");
                     }
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "stopped".into(),
                         reason: None,
-                        final_text: self.final_text.clone().into(),
+                        final_text: self.run.final_text.clone().into(),
                     });
                     self.finish_turn("stopped");
                     reason = "stopped".into();
@@ -3545,7 +3582,7 @@ impl Session {
                     let _ = self.record(EventBody::TurnEnded {
                         outcome: "stopped".into(),
                         reason: None,
-                        final_text: self.final_text.clone().into(),
+                        final_text: self.run.final_text.clone().into(),
                     });
                     self.finish_turn("stopped");
                     reason = "end".into();
@@ -3555,18 +3592,18 @@ impl Session {
                 Ok(TurnEnd::Paused(report)) => {
                     let message = report.message();
                     if report.reason == PauseReason::Steps {
-                        if !self.tui {
+                        if !self.out.tui {
                             eprintln!("→ {message}");
                         }
                     } else {
-                        if !self.tui {
+                        if !self.out.tui {
                             eprintln!("kelir: {message}");
                         }
                         self.emit(UiEvent::Info(format!("» {message}")));
-                        self.final_text = message.clone();
+                        self.run.final_text = message.clone();
                     }
                     let text = match report.reason {
-                        PauseReason::Steps => self.final_text.clone(),
+                        PauseReason::Steps => self.run.final_text.clone(),
                         PauseReason::Provider => message.clone(),
                     };
                     let _ = self.record(EventBody::TurnEnded {
@@ -3580,7 +3617,7 @@ impl Session {
                     false
                 }
                 Err(message) => {
-                    if !self.tui {
+                    if !self.out.tui {
                         eprintln!("kelir: {message}");
                     }
                     self.emit(UiEvent::Error(message.clone()));
@@ -3592,7 +3629,7 @@ impl Session {
                     self.finish_turn("error");
                     // A long-lived session survives a failed turn: the error is in the log and the next `say`
                     // gets another chance ( ). A one-shot run still exits 1.
-                    if !self.keep {
+                    if !self.out.keep {
                         code = 1;
                     }
                     reason = "error".into();
@@ -3603,16 +3640,16 @@ impl Session {
             // A resumed turn that failed on an error the provider called retryable — an outage — gets the turn
             // tried again: surviving one is what `resume` is for, and a provider often recovers within seconds.
             let retry_the_turn = failed
-                && !self.keep
-                && self.resumed
-                && self.retryable_failure
+                && !self.out.keep
+                && self.run.resumed
+                && self.run.retryable_failure
                 && turn_retries + 1 < provider::TURN_ATTEMPTS;
-            if matches!(end, Ok(TurnEnd::End)) || (failed && !self.keep && !retry_the_turn) {
+            if matches!(end, Ok(TurnEnd::End)) || (failed && !self.out.keep && !retry_the_turn) {
                 break;
             }
             if retry_the_turn {
                 turn_retries += 1;
-                self.retryable_failure = false;
+                self.run.retryable_failure = false;
                 code = 0;
                 continue;
             }
@@ -3631,7 +3668,7 @@ impl Session {
                     continue;
                 }
                 None => {
-                    if !self.keep {
+                    if !self.out.keep {
                         break;
                     }
                     match self.idle(rx).await {
@@ -3667,22 +3704,28 @@ impl Session {
             };
             if let Some(list) = landed {
                 let Self {
-                    writer,
-                    blobs,
-                    events,
-                    ui,
+                    log:
+                        Log {
+                            writer,
+                            blobs,
+                            events,
+                            dir,
+                            id,
+                            ..
+                        },
+                    provider:
+                        Provider {
+                            model,
+                            provider_name,
+                            client,
+                            active_provider,
+                            governor,
+                            ..
+                        },
+                    out: Out { ui, json, tui, .. },
                     cfg,
-                    dir,
-                    id,
-                    model,
-                    provider_name,
-                    client,
-                    active_provider,
-                    governor,
                     ctx,
                     tally,
-                    json,
-                    tui,
                     features,
                     ..
                 } = self;
@@ -3740,7 +3783,7 @@ impl Session {
                             Some(focus) => format!("» compact: {focus}"),
                             None => "» compact".to_string(),
                         }));
-                        self.compact_request = Some(CompactRequest {
+                        self.compact.request = Some(CompactRequest {
                             by: "user",
                             focus: focus.clone(),
                             immediate: true,
@@ -3751,8 +3794,8 @@ impl Session {
                 }
             }
             // An immediate `/compact` runs here, at a point with no tool call in flight.
-            if self.compact_request.as_ref().is_some_and(|r| r.immediate) {
-                let request = self.compact_request.take().expect("checked above");
+            if self.compact.request.as_ref().is_some_and(|r| r.immediate) {
+                let request = self.compact.request.take().expect("checked above");
                 if let Err(message) = self.run_compact(rx, &request).await {
                     self.emit(UiEvent::Info(format!("» compact failed: {message}")));
                 }
@@ -3779,47 +3822,53 @@ impl Session {
     }
 
     async fn drive_turn(&mut self, rx: &mut Inbox) -> Result<TurnEnd, String> {
-        self.final_text.clear();
-        self.retryable_failure = false;
+        self.run.final_text.clear();
+        self.run.retryable_failure = false;
         self.emit(UiEvent::TurnStarted {
-            turn: self.turn,
-            provider: self.provider_name.clone(),
-            model: self.model.clone(),
+            turn: self.run.turn,
+            provider: self.provider.provider_name.clone(),
+            model: self.provider.model.clone(),
             limit: self.cfg.max_steps,
         });
         self.report(HerdrState::Working);
-        self.turn_steps = 0;
+        self.run.turn_steps = 0;
         self.gates_do(|gates, _| gates.reset_turn());
         loop {
             // An explicit cap counts the steps of *this* turn: reaching it pauses the turn (the work so far is
             // kept, and the next message opens a new turn with a fresh count).
             if let Some(cap) = self.cfg.max_steps
-                && self.turn_steps >= cap
+                && self.run.turn_steps >= cap
             {
                 self.emit(UiEvent::Paused { steps: cap });
                 return Ok(TurnEnd::Paused(PauseReport::steps(cap)));
             }
-            self.turn_steps += 1;
+            self.run.turn_steps += 1;
 
             // ---------------------------------------------------- before_step A metadata fetch that ran beside
             // the session is applied here: this is the first boundary that reads the window, so the list has had
             let Self {
-                writer,
-                blobs,
-                events,
-                ui,
+                log:
+                    Log {
+                        writer,
+                        blobs,
+                        events,
+                        dir,
+                        id,
+                        ..
+                    },
+                provider:
+                    Provider {
+                        model,
+                        provider_name,
+                        client,
+                        active_provider,
+                        governor,
+                        ..
+                    },
+                out: Out { ui, json, tui, .. },
                 cfg,
-                dir,
-                id,
-                model,
-                provider_name,
-                client,
-                active_provider,
-                governor,
                 ctx,
                 tally,
-                json,
-                tui,
                 features,
                 ..
             } = self;
@@ -3859,22 +3908,28 @@ impl Session {
             // each, at the tail. Never a system rewrite.
             {
                 let Self {
-                    writer,
-                    blobs,
-                    events,
-                    ui,
+                    log:
+                        Log {
+                            writer,
+                            blobs,
+                            events,
+                            dir,
+                            id,
+                            ..
+                        },
+                    provider:
+                        Provider {
+                            model,
+                            provider_name,
+                            client,
+                            active_provider,
+                            governor,
+                            ..
+                        },
+                    out: Out { ui, json, tui, .. },
                     cfg,
-                    dir,
-                    id,
-                    model,
-                    provider_name,
-                    client,
-                    active_provider,
-                    governor,
                     ctx,
                     tally,
-                    json,
-                    tui,
                     features,
                     ..
                 } = self;
@@ -3902,24 +3957,24 @@ impl Session {
             // token whenever it runs, so a copied-out one goes stale before its own `expires` does
             self.refresh_expiring_key();
 
-            let folded = crate::fold::fold(&self.events, &self.dir)?;
+            let folded = crate::fold::fold(&self.log.events, &self.log.dir)?;
             // Ask for several calls in one message when the provider says the model takes them, or (cold or slow
             // list) when the model's family is known to; the loop already runs a batch concurrently and appends
             let request = self.step_request(&folded.request_messages());
             let request_text = serde_json::to_string(&request.body).unwrap_or_default();
-            self.step += 1;
-            let step = self.step;
+            self.run.step += 1;
+            let step = self.run.step;
             self.record(EventBody::StepStarted {
                 step,
-                provider: self.provider_name.clone(),
-                model: self.model.clone(),
+                provider: self.provider.provider_name.clone(),
+                model: self.provider.model.clone(),
                 request_hash: crate::util::fnv1a64_hex(request_text.as_bytes()),
             })?;
             self.emit(UiEvent::Step {
                 step,
-                provider: self.provider_name.clone(),
-                model: self.model.clone(),
-                turn_steps: self.turn_steps,
+                provider: self.provider.provider_name.clone(),
+                model: self.provider.model.clone(),
+                turn_steps: self.run.turn_steps,
                 limit: self.cfg.max_steps,
             });
 
@@ -3963,7 +4018,7 @@ impl Session {
                 })?;
                 // The size of the context the provider just saw: what the auto
                 // trigger compares to the window.
-                self.last_prompt_tokens = Some(usage.prompt_tokens);
+                self.compact.last_prompt_tokens = Some(usage.prompt_tokens);
                 self.emit(UiEvent::Usage {
                     prompt: usage.prompt_tokens,
                     completion: usage.completion_tokens,
@@ -3973,19 +4028,19 @@ impl Session {
             }
             // Even a turn that ends up stopped keeps the last thing the model
             // said in `turn_ended.final_text`.
-            self.final_text = text.clone();
+            self.run.final_text = text.clone();
             self.sync();
             // Documented test hook: die where a crash would leave the log
             // between an assistant message and its tool calls.
             crash_at("usage");
 
-            if !self.json && self.echo_assistant && !text.is_empty() {
+            if !self.out.json && self.out.echo_assistant && !text.is_empty() {
                 println!("{text}");
                 let _ = std::io::stdout().flush();
             }
 
             if calls.is_empty() {
-                self.final_text = text;
+                self.run.final_text = text;
                 // ------------------------------------------------------ turn_end A gate can send the model back once
                 // per turn with a reason, or replace the final text.
                 if self
@@ -4000,9 +4055,9 @@ impl Session {
                         (gates.turn_tool_calls(), gates.turn_blocked())
                     };
                     let payload = json!({
-                        "final_text": self.final_text,
+                        "final_text": self.run.final_text,
                         "tool_calls": tool_calls,
-                        "steps": self.turn_steps,
+                        "steps": self.run.turn_steps,
                         "blocked": blocked,
                     });
                     let verdict = self
@@ -4044,7 +4099,7 @@ impl Session {
                         }
                         crate::gates::Verdict::Rewrite(value) => {
                             if let Some(new) = value.get("text").and_then(Value::as_str) {
-                                self.final_text = new.to_string();
+                                self.run.final_text = new.to_string();
                             }
                         }
                         crate::gates::Verdict::Allow => {}
@@ -4065,8 +4120,8 @@ impl Session {
                 }
                 // A job's declared `max_steps` caps the run itself: if this was the last allowed step, the job is
                 // `paused` even when the model answered on it, so the scheduler's next invocation resumes it.
-                if let Some(cap) = self.step_cap
-                    && self.turn_steps >= cap
+                if let Some(cap) = self.run.step_cap
+                    && self.run.turn_steps >= cap
                 {
                     self.emit(UiEvent::Paused { steps: cap });
                     return Ok(TurnEnd::Paused(PauseReport::steps(cap)));
@@ -4075,9 +4130,9 @@ impl Session {
             }
 
             // ------------------------------------------------------ tool batch
-            self.live_calls = calls.iter().map(|call| call.id.clone()).collect();
+            self.tools.live_calls = calls.iter().map(|call| call.id.clone()).collect();
             let batch = self.run_tools(rx, step, &calls).await?;
-            self.live_calls.clear();
+            self.tools.live_calls.clear();
             let applied = self.apply(Boundary::AfterTools).await?;
             if batch.end || applied.end {
                 return Ok(TurnEnd::End);
@@ -4108,40 +4163,40 @@ impl Session {
             .into_iter()
             .find(|field| {
                 request.has_field(field)
-                    && !self.refused_fields.contains(*field)
+                    && !self.provider.refused_fields.contains(*field)
                     && provider::names_field(&error.message, field)
             });
         let Some(field) = field else {
             return false;
         };
         *request = request.without_field(field);
-        self.refused_fields.insert(field.to_string());
+        self.provider.refused_fields.insert(field.to_string());
         *dropped = Some(field.to_string());
         true
     }
 
     /// Re-read a key that is about to expire, before the next request uses it.
     fn refresh_expiring_key(&mut self) {
-        let Some(expires) = self.active_provider.key_expires_at_ms else {
+        let Some(expires) = self.provider.active_provider.key_expires_at_ms else {
             return;
         };
         let now = crate::models::now_ms();
         if expires.saturating_sub(now) >= credentials::EXPIRY_MARGIN.as_millis() as u64 {
             return;
         }
-        let before = self.active_provider.key.clone();
-        match credentials::resolve(&mut self.active_provider) {
+        let before = self.provider.active_provider.key.clone();
+        match credentials::resolve(&mut self.provider.active_provider) {
             Ok(fresh) => {
-                if self.active_provider.key == before {
+                if self.provider.active_provider.key == before {
                     // Same value, so the same expiry: the provider will say so.
                     return;
                 }
                 if let Ok(client) = Client::new(
-                    self.active_provider.clone(),
-                    &self.id,
+                    self.provider.active_provider.clone(),
+                    &self.log.id,
                     self.cfg.cache_ttl.clone(),
                 ) {
-                    self.client = client;
+                    self.provider.client = client;
                 }
                 let _ = self.record(EventBody::Error {
                     location: "provider".into(),
@@ -4159,7 +4214,7 @@ impl Session {
             }
             Err(message) => {
                 // Not fatal: the request goes out with the key we have.
-                if !self.json && !self.tui {
+                if !self.out.json && !self.out.tui {
                     eprintln!("kelir: {message}");
                 }
             }
@@ -4179,27 +4234,27 @@ impl Session {
             return false;
         }
         *reread = true;
-        let before = self.active_provider.key.clone();
-        let fresh = match credentials::resolve(&mut self.active_provider) {
+        let before = self.provider.active_provider.key.clone();
+        let fresh = match credentials::resolve(&mut self.provider.active_provider) {
             Ok(fresh) => fresh,
             Err(message) => {
                 self.record_error(message, error.status, attempt);
                 return false;
             }
         };
-        if self.active_provider.key == before {
+        if self.provider.active_provider.key == before {
             // The source had nothing newer: retrying the same key buys nothing, and the provider's own
             // message (a refusal, not a wait) is the answer.
             return false;
         }
         if let Ok(client) = Client::new(
-            self.active_provider.clone(),
-            &self.id,
+            self.provider.active_provider.clone(),
+            &self.log.id,
             self.cfg.cache_ttl.clone(),
         ) {
-            self.client = client;
+            self.provider.client = client;
         }
-        let messages = crate::fold::fold(&self.events, &self.dir)
+        let messages = crate::fold::fold(&self.log.events, &self.log.dir)
             .map(|folded| folded.request_messages())
             .unwrap_or_default();
         *request = self.step_request(&messages);
@@ -4261,7 +4316,7 @@ impl Session {
             // The governor (opt-in) can make this request wait for a slot that another local kelir
             // holds. That wait is visible and interruptible like any other.
             let mut slot: Option<crate::governor::Slot> = None;
-            if let Some(governor) = self.governor.clone() {
+            if let Some(governor) = self.provider.governor.clone() {
                 match self.await_slot(rx, &governor, &mut inbox_open).await? {
                     SlotWait::Taken(taken) => slot = taken,
                     SlotWait::Interrupted(end) => return Ok(end),
@@ -4335,7 +4390,7 @@ impl Session {
             })?;
             if !will_retry {
                 if !summary {
-                    self.retryable_failure = error.retryable;
+                    self.run.retryable_failure = error.retryable;
                 }
                 // A retryable failure whose budget is spent is an outage, not a bug: the turn pauses and a
                 // later `say` starts the next attempt from the same fold.
@@ -4394,10 +4449,10 @@ impl Session {
         summary: bool,
         inbox_open: &mut bool,
     ) -> Attempt {
-        let client = self.client.clone();
+        let client = self.provider.client.clone();
         // Live text goes to the UI as it arrives; the callback is a send to an
         // unbounded channel, so it can never stall the stream.
-        let ui = if summary { None } else { self.ui.clone() };
+        let ui = if summary { None } else { self.out.ui.clone() };
         // Documented test hook: die with half a response streamed and nothing
         // committed, which is where a crash in the stream lands.
         let crash_mid_stream = !summary && crash_armed("mid_stream");
@@ -4440,7 +4495,7 @@ impl Session {
     fn show_wait(&mut self, status: Option<u16>, wait: Duration, attempt: u32) {
         let line = crate::retry::wait_line(status, wait, attempt);
         self.emit(UiEvent::Info(format!("» {line}")));
-        if !self.json && !self.tui {
+        if !self.out.json && !self.out.tui {
             eprintln!("kelir: {line}");
         }
         self.emit(UiEvent::Retrying {
@@ -4673,7 +4728,12 @@ impl Session {
                 pid: None,
                 // The call's own directory name: a resume adopts the call's job
                 // id from the log, not from a directory a child could make
-                dir: Some(format!("{}-{}-{}", self.writer.next_seq(), step, index + 1)),
+                dir: Some(format!(
+                    "{}-{}-{}",
+                    self.log.writer.next_seq(),
+                    step,
+                    index + 1
+                )),
             })?;
             self.emit(UiEvent::ToolStarted {
                 name: call.name.clone(),
@@ -4704,7 +4764,7 @@ impl Session {
             let dir = dir.clone();
             let name = call.name.clone();
             let args = call.args.clone();
-            let disabled = self.disabled.contains(&call.name);
+            let disabled = self.tools.disabled.contains(&call.name);
             // `compact` is a native tool whose work is the session's: a request
             // for the next boundary, answered here like any other call.
             let preset = if let Some((gate, reason)) = &vetoed[index] {
@@ -4724,7 +4784,7 @@ impl Session {
                     .and_then(|value| value.as_str())
                     .map(str::to_string)
                     .filter(|focus| !focus.trim().is_empty());
-                self.compact_request = Some(CompactRequest {
+                self.compact.request = Some(CompactRequest {
                     by: "agent",
                     focus: focus.clone(),
                     immediate: false,
@@ -4866,7 +4926,7 @@ impl Session {
         }
         // Every call of the batch has settled: none is a `stop --call` target
         // any more, and the next batch repopulates the list.
-        self.live_calls.clear();
+        self.tools.live_calls.clear();
 
         // Calls that became background jobs, recorded after the whole batch.
         let mut promoted: Vec<String> = Vec::new();
@@ -4928,7 +4988,7 @@ impl Session {
             }
             // The TUI renders its own line from `UiEvent::ToolSettled`; only the
             // headless path prints here, so the painter is the only writer.
-            if !self.json && !self.tui {
+            if !self.out.json && !self.out.tui {
                 let line = format!(
                     "→ {} {} · {} · {} B · {:.1}s",
                     call.name,
@@ -4972,7 +5032,7 @@ impl Session {
         // (`bg_started`, and the wake message if it settled while the model was reading the result).
         for dir in promoted {
             if let Some(status) =
-                crate::bg::Status::read(&crate::bg::status_path(&self.dir.join("bg"), &dir))
+                crate::bg::Status::read(&crate::bg::status_path(&self.log.dir.join("bg"), &dir))
             {
                 let _ = self.note_bg(&status);
             }
@@ -4985,7 +5045,7 @@ impl Session {
 
     /// One call is done: it is no longer a target for `stop --call`.
     fn settle_call(&mut self, call_id: &str) {
-        self.live_calls.retain(|id| id != call_id);
+        self.tools.live_calls.retain(|id| id != call_id);
     }
 
     /// The `stopped` result of a call that had already written output: the byte and line counts,
@@ -5293,12 +5353,55 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let writer = EventLog::open(&dir.join("events.jsonl")).unwrap();
         Session {
-            id: "ses_1".into(),
-            dir: dir.clone(),
-            config_dir: crate::paths::config_dir(),
-            writer,
-            blobs: Blobs::new(&dir),
-            events: Vec::new(),
+            log: Log {
+                writer,
+                blobs: Blobs::new(&dir),
+                events: Vec::new(),
+                id: "ses_1".into(),
+                dir: dir.clone(),
+                config_dir: crate::paths::config_dir(),
+                titled: false,
+            },
+            provider: Provider {
+                client: Client::new(test_provider(), "ses_1", None).unwrap(),
+                active_provider: test_provider(),
+                provider_name: "openrouter".into(),
+                model: model.into(),
+                refused_fields: BTreeSet::new(),
+                governor: None,
+            },
+            out: Out {
+                json: true,
+                echo_assistant: false,
+                keep: false,
+                tui: false,
+                ui: None,
+                herdr: None,
+            },
+            compact: CompactState {
+                request: None,
+                last_prompt_tokens: None,
+                floor: None,
+            },
+            tools: ToolState {
+                names: tools::names(),
+                disabled: BTreeSet::new(),
+                live_calls: Vec::new(),
+            },
+            run: Run {
+                step: 0,
+                turn: 0,
+                turn_steps: 0,
+                has_task: false,
+                final_text: String::new(),
+                run_sources: Vec::new(),
+                task_from: "cli",
+                step_cap: None,
+                resumed: false,
+                in_flight: false,
+                retryable_failure: false,
+                pending_task: String::new(),
+            },
             cfg: Config {
                 provider: String::new(),
                 model: String::new(),
@@ -5333,38 +5436,9 @@ mod tests {
                 },
                 notify: crate::notify::Config::default(),
             },
-            provider_name: "openrouter".into(),
-            model: model.into(),
-            client: Client::new(test_provider(), "ses_1", None).unwrap(),
-            active_provider: test_provider(),
             ctx: Ctx::new(dir, std::env::temp_dir(), vec![], 0, String::new()),
-            json: true,
-            echo_assistant: false,
-            keep: false,
-            tui: false,
-            ui: None,
-            herdr: None,
-            has_task: false,
-            final_text: String::new(),
-            step: 0,
-            turn: 0,
-            turn_steps: 0,
-            disabled: BTreeSet::new(),
             inbox: None,
-            refused_fields: BTreeSet::new(),
-            live_calls: Vec::new(),
             scheduler: Scheduler::default(),
-            compact_request: None,
-            last_prompt_tokens: None,
-            compact_floor: None,
-            tool_names: tools::names(),
-            run_sources: Vec::new(),
-            task_from: "cli",
-            step_cap: None,
-            resumed: false,
-            in_flight: false,
-            retryable_failure: false,
-            pending_task: String::new(),
             features: crate::features::Features {
                 models: models::Models::new(1_000, "default", None, None, None, model),
                 mcp: Some(crate::features::mcp::Mcp::new(
@@ -5379,13 +5453,11 @@ mod tests {
                 gates: Some(crate::features::gates::Gates::new()),
                 sources: crate::features::sources::Sources::new(crate::sources::Watch::default()),
             },
-            governor: None,
             // A throwaway trust state in the same temp dir: no socket here, and
             // nothing in these tests sends a `bg` or `cancel` verb.
             trust: std::sync::Arc::new(crate::trust::Trust::new(dir_for_trust(), String::new())),
             tally: Default::default(),
             retry_wait: Default::default(),
-            titled: false,
             kids: children::Kids::new("ses_1", Default::default(), None),
         }
     }
@@ -5574,11 +5646,11 @@ mod tests {
         );
         // The swap itself is the first announcement, from `swap_model`: this test only has the constructor's
         // seeding to check, so it drives `apply_list` the way a landed fetch does after a swap.
-        session.model = "second/model".into();
+        session.provider.model = "second/model".into();
         session.features.models.window = 1_000;
         session.features.models.window_source = "default";
         let (tx, mut rx) = mpsc::unbounded_channel();
-        session.ui = Some(tx);
+        session.out.ui = Some(tx);
         let mut cache = crate::models::Cache::new(
             "openrouter",
             "https://example.invalid/v1",
@@ -5594,22 +5666,28 @@ mod tests {
         );
         cache.fetched_at_ms = crate::models::now_ms();
         let Session {
-            writer,
-            blobs,
-            events,
-            ui,
+            log:
+                Log {
+                    writer,
+                    blobs,
+                    events,
+                    dir,
+                    id,
+                    ..
+                },
+            provider:
+                Provider {
+                    model,
+                    provider_name,
+                    client,
+                    active_provider,
+                    governor,
+                    ..
+                },
+            out: Out { ui, json, tui, .. },
             cfg,
-            dir,
-            id,
-            model,
-            provider_name,
-            client,
-            active_provider,
-            governor,
             ctx,
             tally,
-            json,
-            tui,
             features,
             ..
         } = &mut session;
@@ -5656,22 +5734,28 @@ mod tests {
         // A second answer for the same model is silent: the number did not move
         // for a new model, so there is nothing new to say.
         let Session {
-            writer,
-            blobs,
-            events,
-            ui,
+            log:
+                Log {
+                    writer,
+                    blobs,
+                    events,
+                    dir,
+                    id,
+                    ..
+                },
+            provider:
+                Provider {
+                    model,
+                    provider_name,
+                    client,
+                    active_provider,
+                    governor,
+                    ..
+                },
+            out: Out { ui, json, tui, .. },
             cfg,
-            dir,
-            id,
-            model,
-            provider_name,
-            client,
-            active_provider,
-            governor,
             ctx,
             tally,
-            json,
-            tui,
             features,
             ..
         } = &mut session;
