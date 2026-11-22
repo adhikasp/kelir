@@ -272,7 +272,13 @@ async fn a_gate_that_hangs_times_out_within_the_limit_and_its_tree_dies() {
     }));
     let config = probe.config(&[("before_tool", None)]);
     let started = Instant::now();
-    let done = drive(&mock, &config, "go", &[("KELIR_GATE_TIMEOUT_MS", "2000")]).await;
+    let done = drive(
+        &mock,
+        &config,
+        "go",
+        &[("KELIR_TEST_GATE_TIMEOUT_MS", "2000")],
+    )
+    .await;
     assert_eq!(done.out.code, 0, "{}", done.out.stderr);
     assert!(
         started.elapsed() < Duration::from_secs(40),
@@ -938,17 +944,11 @@ async fn mcp_calls_are_gated_as_mcp_server_dot_tool() {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/it/support/mcp_server.py"
     );
-    let files = tempfile::tempdir().unwrap();
-    let mcp_toml = files.path().join("mcp.toml");
-    std::fs::write(
-        &mcp_toml,
-        format!(
-            "[servers.demo]\ncommand = '{}'\nargs = ['{}']\n",
-            python(),
-            mcp_script
-        ),
-    )
-    .unwrap();
+    let mcp_toml = format!(
+        "[mcp.servers.demo]\ncommand = '{}'\nargs = ['{}']\n",
+        python(),
+        fwd(mcp_script)
+    );
     let probe = Probe::new(json!({
         "before_tool": {"mode": "rewrite", "input": {"text": "rewritten-arg"}},
         "after_tool": {"mode": "rewrite", "input": {"note": "mcp noted"}},
@@ -963,13 +963,11 @@ async fn mcp_calls_are_gated_as_mcp_server_dot_tool() {
     ))
     .await;
     let sandbox = Sandbox::new(&config);
-    let mcp = mcp_toml.to_string_lossy().into_owned();
+    let mut full = std::fs::read_to_string(&sandbox.config).unwrap();
+    full.push_str(&mcp_toml);
+    std::fs::write(&sandbox.config, full).unwrap();
     let out = sandbox
-        .kelir(
-            &mock.base_url(),
-            &["run", "--json", "go"],
-            &[("KELIR_MCP_CONFIG", mcp.as_str())],
-        )
+        .kelir(&mock.base_url(), &["run", "--json", "go"], &[])
         .await;
     assert_eq!(out.code, 0, "{}", out.stderr);
     let log = sandbox.log(&sandbox.only_session());
@@ -1012,12 +1010,11 @@ async fn mcp_calls_are_gated_as_mcp_server_dot_tool() {
     ))
     .await;
     let sandbox = Sandbox::new(&config);
+    let mut full = std::fs::read_to_string(&sandbox.config).unwrap();
+    full.push_str(&mcp_toml);
+    std::fs::write(&sandbox.config, full).unwrap();
     let out = sandbox
-        .kelir(
-            &mock.base_url(),
-            &["run", "--json", "go"],
-            &[("KELIR_MCP_CONFIG", mcp.as_str())],
-        )
+        .kelir(&mock.base_url(), &["run", "--json", "go"], &[])
         .await;
     assert_eq!(out.code, 0, "{}", out.stderr);
     let log = sandbox.log(&sandbox.only_session());

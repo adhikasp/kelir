@@ -39,7 +39,7 @@ PY=python; command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 
   echo "args = ['-y', '@modelcontextprotocol/server-filesystem', '$FS']"
   echo "description = 'filesystem server on a scratch dir'"
   echo "timeout = 150"
-} > "$S/proj/.kelir/mcp.toml"
+} > "$S/proj/.kelir/config.toml"
 case "$2" in
   a) TASK="Use bash and the kelir CLI only. 1) Run \`kelir mcp ls\`. 2) Run \`kelir mcp demo structured | jq .answer\` and report the number. 3) Run \`kelir mcp s echo token=CANARY-TOOLARG-live text=hi\`. 4) Run \`kelir mcp everything get-sum a=40 b=2\`. 5) Run \`kelir mcp fs list_directory path=$FS | jq -r .content\` and report the file name. Finish with the single word ready." ;;
   b) TASK='Use bash. Run exactly: kelir mcp everything trigger-long-running-operation duration=120 steps=4 . It takes two minutes; wait for it, then say done.' ;;

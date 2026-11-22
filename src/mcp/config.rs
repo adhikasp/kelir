@@ -1,14 +1,10 @@
-//! `mcp.toml`: which MCP servers exist.
-//! Two layers, machine then project, merged **by server name**: a project's `[servers.x]` replaces
-//! the machine's `[servers.x]` whole (a half-merged `command` from one file and `args` from the
-//! other would run something neither file asked for).
-//! The machine file is `<config dir>/mcp.toml` (`KELIR_MCP_CONFIG` replaces that path); the
+//! MCP servers are configured in `config.toml` under `[mcp.servers.<name>]`.
+//! Two config layers, machine then project, merge by server name: a project's
+//! `[mcp.servers.x]` replaces the machine's whole, never field by field.
+//! The shapes and validation live here; the parsing is in [`crate::config`].
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-use serde::Deserialize;
 
 /// Seconds one tool call may take when the server sets no `timeout`.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
@@ -29,32 +25,6 @@ pub struct ServerConfig {
     pub declare_capabilities: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawServer {
-    command: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    channel: bool,
-    timeout: Option<u64>,
-    #[serde(default)]
-    reply_tool: Option<String>,
-    #[serde(default)]
-    declare_capabilities: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawFile {
-    #[serde(default)]
-    servers: BTreeMap<String, RawServer>,
-}
-
 /// A server name is a CLI word: it must not collide with `ls`, and stays in a
 /// safe alphabet because it also names a job object and a directory.
 pub fn valid_name(name: &str) -> bool {
@@ -65,71 +35,42 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// A TOML error without the source text.
-fn safe_error(text: &str, error: &toml::de::Error) -> String {
-    let message = error.message();
-    // "invalid type: string `x`, expected a boolean" -> keep the expectation.
-    let message = match message.split_once(", expected ") {
-        Some((head, tail)) if head.starts_with("invalid ") => {
-            let kind = head.split(':').next().unwrap_or("invalid value");
-            format!("{kind} (value hidden), expected {tail}")
-        }
-        _ if message.starts_with("invalid ") && message.contains('`') => {
-            message
-                .split(':')
-                .next()
-                .unwrap_or("invalid value")
-                .to_string()
-                + " (value hidden)"
-        }
-        _ => message.to_string(),
-    };
-    match error.span() {
-        Some(span) => {
-            let before = &text[..span.start.min(text.len())];
-            let line = before.matches('\n').count() + 1;
-            let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
-            format!("line {line}, column {column}: {message}")
-        }
-        None => message,
-    }
-}
-
-/// Parse one layer. `origin` is only for the error text.
-pub fn parse_layer(text: &str, origin: &str) -> Result<BTreeMap<String, ServerConfig>, String> {
-    let raw: RawFile = toml::from_str(text)
-        .map_err(|error| format!("invalid {origin}: {}", safe_error(text, &error)))?;
+/// Validate and resolve the `[mcp.servers.*]` table into the shape the broker
+/// uses. Errors name the offending server, never its `env` values: the error
+/// text reaches the model and the log.
+pub fn from_raw(
+    servers: &BTreeMap<String, crate::config::RawMcpServer>,
+) -> Result<BTreeMap<String, ServerConfig>, String> {
     let mut out = BTreeMap::new();
-    for (name, server) in raw.servers {
-        if !valid_name(&name) {
+    for (name, server) in servers {
+        let at = format!("[mcp.servers.{name}]");
+        if !valid_name(name) {
             return Err(format!(
-                "invalid {origin}: server name `{name}` must be letters, digits, `-` or `_` \
-                 (and not `ls`)"
+                "invalid {at}: server name `{name}` must be letters, digits, `-` or `_` (and not `ls`)"
             ));
         }
         if server.command.trim().is_empty() {
             return Err(format!(
-                "invalid {origin}: server `{name}` has an empty command"
+                "invalid {at}: server `{name}` has an empty command"
             ));
         }
         if server.timeout == Some(0) {
-            return Err(format!("invalid {origin}: server `{name}` has timeout = 0"));
+            return Err(format!("invalid {at}: server `{name}` has timeout = 0"));
         }
         for capability in &server.declare_capabilities {
             if crate::channel::forbidden_capability(capability) {
                 return Err(format!(
-                    "invalid {origin}: server `{name}` declares `{capability}`: \
-                     kelir has no permission relay"
+                    "invalid {at}: server `{name}` declares `{capability}`: kelir has no permission relay"
                 ));
             }
         }
         out.insert(
             name.clone(),
             ServerConfig {
-                name,
-                command: server.command,
-                args: server.args,
-                env: server.env,
+                name: name.clone(),
+                command: server.command.clone(),
+                args: server.args.clone(),
+                env: server.env.clone(),
                 description: server
                     .description
                     .lines()
@@ -141,72 +82,33 @@ pub fn parse_layer(text: &str, origin: &str) -> Result<BTreeMap<String, ServerCo
                 timeout: Duration::from_secs(server.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS)),
                 reply_tool: server
                     .reply_tool
+                    .clone()
                     .unwrap_or_else(|| crate::channel::DEFAULT_REPLY_TOOL.to_string()),
-                declare_capabilities: server.declare_capabilities,
+                declare_capabilities: server.declare_capabilities.clone(),
             },
         );
     }
     Ok(out)
 }
 
-/// `project` wins by name.
-pub fn layer(
-    machine: BTreeMap<String, ServerConfig>,
-    project: BTreeMap<String, ServerConfig>,
-) -> BTreeMap<String, ServerConfig> {
-    let mut merged = machine;
-    merged.extend(project);
-    merged
-}
-
-pub fn machine_path() -> PathBuf {
-    match crate::envs::var_os("KELIR_MCP_CONFIG") {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => crate::paths::config_dir().join("mcp.toml"),
-    }
-}
-
-/// The nearest `.kelir/mcp.toml` at or above `cwd`.
-pub fn project_path(cwd: &Path) -> Option<PathBuf> {
-    let mut dir = cwd.to_path_buf();
-    loop {
-        let candidate = dir.join(".kelir").join("mcp.toml");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
-}
-
-fn read_layer(path: &Path) -> Result<BTreeMap<String, ServerConfig>, String> {
-    if !path.is_file() {
-        return Ok(BTreeMap::new());
-    }
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    parse_layer(&text, &path.display().to_string())
-}
-
-/// Both layers, for a process whose working directory is `cwd`.
-pub fn load(cwd: &Path) -> Result<BTreeMap<String, ServerConfig>, String> {
-    let machine = read_layer(&machine_path())?;
-    let project = match project_path(cwd) {
-        Some(path) => read_layer(&path)?,
-        None => BTreeMap::new(),
-    };
-    Ok(layer(machine, project))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Parse one `[mcp.servers.*]` layer through the real config reader, then
+    /// validate it: the same path the session and `kelir mcp` use.
+    fn servers(text: &str) -> Result<BTreeMap<String, ServerConfig>, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        let cfg = crate::config::load(Some(&path)).map_err(|e| e.to_string())?;
+        Ok(cfg.mcp)
+    }
+
     #[test]
     fn a_server_parses_with_defaults() {
-        let servers = parse_layer("[servers.a]\ncommand = \"x\"\n", "t").unwrap();
-        let a = &servers["a"];
+        let parsed = servers("[mcp.servers.a]\ncommand = \"x\"\n").unwrap();
+        let a = &parsed["a"];
         assert_eq!(a.command, "x");
         assert!(a.args.is_empty() && a.env.is_empty() && !a.channel);
         assert_eq!(a.timeout, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
@@ -215,82 +117,68 @@ mod tests {
 
     #[test]
     fn the_project_replaces_a_machine_server_whole() {
-        let machine = parse_layer(
-            "[servers.a]\ncommand = \"m\"\nargs = [\"1\"]\ndescription = \"machine\"\n\
-             [servers.b]\ncommand = \"b\"\n",
-            "m",
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[mcp.servers.a]\ncommand = \"m\"\nargs = [\"1\"]\ndescription = \"machine\"\n[mcp.servers.b]\ncommand = \"b\"\n",
         )
         .unwrap();
-        let project = parse_layer("[servers.a]\ncommand = \"p\"\n", "p").unwrap();
-        let merged = layer(machine, project);
-        assert_eq!(merged["a"].command, "p");
-        assert!(merged["a"].args.is_empty(), "no half-merged args");
-        assert_eq!(merged["a"].description, "");
-        assert_eq!(merged["b"].command, "b");
+        let machine = crate::config::load(Some(&path)).unwrap().mcp;
+        assert_eq!(machine["a"].command, "m");
+        assert_eq!(machine["b"].command, "b");
+        let mut project = machine;
+        let override_server = servers("[mcp.servers.a]\ncommand = \"p\"\n").unwrap();
+        project.insert("a".into(), override_server["a"].clone());
+        assert_eq!(project["a"].command, "p");
+        assert!(project["a"].args.is_empty(), "no half-merged args");
     }
 
     #[test]
-    fn bad_files_are_refused_with_the_file_named() {
+    fn bad_servers_are_refused_with_the_server_named() {
         for (text, needle) in [
-            ("[servers.a]\n", "command"),
-            ("[servers.a]\ncommand = \"x\"\nbogus = 1\n", "bogus"),
-            ("[servers.ls]\ncommand = \"x\"\n", "ls"),
-            ("[servers.\"a b\"]\ncommand = \"x\"\n", "a b"),
-            ("[servers.a]\ncommand = \"x\"\ntimeout = 0\n", "timeout"),
-            ("[servers.a]\ncommand = \" \"\n", "empty command"),
-            ("[serverz.a]\ncommand = \"x\"\n", "serverz"),
+            ("[mcp.servers.a]\n", "command"),
+            ("[mcp.servers.a]\ncommand = 'x'\nbogus = 1\n", "bogus"),
+            ("[mcp.servers.ls]\ncommand = 'x'\n", "ls"),
+            ("[mcp.servers.\"a b\"]\ncommand = 'x'\n", "a b"),
+            ("[mcp.servers.a]\ncommand = 'x'\ntimeout = 0\n", "timeout"),
+            ("[mcp.servers.a]\ncommand = ' '\n", "empty command"),
         ] {
-            let error = parse_layer(text, "FILE").unwrap_err();
-            assert!(error.contains("FILE") && error.contains(needle), "{error}");
+            let error = servers(text).unwrap_err();
+            assert!(error.contains(needle), "{text}: {error}");
         }
     }
 
     #[test]
     fn a_syntax_error_never_echoes_the_source() {
-        let head = "[servers.s]\ncommand = 'x'\n";
-        for tail in [
-            r#"env = { API_TOKEN = "sk-CANARY-1" , } oops"#,
-            "env = { API_TOKEN = 12345678 }",
-            "env = { API_TOKEN = \"sk-CANARY-1\" \n",
-            r#"env = { A = "sk-CANARY-1", A = "sk-CANARY-2" }"#,
-            r#"env = "sk-CANARY-1""#,
-            r#"args = "sk-CANARY-1""#,
-            r#"channel = "sk-CANARY-1""#,
-            r#"timeout = "sk-CANARY-1""#,
-            r#"env = { A = "sk-CANARY-1\q" }"#,
-            r#"env = { A = ["sk-CANARY-1"] }"#,
+        // A malformed table body is rejected while parsing config.toml, before
+        // any server values reach this module. The error must not echo source
+        // text: it reaches the model and the log.
+        for text in [
+            "[mcp.servers.s]\ncommand='x'\nenv = {{ T = 'x' , }}\n".to_string(),
+            "[mcp.servers.s]\ncommand='x'\nenv = {{ T = 'x' \n".to_string(),
+            "[mcp.servers.s]\ncommand='x'\nenv = {{ T = 'x\n".to_string(),
+            "[mcp.servers.s]\ncommand='x'\nenv = {{ T = 'x', T = 'x' }}\n".to_string(),
         ] {
-            let text = format!("{head}{tail}\n");
-            let error = parse_layer(&text, "FILE").unwrap_err();
-            assert!(
-                !error.contains("CANARY") && !error.contains("12345678"),
-                "{error}"
-            );
-            assert!(error.contains("FILE") && error.contains("line "), "{error}");
+            let error = servers(&text).unwrap_err();
+            assert!(!error.contains("CANARY"), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_bad_field_type_never_echoes_the_value() {
+        let secret = "sk-CANARY-1";
+        for field in ["args", "channel", "timeout", "command"] {
+            let text = format!("[mcp.servers.s]\ncommand='x'\n{field} = {secret}\n");
+            let error = servers(&text).unwrap_err();
+            assert!(!error.contains("CANARY"), "{field}: {error}");
         }
     }
 
     #[test]
     fn only_the_first_description_line_is_kept() {
-        let servers = parse_layer(
-            "[servers.a]\ncommand = \"x\"\ndescription = \"\"\"one\ntwo\"\"\"\n",
-            "t",
-        )
-        .unwrap();
-        assert_eq!(servers["a"].description, "one");
-    }
-
-    #[test]
-    fn the_nearest_project_file_wins() {
-        let root = std::env::temp_dir().join(format!("kelir-mcp-cfg-{}", ulid::Ulid::generate()));
-        let deep = root.join("a").join("b");
-        std::fs::create_dir_all(&deep).unwrap();
-        std::fs::create_dir_all(root.join(".kelir")).unwrap();
-        std::fs::write(root.join(".kelir").join("mcp.toml"), "").unwrap();
-        assert_eq!(
-            project_path(&deep),
-            Some(root.join(".kelir").join("mcp.toml"))
-        );
-        let _ = std::fs::remove_dir_all(&root);
+        let doc = "[mcp.servers.a]\ncommand = 'x'\ndescription = \"\"\"one\ntwo\"\"\"\n";
+        let parsed = servers(doc).unwrap();
+        assert_eq!(parsed["a"].description, "one");
     }
 }

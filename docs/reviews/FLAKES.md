@@ -20,7 +20,7 @@ in `steer9-before.txt` there.
 
 The 3/3 one was not load-related at all: it fails alone on a box whose real UTC date is
 2026-11-21. `clock_source()` used the `SessionStarted` event's wall-clock `ts` as the date the
-context last knew, ignoring the `KELIR_TODAY` override frozen into the system prompt. Once real
+context last knew, ignoring the `KELIR_TEST_TODAY` override frozen into the system prompt. Once real
 time caught up with the test's "new day" the source was never announced. Red unit test first
 (`jobs::tests::a_clock_source_uses_the_date_the_session_was_rendered_with`), then the product fix:
 `clock_source_from()` takes the rendered date, which `Session::rendered_date()` reads out of the

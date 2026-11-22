@@ -4,7 +4,7 @@
 set -u
 BIN="$1"; CANNED="$2"; W="$(mktemp -d)"; PORT=18765
 mkdir -p "$W/proj/.kelir" "$W/state" "$W/home"
-cat > "$W/proj/.kelir/mcp.toml" <<T
+cat > "$W/proj/.kelir/config.toml" <<T
 [servers.everything]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-everything"]

@@ -101,8 +101,8 @@ pub fn render_system(
 /// The date goes in, never the time: the system prefix must be stable for the
 /// life of a session (and across a resume).
 pub fn today() -> String {
-    // `KELIR_TODAY=YYYY-MM-DD` stands in for the clock (the date-change tests).
-    if let Some(day) = crate::envs::var("KELIR_TODAY") {
+    // `KELIR_TEST_TODAY=YYYY-MM-DD` stands in for the clock (the date-change tests).
+    if let Some(day) = crate::envs::var("KELIR_TEST_TODAY") {
         let day = day.trim();
         if day.len() == 10 && day.as_bytes()[4] == b'-' && day.as_bytes()[7] == b'-' {
             return day.to_string();

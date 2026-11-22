@@ -23,10 +23,10 @@ fn python() -> &'static str {
     if cfg!(windows) { "python" } else { "python3" }
 }
 
-/// A `[servers.demo]` block. `extra` is more TOML lines for the same table.
+/// A `[mcp.servers.demo]` block. `extra` is more TOML lines for the same table.
 fn server(extra: &str) -> String {
     format!(
-        "[servers.demo]\ncommand = '{}'\nargs = ['{}']\ndescription = \"test server\"\n{extra}\n",
+        "[mcp.servers.demo]\ncommand = '{}'\nargs = ['{}']\ndescription = \"test server\"\n{extra}\n",
         python(),
         SCRIPT
     )
@@ -46,8 +46,8 @@ impl Files {
         self.dir.path().join(name)
     }
     fn mcp_toml(&self, text: &str) -> String {
-        let path = self.path("mcp.toml");
-        std::fs::write(&path, text).unwrap();
+        let path = self.path("config.toml");
+        std::fs::write(&path, test_config(text)).unwrap();
         path.to_string_lossy().into_owned()
     }
     fn lines(&self, name: &str) -> Vec<String> {
@@ -98,7 +98,7 @@ async fn wait_gone(pid: u32) {
 async fn one_shot(files: &Files, toml: &str, args: &[&str], env: &[(&str, &str)]) -> Output {
     let sandbox = Sandbox::new("");
     let config = files.mcp_toml(toml);
-    let mut full = vec![("KELIR_MCP_CONFIG", config.as_str())];
+    let mut full = vec![("KELIR_CONFIG", config.as_str())];
     full.extend_from_slice(env);
     let mut argv = vec!["mcp"];
     argv.extend_from_slice(args);
@@ -133,6 +133,12 @@ fn payload_text(value: &Value) -> String {
 
 /// A one-run session whose single bash call is `command`.
 async fn session_run(files: &Files, toml: &str, command: &str) -> Run {
+    let run = session_run_raw(files, toml, command).await;
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    run
+}
+
+async fn session_run_raw(files: &Files, toml: &str, command: &str) -> Run {
     let mock = Mock::start(vec![
         Reply::Sse(sse(&tool_turn(
             "call_m",
@@ -143,19 +149,59 @@ async fn session_run(files: &Files, toml: &str, command: &str) -> Run {
     ])
     .await;
     let config = files.mcp_toml(toml);
-    let run = run_task(
+    run_task(
         &mock,
         &["run", "--json", "use the server"],
-        &[("KELIR_MCP_CONFIG", config.as_str())],
+        &[("KELIR_CONFIG", config.as_str())],
+        None,
+        "",
+    )
+    .await
+}
+
+// ------------------------------------------------------------------ one-shot
+
+#[tokio::test]
+async fn an_explicit_config_flag_selects_the_servers_for_the_session() {
+    let files = Files::new();
+    // The env-named config has a decoy server; only `--config` has `demo`.
+    let env_config = files.mcp_toml("[mcp.servers.decoy]\ncommand = 'decoy-program'\n");
+    let explicit = files.path("alt.toml");
+    std::fs::write(&explicit, test_config(&server(""))).unwrap();
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&tool_turn(
+            "call_m",
+            "bash",
+            &json!({"command": "\"$KELIR_BIN\" mcp ls --json"}),
+        ))),
+        Reply::Sse(sse(&text_turn("done", 0))),
+    ])
+    .await;
+    let run = run_task(
+        &mock,
+        &[
+            "run",
+            "--json",
+            "--config",
+            explicit.to_str().unwrap(),
+            "list servers",
+        ],
+        &[("KELIR_CONFIG", env_config.as_str())],
         None,
         "",
     )
     .await;
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    run
+    let result = payload_text(&run.one_call("call_settled", "tool")["result"]);
+    assert!(
+        result.contains("demo"),
+        "the explicit file's server is missing: {result}"
+    );
+    assert!(
+        !result.contains("decoy"),
+        "the env-named config leaked into the broker: {result}"
+    );
 }
-
-// ------------------------------------------------------------------ one-shot
 
 #[tokio::test]
 async fn ls_lists_servers_and_tools() {
@@ -310,7 +356,7 @@ env = {{ MCP_TEST_LOG = '{log}' }}"
     let out = one_shot(&files, &toml, &["demo", "crash"], &env).await;
     assert_eq!(out.code, 3, "server crash: {out:?}");
 
-    let missing = "[servers.ghost]\ncommand = 'no-such-program-kelir-m6'\n";
+    let missing = "[mcp.servers.ghost]\ncommand = 'no-such-program-kelir-m6'\n";
     let out = one_shot(&files, missing, &["ghost", "x"], &env).await;
     assert_eq!(out.code, 3, "{out:?}");
     assert!(out.stderr.contains("cannot start"), "{}", out.stderr);
@@ -333,18 +379,18 @@ async fn the_project_layer_adds_to_the_machine_layer_and_wins_a_name_clash() {
     let sandbox = Sandbox::new("");
     std::fs::create_dir_all(sandbox.cwd.join(".kelir")).unwrap();
     std::fs::write(
-        sandbox.cwd.join(".kelir").join("mcp.toml"),
-        "[servers.demo]
+        sandbox.cwd.join(".kelir").join("config.toml"),
+        "[mcp.servers.demo]
 command = 'no-such-program-kelir-m6'
 description = \"project\"
-         [servers.extra]
+         [mcp.servers.extra]
 command = 'x'
 description = \"only in the project\"
 ",
     )
     .unwrap();
     let config = files.mcp_toml(&format!(
-        "{}[servers.other]
+        "{}[mcp.servers.other]
 command = 'y'
 ",
         server("")
@@ -353,7 +399,7 @@ command = 'y'
         .kelir(
             "http://127.0.0.1:9/v1",
             &["mcp", "ls", "--json"],
-            &[("KELIR_MCP_CONFIG", config.as_str())],
+            &[("KELIR_CONFIG", config.as_str())],
         )
         .await;
     assert_eq!(out.code, 0, "{}", out.stderr);
@@ -379,14 +425,14 @@ async fn a_bad_mcp_toml_is_a_usage_error_naming_the_file() {
     let files = Files::new();
     let out = one_shot(
         &files,
-        "[servers.x]\ncommand = 'a'\nbogus = 1\n",
+        "[mcp.servers.x]\ncommand = 'a'\nbogus = 1\n",
         &["x", "t"],
         &[],
     )
     .await;
     assert_eq!(out.code, 2, "{out:?}");
     assert!(
-        out.stderr.contains("bogus") && out.stderr.contains("mcp.toml"),
+        out.stderr.contains("bogus") && out.stderr.contains("config.toml"),
         "{}",
         out.stderr
     );
@@ -590,7 +636,7 @@ async fn an_mcp_result_is_snapshotted_in_the_provider_request() {
     let run = run_task(
         &mock,
         &["run", "--json", "use the server"],
-        &[("KELIR_MCP_CONFIG", config.as_str())],
+        &[("KELIR_CONFIG", config.as_str())],
         None,
         "",
     )
@@ -717,9 +763,9 @@ async fn a_canary_in_env_reaches_no_output_channel() {
     let command = "for c in 'mcp ls' 'mcp ls --json' 'mcp demo echo text=x' 'mcp demo nope' \
                    'mcp demo ls --detail full'; do \"$KELIR_BIN\" $c 2>&1; done; echo end";
     let broken =
-        format!("[servers.demo]\ncommand = 'x'\nenv = {{ API_TOKEN = \"{canary}\" , }} oops\n");
+        format!("[mcp.servers.demo]\ncommand = 'x'\nenv = {{ API_TOKEN = \"{canary}\" , }} oops\n");
     let wrong_type = format!(
-        "[servers.demo]\ncommand = 'x'\nenv = {{ API_TOKEN = \"{canary}\", N = 5 }}\nchannel = \"{canary}\"\n"
+        "[mcp.servers.demo]\ncommand = 'x'\nenv = {{ API_TOKEN = \"{canary}\", N = 5 }}\nchannel = \"{canary}\"\n"
     );
     let dies = server(&format!(
         "env = {{ API_TOKEN = \"{canary}\", MCP_TEST_DIE = \"boom\" }}"
@@ -731,7 +777,11 @@ async fn a_canary_in_env_reaches_no_output_channel() {
         ("dies", dies),
         ("fine", fine),
     ] {
-        let run = session_run(&files, &toml, command).await;
+        let run = if matches!(label, "broken" | "wrong_type") {
+            session_run_raw(&files, &toml, command).await
+        } else {
+            session_run(&files, &toml, command).await
+        };
         let everything = format!(
             "{}{}{}{}",
             run.stdout,
@@ -743,7 +793,7 @@ async fn a_canary_in_env_reaches_no_output_channel() {
     }
     // The same through the one-shot path.
     for toml in [
-        format!("[servers.demo]\ncommand = 'x'\nenv = {{ A = \"{canary}\" }} oops\n"),
+        format!("[mcp.servers.demo]\ncommand = 'x'\nenv = {{ A = \"{canary}\" }} oops\n"),
         server(&format!(
             "env = {{ API_TOKEN = \"{canary}\", MCP_TEST_DIE = \"boom\" }}"
         )),
@@ -769,7 +819,7 @@ async fn a_server_that_dies_at_start_says_why() {
         out.stderr
     );
     let bad_path = format!(
-        "[servers.demo]\ncommand = '{}'\nargs = ['{}']\n",
+        "[mcp.servers.demo]\ncommand = '{}'\nargs = ['{}']\n",
         python(),
         files.path("nonexistent").join("server.py").display()
     );
@@ -835,7 +885,7 @@ async fn list_changed_refreshes_the_tools() {
 async fn call_reaches_a_tool_named_like_a_keyword() {
     let files = Files::new();
     let toml = format!(
-        "[servers.evil]\ncommand = '{}'\nargs = ['{}']\n",
+        "[mcp.servers.evil]\ncommand = '{}'\nargs = ['{}']\n",
         python(),
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/it/support/mcp_evil.py")
     );

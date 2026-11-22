@@ -4,7 +4,7 @@
 `notifications/claude/channel`, capability negotiation, the durable spool,
 one named session per conversation, single-flight, bounded concurrency, rate
 limits, fallback replies and `/stop`.
-**Read this when:** you are configuring a channel bridge (`mcp.toml` with
+**Read this when:** you are configuring a channel bridge (`config.toml` with
 `channel = true`), debugging why a message was dropped or answered twice, or
 reading `spool/<server>.jsonl` after a crash (`src/channel.rs`, `src/mcp/`).
 
@@ -15,9 +15,9 @@ credentials and infrastructure. No token or path to one is stored in this repo.
 ## Protocol
 
 At session start the channel server is connected and `initialize` declares the
-capabilities in `[servers.<name>] declare_capabilities` (default
+capabilities in `[mcp.servers.<name>] declare_capabilities` (default
 `claude/channel`). Any capability whose name contains `permission` or
-`approval` (any case, any separator) is refused in `mcp.toml` and filtered at
+`approval` (any case, any separator) is refused in `config.toml` and filtered at
 `initialize`: kelir has no approvals. Inbound messages arrive as `notifications/claude/channel` with
 `message_id`, `conversation_id`, `sender`, `content`/`text`, optional
 `attachments` and `reply_to`. Unknown, malformed and oversized notifications

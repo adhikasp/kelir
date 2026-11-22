@@ -24,7 +24,7 @@ fn python() -> &'static str {
 
 fn evil(extra: &str) -> String {
     format!(
-        "[servers.evil]\ncommand = '{}'\nargs = ['{}']\n{extra}\n",
+        "[mcp.servers.evil]\ncommand = '{}'\nargs = ['{}']\n{extra}\n",
         python(),
         EVIL
     )
@@ -32,7 +32,7 @@ fn evil(extra: &str) -> String {
 
 fn good(extra: &str) -> String {
     format!(
-        "[servers.demo]\ncommand = '{}'\nargs = ['{}']\n{extra}\n",
+        "[mcp.servers.demo]\ncommand = '{}'\nargs = ['{}']\n{extra}\n",
         python(),
         GOOD
     )
@@ -52,8 +52,8 @@ impl Files {
         self.dir.path().join(name)
     }
     fn mcp_toml(&self, text: &str) -> String {
-        let path = self.path("mcp.toml");
-        std::fs::write(&path, text).unwrap();
+        let path = self.path("config.toml");
+        std::fs::write(&path, test_config(text)).unwrap();
         path.to_string_lossy().into_owned()
     }
 }
@@ -62,7 +62,7 @@ impl Files {
 async fn one_shot(files: &Files, toml: &str, args: &[&str], env: &[(&str, &str)]) -> Output {
     let sandbox = Sandbox::new("");
     let config = files.mcp_toml(toml);
-    let mut full = vec![("KELIR_MCP_CONFIG", config.as_str())];
+    let mut full = vec![("KELIR_CONFIG", config.as_str())];
     full.extend_from_slice(env);
     let mut argv = vec!["mcp"];
     argv.extend_from_slice(args);
@@ -83,7 +83,7 @@ async fn session_run(files: &Files, toml: &str, command: &str) -> Run {
     let run = run_task(
         &mock,
         &["run", "--json", "use the server"],
-        &[("KELIR_MCP_CONFIG", config.as_str())],
+        &[("KELIR_CONFIG", config.as_str())],
         None,
         "",
     )
@@ -318,7 +318,8 @@ async fn a_huge_integer_is_not_rounded() {
 #[tokio::test]
 async fn a_bad_mcp_toml_does_not_print_the_env_block() {
     let files = Files::new();
-    let toml = "[servers.s]\ncommand = 'x'\nenv = { API_TOKEN = \"sk-SECRET-VALUE-123\" , } oops\n";
+    let toml =
+        "[mcp.servers.s]\ncommand = 'x'\nenv = { API_TOKEN = \"sk-SECRET-VALUE-123\" , } oops\n";
     let out = one_shot(&files, toml, &["ls"], &[]).await;
     let all = format!("{}{}", out.stdout, out.stderr);
     assert!(!all.contains("sk-SECRET-VALUE-123"), "leaked: {all}");
@@ -329,7 +330,7 @@ async fn a_bad_mcp_toml_does_not_print_the_env_block() {
 async fn env_and_args_secrets_stay_out_of_the_log() {
     let files = Files::new();
     let toml = format!(
-        "[servers.demo]\ncommand = '{}'\nargs = ['{}', '--token=sk-ARGSECRET']\nenv = {{ API_TOKEN = \"sk-ENVSECRET\" }}\n",
+        "[mcp.servers.demo]\ncommand = '{}'\nargs = ['{}', '--token=sk-ARGSECRET']\nenv = {{ API_TOKEN = \"sk-ENVSECRET\" }}\n",
         python(),
         GOOD
     );

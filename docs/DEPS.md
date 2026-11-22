@@ -39,7 +39,7 @@ suggests for edition 2024 are stable from 1.88). Both build hosts run 1.99/1.100
   The base64 decoder for image and blob content is ~25 lines in `src/mcp/render.rs` rather than a
   crate.
 - `toml`, `serde_json`, `ulid`, `tokio` (process, io-util, sync), `libc`/`windows-sys` job objects
-  are the existing ones; `mcp.toml` reuses `toml`.
+  are the existing ones; `config.toml` reuses `toml`.
 
 ## Dev only (not linked into the binary)
 

@@ -331,7 +331,7 @@ const DRAIN: Duration = Duration::from_secs(2);
 
 /// The gate timeout: [`TIMEOUT`], unless a test shortened it.
 pub fn timeout() -> Duration {
-    crate::envs::var("KELIR_GATE_TIMEOUT_MS")
+    crate::envs::var("KELIR_TEST_GATE_TIMEOUT_MS")
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|ms| *ms > 0)
         .map(Duration::from_millis)

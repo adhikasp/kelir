@@ -96,15 +96,15 @@ impl Refusal {
         match self {
             Refusal::Depth { wanted, cap } => format!(
                 "refused: this child would be at depth {wanted}; the deepest allowed is {cap} \
-                 (`max_child_depth`; the root is depth 0). Do the work in this agent instead"
+                 (`[children] max_depth`; the root is depth 0). Do the work in this agent instead"
             ),
             Refusal::PerAgent { have, cap } => format!(
                 "refused: this agent already has {have} live children (limit {cap}, \
-                 `max_children`). Wait for one to finish or stop one with `kelir kill`"
+                 `[children] max_per_agent`). Wait for one to finish or stop one with `kelir kill`"
             ),
             Refusal::Live { have, cap } => format!(
                 "refused: this tree already has {have} live descendants (limit {cap}, \
-                 `max_live_descendants`). Wait for some to finish or stop one with `kelir kill`"
+                 `[children] max_live_descendants`). Wait for some to finish or stop one with `kelir kill`"
             ),
             Refusal::UnknownParent => {
                 "refused: this agent is not in the root's registry (it may have settled)".into()
@@ -824,7 +824,7 @@ mod tests {
         let refused = registry.admit(new("c3", "c4")).unwrap_err();
         assert_eq!(refused, Refusal::Depth { wanted: 4, cap: 3 });
         assert!(refused.message().contains("depth 4"));
-        assert!(refused.message().contains("max_child_depth"));
+        assert!(refused.message().contains("[children] max_depth"));
         assert_eq!(registry.live_descendants(), 3, "a refusal takes no slot");
     }
 

@@ -10,6 +10,19 @@ autonomous agent**: no approvals, no asking permission, no policing of tool call
 with opencode is not a goal. Opinions live in skills and gates (data and scripts), never in the
 core.
 
+
+## Configuration
+
+`config.toml` is the only config file: the machine layer, then the nearest project
+`.kelir/config.toml`, with the project winning per key. Keys are grouped by feature
+(`[compaction]`, `[retry]`, `[children]`, `[channel]`, `[notify]`, `[mcp.servers.<name>]`,
+`[providers.<name>]`). Every typed table has `deny_unknown_fields`; an unread key is an
+ordinary unknown-key error, and there is no compatibility reader for another format.
+`[notify]` is the one exception: its dynamic hook names are validated by the reader
+with the same ordinary error wording.
+MCP servers live in `[mcp.servers.<name>]`, and test-only environment switches use
+one `KELIR_TEST_*` prefix. See `docs/reference/config.md` and `docs/reference/env.md`.
+
 ## Architecture
 
 **One session = one OS process + one append-only event log.** Every harness capability is a verb
@@ -262,12 +275,12 @@ for the session and serves the CLI over `KELIR_SOCK` (exported to every bash chi
 session, `kelir mcp` spawns the server one-shot. Each call is a `call_started`/`call_settled`
 pair with `kind: "mcp"`, and gates see it as tool `mcp:<server>.<tool>`. Channel servers (`tg-bridge`) are connected
 from the start because inbound messages arrive on that connection. Servers are configured in
-`mcp.toml`, each with an optional `description` for the hint.
+`config.toml`, each with an optional `description` for the hint.
 
 ## Channel mode (M10)
 
 `kelir channel` is a headless driver for chat bridges. A bridge is an MCP server with
-`channel = true` in `mcp.toml`; the public repo ships the mechanism, not a concrete chat
+`channel = true` in `config.toml`; the public repo ships the mechanism, not a concrete chat
 service or its credentials. At connect time kelir declares the bridge's configured
 capabilities (`declare_capabilities`, default `claude/channel`) but never a permission-relay
 capability. Inbound `notifications/claude/channel` messages (message id, conversation id,

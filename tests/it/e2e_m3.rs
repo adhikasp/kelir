@@ -1,7 +1,7 @@
 //! M3 end-to-end: durability, resume and compaction against the mock provider.
 //!
 //! The crash tests abort the real binary (SIGABRT / a Windows non-zero exit)
-//! through the documented `KELIR_CRASH_AT` hook, then resume the same log and
+//! through the documented `KELIR_TEST_CRASH_AT` hook, then resume the same log and
 //! assert on the log, the requests the mock received and a side-effect counter:
 //! a completed command is never re-run, and a call that may or may not have run
 //! is reported as unknown.
@@ -84,12 +84,12 @@ async fn crash_point(point: &str) {
         .kelir(
             &mock.base_url(),
             &["run", "--json", "the task"],
-            &[("KELIR_CRASH_AT", point)],
+            &[("KELIR_TEST_CRASH_AT", point)],
         )
         .await;
     assert_ne!(first.code, 0, "{point}: the process exited cleanly");
     assert!(
-        first.stderr.contains("KELIR_CRASH_AT="),
+        first.stderr.contains("KELIR_TEST_CRASH_AT="),
         "{point}: the crash hook did not fire; stderr: {}",
         first.stderr
     );
@@ -238,7 +238,7 @@ async fn a_torn_last_line_is_reported_on_resume_and_the_session_continues() {
         .kelir(
             &mock.base_url(),
             &["run", "--json", "the task"],
-            &[("KELIR_CRASH_AT", "usage")],
+            &[("KELIR_TEST_CRASH_AT", "usage")],
         )
         .await;
     assert_ne!(first.code, 0);
@@ -292,7 +292,7 @@ async fn resume_replaces_the_stale_socket_of_the_dead_process() {
         .kelir(
             &mock.base_url(),
             &["run", "--json", "the task"],
-            &[("KELIR_CRASH_AT", "mid_stream")],
+            &[("KELIR_TEST_CRASH_AT", "mid_stream")],
         )
         .await;
     assert_ne!(first.code, 0);
@@ -726,7 +726,7 @@ async fn simultaneous_resumes_never_both_write_the_log() {
             .kelir(
                 &mock.base_url(),
                 &["run", "--json", "the task"],
-                &[("KELIR_CRASH_AT", "usage")],
+                &[("KELIR_TEST_CRASH_AT", "usage")],
             )
             .await;
         assert_ne!(first.code, 0, "round {round}: the run did not crash");
@@ -776,12 +776,12 @@ async fn a_queued_compaction_survives_a_crash_and_is_applied_on_resume() {
         .kelir(
             &mock.base_url(),
             &["run", "--json", "the task"],
-            &[("KELIR_CRASH_AT", "tool_settled")],
+            &[("KELIR_TEST_CRASH_AT", "tool_settled")],
         )
         .await;
     assert_ne!(first.code, 0);
     assert!(
-        first.stderr.contains("KELIR_CRASH_AT="),
+        first.stderr.contains("KELIR_TEST_CRASH_AT="),
         "stderr: {}",
         first.stderr
     );

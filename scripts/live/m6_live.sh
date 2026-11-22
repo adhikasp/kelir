@@ -26,7 +26,7 @@ BINDIR="$(cd "$(dirname "$BIN")" && pwd)"; export PATH="$BINDIR:$PATH"
     echo "command = '$EVERYTHING_CMD'"
     echo "description = 'MCP reference server (echo, get-sum, ...)'"
   fi
-} > "$S/proj/.kelir/mcp.toml"
+} > "$S/proj/.kelir/config.toml"
 case "$2" in
   a) TASK='Use the kelir CLI through bash. 1) Run `kelir mcp ls`. 2) Run `kelir mcp demo ls`. 3) Call the demo tool echo with text=hello. 4) Run `kelir mcp demo structured | jq .answer` and report the number. Finish with the single word ready.' ;;
   b) TASK='Use bash. 1) Run `kelir mcp demo big` with no pipe and tell me how many bytes the output notice said. 2) Run `kelir mcp demo big | wc -c` and report the number. Finish with the single word ready.' ;;

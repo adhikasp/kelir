@@ -38,9 +38,9 @@ impl ChannelTest {
             let _ = std::fs::write(path, "");
         }
         let mcp = format!(
-            "[servers.fake]\ncommand = '{}'\nargs = ['{}']\nchannel = true\n\
+            "[mcp.servers.fake]\ncommand = '{}'\nargs = ['{}']\nchannel = true\n\
              description = \"fake channel\"\n\
-             [servers.fake.env]\nMCP_CHAN_INBOX = '{}'\nMCP_CHAN_REPLIES = '{}'\n\
+             [mcp.servers.fake.env]\nMCP_CHAN_INBOX = '{}'\nMCP_CHAN_REPLIES = '{}'\n\
              MCP_CHAN_EVENTS = '{}'\nMCP_CHAN_SECRETS = 'channel-canary-7f3a'\n",
             python(),
             SCRIPT.replace('\\', "/"),
@@ -48,7 +48,9 @@ impl ChannelTest {
             replies.to_string_lossy().replace('\\', "/"),
             events.to_string_lossy().replace('\\', "/"),
         );
-        std::fs::write(sandbox.cwd.join("mcp.toml"), mcp).unwrap();
+        let mut full = std::fs::read_to_string(&sandbox.config).unwrap();
+        full.push_str(&mcp);
+        std::fs::write(&sandbox.config, full).unwrap();
         ChannelTest {
             sandbox,
             inbox,
@@ -97,7 +99,6 @@ impl ChannelTest {
     async fn spawn_driver(&self, base_url: &str) -> tokio::process::Child {
         let mut command = self.sandbox.kelir_command(base_url);
         command
-            .env("KELIR_MCP_CONFIG", self.sandbox.cwd.join("mcp.toml"))
             .args([
                 "channel",
                 "--server",

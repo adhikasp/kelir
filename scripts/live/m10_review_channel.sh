@@ -42,7 +42,7 @@ PY
 
 : > "$ROOT/inbox.jsonl"; : > "$ROOT/replies.jsonl"; : > "$ROOT/events.jsonl"; : > "$ROOT/args.jsonl"
 W="$(cygpath -m "$ROOT")"
-cat > mcp.toml <<EOF
+cat > config.toml <<EOF
 [servers.fake]
 command = '$PY'
 args = ['$(cygpath -w "$REPO/scripts/live/review_channel_server.py")']
@@ -60,7 +60,7 @@ cleanup() { kill $MOCK $DRIVER 2>/dev/null; wait $MOCK $DRIVER 2>/dev/null; }
 trap cleanup EXIT
 for _ in $(seq 1 40); do (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.1; done
 
-export KELIR_MCP_CONFIG="$(cygpath -w "$ROOT/work/mcp.toml")"
+export KELIR_CONFIG="$(cygpath -w "$ROOT/work/config.toml")"
 export KELIR_STATE_DIR="$(cygpath -w "$ROOT/state")"
 export KELIR_CONFIG_DIR="$(cygpath -w "$ROOT/noconfig")"
 export KELIR_BASE_URL="http://127.0.0.1:$PORT/v1"

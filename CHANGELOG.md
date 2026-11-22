@@ -15,6 +15,32 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
   alias or compatibility subcommand is kept. Scripts and the builtin skills use
   the new spellings.
 
+### Breaking — rewrite P4B config and environment
+
+- `config.toml` is grouped by feature: `[compaction]`, `[retry]`, `[children]`,
+  `[channel]`, `[notify]` and `[mcp]` replace the flat `auto_compact_at`,
+  `compact_at_tokens`, `compact_prompt`, `compact_keep`, `retry_*`,
+  `channel_*`, `max_child_*`, `max_children`, `max_live_descendants` and
+  notification-hook keys. Every typed table, including `[providers.<name>]` and
+  `[mcp.servers.<name>]`, has `deny_unknown_fields`: an unread key is now an
+  ordinary unknown-key error, with no tailored "was removed" message. `[notify]`
+  is the one exception: its dynamic hook names are validated by the reader with
+  the same ordinary error wording. A literal `key` is refused rather than
+  warned about. Bad values are reported without echoing the offending value, so
+  a secret in `env` never reaches the model or the log.
+- MCP servers are configured under `[mcp.servers.<name>]` in `config.toml`.
+  `mcp.toml` and `KELIR_MCP_CONFIG` are gone; the machine/project layer rule
+  still applies. `--config` or `KELIR_CONFIG` selects the file used by both the
+  session and its MCP broker; one-shot `kelir mcp` has no `--config` flag and
+  reads `KELIR_CONFIG` or the machine/project search.
+- The session socket's JSON envelopes (`Request`, `Response`) reject unknown
+  fields; an extra key is an ordinary deserialisation error, not a silent
+  no-op. The envelope is documented once, in `docs/reference/verbs.md`.
+- Test-only switches are now namespaced: `KELIR_TEST_CRASH_AT`,
+  `KELIR_TEST_NOTIFY_TIMEOUT_MS`, `KELIR_TEST_TODAY`,
+  `KELIR_TEST_GATE_TIMEOUT_MS`, `KELIR_TEST_SHELL_RAW` and
+  `KELIR_TEST_IPC_LOCK_PROBE`. No other `KELIR_*` variable was removed.
+### Breaking — rewrite P4B config and environment
 ### Breaking — rewrite P4B state layout
 
 - A background job now owns exactly one directory: session jobs live under

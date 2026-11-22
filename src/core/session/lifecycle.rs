@@ -113,6 +113,7 @@ impl Session {
                         prepared.cwd.clone(),
                         prepared.dir.clone(),
                         prepared.id.clone(),
+                        prepared.config_path.as_deref(),
                     ),
                 )),
                 gates: Some(crate::features::gates::Gates::new()),

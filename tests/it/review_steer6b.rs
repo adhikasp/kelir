@@ -537,7 +537,7 @@ async fn n1_marker_in_ordinary_output_is_quiet_and_a_real_cut_is_not() {
     );
 }
 
-/// N4: KELIR_SHELL_RAW=cr keeps CRLF terminators on a POSIX script; default
+/// N4: KELIR_TEST_SHELL_RAW=cr keeps CRLF terminators on a POSIX script; default
 /// normalises them. Observable through a `$'\r'` probe.
 #[cfg(windows)]
 #[tokio::test]
@@ -549,7 +549,7 @@ async fn n4_raw_cr_switch_keeps_crlf() {
     let raw = drive(
         vec![("c".into(), json!({"command": cmd}))],
         "",
-        &[("KELIR_SHELL_RAW", "cr")],
+        &[("KELIR_TEST_SHELL_RAW", "cr")],
     )
     .await;
     let script = |run: &Run| {
@@ -567,7 +567,7 @@ async fn n4_raw_cr_switch_keeps_crlf() {
     assert!(!has_cr(&n));
     assert!(
         has_cr(&r),
-        "KELIR_SHELL_RAW=cr did not keep the CRLF terminators"
+        "KELIR_TEST_SHELL_RAW=cr did not keep the CRLF terminators"
     );
 }
 

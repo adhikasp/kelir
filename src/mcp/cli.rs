@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use super::args::{self, CallArgs, Command, Detail};
 use super::broker;
-use super::config::{self, ServerConfig};
+use super::config::ServerConfig;
 use super::render::{EXIT_TIMEOUT, EXIT_UNAVAILABLE, EXIT_USAGE};
 use super::rpc::Client;
 use super::{CallOutput, run_call};
@@ -56,9 +56,9 @@ struct OneShot {
 impl OneShot {
     fn new() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let (servers, config_error) = match config::load(&cwd) {
-            Ok(servers) => (servers, None),
-            Err(error) => (BTreeMap::new(), Some(error)),
+        let (servers, config_error) = match crate::config::load_for_cwd(None, &cwd) {
+            Ok(cfg) => (cfg.mcp, None),
+            Err(error) => (BTreeMap::new(), Some(error.to_string())),
         };
         Self {
             servers,

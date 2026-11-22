@@ -12,7 +12,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(30);
 const STDERR_TAIL: usize = 200;
 
 fn timeout() -> Duration {
-    crate::envs::var("KELIR_NOTIFY_TIMEOUT_MS")
+    crate::envs::var("KELIR_TEST_NOTIFY_TIMEOUT_MS")
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|ms| *ms > 0)
         .map(Duration::from_millis)

@@ -76,7 +76,7 @@ The tree is flat on purpose: a file is a subject.
 | `src/child.rs` | children: the registry and caps, the hand-off to a child process, liveness, the `brief` snapshot cut and copy |
 | `src/childcli.rs` | `kelir run --child`, `kelir brief`, `kelir kill`, `kelir ls` (client side, and the tree rendering) |
 | `src/session/children.rs` | the session side: the `child` verb, the root's registry operations, the spawn-wait-settle task, kill, the wake message |
-| `src/mcp/` | `kelir mcp`: `config.rs` (`mcp.toml`), `rpc.rs` (stdio JSON-RPC client), `args.rs` (words, `k=v`, schema check), `render.rs` (result, exit codes), `broker.rs` (session side), `cli.rs` (client side) |
+| `src/mcp/` | `kelir mcp`: `config.rs` (`config.toml`), `rpc.rs` (stdio JSON-RPC client), `args.rs` (words, `k=v`, schema check), `render.rs` (result, exit codes), `broker.rs` (session side), `cli.rs` (client side) |
 
 ## The face
 

@@ -41,9 +41,9 @@ kelir kill --tree             # every descendant of this session
 
 | key | default | meaning |
 |---|---|---|
-| `max_child_depth` | 3 | the deepest a child may be (root = 0) |
-| `max_children` | 10 | **live** children one agent may have |
-| `max_live_descendants` | 16 | live descendants one root may have, at any depth |
+| `[children] max_depth` | 3 | the deepest a child may be (root = 0) |
+| `[children] max_per_agent` | 10 | **live** children one agent may have |
+| `[children] max_live_descendants` | 16 | live descendants one root may have, at any depth |
 
 The **root session** holds the registry and decides, in one step, so two starts racing
 for the last slot cannot both win. A settled child frees its slot at once; a child whose

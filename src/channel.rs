@@ -525,7 +525,7 @@ pub fn forbidden_capability(name: &str) -> bool {
             .any(|forbidden| lower == *forbidden || lower.starts_with(&format!("{forbidden}/")))
 }
 
-/// Capabilities a channel server declared in `mcp.toml`, or the default. A
+/// Capabilities a channel server declared in `config.toml`, or the default. A
 /// forbidden one is filtered out even if a config bypassed validation.
 pub fn capabilities(config: &crate::mcp::config::ServerConfig) -> Value {
     let list: Vec<&str> = if config.declare_capabilities.is_empty() {
@@ -545,8 +545,8 @@ pub fn capabilities(config: &crate::mcp::config::ServerConfig) -> Value {
     Value::Object(map)
 }
 
-/// Channel mode settings from `config.toml`. The keys are flat (`channel_max_active` etc.) so
-/// the generated config table reads them at the top level; this is the resolved form.
+/// Channel mode settings from `config.toml`. The keys live in `[channel]`; this
+/// is the resolved form.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub max_active: usize,
@@ -1175,7 +1175,7 @@ async fn drive(args: crate::cli::ChannelArgs) -> u8 {
     let state = crate::paths::state_dir();
     let session_dir = state.join("channel");
     let _ = crate::paths::create_private_dir(&session_dir);
-    let broker = Broker::new(cwd, session_dir, "channel".to_string());
+    let broker = Broker::new(cwd, session_dir, "channel".to_string(), None);
     let configured: Vec<String> = broker.servers()["servers"]
         .as_array()
         .into_iter()
@@ -1193,7 +1193,7 @@ async fn drive(args: crate::cli::ChannelArgs) -> u8 {
             .collect()
     };
     if servers.is_empty() {
-        eprintln!("kelir channel: no channel servers configured (channel = true in mcp.toml)");
+        eprintln!("kelir channel: no channel servers configured (channel = true in config.toml)");
         return 1;
     }
     let mut spools = BTreeMap::new();

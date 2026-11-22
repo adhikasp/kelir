@@ -5,14 +5,14 @@
 //! time a call finds it dead.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
-use super::config::{self, ServerConfig};
+use super::config::ServerConfig;
 use super::render::{EXIT_UNAVAILABLE, EXIT_USAGE};
 use super::rpc::{CallError, Client, Notification};
 use super::{CallOutput, run_call};
@@ -60,12 +60,18 @@ struct Inner {
 pub struct Broker(Arc<Inner>);
 
 impl Broker {
-    /// Read both `mcp.toml` layers for a session whose working directory is `cwd`. A bad file is
+    /// Read `[mcp.servers.*]` from the explicit file (`--config`) or both config
+    /// layers for a session whose working directory is `cwd`. A bad file is
     /// remembered, not fatal: the session still runs, and `kelir mcp` says what is wrong.
-    pub fn new(cwd: PathBuf, session_dir: PathBuf, session_id: String) -> Broker {
-        let (servers, config_error) = match config::load(&cwd) {
-            Ok(servers) => (servers, None),
-            Err(error) => (BTreeMap::new(), Some(error)),
+    pub fn new(
+        cwd: PathBuf,
+        session_dir: PathBuf,
+        session_id: String,
+        explicit: Option<&Path>,
+    ) -> Broker {
+        let (servers, config_error) = match crate::config::load_for_cwd(explicit, &cwd) {
+            Ok(cfg) => (cfg.mcp, None),
+            Err(error) => (BTreeMap::new(), Some(error.to_string())),
         };
         Broker::with_servers(servers, config_error, cwd, session_dir, session_id)
     }

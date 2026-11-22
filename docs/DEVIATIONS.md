@@ -239,7 +239,7 @@ wait itself in `session::stream`. Where this differs from the brief:
   a short POSIX command on the argument route is normalised the same way, because otherwise the
   same text would mean two things at the 6,000-byte boundary (`echo a > f<CR>` created `f<CR>`
   below it and `f` above it — STEER-6 review N10). A lone `\r` inside a payload (how a heredoc
-  writes a literal CR to a file) is untouched. `KELIR_SHELL_RAW=cr` sends the bytes exactly as
+  writes a literal CR to a file) is untouched. `KELIR_TEST_SHELL_RAW=cr` sends the bytes exactly as
   written on both POSIX routes, for a caller that needs the raw bytes. A `.bat` also starts with
   `@echo off`: without it `cmd.exe` echoes the prompt and the command line into the result, so a
   20 KB command came back as 20 KB of echo (STEER-6 review N6).
@@ -374,7 +374,7 @@ wait itself in `session::stream`. Where this differs from the brief:
   goes on. kelir dogfoods itself, so a suite run from inside a kelir session inherited
   that session's own job directory and socket: `bg out` read the *session's* jobs, and a
   test could report (or cancel) a job in the session running it. `KELIR_PROMOTE_AFTER`,
-  `KELIR_HERDR`, `KELIR_CRASH_AT` and `KELIR_TEST_PANIC` were the same hazard: an
+  `KELIR_HERDR`, `KELIR_TEST_CRASH_AT` and `KELIR_TEST_PANIC` were the same hazard: an
   ambient value in a developer shell silently changed what the suite exercised (M5-A
   fixes N2). This is test infrastructure, not shipped behaviour, but it is recorded here
   because it changes what the suite proves about process isolation.
@@ -797,7 +797,7 @@ can start in a test.
   tool's result says `compaction queued …`, the verb is queued like `model`, and
   the auto trigger sets the same request. `kelir ctl <id> compact <focus>` now
   carries the focus (before M3 the CLI dropped the words for this verb).
-- **`KELIR_CRASH_AT=<point>` is a test-only injection.** A scripted test names
+- **`KELIR_TEST_CRASH_AT=<point>` is a test-only injection.** A scripted test names
   one of `tool_started` (after the intent is fsync'd, before any process
   starts), `mid_tool` (150 ms after the calls start, side effects already made),
   `tool_settled` (after the batch is committed), `mid_stream` (on the first text
@@ -1536,7 +1536,7 @@ follow-up commit series that restores three things the first pass lost.
 - **The hint and `observe` do not list the servers yet.** Neither exists on this base (M5-B owns
   them). `Broker::descriptions()` returns `(name, description)` for every configured server, ready
   for whoever builds the hint; `kelir mcp ls` is the pull route today.
-- **A new env var, `KELIR_MCP_CONFIG`,** replaces the machine `mcp.toml` path (the way
+- **A new env var, `KELIR_CONFIG`,** replaces the machine `config.toml` path (the way
   `KELIR_CONFIG` does for `config.toml`). The brief did not ask for it; the e2e tests need a way to
   hand a session a server list without writing into the real config dir.
 - **A server gets an allow-listed environment, not the session's (m6fix, review F6).** The spec
@@ -1545,13 +1545,13 @@ follow-up commit series that restores three things the first pass lost.
   proxy and CA variables, then the server's own `env` table, and nothing else.
 - **`kelir mcp <server> call <tool>` exists (m6fix, review N3).** The spec's three shapes make a
   tool named `ls` unreachable; `call` is the escape hatch (a tool named `call` is `call call`).
-- **A lost session after the send is exit 4, and the session reads `mcp.toml` once (m6fix).** The
+- **A lost session after the send is exit 4, and the session reads `config.toml` once (m6fix).** The
   spec says exit 4 is "unknown outcome, never retried"; a transport failure after the request
   reached the session is exactly that, so it no longer falls back to a one-shot run. Editing
-  `mcp.toml` during a session has no effect until the next start/resume (documented in
+  `config.toml` during a session has no effect until the next start/resume (documented in
   `docs/reference/mcp.md`).
 - **Project-defined servers start without a trust prompt (m6fix, review S1, open).** The spec asks
-  for the project layer and `channel = true` autostart; a cloned repo's `.kelir/mcp.toml` can name
+  for the project layer and `channel = true` autostart; a cloned repo's `.kelir/config.toml` can name
   any `command`. Documented in `docs/reference/mcp.md`; the trust gate belongs with STEER-7
   (`src/trust.rs`) and is not built here.
 - **`mcp_started.args` records the shape of the arguments, not their values (m6m, STEER-7).** The
@@ -1608,7 +1608,7 @@ follow-up commit series that restores three things the first pass lost.
   events are written when the call settles, just before `mcp_settled`.
 - **A gate's environment is an allow-list (M8)**, the MCP server list plus `SSH_AUTH_SOCK`, plus
   `KELIR_SESSION_DIR`, `KELIR_GATE_EVENT`, `KELIR_GATE_NAME` and the gate's own `env` table. Not "the
-  environment minus secrets": a user's custom `key_env` variable is withheld too. `KELIR_GATE_TIMEOUT_MS`
+  environment minus secrets": a user's custom `key_env` variable is withheld too. `KELIR_TEST_GATE_TIMEOUT_MS`
   (test hook) shortens the 30 s.
 - **Project-layer gates need a trusted project (M8 fix, review F6).** kelir has no prompt, and
   `src/trust.rs` is the session socket's boundary, not a project-trust store, so trust is *declared*:
@@ -1617,7 +1617,7 @@ follow-up commit series that restores three things the first pass lost.
   are skipped in any other project, with an `error` event (`where` `gate`) per skipped gate; `observe` marks
   them `trusted: false`; a project config's own `trusted_projects` is ignored with a warning. Side effect: the
   machine and project `[gates]` tables are no longer merged per key (the project's used to replace the
-  machine's `session_start`); both sets are kept. Project `mcp.toml` (M6) is untouched and still has no trust
+  machine's `session_start`); both sets are kept. Project `config.toml` (M6) is untouched and still has no trust
   step.
 - **The `gate` event has no `tool` field (M8).** The spec's field list is kept exactly; a gate's `reason`
   and the neighbouring `tool_started` identify the call.
@@ -1679,8 +1679,10 @@ side). Where the code had to choose:
   agent" without saying live; a lifetime count would make a long-lived TUI session unable to
   delegate after ten tasks, and the brief speaks of a crashed child leaking a "slot", which only
   a live count has. The same holds for the other two caps. A `brief` takes a slot while it runs.
-- **The caps are three top-level keys** (`max_child_depth`, `max_children`,
-  `max_live_descendants`), not a `[children]` table: the drift test reads `RawConfig`'s fields.
+- **The caps are grouped under `[children]`** (`max_depth`, `max_per_agent`,
+  `max_live_descendants`) since rewrite P4B; the historical top-level spellings
+  (`max_child_depth`, `max_children`, `max_live_descendants`) were removed, with no aliases.
+  Grouping keys by feature is what P4B asks for; the drift test reads `RawConfig`'s fields.
 - **`child_started`/`child_settled` carry more than the spec's list**: `session`, `parent`,
   `kind` (`child`/`brief`), `model`, and `exit_code?` on settle. The root writes the pair for
   every descendant (that is the registry); a parent that is not the root writes the same pair

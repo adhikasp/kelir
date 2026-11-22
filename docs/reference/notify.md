@@ -26,7 +26,7 @@ A scheduled run with `--single-flight` writes a STATUS file (`src/namedrun.rs`; 
 above. To get a hook on a settled job or child, use the `bg_settled` or `child_settled` key in `[notify]` in `config.toml`.
 Hooks run through the
 configured shell with a **scrubbed environment** (the platform allow-list, plus `KELIR_NOTIFY_EVENT`
-and `KELIR_NOTIFY_MESSAGE`), at most 30 s (`KELIR_NOTIFY_TIMEOUT_MS` shortens it in tests), with
+and `KELIR_NOTIFY_MESSAGE`), at most 30 s (`KELIR_TEST_NOTIFY_TIMEOUT_MS` shortens it in tests), with
 the whole process tree killed on exit. They never hold the session: each runs in a detached task
 and its failure is recorded, never raised to the model or the turn's exit code. A burst of the same
 kind is rate-limited; a `note{kind:"notify"}` event records the hook name and its detail: `<hook event>: <N> hook(s) fired` on success, or `<hook event>: <error>` when a hook failed or was rate-limited.

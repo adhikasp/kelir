@@ -165,7 +165,7 @@ config keys, so they do not appear in `docs/reference/config.md` (STEER-11) when
    `--keep` (default 3) **per job**, so an idle job keeps its warm `target/` no matter how many other jobs ran
    after it. Nothing is removed without `--yes`: the first call is always a dry run.
 6. **No core dumps: `ulimit -c 0` is deliberate — do not drop it.** The suite contains tests that abort a
-   `kelir` on purpose (M3's `KELIR_CRASH_AT` crash injection, and the reviews that re-run it). On a stock
+   `kelir` on purpose (M3's `KELIR_TEST_CRASH_AT` crash injection, and the reviews that re-run it). On a stock
    Linux box each one wrote a core into the system store: on 2026-11-20 the gate machine held **2,660 cores,
    904 MB, ~290 KB each**, every one a `.../target/debug/kelir` SIGABRT from the Linux gate. Whether a core is
    written is the host's decision (`kernel.core_pattern` here is `systemd-coredump`, plus `fs.suid_dumpable`),

@@ -9,6 +9,31 @@ A verb arrives as `{"verb": "say", "args": {…}}` on the session socket or as
 `kelir ctl <session> <verb> [args]`. It is logged as a `verb` event first, then
 applied at **one named boundary** — never between a tool call and its result.
 
+## Wire envelopes
+
+The socket is newline-delimited JSON: one request line in, exactly one answer
+line out. Both envelopes are strict — an unknown field is refused, not ignored
+(`src/ipc.rs`; the unit test `a_wire_envelope_refuses_unknown_fields` guards it).
+
+| side | field | meaning |
+|---|---|---|
+| request | `verb` | the verb name (the request's `id`) |
+| request | `args` | verb arguments; `null` when absent |
+| request | `from` | caller: `ctl`, `tui`, `tool`, `job`, `gate` |
+| request | `token` | the session token, omitted by clients that do not need it |
+| answer | `ok` | whether the verb was accepted |
+| answer | `verb` | the verb this answers, omitted on an early error |
+| answer | `seq` | event sequence, omitted on an early error |
+| answer | `applies` | boundary: `now`, `next_step`, `after_tools`, `turn_end` |
+| answer | `state` | a read-only snapshot (for `status`) |
+| answer | `error` | the refusal reason, present when `ok` is false |
+
+The other two JSON envelopes are documented where their reader lives: the bg
+status file in `docs/reference/files.md` and `src/bg.rs:Status`, the gate's
+stdin/stdout in `docs/reference/gates.md` and `src/gates.rs:GateInput`. They
+use the same words for the same idea: `id` for an object's name, `kind` for
+its type, `ok`/`error` for an outcome.
+
 ## Verbs
 
 | verb | arguments | applies at | what it does |

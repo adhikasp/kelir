@@ -6,7 +6,7 @@ Job `m6`: brief `docs/tasks/M6.md`. Worktree `kelir-wt/m6`, branch `job/m6`.
 
 | piece | where |
 |---|---|
-| `mcp.toml` (machine `<config>/mcp.toml` or `KELIR_MCP_CONFIG`, project `.kelir/mcp.toml`, merged by server name, unknown keys refused) | `src/mcp/config.rs` |
+| `config.toml` (machine `<config>/config.toml` or `KELIR_CONFIG`, project `.kelir/config.toml`, merged by server name, unknown keys refused) | `src/mcp/config.rs` |
 | stdio JSON-RPC client: `initialize`, `tools/list` (cursor), `tools/call`, `notifications/cancelled`, `ping`, inbound notifications; server in its own process group / kill-on-close Job Object | `src/mcp/rpc.rs` |
 | the command line, `k=v` typing from the schema, schema check (`type`, `enum`, `required`, `properties`, `additionalProperties:false`, `items`, `minimum`/`maximum`) | `src/mcp/args.rs` |
 | result to stdout/stderr/files, base64 decode, exit codes | `src/mcp/render.rs` |
@@ -45,7 +45,7 @@ needed in any of the wait loops, and the answer never outruns the log.
 - **Internal verbs carry a per-session random key** (`Broker::key`). STEER-7's session token is not
   on this branch's base; when it merges, the `mcp` verb needs the token on the same path as `view`
   and `bg`.
-- **`KELIR_MCP_CONFIG`** is new (the tests need to give a session a server list without touching
+- **`KELIR_CONFIG`** is new (the tests need to give a session a server list without touching
   the real config dir).
 - **Restart:** a server that died is started again by the next call that finds it dead; a call
   that was in flight when it died is exit 3 and is not retried (the result is unknown).

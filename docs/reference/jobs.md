@@ -100,7 +100,7 @@ scheduled call.
 The system prompt is frozen at session start and holds the date, never the
 time. When a session is resumed on a later UTC day, a `source` event (kind
 `clock`, "it is now <date>") is appended at the tail before the task. The same
-day adds nothing and the cached prefix is untouched. `KELIR_TODAY=YYYY-MM-DD`
+day adds nothing and the cached prefix is untouched. `KELIR_TEST_TODAY=YYYY-MM-DD`
 replaces the clock (used by tests).
 
 ## Recipes

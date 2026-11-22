@@ -80,6 +80,16 @@ async fn wait_until_result<F: Fn() -> bool>(ready: F, timeout: Duration) -> Resu
 /// R1: a torn tail that cuts a multi-byte character must be repaired, not
 /// silently turn the whole spool into an empty file (seq restarts at 1, every
 /// later record unreadable: total message loss).
+/// Parse one config document and return the mcp-server validation error, if any.
+fn parse_layer(text: &str, _label: &str) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    kelir::config::load(Some(&path))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 #[test]
 fn r1_invalid_utf8_torn_tail_must_not_erase_the_spool() {
     let dir = temp("utf8");
@@ -175,10 +185,10 @@ fn r4_permission_relay_variants_must_be_forbidden() {
 /// R4b: the config validator must reject a permission-relay capability too.
 #[test]
 fn r4b_config_rejects_permission_relay() {
-    let text = "[servers.fake]\ncommand = 'python'\ndeclare_capabilities = ['claude/channel/permission_relay']\n";
+    let text = "[mcp.servers.fake]\ncommand = 'python'\ndeclare_capabilities = ['claude/channel/permission_relay']\n";
     assert!(
-        kelir::mcp::config::parse_layer(text, "review").is_err(),
-        "a permission relay capability must be refused in mcp.toml"
+        parse_layer(text, "review").is_err(),
+        "a permission relay capability must be refused in config.toml"
     );
 }
 
@@ -349,8 +359,8 @@ impl ChannelTest {
         let args_path = sandbox.cwd.join("review-reply-args.jsonl");
         let _ = std::fs::write(&args_path, "");
         let mcp = format!(
-            "[servers.fake]\ncommand = '{}'\nargs = ['{}']\nchannel = true\n\
-             [servers.fake.env]\nMCP_CHAN_INBOX = '{}'\nMCP_CHAN_REPLIES = '{}'\n\
+            "[mcp.servers.fake]\ncommand = '{}'\nargs = ['{}']\nchannel = true\n\
+             [mcp.servers.fake.env]\nMCP_CHAN_INBOX = '{}'\nMCP_CHAN_REPLIES = '{}'\n\
              MCP_CHAN_EVENTS = '{}'\nMCP_CHAN_ARGS = '{}'\nMCP_CHAN_SECRETS = 'channel-canary-7f3a'\n",
             if cfg!(windows) { "python" } else { "python3" },
             concat!(
@@ -363,7 +373,9 @@ impl ChannelTest {
             events.to_string_lossy().replace('\\', "/"),
             args_path.to_string_lossy().replace('\\', "/"),
         );
-        std::fs::write(sandbox.cwd.join("mcp.toml"), mcp).unwrap();
+        let mut full = std::fs::read_to_string(&sandbox.config).unwrap();
+        full.push_str(&mcp);
+        std::fs::write(&sandbox.config, full).unwrap();
         ChannelTest {
             sandbox,
             inbox,
@@ -415,7 +427,6 @@ impl ChannelTest {
     async fn spawn_driver_with(&self, base_url: &str, extra: &[&str]) -> tokio::process::Child {
         let mut std_command = self.sandbox.kelir_command(base_url);
         std_command
-            .env("KELIR_MCP_CONFIG", self.sandbox.cwd.join("mcp.toml"))
             .args(std::iter::once("channel").chain(std::iter::once("--server")))
             .arg("fake")
             .args(extra)

@@ -25,7 +25,7 @@
 #     doctests (the crate has none today; this keeps it that way).
 set -uo pipefail
 # No core dumps (BUILD-INFRA rule 6, docs/BUILD.md). The suite includes tests
-# that abort a `kelir` on purpose (the `KELIR_CRASH_AT` crash injection), and on
+# that abort a `kelir` on purpose (the `KELIR_TEST_CRASH_AT` crash injection), and on
 # a box whose core pattern writes to a store each abort left a ~290 KB core:
 # 2,660 files / 904 MB on 2026-11-20. The limit is set in the shell that starts
 # the test binaries — before fmt, so nothing this gate spawns can dump — and is

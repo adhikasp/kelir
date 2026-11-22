@@ -20,9 +20,8 @@ the value; `session_started.key_origin` records the same.
 |---|---|
 | `OPENROUTER_API_KEY` | the OpenRouter provider's key (never printed: `kelir doctor` reports the source) |
 | `KELIR_GO_API_KEY` | the OpenCode Go key, an override for opencode's own store |
-| `KELIR_CONFIG` | the config file to use instead of the machine/project search |
+| `KELIR_CONFIG` | the machine config file to use instead of the machine-layer search (the project layer still applies) |
 | `KELIR_CONFIG_DIR` | the machine config directory (`config.toml`, `prompt.md`, `skills/`) |
-| `KELIR_MCP_CONFIG` | the machine `mcp.toml` to use instead of `<config dir>/mcp.toml` (the project's `.kelir/mcp.toml` still layers on top) |
 | `KELIR_STATE_DIR` | the state root (sessions, model caches, bg jobs, locks) |
 | `KELIR_HOME` | replaces `$HOME`/`USERPROFILE` only (user skills, `~`); it does NOT move state or config, set `KELIR_STATE_DIR` and `KELIR_CONFIG_DIR` for that |
 | `KELIR_BASE_URL` | overrides a provider's base URL (a proxy, or a test's mock server) |
@@ -67,13 +66,13 @@ the value; `session_started.key_origin` records the same.
 
 | variable | effect |
 |---|---|
-| `KELIR_NOTIFY_TIMEOUT_MS` | shorten the 30 s notify-hook timeout (the job tests) |
-| `KELIR_TODAY` | `YYYY-MM-DD` replaces today's UTC date: a new session's system prompt and the date-change source of a resume (the job tests) |
-| `KELIR_GATE_TIMEOUT_MS` | shorten the 30 s gate timeout (the gate tests; a timed-out gate fails open) |
-| `KELIR_CRASH_AT` | abort at a named point (`before_append`, …): the crash tests |
+| `KELIR_TEST_NOTIFY_TIMEOUT_MS` | shorten the 30 s notify-hook timeout (the job tests) |
+| `KELIR_TEST_TODAY` | `YYYY-MM-DD` replaces today's UTC date: a new session's system prompt and the date-change source of a resume (the job tests) |
+| `KELIR_TEST_GATE_TIMEOUT_MS` | shorten the 30 s gate timeout (the gate tests; a timed-out gate fails open) |
+| `KELIR_TEST_CRASH_AT` | abort at a named point (`before_append`, …): the crash tests |
 | `KELIR_TEST_PANIC` | panic once the TUI owns the terminal, to prove the restore path |
-| `KELIR_SHELL_RAW` | `cr`: send a POSIX script raw, keeping CRLF terminators |
-| `KELIR_IPC_LOCK_PROBE` | a session dir: a test child tries to take the lock there, to prove a second process is refused (the IPC tests) |
+| `KELIR_TEST_SHELL_RAW` | `cr`: send a POSIX script raw, keeping CRLF terminators |
+| `KELIR_TEST_IPC_LOCK_PROBE` | a session dir: a test child tries to take the lock there, to prove a second process is refused (the IPC tests) |
 
 ## Notes
 

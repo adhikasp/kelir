@@ -29,7 +29,7 @@ pub const DEFAULT_WINDOW: u64 = 128_000;
 /// Compaction is triggered when the context passes this fraction of the window.
 pub const AUTO_FRACTION: f64 = 0.8;
 /// Messages kept verbatim after the summary, so the model still sees what it was
-/// doing; `compact_keep` in the config overrides it.
+/// doing; `[compaction] keep` in the config overrides it.
 pub const DEFAULT_KEEP: usize = 4;
 
 /// Compaction is triggered once the context passes this many tokens, whatever the window is — unless

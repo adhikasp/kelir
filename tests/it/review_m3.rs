@@ -214,7 +214,7 @@ async fn r4_a_crash_during_a_resume_resumes_again_without_double_results() {
         .kelir(
             &mock.base_url(),
             &["run", "--json", "the task"],
-            &[("KELIR_CRASH_AT", "mid_tool")],
+            &[("KELIR_TEST_CRASH_AT", "mid_tool")],
         )
         .await;
     assert_ne!(first.code, 0);
@@ -234,7 +234,7 @@ async fn r4_a_crash_during_a_resume_resumes_again_without_double_results() {
         .kelir(
             &mock.base_url(),
             &["run", "--json", "--resume", id.as_str()],
-            &[("KELIR_CRASH_AT", "mid_tool")],
+            &[("KELIR_TEST_CRASH_AT", "mid_tool")],
         )
         .await;
     assert_ne!(
@@ -320,7 +320,7 @@ async fn r5_a_torn_line_is_reported_once_not_on_every_later_resume() {
         .kelir(
             &mock.base_url(),
             &["run", "--json", "the task"],
-            &[("KELIR_CRASH_AT", "usage")],
+            &[("KELIR_TEST_CRASH_AT", "usage")],
         )
         .await;
     assert_ne!(first.code, 0);
@@ -515,7 +515,7 @@ async fn r9_two_simultaneous_resumes_do_not_both_write_the_log() {
         .kelir(
             &mock.base_url(),
             &["run", "--json", "the task"],
-            &[("KELIR_CRASH_AT", "usage")],
+            &[("KELIR_TEST_CRASH_AT", "usage")],
         )
         .await;
     assert_ne!(first.code, 0);
@@ -585,7 +585,7 @@ async fn r11_a_failing_summary_is_not_retried_on_every_step() {
         script.push(Reply::Http(500, "{\"error\":\"boom\"}".into()));
     }
     let mock = Mock::start(script).await;
-    let sandbox = Sandbox::new("window = 100\ncompact_keep = 0\nretries = 0\n");
+    let sandbox = Sandbox::new("window = 100\ncompact_keep = 0\n[retry]\nmax_attempts = 1\n");
     let run = sandbox
         .kelir(&mock.base_url(), &["run", "--json", "the task"], &[])
         .await;

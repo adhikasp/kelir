@@ -50,7 +50,7 @@ test pins `cmd.exe /C <path>` and `cmd.exe /D /C <path>`.
   cwd and env; the reviewer's `f2_cwd_env_and_exit_code_are_preserved` still passes.
 - **N4 — CRLF, documented**: POSIX scripts get LF (a CRLF `cmd.sh` breaks a heredoc terminator);
   `cmd.exe`/PowerShell get CRLF; a lone `\r` in a payload is untouched (a unit test writes one to
-  a file and reads it back). `KELIR_SHELL_RAW=cr` keeps the raw CRLF terminators, which is the
+  a file and reads it back). `KELIR_TEST_SHELL_RAW=cr` keeps the raw CRLF terminators, which is the
   cheap escape hatch for a caller that needs them.
 - Job scripts are now `bg/<id>.sh|.bat|.ps1`, not one shared `bg/cmd.sh`: two `bg run`s could
   overwrite each other's script (found while making `bg run` take the file route on Windows).

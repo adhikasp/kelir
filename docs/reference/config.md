@@ -1,94 +1,128 @@
 # `config.toml`
 
-**Summary:** every key kelir reads from its config file, with the type, the
-default, the flag or environment variable that overrides it, what it changes and
-the function in `src/config.rs` that reads it.
-**Read this when:** you are setting a session up on a new machine, a session did
-something you did not ask for, or you are adding a key (`src/config.rs`:
-`RawConfig`, `RawProvider`, `load`).
+**Summary:** every key kelir reads from its config file, grouped by feature, with the
+type, default, override, effect and reader.
+**Read this when:** setting a session up on a new machine, debugging a session that did
+something unexpected, or adding a key (`src/config.rs`: `RawConfig` and the `Raw*` tables).
 
-Two files merge, machine first, project second (so the project wins per key):
+Two files merge, machine first, project second (the project wins per key):
 
-1. `KELIR_CONFIG` or `--config`, when set: that one file, and nothing else;
+1. `KELIR_CONFIG` or `--config`, when set: that file instead of the machine layer; the project layer still applies;
 2. else `<config>/config.toml` (`%APPDATA%\kelir` on Windows, `$XDG_CONFIG_HOME/kelir`
    or `~/.config/kelir` on Linux, `~/Library/Application Support/kelir` on macOS),
    then the nearest `.kelir/config.toml` walking up from the cwd.
 
-An unknown `[providers.<name>]` table is an error naming the two real provider
-names. An unknown *key* is not: a config written for a newer kelir still loads.
-A literal `key` (top level or in a provider table) is warned about and ignored —
-keys come from the environment, `key_cmd`, or opencode's store.
+Every typed table has `deny_unknown_fields`: a typo is the ordinary unknown-key
+error naming the field and its table. `[notify]` is the one exception: its hook
+names are dynamic keys (`turn_done`, `error`, `paused`, `bg_settled`,
+`child_settled`) captured in a flattened map, so serde cannot put
+`deny_unknown_fields` on the table. The reader validates those names itself and
+returns the same ordinary unknown-field wording. There are no tailored "this
+was removed" messages and no compatibility readers: a config written for
+another kelir format is rejected, not interpreted. A literal key is never read
+— keys come from the environment, `key_cmd` or opencode's store.
 
-## Keys
+The feature tables are `compaction`, `retry`, `children`, `channel`, `notify`
+and `mcp`; their keys are nested, never flat aliases.
 
-### Top level
+## Top level: one session
 
 | key | type | default | override | effect | source |
 |---|---|---|---|---|---|
 | `provider` | string | `openrouter` | `--provider` | which of the two providers this session uses | `src/config.rs:load` |
 | `model` | string | `deepseek/deepseek-v4.1-flash-1017` | `--model` | the model id sent with every request | `src/config.rs:load` |
-| `shell` | string or array of strings | Windows: Git for Windows `bash.exe`, else `bash` on PATH, else `cmd.exe /C`; elsewhere: `bash` on PATH, else `$SHELL`, else `sh`, each with `-c`; the array is the argv prefix | — | the program `bash` tool calls and `kelir bg run` commands run in | `src/config.rs:load` |
-| `spill_limit` | integer (bytes) | `10240` | — | output over this many bytes is written to `calls/<call>/out` and the model sees a spill notice instead of the whole text | `src/config.rs:load` |
-| `max_steps` | integer | unset: no cap. `0` also means no cap | `--max-steps` | cap the steps of one turn; reaching it *pauses* the turn (`turn_ended` with `reason: "steps"`), and the next message starts a new turn | `src/config.rs:load` |
-| `cache_ttl` | string | unset: the provider's own default | — | the `cache_control.ttl` sent with the request (`5m`, `1h`), for providers that charge separately for a longer break-even | `src/config.rs:load` |
-| `prompt` | path | the embedded `src/prompt.md` | — | the base prompt file; when set it replaces `<config>/prompt.md` (read only when `prompt` is unset); only `<cwd>/.kelir/prompt.md` wins over it | `src/config.rs:load_prompt` |
-| `providers` | table, keyed by provider name | both providers, with their built-in base URL and key source | — | per-provider settings (see the `providers.*` rows); any other table name is a config error | `src/config.rs:load` |
-| `key` | string | — | — | **refused**: a literal key is warned about and ignored (the environment, `key_cmd` and opencode's store are the three sources) | `src/config.rs:load` |
-| `window` | integer (tokens) | unset: the provider's model metadata, else `128000` | — | the context window for every model, for a provider that publishes none | `src/config.rs:load` |
-| `model_windows` | table of integers (tokens), keyed by model id | empty | — | per-model window overrides; they win over `window` and over the provider's metadata | `src/config.rs:load` |
-| `auto_compact_at` | float in `(0, 1]` | `0.8` | — | the fraction of the window at which compaction triggers automatically | `src/config.rs:load` |
-| `compact_at_tokens` | integer (tokens) | `150000`; `0` disables the cap | — | an absolute soft target: compaction triggers at `min(window * auto_compact_at, compact_at_tokens)` | `src/config.rs:load` |
-| `compact_prompt` | path | the embedded default in `src/compact.rs` | — | the summary prompt; `<config>/compact.md` is read when this is unset | `src/config.rs:load_compact_prompt` |
-| `compact_keep` | integer | `4` | — | how many messages stay verbatim after a compaction | `src/config.rs:load` |
-| `skills_dirs` | array of paths | empty (`~/.claude/skills`, `<config>/skills`, `.claude/skills`, `.kelir/skills` are always searched) | — | extra skills directories, named in the base prompt and searched read-only; `~/` and `$HOME/` expand | `src/config.rs:load` |
-| `memory_dir` | path | unset: no memory | — | a directory of `.md`/`.txt` notes loaded as `memory` sources: rendered once into the frozen system, and a note edited or created later arrives as a `source` message at the tail; the model writes memory with `edit`; `~/` expands, a relative path is the session cwd's | `src/config.rs:load` |
-| `gates` | table | unset: no gates | — | `[gates]`: executables run at `session_start`, `prompt_submit`, `before_tool`,                  `after_tool`, `turn_end`, `session_end`; each key takes a command string, a table                  (`command`, `name`, `tools`, `env`) or a list of them; a named table with `builtin = "hint"` declares the built-in hint instead (with `model`, `provider`, `endpoint`, `timeout_ms`); built-ins and external gates may answer `context`/`kind` and add a `source` event; a gate answers `allow`,                  `deny` or `rewrite` as JSON and fails open (see `gates`) | `src/config.rs:load` |
-| `trusted_projects` | array of paths | empty: no project is trusted | `KELIR_TRUST_PROJECT` | machine setting: directories (and everything under them) whose own gates may run; a                  project's `.kelir/config.toml` `[gates]` and its project skills' `kelir-gate` scripts                  are skipped, with a note in the log, in any other project; ignored in a project config | `src/config.rs:load` |
-| `promote_after` | integer (seconds) | `600`; `0` disables promotion | `KELIR_PROMOTE_AFTER` | a bash call still running after this long becomes a background job instead of being killed | `src/config.rs:promote_after` |
-| `retry_base_ms` | integer (ms) | `2000` | — | the first retry wait; each further attempt doubles up to `retry_cap_ms` | `src/config.rs:retry_policy` |
-| `retry_cap_ms` | integer (ms) | `120000` | — | the longest a backoff grows to; it must be at least `retry_base_ms` | `src/config.rs:retry_policy` |
-| `retry_max_wait` | integer (seconds) | `1800`; `0` waits as long as the provider asks | — | the total wait budget per request; running out pauses the turn (`reason: "provider"`) | `src/config.rs:retry_policy` |
-| `retry_max_attempts` | integer | unset: only the budget and `retry_max_wait` bound the retries | — | a count cap inside the budget (`3` = three tries and out) | `src/config.rs:retry_policy` |
-| `warn_prompt_tokens` | integer (tokens) | `150000`; `0` turns the warning off | — | when the last prompt is larger than this, one `note{kind:"prompt_tokens"}` event and one dim line on                  the screen; it speaks again only after the prompt has fallen back under it.                  Never sent to the model | `src/config.rs:load` |
-| `max_child_depth` | integer | `3` | — | the deepest a child may be (the root is depth 0); `kelir run --child` past it exits 3 with the count | `src/config.rs:load` |
-| `max_children` | integer | `10` | — | live children one agent may have at once (a settled child frees its slot); the root's registry decides | `src/config.rs:load` |
-| `max_live_descendants` | integer | `16` | — | live descendants one root may have at once, however deep; a child whose process is gone is reaped and frees its slot | `src/config.rs:load` |
-| `channel_max_active` | integer | `4` | — | the largest number of channel conversations answering at once; the rest wait | `src/config.rs:load` |
-| `channel_per_conversation_rpm` | integer | `20` | — | at most this many messages per conversation in a 60-second window | `src/config.rs:load` |
-| `channel_global_rpm` | integer | `120` | — | at most this many messages across all conversations in a 60-second window | `src/config.rs:load` |
-| `channel_fallback` | string | `Sorry — I couldn't finish that. Please try again.` | — | the single fallback reply sent when a channel turn errors, pauses or times out | `src/config.rs:load` |
-| `channel_spool_limit` | integer (bytes) | `8388608` | — | compact the append-only channel spool once it grows past this size | `src/config.rs:load` |
-| `notify` | table | unset: no notifications | — | `[notify]`: `turn_done`, `error`, `paused`, `bg_settled` and `child_settled` each take a command or list of commands (scrubbed shell hooks, 30 s timeout, rate-limited); `terminal` (`false` by default), `terminal_kind` (`osc9` or `osc777`), `rate_limit` seconds and `title` control the optional OSC record, emitted only on a TTY. Nothing is enabled by default | `src/config.rs:notify` |
+| `shell` | string or array of strings | Git for Windows `bash.exe`, else `bash` on PATH, else `cmd.exe /C` on Windows; `bash` on PATH, else `$SHELL`, else `sh`, each with `-c`, elsewhere | — | argv prefix for `bash` tool calls and `kelir bg run` | `src/config.rs:load` |
+| `spill_limit` | integer (bytes) | `10240` | — | output above this is spilled to a file and the model sees a notice | `src/config.rs:load` |
+| `max_steps` | integer | unset; `0` also means unlimited | `--max-steps` | cap the steps of one turn; reaching it pauses the turn | `src/config.rs:load` |
+| `cache_ttl` | string | unset: provider default | — | `cache_control.ttl` (`5m`, `1h`) | `src/config.rs:load` |
+| `prompt` | path | embedded `src/prompt.md` | — | base prompt; `<cwd>/.kelir/prompt.md` still wins | `src/config.rs:load_prompt` |
+| `window` | integer (tokens) | provider metadata, else `128000` | — | context window when a provider publishes none | `src/config.rs:load` |
+| `model_windows` | table of integers keyed by model id | empty | — | per-model window overrides | `src/config.rs:load` |
+| `promote_after` | integer (seconds) | `600`; `0` disables | `KELIR_PROMOTE_AFTER` | promote a still-running bash call to a background job | `src/config.rs:promote_after` |
+| `warn_prompt_tokens` | integer | `150000`; `0` turns it off | — | one `note{kind:"prompt_tokens"}` event and screen line when a prompt grows past it, never sent to the model | `src/config.rs:load` |
+| `skills_dirs` | array of paths | empty (the default directories are always searched) | — | extra read-only skill directories | `src/config.rs:load` |
+| `memory_dir` | path | unset | — | directory of notes rendered into the frozen system; later edits arrive as `source` messages | `src/config.rs:load` |
+| `gates` | table | unset | — | external and built-in gates at the six named points; see `docs/reference/gates.md` | `src/config.rs:load` |
+| `trusted_projects` | array of paths | empty | `KELIR_TRUST_PROJECT` | machine-only: projects whose own gates may run; a project layer's `gates` is ignored elsewhere | `src/config.rs:load` |
+| `providers` | table keyed by provider name | both built-in providers | — | per-provider settings; only `openrouter` and `opencode-go` exist | `src/config.rs:load` |
 
-### Per provider (`[providers.<name>]`)
+## `[providers.<name>]`
 
 | key | type | default | override | effect | source |
 |---|---|---|---|---|---|
-| `base_url` | string | the provider's own endpoint | `KELIR_BASE_URL` (for the session's provider) | where requests go: a proxy, a gateway, or a test's mock server | `src/config.rs:load` |
-| `key_env` | string | `OPENROUTER_API_KEY` / `KELIR_GO_API_KEY` | — | the variable the key is read from first | `src/config.rs:load` |
-| `key_cmd` | array of strings | unset | — | a command whose trimmed stdout is the key, when the variable says nothing; only its file name is recorded | `src/config.rs:load` |
-| `key` | string | — | — | **refused** here too: warned about and ignored | `src/config.rs:load` |
-| `extra_headers` | table of strings | empty | — | headers added to every request to this provider | `src/config.rs:load` |
-| `reasoning_field` | string | unset: no field | — | the request field a provider wants its effort in, when it is not the documented one | `src/config.rs:load` |
-| `reasoning_effort` | string: `low`, `medium`, `high`, `none` | `medium` | — | how much hidden reasoning to ask for; `none` sends no field, and an explicit value reaches a model even when the provider's list says nothing | `src/config.rs:load` |
-| `session_header` | string | `x-opencode-session` for `opencode-go` | — | the header carrying the session id, for a provider that requires one | `src/config.rs:load` |
-| `max_concurrent_requests` | integer | unset: no limit | — | at most this many requests in flight to this provider across every local kelir process (`0`/unset = off) | `src/config.rs:load` |
+| `base_url` | string | provider's endpoint | `KELIR_BASE_URL` | proxy, gateway or mock server | `src/config.rs:load` |
+| `key_env` | string | `OPENROUTER_API_KEY` / `KELIR_GO_API_KEY` | — | variable read first for the key | `src/config.rs:load` |
+| `key_cmd` | array of strings | unset | — | command whose trimmed stdout is the key; only its file name is recorded | `src/config.rs:load` |
+| `extra_headers` | table of strings | empty | — | headers added to every request | `src/config.rs:load` |
+| `reasoning_field` | string | provider default | — | request field for reasoning effort | `src/config.rs:load` |
+| `reasoning_effort` | `low`, `medium`, `high`, `none` | `medium` | — | `none` sends no field; an explicit value overrides provider model metadata | `src/config.rs:load` |
+| `session_header` | string | `x-opencode-session` for Go | — | header carrying the session id | `src/config.rs:load` |
+| `max_concurrent_requests` | integer | unset: no limit | — | concurrency cap across local kelir processes | `src/config.rs:load` |
 
-## What the two provider tables are, exactly
+## `[compaction]`
 
-`[providers.openrouter]` and `[providers.opencode-go]`, and nothing else: the
-table name *is* the provider (`kind = "…"` is no longer read). Each one starts
-from a built-in entry (its base URL, its key source, and its session header for
-Go) and the file overlays what it names; `overlay()` in `src/config.rs` shows the
-merge order.
+| key | type | default | effect | source |
+|---|---|---|---|---|
+| `auto_at` | float in `(0, 1]` | `0.8` | fraction of the window that triggers compaction | `src/config.rs:load` |
+| `at_tokens` | integer | `150000`; `0` disables | absolute soft target | `src/config.rs:load` |
+| `prompt` | path | embedded default in `src/compact.rs` | summary prompt; `<config>/compact.md` is read when unset | `src/config.rs:load_compact_prompt` |
+| `keep` | integer | `4` | messages kept verbatim | `src/config.rs:load` |
 
-## Where the prompt and the skills come from
+## `[retry]`
 
-- `prompt`: a file. When set it is used instead of `<config>/prompt.md` (that
-  file is read only when `prompt` is unset); `<cwd>/.kelir/prompt.md` beats
-  either. `sources[]` in `session_started` records which one
-  won, so a log reader does not have to guess.
-- `compact_prompt`: a file; `<config>/compact.md` is read when the key is unset,
-  else the embedded default in `src/compact.rs`.
-- `skills_dirs`: extra directories, named in the base prompt and searched
-  read-only. `docs/reference/sources-and-skills.md` has the whole search order.
+| key | type | default | effect | source |
+|---|---|---|---|---|
+| `base_ms` | integer | `2000` | first backoff | `src/config.rs:retry_policy` |
+| `cap_ms` | integer | `120000` | backoff ceiling; must be at least `base_ms` | `src/config.rs:retry_policy` |
+| `max_wait` | integer (seconds) | `1800`; `0` = unlimited | per-request wait budget | `src/config.rs:retry_policy` |
+| `max_attempts` | integer | unset | optional attempt cap inside the budget | `src/config.rs:retry_policy` |
+
+## `[children]`
+
+| key | type | default | effect | source |
+|---|---|---|---|---|
+| `max_depth` | integer | `3` | deepest child (root is 0) | `src/config.rs:load` |
+| `max_per_agent` | integer | `10` | live children per agent | `src/config.rs:load` |
+| `max_live_descendants` | integer | `16` | live descendants per root | `src/config.rs:load` |
+
+## `[channel]`
+
+| key | type | default | effect | source |
+|---|---|---|---|---|
+| `max_active` | integer | `4` | conversations answered at once | `src/config.rs:load` |
+| `per_conversation_rpm` | integer | `20` | messages per conversation per minute | `src/config.rs:load` |
+| `global_rpm` | integer | `120` | messages across all conversations per minute | `src/config.rs:load` |
+| `fallback` | string | `Sorry — I couldn't finish that. Please try again.` | reply when a channel turn fails | `src/config.rs:load` |
+| `spool_limit` | integer (bytes) | `8388608` | compact the spool above this size | `src/config.rs:load` |
+
+## `[notify]`
+
+| key | type | default | effect | source |
+|---|---|---|---|---|
+| `hooks` | table of command strings or lists | empty | `turn_done`, `error`, `paused`, `bg_settled`, `child_settled`: scrubbed shell hooks, 30 s timeout, rate-limited | `src/config.rs:notify` |
+| `terminal` | boolean | `false` | emit an OSC terminal record on a TTY | `src/config.rs:notify` |
+| `terminal_kind` | string | empty | `osc9` or `osc777` | `src/config.rs:notify` |
+| `rate_limit` | integer (seconds) | `0` | minimum interval between terminal records | `src/config.rs:notify` |
+| `title` | string | empty | title used by the terminal record | `src/config.rs:notify` |
+
+## `[mcp.servers.<name>]`
+
+MCP servers used to live in a second file; they are now part of `config.toml`.
+The two layers merge by server name: a project's `[mcp.servers.x]` replaces the
+machine's whole, never field by field.
+
+| key | type | default | effect | source |
+|---|---|---|---|---|
+| `servers` | table | empty | every MCP server, keyed by name | `src/config.rs:load` |
+| `command` | string | required | program to start | `src/mcp/config.rs:from_raw` |
+| `args` | array of strings | empty | argv after the command | `src/mcp/config.rs:from_raw` |
+| `env` | table of strings | empty | server-only environment; never printed | `src/mcp/config.rs:from_raw` |
+| `description` | string | empty | first line shown by `kelir mcp ls` | `src/mcp/config.rs:from_raw` |
+| `channel` | boolean | `false` | connect when the session starts | `src/mcp/config.rs:from_raw` |
+| `timeout` | integer (seconds) | `60`; `0` is refused | time allowed for one call | `src/mcp/config.rs:from_raw` |
+| `reply_tool` | string | channel default | tool a channel server sends answers with | `src/mcp/config.rs:from_raw` |
+| `declare_capabilities` | array of strings | empty | capabilities announced at `initialize`; permission relays are refused | `src/mcp/config.rs:from_raw` |
+
+A name is letters, digits, `-` or `_`, and not `ls`. A malformed value is
+reported with its table and field but never its value: an error reaches the
+model and the log, and a server's `env` may hold a secret.

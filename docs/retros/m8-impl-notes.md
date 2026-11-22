@@ -14,7 +14,7 @@ Branch `job/m8`. What was built, what was decided, what to look at.
   `before_tool`/`after_tool` in `run_tools`; `turn_end` in `drive_turn` at the
   no-tool-calls branch; MCP calls through `gated_mcp_call` (broker task).
 - `EventBody::Gate`, `ToolOutcome::denied`, `tools::denied_text`, `envs` (`KELIR_GATE_EVENT`,
-  `KELIR_GATE_NAME`, test hook `KELIR_GATE_TIMEOUT_MS`), `mcp::rpc::inherited` made `pub(crate)`.
+  `KELIR_GATE_NAME`, test hook `KELIR_TEST_GATE_TIMEOUT_MS`), `mcp::rpc::inherited` made `pub(crate)`.
 - `observe`: `== gates ==` and `== gates fired ==`.
 - `examples/gates/`: `verify_before_claim.py`, `note_check.py`, `git_sync.py`, `numbered_answers.py`.
 - `sources.rs`: `BUILTIN_SKILLS` (kelir, delegation, herdr); `src/docs/skill-delegation.md`,
@@ -33,7 +33,7 @@ Branch `job/m8`. What was built, what was decided, what to look at.
    Only when a prompt gate exists; otherwise the old path is unchanged.
 4. **MCP gate events are logged at settle time** (the gate ran on the broker task, only the loop
    writes the log); the `gate_runs` ride in the internal settle verb (key-checked like the rest).
-5. **Project-layer gates run without a trust prompt** (DEVIATIONS, same as project `mcp.toml`).
+5. **Project-layer gates run without a trust prompt** (DEVIATIONS, same as project `config.toml`).
 6. The `delegation` skill documents M7's CLI from the SPEC; M7 was not merged here.
 
 ## Tests

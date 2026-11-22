@@ -292,7 +292,7 @@ kelir mcp <server> call <tool> ...   (a tool named ls or call)
 
 Exit codes: 0 ok, 1 the tool reported `isError`, 2 usage, 3 server
 unavailable, 4 timeout (unknown outcome, never retried). The whole story —
-`mcp.toml`, typing of `k=v`, the broker, channel servers — is `kelir docs mcp`.
+`config.toml`, typing of `k=v`, the broker, channel servers — is `kelir docs mcp`.
 
 ## `kelir bg-shim`
 

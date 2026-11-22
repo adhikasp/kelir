@@ -14,7 +14,7 @@ Job `m9`: brief `docs/tasks/M9.md`. Worktree `kelir-wt/m9`, branch `job/m9`.
 | notify hooks (scrubbed env, 30 s, tree kill) | `src/notify.rs` |
 | the two calls the loop makes | `src/session/jobhooks.rs`; edits in `src/session.rs`, `src/session/children.rs` |
 | CLI surface | `src/cli.rs` (`Job`, `Sessions`, `run --name`), `src/main.rs` |
-| env: `KELIR_JOB*` (set), `KELIR_NOTIFY_TIMEOUT_MS`, `KELIR_TODAY` (tests) | `src/envs.rs` |
+| env: `KELIR_JOB*` (set), `KELIR_TEST_NOTIFY_TIMEOUT_MS`, `KELIR_TEST_TODAY` (tests) | `src/envs.rs` |
 | docs: topic `jobs`, SPEC "Jobs", DEVIATIONS "M9", files/source-map/README, generated tables | `docs/` |
 | tests | 18 e2e in `tests/e2e_m9.rs`; unit tests in `atomic`, `joblock` (9), `jobs` (11), `names` (2) |
 

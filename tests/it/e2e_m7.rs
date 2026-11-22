@@ -531,7 +531,7 @@ async fn depth_four_is_refused() {
     let result = result_of_call(&l4, "call_4");
     assert!(result.contains("rc=3"), "{result}");
     assert!(result.contains("depth 4"), "{result}");
-    assert!(result.contains("max_child_depth"), "{result}");
+    assert!(result.contains("[children] max_depth"), "{result}");
     assert!(
         family
             .by_task()

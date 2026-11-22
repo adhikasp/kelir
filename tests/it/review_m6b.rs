@@ -30,7 +30,7 @@ fn toml_for(args_extra: &str, env: &[(&str, &str)]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "[servers.s]\ncommand = '{}'\nargs = ['{}'{args_extra}]\ndescription = \"m6b server\"\nenv = {{ {env_text} }}\n",
+        "[mcp.servers.s]\ncommand = '{}'\nargs = ['{}'{args_extra}]\ndescription = \"m6b server\"\nenv = {{ {env_text} }}\n",
         python(),
         SERVER
     )
@@ -53,8 +53,8 @@ impl Files {
         self.path(name).to_string_lossy().into_owned()
     }
     fn mcp_toml(&self, text: &str) -> String {
-        let path = self.path("mcp.toml");
-        std::fs::write(&path, text).unwrap();
+        let path = self.path("config.toml");
+        std::fs::write(&path, test_config(text)).unwrap();
         path.to_string_lossy().into_owned()
     }
 }
@@ -152,7 +152,7 @@ async fn session_run(files: &Files, toml: &str, command: &str) -> Run {
     let run = run_task(
         &mock,
         &["run", "--json", "use the server"],
-        &[("KELIR_MCP_CONFIG", config.as_str())],
+        &[("KELIR_CONFIG", config.as_str())],
         None,
         "",
     )
@@ -410,51 +410,63 @@ async fn the_servers_command_line_has_no_env_values() {
 
 /// Configuration errors never echo a value, for many ways to break a file
 /// around a secret (all through the library parser the session and the CLI use).
+/// Parse one config document and return the mcp-server validation error, if any.
+fn parse_layer(text: &str, _label: &str) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    kelir::config::load(Some(&path))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 #[test]
 fn config_errors_never_echo_a_secret() {
     let secret = "sk-CANARY-fuzz-0042";
     let shapes: Vec<String> = vec![
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\" , }} oops"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\" \n}}"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = '{secret}\n}}"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\", T = \"{secret}\" }}"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = {secret} }}"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ \"{secret}\" = 1 }}"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ {secret} = \"v\" }}"),
-        format!("[servers.a]\ncommand='x'\nenv = [\"{secret}\"]"),
-        format!("[servers.a]\ncommand='x'\nenv = \"{secret}\""),
-        format!("[servers.a]\ncommand={{ x = \"{secret}\" }}"),
-        format!("[servers.a]\ncommand='x'\nargs = \"{secret}\""),
-        format!("[servers.a]\ncommand='x'\nargs = [1, \"{secret}\"]"),
-        format!("[servers.a]\ncommand='x'\nchannel = \"{secret}\""),
-        format!("[servers.a]\ncommand='x'\ntimeout = \"{secret}\""),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\" , }} oops"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\" \n}}"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = '{secret}\n}}"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\", T = \"{secret}\" }}"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = {secret} }}"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ \"{secret}\" = 1 }}"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ {secret} = \"v\" }}"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = [\"{secret}\"]"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = \"{secret}\""),
+        format!("[mcp.servers.a]\ncommand={{ x = \"{secret}\" }}"),
+        format!("[mcp.servers.a]\ncommand='x'\nargs = \"{secret}\""),
+        format!("[mcp.servers.a]\ncommand='x'\nargs = [1, \"{secret}\"]"),
+        format!("[mcp.servers.a]\ncommand='x'\nchannel = \"{secret}\""),
+        format!("[mcp.servers.a]\ncommand='x'\ntimeout = \"{secret}\""),
         format!(
-            "[servers.a]\ncommand='x'\ntimeout = -1\ndescription = \"{secret}\"\nbogus = \"{secret}\""
+            "[mcp.servers.a]\ncommand='x'\ntimeout = -1\ndescription = \"{secret}\"\nbogus = \"{secret}\""
         ),
-        format!("[servers.{secret}]\ncommand='x'"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = \"\\q{secret}\" }}"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\\u00\" }}"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\\uD800\" }}"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = 0x{secret} }}"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = 1979-05-27T07:32:00Z{secret} }}"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = \"\"\"{secret}\n"),
-        format!("[servers.a]\ncommand='x'\nenv.T = \"{secret}\"\nenv.T = \"{secret}\""),
+        format!("[mcp.servers.{secret}]\ncommand='x'"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"\\q{secret}\" }}"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\\u00\" }}"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\\uD800\" }}"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = 0x{secret} }}"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = 1979-05-27T07:32:00Z{secret} }}"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"\"\"{secret}\n"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv.T = \"{secret}\"\nenv.T = \"{secret}\""),
         format!(
-            "[servers.a]\ncommand='x'\n[servers.a.env]\nT = \"{secret}\"\n[servers.a.env]\nT = \"{secret}\""
+            "[mcp.servers.a]\ncommand='x'\n[mcp.servers.a.env]\nT = \"{secret}\"\n[mcp.servers.a.env]\nT = \"{secret}\""
         ),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\" }}\n[servers.a]\ncommand='y'"),
+        format!(
+            "[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\" }}\n[mcp.servers.a]\ncommand='y'"
+        ),
         format!("servers = \"{secret}\""),
         format!("servers = {{ a = \"{secret}\" }}"),
         format!("[servers]\na = \"{secret}\""),
-        format!("[servers.a]\ncommand = \"{secret}\"\nenv = 7"),
-        format!("[servers.a]\ncommand = 5\nenv = {{ T = \"{secret}\" }}"),
-        format!("\u{feff}[servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\"}} #"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\" }}\n{secret}"),
-        format!("[servers.a]\ncommand='x'\n{secret} = 1"),
-        format!("[servers.a]\ncommand='x'\nenv = {{ T = \"{secret}, expected a string\" , }}"),
+        format!("[mcp.servers.a]\ncommand = \"{secret}\"\nenv = 7"),
+        format!("[mcp.servers.a]\ncommand = 5\nenv = {{ T = \"{secret}\" }}"),
+        format!("\u{feff}[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\"}} #"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"{secret}\" }}\n{secret}"),
+        format!("[mcp.servers.a]\ncommand='x'\n{secret} = 1"),
+        format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"{secret}, expected a string\" , }}"),
     ];
     for (n, text) in shapes.iter().enumerate() {
-        if let Err(error) = kelir::mcp::config::parse_layer(text, "mcp.toml") {
+        if let Err(error) = parse_layer(text, "config.toml") {
             // A key NAME may legitimately be reported (`unknown field`), but a
             // value never; for shapes where the secret is a key, the message
             // may name it, so only value-position shapes are asserted below.

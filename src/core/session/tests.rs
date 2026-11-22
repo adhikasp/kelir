@@ -188,6 +188,7 @@ fn test_session(model: &str) -> Session {
             gates: Vec::new(),
             project_gates: Vec::new(),
             trusted_projects: Vec::new(),
+            mcp: std::collections::BTreeMap::new(),
             channel: crate::channel::Config {
                 max_active: 4,
                 per_conversation_rpm: 20,
@@ -276,6 +277,7 @@ fn system_prompt_is_stable_within_a_run() {
         gates: Vec::new(),
         project_gates: Vec::new(),
         trusted_projects: Vec::new(),
+        mcp: std::collections::BTreeMap::new(),
         channel: crate::channel::Config {
             max_active: 4,
             per_conversation_rpm: 20,

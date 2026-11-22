@@ -180,7 +180,7 @@ then re-run the gates on `main`.
 - Envelope: `user` event with `from: channel`, remote-user/untrusted warning,
   `reply-to` and attachment pointers (`tests/e2e_m10.rs`, live log).
 - Provider failure → exactly one fallback reply (`tests/e2e_m10.rs::one_fallback_on_failure`).
-- No canary from `mcp.toml` env in events, spool, stdout or stderr
+- No canary from `config.toml` env in events, spool, stdout or stderr
   (`r8`, e2e, live grep: `none`).
 - `turn_done` notification sent on turn end (e2e + live).
 - OSC 7501 status: `Working` while a turn runs, `Idle` otherwise

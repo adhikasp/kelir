@@ -96,13 +96,12 @@ pub struct Config {
     /// A bash call still running after this long is promoted to a background job instead of being killed
     /// (`config.toml` `promote_after`, seconds; `KELIR_PROMOTE_AFTER` overrides it; zero disables
     pub promote_after: std::time::Duration,
-    /// What to retry and how long to wait (`retry_base_ms`, `retry_cap_ms`,
-    /// `retry_max_wait`).
+    /// What to retry and how long to wait (`[retry]` table).
     pub retry: crate::retry::Policy,
     /// Warn (log and screen, never the model) when the last prompt is larger than this many
     /// tokens (`warn_prompt_tokens`, default 150000; `None` = off).
     pub warn_prompt_tokens: Option<u64>,
-    /// The child caps (`max_child_depth`, `max_children`, `max_live_descendants`):
+    /// The child caps (`[children] max_depth`, `max_per_agent`, `max_live_descendants`):
     /// enforced by the root session's registry.
     pub children: crate::child::Caps,
     /// Gates declared under `[gates]`; skills add theirs at session start.
@@ -118,10 +117,12 @@ pub struct Config {
     /// Notification hooks and terminal records. Nothing is enabled by
     /// default.
     pub notify: crate::notify::Config,
+    /// `[mcp.servers.*]`: the MCP servers this machine/project configures.
+    pub mcp: BTreeMap<String, crate::mcp::config::ServerConfig>,
 }
 
-/// Every top-level and per-provider key the config reader accepts, for the
-/// docs drift test. The test below checks it against the serde structs.
+/// Every top-level and per-table key the config reader accepts, for the docs
+/// drift test. The test below checks it against the serde structs.
 pub const KEYS: &[&str] = &[
     "provider",
     "model",
@@ -130,33 +131,58 @@ pub const KEYS: &[&str] = &[
     "max_steps",
     "cache_ttl",
     "prompt",
-    "providers",
-    "key",
     "window",
     "model_windows",
-    "auto_compact_at",
-    "compact_at_tokens",
-    "compact_prompt",
-    "compact_keep",
+    "promote_after",
+    "warn_prompt_tokens",
     "skills_dirs",
     "memory_dir",
-    "promote_after",
-    "retry_base_ms",
-    "retry_cap_ms",
-    "retry_max_wait",
-    "retry_max_attempts",
-    "warn_prompt_tokens",
-    "max_child_depth",
-    "max_children",
-    "max_live_descendants",
     "gates",
     "trusted_projects",
-    "channel_max_active",
-    "channel_per_conversation_rpm",
-    "channel_global_rpm",
-    "channel_fallback",
-    "channel_spool_limit",
+    "providers",
+    "compaction",
+    "retry",
+    "children",
+    "channel",
     "notify",
+    "mcp",
+    // compaction
+    "auto_at",
+    "at_tokens",
+    "prompt",
+    "keep",
+    // retry
+    "base_ms",
+    "cap_ms",
+    "max_wait",
+    "max_attempts",
+    // children
+    "max_depth",
+    "max_per_agent",
+    "max_live_descendants",
+    // channel
+    "max_active",
+    "per_conversation_rpm",
+    "global_rpm",
+    "fallback",
+    "spool_limit",
+    // notify
+    "hooks",
+    "terminal",
+    "terminal_kind",
+    "rate_limit",
+    "title",
+    // mcp
+    "servers",
+    "command",
+    "args",
+    "env",
+    "description",
+    "reply_tool",
+    "declare_capabilities",
+    "channel",
+    "timeout",
+    // provider table
     "base_url",
     "key_env",
     "key_cmd",
@@ -178,8 +204,84 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// `[compaction]`: when and how a long conversation is summarised.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawCompaction {
+    auto_at: Option<f64>,
+    at_tokens: Option<u64>,
+    prompt: Option<String>,
+    keep: Option<usize>,
+}
+
+/// `[retry]`: the backoff schedule and budget.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawRetry {
+    base_ms: Option<u64>,
+    cap_ms: Option<u64>,
+    max_wait: Option<u64>,
+    max_attempts: Option<u32>,
+}
+
+/// `[children]`: the caps the root enforces on its descendants.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawChildren {
+    max_depth: Option<u32>,
+    max_per_agent: Option<u32>,
+    max_live_descendants: Option<u32>,
+}
+
+/// `[channel]`: the conversation and rate limits of a channel bridge.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawChannel {
+    max_active: Option<usize>,
+    per_conversation_rpm: Option<u32>,
+    global_rpm: Option<u32>,
+    fallback: Option<String>,
+    spool_limit: Option<u64>,
+}
+
+/// `[notify]`: event hooks and the optional OSC terminal record.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
+struct RawNotify {
+    terminal: bool,
+    terminal_kind: Option<String>,
+    rate_limit: Option<u64>,
+    title: Option<String>,
+    #[serde(flatten)]
+    hooks: BTreeMap<String, toml::Value>,
+}
+
+/// `[mcp.servers.<name>]`: one place for MCP servers.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawMcp {
+    servers: BTreeMap<String, RawMcpServer>,
+}
+
+/// One MCP server. The name is the CLI word and a directory name, so it is
+/// validated at load time (see [`crate::mcp::config::valid_name`]).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawMcpServer {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub description: String,
+    pub channel: bool,
+    pub timeout: Option<u64>,
+    pub reply_tool: Option<String>,
+    pub declare_capabilities: Vec<String>,
+}
+
+/// Every table is strict: an unknown key is the ordinary unknown-key error,
+/// with no "was removed" message for any name.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct RawConfig {
     provider: Option<String>,
     model: Option<String>,
@@ -188,49 +290,22 @@ struct RawConfig {
     max_steps: Option<u32>,
     cache_ttl: Option<String>,
     prompt: Option<String>,
-    providers: BTreeMap<String, RawProvider>,
-    /// A key written into the config file itself.
-    key: Option<String>,
     window: Option<u64>,
     model_windows: BTreeMap<String, u64>,
-    auto_compact_at: Option<f64>,
-    compact_at_tokens: Option<u64>,
-    compact_prompt: Option<String>,
-    compact_keep: Option<usize>,
-    skills_dirs: Vec<PathBuf>,
-    /// A directory of notes loaded as sources (`memory_dir`).
-    memory_dir: Option<PathBuf>,
     promote_after: Option<u64>,
-    retry_base_ms: Option<u64>,
-    retry_cap_ms: Option<u64>,
-    /// Total waiting per request in seconds; `0` waits as long as it takes.
-    retry_max_wait: Option<u64>,
-    /// A count cap inside the budget (`retry_max_attempts`), for a job that
-    /// wants "three tries and out".
-    retry_max_attempts: Option<u32>,
     warn_prompt_tokens: Option<u64>,
-    max_child_depth: Option<u32>,
-    max_children: Option<u32>,
-    max_live_descendants: Option<u32>,
-    /// `[gates]`: event name -> command, table or list (see `crate::gates`).
-    gates: Option<toml::Value>,
-    /// Directories whose project-layer gates may run (machine layer only).
-    #[serde(default)]
+    skills_dirs: Vec<PathBuf>,
+    memory_dir: Option<PathBuf>,
     trusted_projects: Vec<PathBuf>,
-    /// Channel mode: how many conversations may answer at once.
-    channel_max_active: Option<usize>,
-    /// Channel mode: messages per conversation per minute.
-    channel_per_conversation_rpm: Option<u32>,
-    /// Channel mode: messages across all conversations per minute.
-    channel_global_rpm: Option<u32>,
-    /// Channel mode: fallback reply text when a turn fails, pauses or times out.
-    channel_fallback: Option<String>,
-    /// Channel mode: spool bytes before done records are compacted.
-    channel_spool_limit: Option<u64>,
-    /// `[notify]`: event -> hook commands, plus terminal and rate-limit knobs.
-    notify: Option<toml::Value>,
+    gates: Option<toml::Value>,
+    providers: BTreeMap<String, RawProvider>,
+    compaction: RawCompaction,
+    retry: RawRetry,
+    children: RawChildren,
+    channel: RawChannel,
+    notify: RawNotify,
+    mcp: RawMcp,
 }
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum ShellSpec {
@@ -239,14 +314,11 @@ enum ShellSpec {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct RawProvider {
     base_url: Option<String>,
     key_env: Option<String>,
     key_cmd: Option<Vec<String>>,
-    /// A literal key in a provider table: warned about and ignored, never used
-    /// (the same rule as the top-level `key`).
-    key: Option<String>,
     extra_headers: BTreeMap<String, String>,
     reasoning_field: Option<String>,
     reasoning_effort: Option<String>,
@@ -267,24 +339,10 @@ pub fn unknown_provider(name: &str) -> ConfigError {
     ))
 }
 
-/// The error a `[providers.<name>]` table with an unknown name gives ( fix 3): it says which table, in
-/// which file, that the name *is* the provider (`kind = …` is no longer used), and what to rename it
-pub fn unknown_provider_table(name: &str, sources: &[PathBuf]) -> ConfigError {
-    let files = if sources.is_empty() {
-        "the config file".to_string()
-    } else {
-        sources
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    ConfigError(format!(
-        "`[providers.{name}]` in {files}: unknown provider `{name}`: the table name *is* the provider and there are exactly \
-         two, `{PROVIDER_OPENROUTER}` and `{PROVIDER_GO}` (`kind = \"…\"` is no longer used). Rename the table to \
-         `[providers.{PROVIDER_OPENROUTER}]` or `[providers.{PROVIDER_GO}]`, then check `provider = \"…\"` in the same file; \
-         `key_env` keeps working"
-    ))
+/// An unknown `[providers.<name>]` table is the same error as an unknown
+/// `provider = "…"`: exactly two names exist, and neither is special.
+pub fn unknown_provider_table(name: &str) -> ConfigError {
+    unknown_provider(name)
 }
 
 fn builtin_provider(name: &str) -> Option<RawProvider> {
@@ -307,61 +365,58 @@ fn builtin_provider(name: &str) -> Option<RawProvider> {
 
 /// Load the config. `explicit` (CLI flag) or `KELIR_CONFIG` replace the search.
 pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    load_for_cwd(explicit, &cwd)
+}
+
+/// Load with an explicit working directory: the MCP broker uses the session's
+/// cwd, which can differ from the process's, to find the project layer.
+pub fn load_for_cwd(explicit: Option<&Path>, cwd: &Path) -> Result<Config, ConfigError> {
     let explicit = explicit
         .map(PathBuf::from)
         .or_else(|| crate::envs::var_os("KELIR_CONFIG").map(PathBuf::from))
         .filter(|p| !p.as_os_str().is_empty());
 
     let mut merged = toml::Value::Table(Default::default());
-    let mut sources: Vec<PathBuf> = Vec::new();
-    let mut project_gates: Option<toml::Value> = None;
-    match explicit {
-        Some(path) => {
-            let value = read_toml(&path)?;
-            merge(&mut merged, value);
-            sources.push(path);
-        }
-        None => {
-            let machine = paths::machine_config_path();
-            if machine.exists() {
-                merge(&mut merged, read_toml(&machine)?);
-                sources.push(machine);
-            }
-            if let Some(project) = find_project_config() {
-                let mut layer = read_toml(&project)?;
-                // The project layer cannot vouch for itself, and its gates are
-                // kept apart: they run only in a trusted project .
-                if let Some(table) = layer.as_table_mut() {
-                    project_gates = table.remove("gates");
-                    if table.remove("trusted_projects").is_some() {
-                        eprintln!(
-                            "kelir: warning: `trusted_projects` in a project config is ignored: it is a machine setting"
-                        );
-                    }
-                }
-                merge(&mut merged, layer);
-                sources.push(project);
-            }
+    if let Some(path) = explicit {
+        merge(&mut merged, read_toml(&path)?);
+    } else {
+        let machine = paths::machine_config_path();
+        if machine.exists() {
+            merge(&mut merged, read_toml(&machine)?);
         }
     }
+    // The project layer always applies, even when a machine file was named
+    // explicitly: a test or a user can point at one machine config without
+    // turning off the project's own settings.
+    let mut project_gates: Option<toml::Value> = None;
+    if let Some(project) = find_project_config(cwd) {
+        let mut layer = read_toml(&project)?;
+        // The project cannot vouch for itself, and its gates need their own
+        // trust decision: keep both out of the merged machine layer.
+        if let Some(table) = layer.as_table_mut() {
+            project_gates = table.remove("gates");
+            if table.remove("trusted_projects").is_some() {
+                eprintln!(
+                    "kelir: warning: `trusted_projects` in a project config is ignored: it is a machine setting"
+                );
+            }
+        }
+        merge(&mut merged, layer);
+    }
 
+    if let Some(providers) = merged.get("providers").and_then(toml::Value::as_table)
+        && let Some(other) = providers
+            .keys()
+            .find(|name| !PROVIDERS.contains(&name.as_str()))
+    {
+        return Err(unknown_provider_table(other));
+    }
     let raw: RawConfig = merged
         .try_into()
-        .map_err(|error| ConfigError(format!("invalid config.toml: {error}")))?;
-    // Read the knobs that are plain numbers before anything is moved out of
-    // `raw`.
+        .map_err(|error| ConfigError(format!("invalid config.toml: {}", safe_de_error(&error))))?;
     let retry = retry_policy(&raw)?;
-
-    // A literal key in the config file is refused with a warning: `key = "…"` goes stale, shadows a live
-    // store and puts a secret in a file that gets copied around.
-    if let Some(_literal) = raw.key.as_deref().filter(|key| !key.trim().is_empty()) {
-        eprintln!(
-            "kelir: warning: `key` in a config file is ignored: use the environment (\
-             {} / {}) or `key_cmd = [\"cmd\", …]`",
-            crate::credentials::OPENROUTER_ENV,
-            crate::credentials::GO_ENV
-        );
-    }
+    let mcp = mcp_servers(&raw.mcp)?;
 
     let shell = match raw.shell {
         Some(ShellSpec::One(shell)) => vec![shell, "-c".into()],
@@ -369,27 +424,20 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         _ => default_shell(),
     };
 
-    // Exactly two providers, and only those two: a table for anything else is a usage error that
-    // names the pair (a maintainer's config called theirs `kelir`) and the file to edit.
     if let Some(other) = raw
         .providers
         .keys()
         .find(|name| !PROVIDERS.contains(&name.as_str()))
     {
-        return Err(unknown_provider_table(other, &sources));
+        return Err(unknown_provider_table(other));
     }
 
     let mut providers = BTreeMap::new();
     for name in PROVIDERS {
-        let base = builtin_provider(name).unwrap_or_default();
-        let user = raw.providers.get(name).cloned().unwrap_or_default();
-        if let Some(_literal) = user.key.as_deref().filter(|key| !key.trim().is_empty()) {
-            eprintln!(
-                "kelir: warning: `[providers.{name}] key` is ignored: use `key_env`, `key_cmd`,\
-                 or the environment"
-            );
-        }
-        let entry = overlay(base, user);
+        let entry = overlay(
+            builtin_provider(name).unwrap_or_default(),
+            raw.providers.get(name).cloned().unwrap_or_default(),
+        );
         let kind = if name == PROVIDER_OPENROUTER {
             ProviderKind::OpenRouter
         } else {
@@ -397,7 +445,6 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         };
         let base_url = entry
             .base_url
-            .clone()
             .filter(|url| !url.is_empty())
             .ok_or_else(|| ConfigError(format!("provider `{name}`: base_url is required")))?;
         let (effort, effort_explicit) = reasoning_effort(entry.reasoning_effort, name)?;
@@ -406,8 +453,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             ProviderConfig {
                 kind,
                 base_url,
-                // The key itself is resolved at session start ([`crate::credentials`]): it may need a
-                // process read, and a config load must stay pure (a test, a `doctor`, an editor).
+                // The key is resolved at session start ([`crate::credentials`]); load stays pure.
                 key_env: entry.key_env,
                 key_cmd: entry.key_cmd,
                 key: None,
@@ -423,20 +469,38 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         );
     }
 
-    // The base prompt and the file it came from (`None` for the embedded
-    // default), so `sources[]` records the real path .
     let (system_prompt, prompt_path) = load_prompt(raw.prompt.as_deref())?;
-    let compact_prompt = load_compact_prompt(raw.compact_prompt.as_deref())?;
-    let auto_compact_at = raw.auto_compact_at.unwrap_or(crate::compact::AUTO_FRACTION);
+    let compact_prompt = load_compact_prompt(raw.compaction.prompt.as_deref())?;
+    let auto_compact_at = raw
+        .compaction
+        .auto_at
+        .unwrap_or(crate::compact::AUTO_FRACTION);
     if !(0.0..=1.0).contains(&auto_compact_at) || auto_compact_at == 0.0 {
         return Err(ConfigError(format!(
-            "auto_compact_at must be between 0 and 1 (got {auto_compact_at})"
+            "compaction.auto_at must be between 0 and 1 (got {auto_compact_at})"
         )));
     }
 
+    let gates = match &raw.gates {
+        Some(value) => crate::gates::from_toml(value).map_err(ConfigError)?,
+        None => Vec::new(),
+    };
+    let project_gates = match &project_gates {
+        Some(value) => crate::gates::from_toml(value)
+            .map_err(|error| ConfigError(format!("project config: {error}")))?
+            .into_iter()
+            .map(|mut def| {
+                def.origin = "project config".into();
+                def
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
     Ok(Config {
         compact_at_tokens: raw
-            .compact_at_tokens
+            .compaction
+            .at_tokens
             .unwrap_or(crate::compact::DEFAULT_SOFT_TARGET),
         provider: match raw.provider {
             Some(name) if PROVIDERS.contains(&name.as_str()) => name,
@@ -462,7 +526,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             .into_iter()
             .map(|path| expand_home(&path.to_string_lossy()))
             .collect(),
-        compact_keep: raw.compact_keep.unwrap_or(crate::compact::DEFAULT_KEEP),
+        compact_keep: raw.compaction.keep.unwrap_or(crate::compact::DEFAULT_KEEP),
         memory_dir: raw
             .memory_dir
             .filter(|path| !path.as_os_str().is_empty())
@@ -476,30 +540,20 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         },
         children: crate::child::Caps {
             depth: raw
-                .max_child_depth
+                .children
+                .max_depth
                 .unwrap_or(crate::child::DEFAULT_MAX_DEPTH),
             per_agent: raw
-                .max_children
+                .children
+                .max_per_agent
                 .unwrap_or(crate::child::DEFAULT_MAX_CHILDREN),
             live: raw
+                .children
                 .max_live_descendants
                 .unwrap_or(crate::child::DEFAULT_MAX_LIVE),
         },
-        gates: match &raw.gates {
-            Some(value) => crate::gates::from_toml(value).map_err(ConfigError)?,
-            None => Vec::new(),
-        },
-        project_gates: match &project_gates {
-            Some(value) => crate::gates::from_toml(value)
-                .map_err(|error| ConfigError(format!("project config: {error}")))?
-                .into_iter()
-                .map(|mut def| {
-                    def.origin = "project config".into();
-                    def
-                })
-                .collect(),
-            None => Vec::new(),
-        },
+        gates,
+        project_gates,
         trusted_projects: raw
             .trusted_projects
             .iter()
@@ -507,103 +561,101 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             .collect(),
         channel: crate::channel::Config {
             max_active: raw
-                .channel_max_active
+                .channel
+                .max_active
                 .unwrap_or(crate::channel::DEFAULT_MAX_ACTIVE),
             per_conversation_rpm: raw
-                .channel_per_conversation_rpm
+                .channel
+                .per_conversation_rpm
                 .unwrap_or(crate::channel::DEFAULT_PER_CONVERSATION_RPM),
             global_rpm: raw
-                .channel_global_rpm
+                .channel
+                .global_rpm
                 .unwrap_or(crate::channel::DEFAULT_GLOBAL_RPM),
             fallback: raw
-                .channel_fallback
+                .channel
+                .fallback
                 .unwrap_or_else(|| crate::channel::DEFAULT_FALLBACK.into()),
             spool_limit: raw
-                .channel_spool_limit
+                .channel
+                .spool_limit
                 .unwrap_or(crate::channel::DEFAULT_SPOOL_LIMIT),
         },
-        notify: notify(raw.notify.as_ref())?,
+        notify: notify(&raw.notify)?,
+        mcp,
     })
 }
 
-/// The `[notify]` table: event -> command list, plus terminal and rate limit. Nothing is
-/// enabled by default.
-fn notify(raw: Option<&toml::Value>) -> Result<crate::notify::Config, ConfigError> {
-    let Some(value) = raw else {
-        return Ok(crate::notify::Config::default());
-    };
-    let table = value.as_table().ok_or_else(|| {
-        ConfigError("`[notify]` must be a table of event names and commands".into())
-    })?;
-    let mut cfg = crate::notify::Config::default();
-    for (key, entry) in table {
-        match key.as_str() {
-            "terminal" => {
-                cfg.terminal = entry
-                    .as_bool()
-                    .ok_or_else(|| ConfigError("`notify.terminal` must be a boolean".into()))?;
-            }
-            "terminal_kind" => {
-                let kind = entry.as_str().unwrap_or("").to_string();
-                if !kind.is_empty() && kind != "osc9" && kind != "osc777" {
-                    return Err(ConfigError(
-                        "`notify.terminal_kind` must be `osc9` or `osc777`".into(),
-                    ));
-                }
-                cfg.terminal_kind = kind;
-            }
-            "rate_limit" | "rate_limit_secs" => {
-                cfg.rate_limit_secs = entry
-                    .as_integer()
-                    .and_then(|n| u64::try_from(n).ok())
-                    .ok_or_else(|| {
-                        ConfigError("`notify.rate_limit` must be a non-negative integer".into())
-                    })?;
-            }
-            "title" => {
-                cfg.title = entry.as_str().unwrap_or("").to_string();
-            }
-            kind if crate::notify::KINDS.contains(&kind) => {
-                let commands: Vec<String> = match entry {
-                    toml::Value::String(one) => vec![one.clone()],
-                    toml::Value::Array(list) => list
-                        .iter()
-                        .map(|item| {
-                            item.as_str().map(str::to_string).ok_or_else(|| {
-                                ConfigError(format!("`notify.{kind}` holds a non-string command"))
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                    _ => {
-                        return Err(ConfigError(format!(
-                            "`notify.{kind}` must be a command string or a list of them"
-                        )));
-                    }
-                };
-                cfg.hooks.insert(kind.to_string(), commands);
-            }
-            other => {
+/// Validate and resolve `[mcp.servers.*]` into the shape the broker uses.
+fn mcp_servers(
+    raw: &RawMcp,
+) -> Result<BTreeMap<String, crate::mcp::config::ServerConfig>, ConfigError> {
+    crate::mcp::config::from_raw(&raw.servers).map_err(ConfigError)
+}
+
+/// The `[notify]` table: event -> command list, plus terminal and rate limit.
+/// The hook names are kept as a map; every other key is a typed field, so a
+/// typo is the ordinary unknown-key error from serde.
+fn notify(raw: &RawNotify) -> Result<crate::notify::Config, ConfigError> {
+    if let Some(kind) = &raw.terminal_kind
+        && !kind.is_empty()
+        && kind != "osc9"
+        && kind != "osc777"
+    {
+        return Err(ConfigError(
+            "notify.terminal_kind must be `osc9` or `osc777`".into(),
+        ));
+    }
+    let mut hooks = BTreeMap::new();
+    for (kind, entry) in &raw.hooks {
+        if !crate::notify::KINDS.contains(&kind.as_str()) {
+            return Err(ConfigError(format!(
+                "unknown field `{kind}` in `[notify]`, expected one of {}",
+                crate::notify::KINDS
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        let commands: Vec<String> = match entry {
+            toml::Value::String(one) => vec![one.clone()],
+            toml::Value::Array(list) => list
+                .iter()
+                .map(|item| {
+                    item.as_str().map(str::to_string).ok_or_else(|| {
+                        ConfigError(format!("`notify.{kind}` holds a non-string command"))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => {
                 return Err(ConfigError(format!(
-                    "unknown notification event `{other}` in `[notify]`: expected one of {}",
-                    crate::notify::KINDS.join(", ")
+                    "`notify.{kind}` must be a command string or a list of them"
                 )));
             }
-        }
+        };
+        hooks.insert(kind.clone(), commands);
     }
-    Ok(cfg)
+    Ok(crate::notify::Config {
+        hooks,
+        terminal: raw.terminal,
+        terminal_kind: raw.terminal_kind.clone().unwrap_or_default(),
+        rate_limit_secs: raw.rate_limit.unwrap_or_default(),
+        title: raw.title.clone().unwrap_or_default(),
+    })
 }
 
 /// The retry schedule and budget. A wrong value is a config error rather than a
-/// silent fallback: a person who writes `retry_max_wait` means it.
+/// silent fallback: a person who writes a `retry` key means it.
 fn retry_policy(raw: &RawConfig) -> Result<crate::retry::Policy, ConfigError> {
-    let base_ms = raw.retry_base_ms.unwrap_or(crate::retry::DEFAULT_BASE_MS);
-    let cap_ms = raw.retry_cap_ms.unwrap_or(crate::retry::DEFAULT_CAP_MS);
+    let base_ms = raw.retry.base_ms.unwrap_or(crate::retry::DEFAULT_BASE_MS);
+    let cap_ms = raw.retry.cap_ms.unwrap_or(crate::retry::DEFAULT_CAP_MS);
     if cap_ms < base_ms {
         return Err(ConfigError(format!(
-            "retry_cap_ms ({cap_ms}) must be at least retry_base_ms ({base_ms})"
+            "retry.cap_ms ({cap_ms}) must be at least retry.base_ms ({base_ms})"
         )));
     }
-    let max_wait = match raw.retry_max_wait {
+    let max_wait = match raw.retry.max_wait {
         // `0` is the documented "wait as long as the provider needs".
         Some(0) => None,
         Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
@@ -615,7 +667,7 @@ fn retry_policy(raw: &RawConfig) -> Result<crate::retry::Policy, ConfigError> {
         base_ms,
         cap_ms,
         max_wait,
-        max_attempts: raw.retry_max_attempts.filter(|attempts| *attempts > 0),
+        max_attempts: raw.retry.max_attempts.filter(|attempts| *attempts > 0),
     })
 }
 
@@ -734,7 +786,6 @@ fn overlay(base: RawProvider, user: RawProvider) -> RawProvider {
         base_url: user.base_url.or(base.base_url),
         key_env: user.key_env.or(base.key_env),
         key_cmd: user.key_cmd.or(base.key_cmd),
-        key: user.key.or(base.key),
         extra_headers: {
             let mut headers = base.extra_headers;
             headers.extend(user.extra_headers);
@@ -754,8 +805,50 @@ fn read_toml(path: &Path) -> Result<toml::Value, ConfigError> {
         .map_err(|error| ConfigError(format!("cannot read {}: {error}", path.display())))?;
     // toml 1.x: `str::parse::<Value>()` parses a single TOML *value*, not a
     // document; `from_str` parses the document into a Value (table).
-    toml::from_str(&text)
-        .map_err(|error| ConfigError(format!("invalid TOML in {}: {error}", path.display())))
+    toml::from_str::<toml::Value>(&text).map_err(|error| {
+        let message = error.message().to_string();
+        let (line, column) = error
+            .span()
+            .map(|span| {
+                let before = &text[..span.start.min(text.len())];
+                (
+                    before.matches('\n').count() + 1,
+                    before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1,
+                )
+            })
+            .unwrap_or((0, 0));
+        ConfigError(format!(
+            "invalid TOML in {} at line {line}, column {column}: {message}",
+            path.display()
+        ))
+    })
+}
+
+/// serde quotes the offending value in type errors. A config can hold secrets
+/// (an MCP server's `env`), and this text reaches the model and the log: keep
+/// the field path and the expectation, never the value.
+fn safe_de_error(error: &toml::de::Error) -> String {
+    let text = error.to_string();
+    let mut lines = text.lines();
+    let message = lines.next().unwrap_or("invalid config");
+    let mut out = String::new();
+    for (index, part) in message.split(", expected ").enumerate() {
+        if index > 0 {
+            out.push_str(", expected ");
+        }
+        if index == 0 && (part.starts_with("invalid type: ") || part.starts_with("invalid value: "))
+        {
+            out.push_str(part.split(':').next().unwrap_or("invalid value"));
+            out.push_str(" (value hidden)");
+        } else {
+            out.push_str(part);
+        }
+    }
+    for line in lines {
+        out.push('\n');
+        out.push_str(line);
+    }
+    out
 }
 
 /// Deep merge: tables merge key by key, everything else is replaced.
@@ -776,17 +869,16 @@ fn merge(base: &mut toml::Value, over: toml::Value) {
 }
 
 /// The nearest `.kelir/config.toml`, walking up from the cwd.
-fn find_project_config() -> Option<PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
+fn find_project_config(cwd: &Path) -> Option<PathBuf> {
+    let mut current = Some(cwd.to_path_buf());
+    while let Some(dir) = current {
         let candidate = dir.join(".kelir").join("config.toml");
         if candidate.exists() {
             return Some(candidate);
         }
-        if !dir.pop() {
-            return None;
-        }
+        current = dir.parent().map(Path::to_path_buf);
     }
+    None
 }
 
 /// The base prompt text and the file it came from (`None` for the embedded
@@ -882,12 +974,14 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// Field names of `struct RawConfig` / `RawProvider`, read from this file.
+    /// Field names of a `Raw*` struct, read from this file.
     fn fields(src: &str, name: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut inside = false;
         for line in src.lines() {
-            if line.starts_with(&format!("struct {name} {{")) {
+            if line.starts_with(&format!("struct {name} {{"))
+                || line.starts_with(&format!("pub struct {name} {{"))
+            {
                 inside = true;
             } else if inside && line == "}" {
                 break;
@@ -895,7 +989,7 @@ mod tests {
                 let Some((field, _)) = line.trim().split_once(':') else {
                     continue;
                 };
-                let field = field.trim();
+                let field = field.trim().trim_start_matches("pub ").trim();
                 if !field.starts_with("//") {
                     out.push(field.to_string());
                 }
@@ -908,10 +1002,20 @@ mod tests {
     #[test]
     fn keys_track_the_config_structs() {
         const SRC: &str = include_str!("config.rs");
-        let from_code: std::collections::BTreeSet<String> = fields(SRC, "RawConfig")
-            .into_iter()
-            .chain(fields(SRC, "RawProvider"))
-            .collect();
+        let from_code: std::collections::BTreeSet<String> = [
+            "RawConfig",
+            "RawProvider",
+            "RawCompaction",
+            "RawRetry",
+            "RawChildren",
+            "RawChannel",
+            "RawNotify",
+            "RawMcp",
+            "RawMcpServer",
+        ]
+        .into_iter()
+        .flat_map(|name| fields(SRC, name))
+        .collect();
         let listed: std::collections::BTreeSet<String> =
             KEYS.iter().map(|key| (*key).to_string()).collect();
         assert_eq!(
@@ -955,7 +1059,6 @@ model = "some/model"
 spill_limit = 2048
 max_steps = 7
 shell = ["sh", "-c"]
-reasoning_unused = 1
 [providers.opencode-go]
 base_url = "https://example.invalid/v1"
 reasoning_field = "thinking"
@@ -1022,21 +1125,13 @@ extra_headers = { "x-extra" = "yes" }
         // error has to say which, in which table and in which file, and how to migrate.
         for text in [
             "[providers.local]\nkey_env = \"NOPE_KEY\"\n",
-            "[providers.weird]\nkind = \"gemini\"\nbase_url = \"x\"\n",
+            "[providers.weird]\nbase_url = \"x\"\n",
         ] {
             let path = temp_config(text);
             let error = load(Some(&path)).unwrap_err().to_string();
             assert!(error.contains("exactly two"), "{error}");
             assert!(error.contains(PROVIDER_OPENROUTER), "{error}");
             assert!(error.contains(PROVIDER_GO), "{error}");
-            assert!(error.contains("[providers.local]") || error.contains("[providers.weird]"));
-            assert!(
-                error.contains(&path.display().to_string()),
-                "the file to edit: {error}"
-            );
-            assert!(error.contains("Rename the table"), "{error}");
-            assert!(error.contains("key_env"), "{error}");
-            assert!(!error.contains("kind = \"…\" is no longer used\n"));
         }
     }
 
@@ -1061,10 +1156,12 @@ extra_headers = { "x-extra" = "yes" }
             format!("[{table}]\n"),
             format!("[{table}.\"a/b\"]\ninput = 1.0\noutput = 2.0\n"),
         ] {
-            let cfg = load(Some(&temp_config(&removed))).unwrap();
-            assert_eq!(cfg.warn_prompt_tokens, Some(150_000));
-            // No special "this was removed" message: an unread key is just
-            // ignored, like any other key the current config does not know.
+            let error = load(Some(&temp_config(&removed))).unwrap_err().to_string();
+            assert!(error.contains("unknown field"), "{error}");
+            assert!(!error.contains("no longer used"), "{error}");
+            assert!(!error.contains("removed"), "{error}");
+            // No tailored "this was removed" message: a dead key gets the
+            // ordinary unknown-key treatment.
         }
     }
 
@@ -1081,11 +1178,8 @@ extra_headers = { "x-extra" = "yes" }
 
     #[test]
     fn the_two_provider_tables_only_override_their_settings() {
-        // A `[providers.openrouter]` table that names a kind is not how a
-        // provider is chosen any more: the name is the provider.
-        let path = temp_config(
-            "[providers.opencode-go]\nbase_url = \"http://127.0.0.1:1/v1\"\nkind = \"openrouter\"\n",
-        );
+        // The table name is the provider; it cannot be changed from inside.
+        let path = temp_config("[providers.opencode-go]\nbase_url = \"http://127.0.0.1:1/v1\"\n");
         let cfg = load(Some(&path)).unwrap();
         let go = cfg.providers.get(PROVIDER_GO).unwrap();
         assert_eq!(
@@ -1098,15 +1192,14 @@ extra_headers = { "x-extra" = "yes" }
 
     #[test]
     fn a_literal_key_in_the_config_is_ignored_not_used() {
-        // Warned about (to stderr) and refused: a literal goes stale, shadows a
-        // live store and puts a secret in a file that gets copied.
+        // Refused at load: a literal goes stale, shadows a live store and puts
+        // a secret in a file that gets copied.
         let path = temp_config(
             "key = \"sk-literal-not-used\"\n[providers.openrouter]\nkey = \"sk-also-not-used\"\n",
         );
-        let cfg = load(Some(&path)).unwrap();
-        let openrouter = cfg.providers.get(PROVIDER_OPENROUTER).unwrap();
-        assert_eq!(openrouter.key, None, "a config-file key is never used");
-        assert_eq!(openrouter.key_env.as_deref(), Some("OPENROUTER_API_KEY"));
+        let error = load(Some(&path)).unwrap_err().to_string();
+        assert!(error.contains("unknown field"), "{error}");
+        assert!(!error.contains("literal"), "{error}");
     }
 
     #[test]
@@ -1153,8 +1246,9 @@ extra_headers = { "x-extra" = "yes" }
         let path = temp_config(
             r#"
 window = 64000
-auto_compact_at = 0.5
-compact_keep = 0
+[compaction]
+auto_at = 0.5
+keep = 0
 [model_windows]
 "deepseek/deepseek-chat" = 32000
 "#,
@@ -1171,11 +1265,11 @@ compact_keep = 0
         let path = temp_config("");
         let cfg = load(Some(&path)).unwrap();
         assert_eq!(cfg.compact_at_tokens, crate::compact::DEFAULT_SOFT_TARGET);
-        let path = temp_config("compact_at_tokens = 120000\n");
+        let path = temp_config("[compaction]\nat_tokens = 120000\n");
         let cfg = load(Some(&path)).unwrap();
         assert_eq!(cfg.compact_at_tokens, 120_000);
         // Zero is "no absolute cap": the window fraction alone decides.
-        let path = temp_config("compact_at_tokens = 0\n");
+        let path = temp_config("[compaction]\nat_tokens = 0\n");
         let cfg = load(Some(&path)).unwrap();
         assert_eq!(cfg.compact_at_tokens, 0);
     }
@@ -1270,10 +1364,11 @@ reasoning_effort = \"none\"
         assert_eq!(cfg.retry.max_attempts, None);
 
         let path = temp_config(
-            "retry_base_ms = 500
-retry_cap_ms = 4000
-retry_max_wait = 60
-retry_max_attempts = 5
+            "[retry]
+base_ms = 500
+cap_ms = 4000
+max_wait = 60
+max_attempts = 5
 ",
         );
         let cfg = load(Some(&path)).unwrap();
@@ -1282,30 +1377,29 @@ retry_max_attempts = 5
         assert_eq!(cfg.retry.max_wait, Some(std::time::Duration::from_secs(60)));
         assert_eq!(cfg.retry.max_attempts, Some(5));
 
-        // `retry_max_wait = 0` is "wait as long as the provider needs".
+        // `[retry] max_wait = 0` is "wait as long as the provider needs".
         let path = temp_config(
-            "retry_max_wait = 0
+            "[retry]
+max_wait = 0
 ",
         );
         assert_eq!(load(Some(&path)).unwrap().retry.max_wait, None);
-        // A count cap of zero would mean "never retry", which `retry_max_wait = 0` cannot express;
-        // it is refused as an attempt cap and falls back to the budget.
-        let path = temp_config(
-            "retry_max_attempts = 0
-",
-        );
+        // A count cap of zero would mean "never retry", which `[retry] max_wait = 0` cannot
+        // express; it is refused as an attempt cap and falls back to the budget.
+        let path = temp_config("[retry]\nmax_attempts = 0\n");
         assert_eq!(load(Some(&path)).unwrap().retry.max_attempts, None);
     }
 
     #[test]
     fn a_cap_below_the_base_is_refused() {
         let path = temp_config(
-            "retry_base_ms = 5000
-retry_cap_ms = 1000
+            "[retry]
+base_ms = 5000
+cap_ms = 1000
 ",
         );
         let error = load(Some(&path)).unwrap_err();
-        assert!(error.to_string().contains("retry_cap_ms"), "{error}");
+        assert!(error.to_string().contains("cap_ms"), "{error}");
     }
 
     #[test]
@@ -1358,11 +1452,19 @@ max_concurrent_requests = 0
 
     #[test]
     fn a_bad_auto_fraction_is_refused() {
-        let path = temp_config("auto_compact_at = 1.5\n");
+        let path = temp_config("[compaction]\nauto_at = 1.5\n");
         let error = load(Some(&path)).unwrap_err();
-        assert!(error.to_string().contains("auto_compact_at"), "{error}");
-        let path = temp_config("auto_compact_at = 0\n");
+        assert!(error.to_string().contains("compaction.auto_at"), "{error}");
+        let path = temp_config("[compaction]\nauto_at = 0\n");
         assert!(load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn unknown_notify_key_uses_the_ordinary_error() {
+        let path = temp_config("[notify]\ntypo = 'echo hi'\n");
+        let error = load(Some(&path)).unwrap_err().to_string();
+        assert!(error.contains("unknown field `typo`"), "{error}");
+        assert!(!error.contains("notification event"), "{error}");
     }
 
     #[test]
@@ -1391,14 +1493,14 @@ max_concurrent_requests = 0
         let prompt = dir.join("compact.md");
         std::fs::write(&prompt, "SUMMARISE HARD").unwrap();
         let path = temp_config(&format!(
-            "compact_prompt = {:?}\n",
+            "[compaction]\nprompt = {:?}\n",
             prompt.to_string_lossy()
         ));
         let cfg = load(Some(&path)).unwrap();
         assert_eq!(cfg.compact_prompt, "SUMMARISE HARD");
         // A configured path that does not exist is an error, not a silent
         // fallback to the default prompt.
-        let path = temp_config("compact_prompt = \"does/not/exist.md\"\n");
+        let path = temp_config("[compaction]\nprompt = \"does/not/exist.md\"\n");
         assert!(load(Some(&path)).is_err());
     }
 
@@ -1406,7 +1508,7 @@ max_concurrent_requests = 0
     fn project_config_is_found_by_walking_up() {
         // The repo root is the only ancestor here, and it has no .kelir dir;
         // the helper must simply not panic and not invent a path.
-        let found = find_project_config();
+        let found = find_project_config(std::path::Path::new("."));
         if let Some(path) = found {
             assert!(path.ends_with("config.toml"));
         }

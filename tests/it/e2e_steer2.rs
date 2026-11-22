@@ -493,13 +493,7 @@ async fn an_unknown_provider_table_says_where_it_is_and_what_to_rename() {
     ] {
         let run = run_task(&mock, &args, &[("KELIR_CONFIG", &path)], None, "").await;
         assert_eq!(run.code, 2, "{:?}: {}{}", args, run.stdout, run.stderr);
-        for needle in [
-            "[providers.kelir]",
-            path.as_str(),
-            "exactly two",
-            "Rename the table",
-            "key_env",
-        ] {
+        for needle in ["`kelir`", "exactly two", "openrouter", "opencode-go"] {
             assert!(
                 run.stderr.contains(needle),
                 "{:?}: missing {needle:?} in {}",

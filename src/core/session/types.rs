@@ -62,6 +62,9 @@ pub(crate) struct Prepared {
     pub(crate) dir: PathBuf,
     pub(crate) task: String,
     pub(crate) cwd: PathBuf,
+    /// The file named by `--config`, if any: MCP's broker must read the same
+    /// file the rest of the session was built from.
+    pub(crate) config_path: Option<PathBuf>,
     /// The frozen system prompt: the text, its hash, and the sources that went
     /// in (`session_started.system` and `sources[]`).
     pub(crate) system: crate::sources::Rendered,
@@ -255,9 +258,9 @@ pub(crate) fn compact_queued(focus: &Option<String>) -> String {
 }
 
 /// Is this process armed to die at `point`? The documented test hook
-/// (`KELIR_CRASH_AT=<point>`) is a no-op unless it names this point exactly.
+/// (`KELIR_TEST_CRASH_AT=<point>`) is a no-op unless it names this point exactly.
 pub(crate) fn crash_armed(point: &str) -> bool {
-    crate::envs::var_os("KELIR_CRASH_AT")
+    crate::envs::var_os("KELIR_TEST_CRASH_AT")
         .map(|value| value.to_string_lossy().trim() == point)
         .unwrap_or(false)
 }
@@ -266,7 +269,7 @@ pub(crate) fn crash_armed(point: &str) -> bool {
 pub(crate) fn crash_now(point: &str) -> ! {
     let _ = writeln!(
         std::io::stderr(),
-        "kelir: KELIR_CRASH_AT={point}: aborting (test hook)"
+        "kelir: KELIR_TEST_CRASH_AT={point}: aborting (test hook)"
     );
     let _ = std::io::stderr().flush();
     std::process::abort()

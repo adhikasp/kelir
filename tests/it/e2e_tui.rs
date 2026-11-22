@@ -1356,7 +1356,7 @@ async fn the_tui_reports_a_paused_turn_to_herdr() {
     let config = temp.path().join("config.toml");
     std::fs::write(
         &config,
-        "provider = \"openrouter\"\nmodel = \"test/model\"\nretry_base_ms = 50\nretry_cap_ms = 100\nretry_max_attempts = 2\nretry_max_wait = 5\n",
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n[retry]\nbase_ms = 50\ncap_ms = 100\nmax_attempts = 2\nmax_wait = 5\n",
     )
     .unwrap();
     let state = temp.path().join("state");
@@ -1406,7 +1406,7 @@ async fn the_tui_shows_the_retry_countdown_and_recovers() {
     let config = temp.path().join("config.toml");
     std::fs::write(
         &config,
-        "provider = \"openrouter\"\nmodel = \"test/model\"\nretry_base_ms = 3000\nretry_cap_ms = 3000\nretry_max_attempts = 3\n",
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n[retry]\nbase_ms = 3000\ncap_ms = 3000\nmax_attempts = 3\n",
     )
     .unwrap();
     let state = temp.path().join("state");

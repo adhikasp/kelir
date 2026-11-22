@@ -74,15 +74,11 @@ pub const VARS: &[Var] = &[
     // ------------------------------------------------------------- locations
     read(
         "KELIR_CONFIG",
-        "the config file to use instead of the machine/project search",
+        "the machine config file to use instead of the machine-layer search (the project layer still applies)",
     ),
     read(
         "KELIR_CONFIG_DIR",
         "the machine config directory (`config.toml`, `prompt.md`, `skills/`)",
-    ),
-    read(
-        "KELIR_MCP_CONFIG",
-        "the machine `mcp.toml` to use instead of `<config dir>/mcp.toml` (the project's `.kelir/mcp.toml` still layers on top)",
     ),
     read(
         "KELIR_STATE_DIR",
@@ -177,7 +173,7 @@ pub const VARS: &[Var] = &[
     ),
     set(
         "KELIR_DEPTH",
-        "that session's depth in the tree (the root is 0); a start past `max_child_depth` is refused",
+        "that session's depth in the tree (the root is 0); a start past `[children] max_depth` is refused",
     ),
     set("KELIR_CALL_ID", "the provider call id of the bash call"),
     set(
@@ -210,19 +206,19 @@ pub const VARS: &[Var] = &[
         "set for an event hook only: the terminal record's message (title and event kind)",
     ),
     hook(
-        "KELIR_NOTIFY_TIMEOUT_MS",
+        "KELIR_TEST_NOTIFY_TIMEOUT_MS",
         "shorten the 30 s notify-hook timeout (the job tests)",
     ),
     hook(
-        "KELIR_TODAY",
+        "KELIR_TEST_TODAY",
         "`YYYY-MM-DD` replaces today's UTC date: a new session's system prompt and the date-change source of a resume (the job tests)",
     ),
     hook(
-        "KELIR_GATE_TIMEOUT_MS",
+        "KELIR_TEST_GATE_TIMEOUT_MS",
         "shorten the 30 s gate timeout (the gate tests; a timed-out gate fails open)",
     ),
     hook(
-        "KELIR_CRASH_AT",
+        "KELIR_TEST_CRASH_AT",
         "abort at a named point (`before_append`, …): the crash tests",
     ),
     hook(
@@ -230,11 +226,11 @@ pub const VARS: &[Var] = &[
         "panic once the TUI owns the terminal, to prove the restore path",
     ),
     hook(
-        "KELIR_SHELL_RAW",
+        "KELIR_TEST_SHELL_RAW",
         "`cr`: send a POSIX script raw, keeping CRLF terminators",
     ),
     hook(
-        "KELIR_IPC_LOCK_PROBE",
+        "KELIR_TEST_IPC_LOCK_PROBE",
         "a session dir: a test child tries to take the lock there, to prove a second process is refused (the IPC tests)",
     ),
 ];

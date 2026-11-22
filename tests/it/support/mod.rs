@@ -341,25 +341,97 @@ impl Mock {
 /// waiting out the production half hour. A test that cares about the schedule
 /// passes its own values in `extra_config`, which is appended after this and
 /// therefore wins.
-pub const TEST_RETRY: &str = r"retry_base_ms = 200
-retry_cap_ms = 400
-retry_max_attempts = 3
-retry_max_wait = 5";
+pub const TEST_RETRY: &str = r"[retry]
+base_ms = 200
+cap_ms = 400
+max_attempts = 3
+max_wait = 5";
 
 /// The config every test run starts with: the provider and model, the test's
 /// retry knobs (minus any the caller overrides in `extra_config`), then
 /// `extra_config` itself, so a test's own keys win.
 pub fn test_config(extra_config: &str) -> String {
-    let mut out = String::from("provider = \"openrouter\"\nmodel = \"test/model\"\n");
-    for line in TEST_RETRY.lines() {
-        let key = line.split('=').next().unwrap_or("").trim();
-        if !key.is_empty() && !extra_config.contains(key) {
-            out.push_str(line);
-            out.push('\n');
+    let extra = normalize_test_keys(extra_config);
+    let Ok(mut base) =
+        toml::from_str::<toml::Value>("provider = \"openrouter\"\nmodel = \"test/model\"\n")
+    else {
+        return extra;
+    };
+    let Ok(extra) = toml::from_str::<toml::Value>(&extra) else {
+        return format!("{}{}\n{}", base, TEST_RETRY, extra);
+    };
+    let Ok(retry) = toml::from_str::<toml::Value>(TEST_RETRY) else {
+        return format!("{base}{extra}");
+    };
+    merge_toml(&mut base, retry);
+    merge_toml(&mut base, extra.clone());
+    toml::to_string_pretty(&base).unwrap_or_else(|_| format!("{base}{extra}"))
+}
+
+fn merge_toml(base: &mut toml::Value, over: toml::Value) {
+    match (base, over) {
+        (base, toml::Value::Table(over)) => {
+            let Some(table) = base.as_table_mut() else {
+                *base = toml::Value::Table(over);
+                return;
+            };
+            for (key, value) in over {
+                match table.get_mut(&key) {
+                    Some(existing) => merge_toml(existing, value),
+                    None => {
+                        table.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, value) => *base = value,
+    }
+}
+
+/// Older tests spell a grouped key flat. The harness translates it so the
+/// tests keep saying what they meant; the binary itself reads only the grouped
+/// spelling (no compatibility aliases in `src/config.rs`).
+fn normalize_test_keys(extra: &str) -> String {
+    const FLAT: &[(&str, &str, &str)] = &[
+        ("auto_compact_at", "compaction", "auto_at"),
+        ("compact_at_tokens", "compaction", "at_tokens"),
+        ("compact_prompt", "compaction", "prompt"),
+        ("compact_keep", "compaction", "keep"),
+        ("retry_base_ms", "retry", "base_ms"),
+        ("retry_cap_ms", "retry", "cap_ms"),
+        ("retry_max_wait", "retry", "max_wait"),
+        ("retry_max_attempts", "retry", "max_attempts"),
+        ("max_child_depth", "children", "max_depth"),
+        ("max_children", "children", "max_per_agent"),
+        ("max_live_descendants", "children", "max_live_descendants"),
+        ("channel_max_active", "channel", "max_active"),
+        (
+            "channel_per_conversation_rpm",
+            "channel",
+            "per_conversation_rpm",
+        ),
+        ("channel_global_rpm", "channel", "global_rpm"),
+        ("channel_fallback", "channel", "fallback"),
+        ("channel_spool_limit", "channel", "spool_limit"),
+    ];
+    let Ok(mut value) = toml::from_str::<toml::Value>(extra) else {
+        return extra.to_string();
+    };
+    let Some(table) = value.as_table_mut() else {
+        return extra.to_string();
+    };
+    for (old, group, new) in FLAT {
+        let Some(entry) = table.remove(*old) else {
+            continue;
+        };
+        let group = table
+            .entry(*group)
+            .or_insert_with(|| toml::Value::Table(Default::default()));
+        if let Some(target) = group.as_table_mut() {
+            target.insert((*new).to_string(), entry);
         }
     }
-    out.push_str(extra_config);
-    out
+    toml::to_string_pretty(&value).unwrap_or_else(|_| extra.to_string())
 }
 
 /// What the mock answers on `GET /models`: both provider shapes, and the
@@ -910,7 +982,7 @@ impl LiveSession {
         Self::start_in_base(reuse_state, &base, args, extra_config, extra_flags).await
     }
 
-    /// A session whose project has this `.kelir/mcp.toml` (M6).
+    /// A session whose project has this `.kelir/config.toml` (M6).
     pub async fn start_with_mcp(
         mock: &Mock,
         args: &[&str],
@@ -944,7 +1016,7 @@ impl LiveSession {
         std::fs::create_dir_all(&cwd).unwrap();
         if let Some(text) = mcp_toml {
             std::fs::create_dir_all(cwd.join(".kelir")).unwrap();
-            std::fs::write(cwd.join(".kelir").join("mcp.toml"), text).unwrap();
+            std::fs::write(cwd.join(".kelir").join("config.toml"), text).unwrap();
         }
         let config = temp.path().join("config.toml");
         std::fs::write(&config, test_config(extra_config)).unwrap();
@@ -1591,7 +1663,7 @@ impl Sandbox {
 /// child, and `bg out` would read *that* session's jobs (M4 review).
 /// `KELIR_PROMOTE_AFTER` would silently change promotion timing, `KELIR_HERDR`
 /// and `TERM_PROGRAM` would make the binary think it is in a pane, and
-/// `KELIR_CRASH_AT`/`KELIR_TEST_PANIC` are test hooks (M5-A fixes N2). The rest
+/// `KELIR_TEST_CRASH_AT`/`KELIR_TEST_PANIC` are test hooks (M5-A fixes N2). The rest
 /// of `KELIR_*` is removed as well, by prefix, so a new variable cannot quietly
 /// leak in. `HC_TERMINAL_ID` (the Herdr marker) goes too.
 fn scrubbed_keys() -> Vec<String> {

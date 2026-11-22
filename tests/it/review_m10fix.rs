@@ -55,8 +55,8 @@ impl ChannelTest {
             let _ = std::fs::write(path, "");
         }
         let mcp = format!(
-            "[servers.fake]\ncommand = '{}'\nargs = ['{}']\nchannel = true\n\
-             [servers.fake.env]\nMCP_CHAN_INBOX = '{}'\nMCP_CHAN_REPLIES = '{}'\n\
+            "[mcp.servers.fake]\ncommand = '{}'\nargs = ['{}']\nchannel = true\n\
+             [mcp.servers.fake.env]\nMCP_CHAN_INBOX = '{}'\nMCP_CHAN_REPLIES = '{}'\n\
              MCP_CHAN_EVENTS = '{}'\nMCP_CHAN_ARGS = '{}'\nMCP_CHAN_SECRETS = 'fix-canary-9e2b'\n",
             if cfg!(windows) { "python" } else { "python3" },
             concat!(
@@ -69,7 +69,9 @@ impl ChannelTest {
             events.to_string_lossy().replace('\\', "/"),
             args_path.to_string_lossy().replace('\\', "/"),
         );
-        std::fs::write(sandbox.cwd.join("mcp.toml"), mcp).unwrap();
+        let mut full = std::fs::read_to_string(&sandbox.config).unwrap();
+        full.push_str(&mcp);
+        std::fs::write(&sandbox.config, full).unwrap();
         ChannelTest {
             sandbox,
             inbox,
@@ -118,7 +120,6 @@ impl ChannelTest {
     async fn spawn_driver(&self, base_url: &str, extra: &[&str]) -> tokio::process::Child {
         let mut std_command = self.sandbox.kelir_command(base_url);
         std_command
-            .env("KELIR_MCP_CONFIG", self.sandbox.cwd.join("mcp.toml"))
             .args(std::iter::once("channel").chain(std::iter::once("--server")))
             .arg("fake")
             .args(extra)
@@ -188,7 +189,7 @@ async fn r15_two_new_conversations_get_distinct_sessions_and_both_answer() {
         id_a, id_b,
         "two NEW conversations must get distinct session ids"
     );
-    // No secret from mcp.toml env may appear in the bridge args or events.
+    // No secret from config.toml env may appear in the bridge args or events.
     for path in [&test.args_path, &test.events] {
         let text = std::fs::read_to_string(path).unwrap_or_default();
         assert!(
@@ -205,6 +206,16 @@ async fn r15_two_new_conversations_get_distinct_sessions_and_both_answer() {
 /// nothing before the tear. The repaired file must contain exactly the good
 /// prefix (all complete records before the torn one), and `.torn` must hold
 /// exactly the dropped bytes for inspection.
+/// Parse one config document and return the mcp-server validation error, if any.
+fn parse_layer(text: &str, _label: &str) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    kelir::config::load(Some(&path))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 #[test]
 fn r17_torn_multibyte_tail_keeps_every_good_byte_and_the_exact_torn_suffix() {
     use kelir::channel::{Message, Spool};
@@ -307,10 +318,10 @@ fn r20_config_rejects_forbidden_variants_without_echoing_env_secret() {
         "approval_relay",
     ] {
         let text = format!(
-            "[servers.fake]\ncommand = 'python'\ndeclare_capabilities = ['{cap}']\n\
-             [servers.fake.env]\nAPI_TOKEN = '{secret}'\n"
+            "[mcp.servers.fake]\ncommand = 'python'\ndeclare_capabilities = ['{cap}']\n\
+             [mcp.servers.fake.env]\nAPI_TOKEN = '{secret}'\n"
         );
-        let err = kelir::mcp::config::parse_layer(&text, "review")
+        let err = parse_layer(&text, "review")
             .err()
             .unwrap_or_else(|| panic!("capability {cap} must be refused"));
         assert!(!err.contains(secret), "error echoed the env secret: {err}");

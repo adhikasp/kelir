@@ -50,7 +50,7 @@ one case with no status file: `bg ls` does not list it at all (no status file, n
 ## "A child start was refused" or "a child is gone"
 
 `kelir run --child` exits 3 with `refused: …` and the count when a cap is full
-(`max_child_depth`, `max_children`, `max_live_descendants`; `docs/reference/children.md`).
+(`[children] max_depth`, `max_per_agent`, `max_live_descendants`; `docs/reference/children.md`).
 `kelir ls` shows what is live; `kelir kill <session>` frees a slot. A child whose process
 died shows `lost` (or `killed`) in `kelir ls` and in the root's `call_settled{kind:"child"}`. A child
 ends with its parent: after `kill -9` of a Unix parent it takes up to a second to notice.

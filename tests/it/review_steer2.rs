@@ -322,18 +322,17 @@ async fn junk_override_gives_a_clear_401_and_no_retry() {
 
 /// A literal key in the config: warned about, never sent.
 #[tokio::test]
-async fn literal_key_in_config_is_warned_and_unused() {
+async fn literal_key_in_config_is_refused() {
     let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
     let cfg = "key = \"sk-literal-top\"\n[providers.openrouter]\nkey = \"sk-literal-prov\"\n";
     let run = run_task(&mock, &["run", "--json", "hi"], &[], None, cfg).await;
-    assert_eq!(run.code, 0, "{}", run.stderr);
-    assert!(run.stderr.contains("warning"), "{}", run.stderr);
-    assert_eq!(
-        mock.requests()[0].header("authorization"),
-        Some("Bearer test-openrouter-key")
+    assert_eq!(run.code, 2, "{}", run.stderr);
+    assert!(run.stderr.contains("unknown field"), "{}", run.stderr);
+    assert!(
+        !run.stderr.contains("sk-literal"),
+        "literal leaked into stderr"
     );
-    let w = written(&run);
-    assert!(!w.contains("sk-literal"), "literal leaked into outputs/log");
+    assert_eq!(mock.request_count(), 0);
     let mock = Mock::start(vec![]).await;
     let run = run_task(
         &mock,

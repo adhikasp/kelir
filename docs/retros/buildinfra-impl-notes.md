@@ -129,7 +129,7 @@ the property the gate needs.
 
 ## Follow-up: the Linux gate leaked core dumps (buildinfra2, 2026-11-20)
 
-The crash-injection tests (M3's `KELIR_CRASH_AT`) abort a `kelir` on purpose, and the gate box's
+The crash-injection tests (M3's `KELIR_TEST_CRASH_AT`) abort a `kelir` on purpose, and the gate box's
 `kernel.core_pattern` is `systemd-coredump`: the store had grown to **2,660 cores / 904 MB, ~290 KB each**, every
 one a `target/debug/kelir` SIGABRT from a gate run. A core from an intentional abort is pure waste. Fixed in
 `buildinfra2`: `remote-check.sh`'s far-side runner, `gate.sh` and `gate-load.sh` set `ulimit -c 0` before the

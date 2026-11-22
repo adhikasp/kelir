@@ -70,7 +70,9 @@ Session ids are ULIDs, so the directory names sort into creation order and
 ```
 
 `locks/` holds OS file locks, not pid files: a kelir that crashes leaks nothing
-because the kernel releases the lock. `models-<endpoint>.json` is named after the
+because the kernel releases the lock. Each `bg/<id>/<id>.status` is one JSON
+object (`src/bg.rs:Status`): `id`, `kind`, `state`, `cmd`, `out` and the pids,
+written temp-then-rename. `models-<endpoint>.json` is named after the
 *endpoint* (provider name plus a hash of the normalised base URL), so a proxy or
 a second gateway sharing a state dir never inherits another server's numbers.
 
@@ -84,8 +86,8 @@ kelir creates.
 2. Otherwise `<config>/config.toml`, then the nearest `.kelir/config.toml`
    walking up from the cwd (the project's, merged per key over the machine's).
 
-`mcp.toml` follows the same two layers, in its own file: `<config>/mcp.toml`
-(or `KELIR_MCP_CONFIG`), then the nearest `.kelir/mcp.toml`, merged per server
+`config.toml` follows the same two layers, in its own file: `<config>/config.toml`
+(or `KELIR_CONFIG`), then the nearest `.kelir/config.toml`, merged per server
 name (`docs/reference/mcp.md`).
 
 ## The pieces, and the file that owns each

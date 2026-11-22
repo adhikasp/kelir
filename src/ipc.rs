@@ -44,6 +44,7 @@ pub const MAX_LINE: usize = 64 * 1024;
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     pub verb: String,
     #[serde(default)]
@@ -79,6 +80,7 @@ impl Request {
 
 /// One answer line. Exactly one per request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Response {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -673,6 +675,15 @@ mod tests {
     }
 
     #[test]
+    fn a_wire_envelope_refuses_unknown_fields() {
+        assert!(serde_json::from_str::<Request>(r#"{"verb":"end","verbx":"end"}"#).is_err());
+        let ok = Response::error("no").line();
+        let mut value: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        value["extraneous"] = json!(1);
+        assert!(serde_json::from_value::<Response>(value).is_err());
+    }
+
+    #[test]
     fn ok_and_error_responses_are_one_line_json() {
         let ok = Response::ok("say", 7, "now", json!({"step": 2}));
         let line = ok.line();
@@ -815,7 +826,7 @@ mod tests {
             let first = first.unwrap_or_else(|| panic!("round {round}: cannot take the lock"));
             let status = crate::sys::runner::std_command(&std::env::current_exe().unwrap())
                 .args(["--exact", "ipc::tests::lock_probe", "--nocapture"])
-                .env("KELIR_IPC_LOCK_PROBE", &dir)
+                .env("KELIR_TEST_IPC_LOCK_PROBE", &dir)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
@@ -848,7 +859,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lock_probe() {
-        let Some(dir) = crate::envs::var("KELIR_IPC_LOCK_PROBE") else {
+        let Some(dir) = crate::envs::var("KELIR_TEST_IPC_LOCK_PROBE") else {
             return;
         };
         let lock = lock(std::path::Path::new(&dir)).expect("probe acquired the lock");

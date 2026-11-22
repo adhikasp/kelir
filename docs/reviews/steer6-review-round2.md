@@ -34,7 +34,7 @@ Note: my first two Linux runs overlapped in the same work dir (I started the scr
 | **N1** cut notice | **fixed** | `cat <<'WANTED'` unterminated still gets the notice; marker in the middle of ordinary exit-0 output is quiet (`n1_…`). Residual: marker in the last 3 lines, or any non-zero exit with the marker, still shows it (by design in the brief). |
 | **N2** PowerShell | **fixed** | see B1 row. |
 | **N3** prompt snapshot | **fixed** | `tests/fixtures/prompt.md.snapshot` + `the_base_prompt_is_byte_identical_to_its_snapshot`; the live system message is 1301 bytes with the directories block. |
-| **N4** CRLF | **fixed + documented** | POSIX script has no CR (checked in `cmd.sh` of the call dir); `KELIR_SHELL_RAW=cr` keeps CRLF in `cmd.sh` (`n4_raw_cr_switch_keeps_crlf`); DEVIATIONS documents both. |
+| **N4** CRLF | **fixed + documented** | POSIX script has no CR (checked in `cmd.sh` of the call dir); `KELIR_TEST_SHELL_RAW=cr` keeps CRLF in `cmd.sh` (`n4_raw_cr_switch_keeps_crlf`); DEVIATIONS documents both. |
 
 ## New findings
 

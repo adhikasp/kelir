@@ -367,7 +367,7 @@ async fn every_resumed_session_announces_the_new_date() {
                 sb,
                 mock,
                 &["run", "--name", "daily", "task"],
-                &[("KELIR_TODAY", &day)],
+                &[("KELIR_TEST_TODAY", &day)],
             )
             .await
         }
@@ -603,7 +603,7 @@ async fn the_next_day_adds_only_the_date_source_at_the_tail() {
                 sb,
                 mock,
                 &["run", "--name", "daily2", "task"],
-                &[("KELIR_TODAY", &day)],
+                &[("KELIR_TEST_TODAY", &day)],
             )
             .await
         }

@@ -72,7 +72,7 @@ launcher, and the first version of the test failed for that reason, not for N5. 
 The normalisation now follows the **shell family**, not the route: `decide` normalises CRLF to LF
 inside the argument it hands a POSIX shell, exactly as `script_body` does for the file, so a
 command means the same below and above `SHELL_CMD_MAX` (`echo a > f<CR>` wrote `f<CR>` under it and
-`f` above it; the reviewer's test passed on Windows and failed on Linux for this). `KELIR_SHELL_RAW=cr`
+`f` above it; the reviewer's test passed on Windows and failed on Linux for this). `KELIR_TEST_SHELL_RAW=cr`
 keeps the raw bytes on both routes. The reviewer's `s1_short_command_regressions` CRLF block now
 asserts the same thing on both platforms, and a unit test pins the pair of routes.
 `DEVIATIONS.md` says so.

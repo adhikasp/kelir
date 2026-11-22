@@ -86,7 +86,7 @@ keep the gate green while documenting the bug; they are the failing scenario for
   the same count/shape (`clocks.len() == 1`, clock name and text, frozen system prompt,
   tail lines, prefix equality); only the date literal became a variable. It is not a
   weakening: before the fix this test failed after 2026-11-21T00:00Z because the
-  *second and third* runs used yesterday's `KELIR_TODAY`, so no new-day clock appeared.
+  *second and third* runs used yesterday's `KELIR_TEST_TODAY`, so no new-day clock appeared.
   Passes now, and it passed in both gate halves.
 
 ## Live drive (Herdr panes, real OpenRouter model `deepseek/deepseek-v4.1-flash-1017`)

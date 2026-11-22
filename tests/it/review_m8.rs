@@ -184,7 +184,7 @@ async fn a_timed_out_gate_that_ignores_sigterm_leaves_nothing() {
     let (out, log, _sb) = one_turn(
         &rev_cmd("ignoreterm", work.path()),
         "before_tool",
-        &[("KELIR_GATE_TIMEOUT_MS", "2000")],
+        &[("KELIR_TEST_GATE_TIMEOUT_MS", "2000")],
     )
     .await;
     assert_eq!(out.code, 0, "{}", out.stderr);
@@ -569,7 +569,7 @@ Body.
         // A shared CI runner (PowerShell cold start + concurrent OS jobs) can
         // exceed the 30 s default gate timeout; the test proves a .ps1 gate
         // RUNS from a console-less parent, not that it finishes in 30 s.
-        .env("KELIR_GATE_TIMEOUT_MS", "120000")
+        .env("KELIR_TEST_GATE_TIMEOUT_MS", "120000")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let child = sandbox
@@ -653,7 +653,7 @@ async fn a_gate_that_sends_a_verb_to_its_own_session_cannot_deadlock_it() {
         .kelir(
             &mock.base_url(),
             &["run", "--json", "go"],
-            &[("KELIR_GATE_TIMEOUT_MS", "4000")],
+            &[("KELIR_TEST_GATE_TIMEOUT_MS", "4000")],
         )
         .await;
     assert_eq!(out.code, 0, "{}", out.stderr);
