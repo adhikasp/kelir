@@ -1,9 +1,11 @@
 //! Boot: process options, the main run loop and preparation.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use super::types::*;
 use super::*;
 
-pub(super) async fn drive(opts: Options) -> u8 {
+pub(crate) async fn drive(opts: Options) -> u8 {
     // One interrupt listener for the process, installed before *anything* observable: before `prepare`
     // (which records `session_started`) and so before any client can see the session and signal it.
     crate::signals::install();
@@ -103,11 +105,11 @@ pub(super) async fn drive(opts: Options) -> u8 {
     // The root looks for children whose process is gone once a second, so a
     // crashed one frees its slot and a killed subtree is recorded.
     if session.kids.is_root() {
-        watch_children(tx.clone(), session.kids.key().to_string());
+        crate::features::children::watch_children(tx.clone(), session.kids.key().to_string());
     }
     // A child leaves with its parent: a hard-killed parent cannot signal it.
     if let Some(handoff) = opts.child.clone() {
-        watch_parent(handoff, tx.clone(), trust.token().to_string());
+        crate::features::children::watch_parent(handoff, tx.clone(), trust.token().to_string());
     }
 
     // A job's wall clock: at the deadline the turn is told to stop; if the loop
@@ -232,57 +234,6 @@ pub(super) async fn drive(opts: Options) -> u8 {
     code
 }
 
-/// Ask the root's own loop to reap dead children, every second.
-fn watch_children(tx: mpsc::UnboundedSender<Incoming>, key: String) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let (reply, _answer) = oneshot::channel();
-            let request = Request::new(
-                crate::child::VERB,
-                json!({"op": "reap", "key": key}),
-                crate::child::FROM_INTERNAL,
-            );
-            if tx
-                .send(Incoming {
-                    request,
-                    reply,
-                    action: None,
-                })
-                .is_err()
-            {
-                return;
-            }
-        }
-    });
-}
-
-/// A child session ends when its parent does.
-fn watch_parent(
-    handoff: crate::child::Handoff,
-    tx: mpsc::UnboundedSender<Incoming>,
-    token: String,
-) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if crate::child::parent_alive(&handoff) {
-                continue;
-            }
-            let (reply, _answer) = oneshot::channel();
-            let _ = tx.send(Incoming {
-                request: Request::new("end", json!({}), "parent-gone").with_token(Some(token)),
-                reply,
-                action: None,
-            });
-            // The end verb stops the session cleanly; if something is stuck,
-            // leave anyway.
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            std::process::exit(143);
-        }
-    });
-}
-
 /// A job's timeout: stop the turn at the deadline, force the process out if the
 /// loop does not end by itself.
 fn watch_deadline(
@@ -344,7 +295,7 @@ fn watch_bg(dir: PathBuf, tx: mpsc::UnboundedSender<Incoming>) {
     });
 }
 
-pub(super) async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
+pub(crate) async fn prepare(opts: &Options) -> Result<Prepared, Failure> {
     let common = &opts.common;
     let mut cfg = config::load(common.config.as_deref())
         .map_err(|error| Failure::Usage(error.to_string()))?;
@@ -579,7 +530,7 @@ pub fn provider_base(provider: &crate::config::ProviderConfig) -> String {
 }
 
 /// What [`reopen`] hands back: the session's identity, provider and log state.
-pub(super) struct ReopenedSession {
+pub(crate) struct ReopenedSession {
     id: String,
     dir: PathBuf,
     provider_name: String,
@@ -593,7 +544,7 @@ pub(super) struct ReopenedSession {
 }
 
 /// Read a session's log and prove it is not already running.
-pub(super) async fn reopen(
+pub(crate) async fn reopen(
     spec: &str,
     cfg: &Config,
     cache_id: Option<String>,

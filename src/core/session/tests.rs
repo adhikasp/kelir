@@ -1,3 +1,6 @@
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
+
 use super::types::*;
 use super::*;
 use crate::features::models::ModelList;
@@ -216,7 +219,7 @@ fn test_session(model: &str) -> Session {
         trust: std::sync::Arc::new(crate::trust::Trust::new(dir_for_trust(), String::new())),
         tally: Default::default(),
         retry_wait: Default::default(),
-        kids: children::Kids::new("ses_1", Default::default(), None),
+        kids: crate::features::children::Kids::new("ses_1", Default::default(), None),
     }
 }
 

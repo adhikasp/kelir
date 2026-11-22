@@ -1,11 +1,13 @@
 //! Turn reporting and final state answers.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use super::*;
 
 impl Session {
     /// a kill can leave a log whose last message is the assistant's final answer, and a request may not
     /// end on one — providers read a trailing assistant message as prefill or refuse it.
-    pub(super) fn continue_a_turn_that_ends_on_an_answer(&mut self) -> Result<(), String> {
+    pub(crate) fn continue_a_turn_that_ends_on_an_answer(&mut self) -> Result<(), String> {
         if !self.run.pending_task.trim().is_empty() {
             return Ok(());
         }
@@ -38,7 +40,7 @@ impl Session {
 
     /// The partial output of a call the previous process started, when its `commands/<seq>-*` directory
     /// still has one.
-    pub(super) fn interrupted_output(&self, call: &UnsettledCall) -> Option<(String, u64, u64)> {
+    pub(crate) fn interrupted_output(&self, call: &UnsettledCall) -> Option<(String, u64, u64)> {
         if !call.started {
             return None;
         }
@@ -69,7 +71,7 @@ impl Session {
 
     /// The read-only view a built-in gate gets of this session. Kept in the core
     /// because it borrows the provider client, config and fold.
-    pub(super) fn gate_ctx(&self) -> crate::gates::GateCtx<'_> {
+    pub(crate) fn gate_ctx(&self) -> crate::gates::GateCtx<'_> {
         // The built-in hint must see machine-level skills, just as the old
         // core hint did (`places(&ctx.cwd, &cfg.skills_dirs, Some(config_dir()))`).
         crate::gates::GateCtx {
@@ -88,7 +90,7 @@ impl Session {
 
     /// Append one event. Oversized payloads go to `blobs/` first, named by the
     /// seq the event is about to get.
-    pub(super) fn record(&mut self, body: EventBody) -> Result<LogEvent, String> {
+    pub(crate) fn record(&mut self, body: EventBody) -> Result<LogEvent, String> {
         let seq = self.log.writer.next_seq();
         let title = if !self.log.titled
             && let EventBody::User { text, from, .. } = &body
@@ -131,14 +133,14 @@ impl Session {
         Ok(event)
     }
 
-    pub(super) fn warn(&self) -> crate::usage::Warn {
+    pub(crate) fn warn(&self) -> crate::usage::Warn {
         crate::usage::Warn {
             prompt_tokens: self.cfg.warn_prompt_tokens,
         }
     }
 
     /// After a `usage` event: say so, once, when a threshold was crossed.
-    pub(super) fn note_warnings(&mut self) {
+    pub(crate) fn note_warnings(&mut self) {
         let warn = self.warn();
         for warning in self.tally.warnings(warn) {
             let _ = self.record(EventBody::Warning {
@@ -154,7 +156,7 @@ impl Session {
         }
     }
 
-    pub(super) fn status_answer(&self) -> Response {
+    pub(crate) fn status_answer(&self) -> Response {
         let retry =
             self.retry_wait
                 .get()
@@ -190,39 +192,19 @@ impl Session {
                 object.insert(key, value);
             }
         }
-        // MCP servers: name, state, tool count and channel flag only. Never
-        // config, env, descriptions or server stderr (those can hold secrets).
-        let servers = self.features.mcp.as_ref().expect("mcp feature").servers();
-        let mcp: Vec<Value> = servers["servers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|s| {
-                let state = s["state"].as_str().unwrap_or("");
-                // A `failed: ...` state carries server text; keep the word only.
-                let state = if state.starts_with("failed") { "failed" } else { state };
-                json!({"name": s["name"], "state": state, "tools": s["tools"], "channel": s["channel"]})
-            })
-            .collect();
-        state["mcp"] = Value::Array(mcp);
-        state["gates"] = self
-            .features
-            .gates
-            .as_ref()
-            .expect("gates feature")
-            .status(self);
-        state["children"] = json!(self.live_children());
-        state["child_list"] = self.child_list();
+        if let Some(object) = state.as_object_mut() {
+            self.features.status_extended(self, object);
+        }
         Response::ok("status", 0, "now", state)
     }
 
-    pub(super) fn sync(&mut self) {
+    pub(crate) fn sync(&mut self) {
         let _ = self.log.writer.sync();
     }
 
     /// Tell the UI what happened. A closed UI is not an error: the session is
     /// the source of truth and keeps working headless.
-    pub(super) fn emit(&self, event: UiEvent) {
+    pub(crate) fn emit(&self, event: UiEvent) {
         match &event {
             UiEvent::Retrying {
                 until,
@@ -244,7 +226,7 @@ impl Session {
     }
 
     /// Report Herdr status (no-op unless a writer was opened).
-    pub(super) fn report(&mut self, state: HerdrState) {
+    pub(crate) fn report(&mut self, state: HerdrState) {
         let Some(herdr) = &self.out.herdr else {
             return;
         };
@@ -258,7 +240,7 @@ impl Session {
 
     /// Set the Herdr pane title from the session title. In the TUI the record travels with the
     /// other status records and is written between paints; non-TUI paths write it here.
-    pub(super) fn report_title(&mut self, title: &str) {
+    pub(crate) fn report_title(&mut self, title: &str) {
         if self.out.herdr.is_none() {
             return;
         }
@@ -270,7 +252,7 @@ impl Session {
         }
     }
 
-    pub(super) fn notify(&mut self, kind: &str, detail: &str) {
+    pub(crate) fn notify(&mut self, kind: &str, detail: &str) {
         let dispatch = crate::notify::fire(
             &self.cfg.notify,
             &std::collections::BTreeMap::new(),
@@ -291,7 +273,7 @@ impl Session {
     }
 
     /// One turn is over: the UI gets its outcome, Herdr gets its word.
-    pub(super) fn finish_turn(&mut self, outcome: &str) {
+    pub(crate) fn finish_turn(&mut self, outcome: &str) {
         self.emit(UiEvent::TurnEnded {
             outcome: outcome.to_string(),
             final_text: self.run.final_text.clone(),
@@ -316,7 +298,7 @@ impl Session {
         }
     }
 
-    pub(super) fn print_result(&self, exit_code: u8) {
+    pub(crate) fn print_result(&self, exit_code: u8) {
         if !self.out.json {
             return;
         }
@@ -353,7 +335,7 @@ impl Session {
         );
     }
 
-    pub(super) fn state(&self) -> Value {
+    pub(crate) fn state(&self) -> Value {
         json!({
             "turn": self.run.turn,
             "step": self.run.step,

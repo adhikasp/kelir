@@ -4,19 +4,27 @@
 //! One verb (`child`) with an `op`:
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
-use super::types::*;
-use super::*;
 use crate::child::{
     self, Admission, Caps, ChildNote, Entry, Handoff, KIND_BRIEF, KIND_CHILD, Lineage, NewChild,
     Registry, RootChannel,
 };
 
+use crate::core::session::types::Session;
+use crate::core::session::util::new_session_id;
+use crate::event::{EventBody, LogEvent, Payload};
+use crate::features::children_ops::{run_child, wake_text};
+use crate::ipc::{self, Incoming, Request, Response};
+use crate::tui::UiEvent;
+use crate::verbs::{Pending, Verb};
+
 /// What the session keeps about the family it is in.
-pub(super) struct Kids {
+pub(crate) struct Kids {
     pub lineage: Lineage,
     /// The registry: only the root's has entries.
     pub registry: Registry,
@@ -71,25 +79,25 @@ impl Kids {
 
 /// Everything the spawning task needs, copied out of the session so the task
 /// owns it.
-pub(super) struct Plan {
-    pub(super) kind: &'static str,
-    pub(super) task: String,
-    pub(super) background: bool,
-    pub(super) provider: String,
-    pub(super) model: String,
-    pub(super) cwd: String,
-    pub(super) me: String,
-    pub(super) inbox: mpsc::UnboundedSender<Incoming>,
-    pub(super) key: String,
+pub(crate) struct Plan {
+    pub(crate) kind: &'static str,
+    pub(crate) task: String,
+    pub(crate) background: bool,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) cwd: String,
+    pub(crate) me: String,
+    pub(crate) inbox: mpsc::UnboundedSender<Incoming>,
+    pub(crate) key: String,
     /// How to reach the root: the session's own socket and token when it is
     /// the root, the root's socket and token otherwise. The caller's own session
     /// id identifies it to the root; no per-child secret is needed.
-    pub(super) root: String,
-    pub(super) root_sock: String,
-    pub(super) root_token: String,
-    pub(super) groups: crate::proc::SessionGroups,
+    pub(crate) root: String,
+    pub(crate) root_sock: String,
+    pub(crate) root_token: String,
+    pub(crate) groups: crate::proc::SessionGroups,
     /// A brief: the by-value copy of the log, and the cache id it shares.
-    pub(super) snapshot: Option<(PathBuf, Vec<LogEvent>)>,
+    pub(crate) snapshot: Option<(PathBuf, Vec<LogEvent>)>,
 }
 
 /// How long a child process seen gone may wait to be settled by its starter
@@ -97,14 +105,14 @@ pub(super) struct Plan {
 const DEAD_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The most task or result text one request to the root carries.
-pub(super) const REMOTE_TEXT: usize = 16 * 1024;
+pub(crate) const REMOTE_TEXT: usize = 16 * 1024;
 
-pub(super) fn internal(key: &str, mut args: Value) -> Request {
+pub(crate) fn internal(key: &str, mut args: Value) -> Request {
     args["key"] = json!(key);
     Request::new(child::VERB, args, child::FROM_INTERNAL)
 }
 
-pub(super) async fn ask_loop(
+pub(crate) async fn ask_loop(
     inbox: &mpsc::UnboundedSender<Incoming>,
     request: Request,
 ) -> Result<Response, String> {
@@ -121,7 +129,7 @@ pub(super) async fn ask_loop(
         .map_err(|_| "the session did not answer".to_string())
 }
 
-pub(super) async fn ask_root(plan: &Plan, mut args: Value) -> Result<Response, String> {
+pub(crate) async fn ask_root(plan: &Plan, mut args: Value) -> Result<Response, String> {
     args["session"] = json!(plan.me);
     let request =
         Request::new(child::VERB, args, "child").with_token(Some(plan.root_token.clone()));
@@ -134,7 +142,7 @@ pub(super) async fn ask_root(plan: &Plan, mut args: Value) -> Result<Response, S
     .map_err(|error| format!("cannot reach the root session: {}", error.message()))
 }
 
-pub(super) fn state_of(response: Response) -> Result<Value, String> {
+pub(crate) fn state_of(response: Response) -> Result<Value, String> {
     if response.ok {
         Ok(response.state.unwrap_or(Value::Null))
     } else {
@@ -146,7 +154,7 @@ impl Session {
     // ------------------------------------------------------------- entry
 
     /// The `child` verb, and `brief` from `kelir ctl`.
-    pub(super) fn child_verb(&mut self, request: Request, reply: oneshot::Sender<Response>) {
+    pub(crate) fn child_verb(&mut self, request: Request, reply: oneshot::Sender<Response>) {
         let op = request
             .args
             .get("op")
@@ -185,7 +193,7 @@ impl Session {
 
     // ------------------------------------------------------------- start
 
-    pub(super) fn child_start(&mut self, op: &str, args: &Value, reply: oneshot::Sender<Response>) {
+    pub(crate) fn child_start(&mut self, op: &str, args: &Value, reply: oneshot::Sender<Response>) {
         let text = |key: &str| {
             args.get(key)
                 .and_then(Value::as_str)
@@ -258,7 +266,7 @@ impl Session {
 
     /// Settle the children whose process is gone (a crashed child must not keep
     /// its slot) and write `child_settled` for each.
-    pub(super) fn reap_children(&mut self) {
+    pub(crate) fn reap_children(&mut self) {
         let reaped = self.kids.registry.reap(
             &|entry| child::process_alive(entry.pid.unwrap_or(0), entry.started_ms),
             DEAD_GRACE,
@@ -275,7 +283,7 @@ impl Session {
         }
     }
 
-    pub(super) fn child_internal(&mut self, op: &str, args: &Value) -> Response {
+    pub(crate) fn child_internal(&mut self, op: &str, args: &Value) -> Response {
         let text = |key: &str| {
             args.get(key)
                 .and_then(Value::as_str)
@@ -347,7 +355,7 @@ impl Session {
     /// An operation a descendant sent over this (root) session's socket: the token got it here,
     /// and the caller's own session id says what it may touch. Only a descendant (live or settled)
     /// of this root is allowed; same-user processes are trusted by design.
-    pub(super) fn child_remote(&mut self, op: &str, args: &Value) -> Response {
+    pub(crate) fn child_remote(&mut self, op: &str, args: &Value) -> Response {
         if !self.kids.is_root() {
             return Response::error("child: only the root session keeps the registry");
         }
@@ -367,7 +375,7 @@ impl Session {
         }
     }
 
-    pub(super) fn registry_admit(&mut self, parent: &str, args: &Value) -> Response {
+    pub(crate) fn registry_admit(&mut self, parent: &str, args: &Value) -> Response {
         let text = |key: &str| {
             args.get(key)
                 .and_then(Value::as_str)
@@ -375,7 +383,7 @@ impl Session {
                 .to_string()
         };
         self.reap_children();
-        let session = super::new_session_id();
+        let session = new_session_id();
         let kind = if text("kind") == KIND_BRIEF {
             KIND_BRIEF
         } else {
@@ -424,7 +432,7 @@ impl Session {
         )
     }
 
-    pub(super) fn registry_up(&mut self, who: &str, args: &Value) -> Response {
+    pub(crate) fn registry_up(&mut self, who: &str, args: &Value) -> Response {
         let child_id = args.get("child_id").and_then(Value::as_str).unwrap_or("");
         let pid = args.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
         let started = args.get("started_ms").and_then(Value::as_u64);
@@ -445,7 +453,7 @@ impl Session {
         Response::ok(child::VERB, 0, "now", json!({"kill": killed}))
     }
 
-    pub(super) fn registry_settle(&mut self, who: &str, args: &Value) -> Response {
+    pub(crate) fn registry_settle(&mut self, who: &str, args: &Value) -> Response {
         let text = |key: &str| {
             args.get(key)
                 .and_then(Value::as_str)
@@ -486,7 +494,7 @@ impl Session {
         }
     }
 
-    pub(super) fn log_child_settled(
+    pub(crate) fn log_child_settled(
         &mut self,
         entry: &Entry,
         outcome: &str,
@@ -507,7 +515,7 @@ impl Session {
         }
     }
 
-    pub(super) fn queue_child_note(
+    pub(crate) fn queue_child_note(
         &mut self,
         entry: &Entry,
         outcome: &str,
@@ -536,7 +544,7 @@ impl Session {
 
     /// Apply a settlement at a boundary: the `child_settled` event (unless the registry already wrote it)
     /// and, for a background child, the message that wakes the model.
-    pub(super) fn note_child(&mut self, note: &ChildNote) -> Result<bool, String> {
+    pub(crate) fn note_child(&mut self, note: &ChildNote) -> Result<bool, String> {
         let settled = self.log.events.iter().any(|event| {
             matches!(&event.body, EventBody::ChildSettled { child_id, .. } if child_id == &note.child_id)
         });
@@ -576,7 +584,7 @@ impl Session {
     /// `kelir kill`: stop descendants of the asker. In the root it is decided here; elsewhere it
     /// is forwarded with the session's token and its own session id (the root decides what is
     /// below whom).
-    pub(super) fn child_kill(&mut self, args: &Value, reply: oneshot::Sender<Response>) {
+    pub(crate) fn child_kill(&mut self, args: &Value, reply: oneshot::Sender<Response>) {
         let target = args
             .get("target")
             .and_then(Value::as_str)
@@ -639,4 +647,55 @@ impl Session {
             let _ = reply.send(answer);
         });
     }
+}
+
+/// Ask the root's own loop to reap dead children, every second.
+pub(crate) fn watch_children(tx: mpsc::UnboundedSender<Incoming>, key: String) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let (reply, _answer) = oneshot::channel();
+            let request = Request::new(
+                crate::child::VERB,
+                json!({"op": "reap", "key": key}),
+                crate::child::FROM_INTERNAL,
+            );
+            if tx
+                .send(Incoming {
+                    request,
+                    reply,
+                    action: None,
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+}
+
+/// A child session ends when its parent does.
+pub(crate) fn watch_parent(
+    handoff: crate::child::Handoff,
+    tx: mpsc::UnboundedSender<Incoming>,
+    token: String,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if crate::child::parent_alive(&handoff) {
+                continue;
+            }
+            let (reply, _answer) = oneshot::channel();
+            let _ = tx.send(Incoming {
+                request: Request::new("end", json!({}), "parent-gone").with_token(Some(token)),
+                reply,
+                action: None,
+            });
+            // The end verb stops the session cleanly; if something is stuck,
+            // leave anyway.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            std::process::exit(143);
+        }
+    });
 }

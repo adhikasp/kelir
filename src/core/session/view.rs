@@ -1,4 +1,6 @@
 //! Message folding, attachment import and view checks.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use super::*;
 
@@ -7,7 +9,7 @@ impl Session {
     /// verb is *applied* later, at its boundary.
     /// Messages that should start the next turn: `later` deliveries, and any
     /// `say` that was still waiting when the turn ended.
-    pub(super) fn take_turn_messages(&mut self) -> Option<TurnStart> {
+    pub(crate) fn take_turn_messages(&mut self) -> Option<TurnStart> {
         let mut messages = Vec::new();
         let mut end = false;
         let mut woke = false;
@@ -57,7 +59,7 @@ impl Session {
 
     /// Record what a job's status file says: `bg_started` once, and — when it settled — `bg_settled` plus
     /// the `user` message from `job` that wakes the agent.
-    pub(super) fn note_bg(&mut self, reported: &crate::bg::Status) -> Result<bool, String> {
+    pub(crate) fn note_bg(&mut self, reported: &crate::bg::Status) -> Result<bool, String> {
         let id = reported.id.clone();
         // The id is this session's own or nothing: a status file nobody minted never reaches the log
         // as a job. Same-user children are trusted; ownership is the only check here.
@@ -116,7 +118,7 @@ impl Session {
 
     /// A wake-up the session raised itself (its own `bg/` watcher) is not a request: there is no `Request`
     /// to answer and nobody is waiting.
-    pub(super) fn note_own(&self, action: Option<crate::ipc::Action>) -> Option<Pending> {
+    pub(crate) fn note_own(&self, action: Option<crate::ipc::Action>) -> Option<Pending> {
         action.map(|crate::ipc::Action::Note(status)| Pending {
             // The watcher wrote no `verb` event, so there is no seq of its own; the scheduler keeps
             // arrival order and `note_bg` writes the `bg_*` events in the order the notes apply.
@@ -128,7 +130,7 @@ impl Session {
 
     /// One image queued by `kelir view`: resolve the path, record the `source` event (kind
     /// `attachment`), and return what the TUI shows.
-    pub(super) fn apply_view(&mut self, named: &str) -> Result<(String, u64), String> {
+    pub(crate) fn apply_view(&mut self, named: &str) -> Result<(String, u64), String> {
         let path = self.check_view(named)?;
         let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
         // Audio and video are stored with a note, never sent: a `source` event
@@ -163,7 +165,7 @@ impl Session {
 
     /// Resolve and validate a `view` path without side effects: the same check
     /// the ack runs, so the CLI's answer is the truth.
-    pub(super) fn check_view(&self, named: &str) -> Result<std::path::PathBuf, String> {
+    pub(crate) fn check_view(&self, named: &str) -> Result<std::path::PathBuf, String> {
         let path = crate::attachments::resolve(&self.log.dir, &self.ctx.cwd, named);
         if !path.is_file() {
             return Err(format!(
@@ -234,7 +236,7 @@ impl Session {
 
     /// Whether the provider says the current model takes images: `Some(true)` and `Some(false)` are
     /// answers, `None` is "not stated" (the fetched or cached model list has no entry, or the entry has no
-    pub(super) fn vision_support(&self) -> Option<bool> {
+    pub(crate) fn vision_support(&self) -> Option<bool> {
         self.features
             .models
             .models
@@ -244,7 +246,7 @@ impl Session {
 
     /// Copy one image into `<session>/attachments/` and return its relative
     /// path. Content that is already there is not copied twice.
-    pub(super) fn import_attachment(&self, path: &Path) -> Result<String, String> {
+    pub(crate) fn import_attachment(&self, path: &Path) -> Result<String, String> {
         let dir = crate::attachments::dir(&self.log.dir);
         std::fs::create_dir_all(&dir)
             .map_err(|error| format!("view: cannot create {}: {error}", dir.display()))?;
@@ -265,7 +267,7 @@ impl Session {
     /// at the tail, so the system prefix (and its cache) is untouched.
     /// The per-boundary mtime/hash check of the recorded sources: a file edited on disk since it went into
     /// the context becomes one `source` message.
-    pub(super) async fn record_messages(&mut self, messages: Vec<Message>) -> Result<(), String> {
+    pub(crate) async fn record_messages(&mut self, messages: Vec<Message>) -> Result<(), String> {
         for mut message in messages {
             let from = message.from.clone();
             let Some(text) = self.gates_prompt(message.text, &from).await? else {

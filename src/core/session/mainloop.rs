@@ -1,4 +1,6 @@
 //! The outer loop: run, idle and the boundary helpers.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use super::*;
 
@@ -7,7 +9,7 @@ impl Session {
 
     /// Run the session: one turn, then more when `--keep` or when messages are
     /// queued. Ends with `session_ended`.
-    pub(super) async fn run(&mut self, rx: &mut Inbox) -> u8 {
+    pub(crate) async fn run(&mut self, rx: &mut Inbox) -> u8 {
         let mut code = 0u8;
         // Every way out of the loop below sets it (the loop always runs at
         // least one turn).
@@ -192,7 +194,7 @@ impl Session {
     }
 
     /// `--keep` and no turn running: take verbs until one starts a turn.
-    pub(super) async fn idle(&mut self, rx: &mut Inbox) -> Idle {
+    pub(crate) async fn idle(&mut self, rx: &mut Inbox) -> Idle {
         loop {
             // A metadata fetch that started with the session lands here as well as at `before_step`: an idle
             // session answers `state` too, and a list that arrived while nobody was asking should still be applied
@@ -321,7 +323,7 @@ impl Session {
 
     /// Handle one verb that arrived while a request was in flight. `stop` and
     /// `end` interrupt now; anything else waits for its boundary.
-    pub(super) fn take_interrupt(&mut self, incoming: Incoming, interrupt: &mut Option<StreamEnd>) {
+    pub(crate) fn take_interrupt(&mut self, incoming: Incoming, interrupt: &mut Option<StreamEnd>) {
         if let Some(pending) = self.accept(incoming) {
             match pending.verb {
                 Verb::Stop { call: None, reason } => {

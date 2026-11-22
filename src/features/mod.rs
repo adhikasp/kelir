@@ -1,6 +1,8 @@
 //! The feature registry. The core owns one `Features` and calls its hooks by name of
 //! boundary; it never names a member. Dispatch is static, in the documented order.
 
+pub mod children;
+pub mod children_ops;
 pub mod gates;
 pub mod mcp;
 pub mod models;
@@ -34,4 +36,63 @@ impl Features {
         Feature::status(&self.models, out);
         Feature::status(&self.sources, out);
     }
+
+    /// Status fields owned by features that also need a view of the session.
+    /// The core calls this once, after `status`, and never constructs these
+    /// values itself.
+    pub(crate) fn status_extended(
+        &self,
+        session: &crate::core::session::types::Session,
+        out: &mut serde_json::Map<String, serde_json::Value>,
+    ) {
+        use serde_json::{Value, json};
+        // MCP servers: name, state, tool count and channel flag only. Never
+        // config, env, descriptions or server stderr (those can hold secrets).
+        let servers = self.mcp.as_ref().expect("mcp feature").servers();
+        let mcp: Vec<Value> = servers["servers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| {
+                let state = s["state"].as_str().unwrap_or("");
+                // A `failed: ...` state carries server text; keep the word only.
+                let state = if state.starts_with("failed") { "failed" } else { state };
+                json!({"name": s["name"], "state": state, "tools": s["tools"], "channel": s["channel"]})
+            })
+            .collect();
+        out.insert("mcp".into(), Value::Array(mcp));
+        let gates = self.gates.as_ref().expect("gates feature").status(session);
+        out.insert("gates".into(), gates);
+        out.insert("children".into(), json!(session.live_children()));
+        out.insert("child_list".into(), session.child_list());
+    }
+}
+
+/// Verbs owned by features that must be answered before the core parses them.
+/// `Ok(())` means the verb was handled; `Err` hands the request back unchanged.
+pub(crate) fn early_feature_verb(
+    session: &mut crate::core::session::types::Session,
+    request: crate::ipc::Request,
+    reply: tokio::sync::oneshot::Sender<crate::ipc::Response>,
+) -> Result<
+    (),
+    (
+        crate::ipc::Request,
+        tokio::sync::oneshot::Sender<crate::ipc::Response>,
+    ),
+> {
+    if crate::mcp::broker::is_mcp_verb(&request.verb) {
+        session.mcp_do(|mcp, session| mcp.verb(session, request, reply));
+        return Ok(());
+    }
+    if request.verb == crate::child::VERB || request.verb == "brief" {
+        session.child_or_brief(request, reply);
+        return Ok(());
+    }
+    Err((request, reply))
+}
+
+/// Flush feature work at a verb boundary before the core applies pending verbs.
+pub(crate) fn flush_features(session: &mut crate::core::session::types::Session) {
+    session.mcp_do(|mcp, session| mcp.flush(session));
 }

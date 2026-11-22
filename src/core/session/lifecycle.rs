@@ -1,9 +1,11 @@
 //! Session construction and log reopen.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use super::*;
 
 impl Session {
-    pub(super) fn open(
+    pub(crate) fn open(
         prepared: Prepared,
         trust: std::sync::Arc<crate::trust::Trust>,
     ) -> Result<Self, String> {
@@ -118,7 +120,11 @@ impl Session {
             },
             trust,
             tally: crate::usage::Tally::default(),
-            kids: children::Kids::new(&prepared.id, prepared.cfg.children, prepared.child.as_ref()),
+            kids: crate::features::children::Kids::new(
+                &prepared.id,
+                prepared.cfg.children,
+                prepared.child.as_ref(),
+            ),
             retry_wait: std::cell::Cell::new(None),
         };
         if session.kids.root.is_some() {
@@ -187,7 +193,7 @@ impl Session {
 
     /// Pick the log up where it stopped: report the damage, mark the resume, settle the calls nobody
     /// settled (as *unknown*, never by running them again), and add a new task if one was given.
-    pub(super) fn reopen(&mut self, read: Reopened) -> Result<(), String> {
+    pub(crate) fn reopen(&mut self, read: Reopened) -> Result<(), String> {
         // Gaps in the log first: a torn last line and every line that never parsed are reported, never dropped
         // silently — but a gap that a previous resume already reported is not reported again.
         let reported: Vec<String> = self

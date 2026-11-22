@@ -1,4 +1,6 @@
 //! The compaction half of the session loop.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use super::types::*;
 use super::*;
@@ -6,7 +8,7 @@ use super::*;
 impl Session {
     /// Compact the context if something asked for it: the `compact` tool, the `compact` verb, or
     /// the auto trigger at the configured fraction of the model's window.
-    pub(super) async fn maybe_compact(
+    pub(crate) async fn maybe_compact(
         &mut self,
         rx: &mut Inbox,
     ) -> Result<Option<TurnEnd>, String> {
@@ -55,7 +57,7 @@ impl Session {
     }
 
     /// Run a requested compaction and report what it did.
-    pub(super) async fn run_compact(
+    pub(crate) async fn run_compact(
         &mut self,
         rx: &mut Inbox,
         request: &CompactRequest,
@@ -123,7 +125,7 @@ impl Session {
     }
 
     /// The size of the request the fold would build with `preview` appended.
-    pub(super) fn preview_tokens(&self, preview: &EventBody, seq: u64) -> Result<u64, String> {
+    pub(crate) fn preview_tokens(&self, preview: &EventBody, seq: u64) -> Result<u64, String> {
         let mut events = self.log.events.clone();
         events.push(LogEvent::new(seq, preview.clone()));
         let folded = crate::fold::fold(&events, &self.log.dir)?;
@@ -131,7 +133,7 @@ impl Session {
     }
 
     /// Summarise the range and write the `compacted` event.
-    pub(super) async fn compact(
+    pub(crate) async fn compact(
         &mut self,
         rx: &mut Inbox,
         request: &CompactRequest,

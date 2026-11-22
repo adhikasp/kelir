@@ -1,16 +1,18 @@
 //! The verb half of the session loop: accept, parse, log and apply verbs.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use super::types::*;
 use super::*;
 
 impl Session {
-    pub(super) fn accept(&mut self, incoming: Incoming) -> Option<Pending> {
+    pub(crate) fn accept(&mut self, incoming: Incoming) -> Option<Pending> {
         self.accept_as(incoming, None)
     }
 
     /// `accept`, with the answer's `applies` word overridden. The idle loop uses it for a `stop`
     /// that has nothing to stop: the verb is dropped, so the answer says `dropped`, not `now`.
-    pub(super) fn accept_as(
+    pub(crate) fn accept_as(
         &mut self,
         incoming: Incoming,
         applies: Option<&'static str>,
@@ -32,14 +34,10 @@ impl Session {
             let _ = reply.send(self.status_answer());
             return None;
         }
-        if crate::mcp::broker::is_mcp_verb(&name) {
-            self.mcp_do(|mcp, session| mcp.verb(session, request, reply));
-            return None;
-        }
-        if name == crate::child::VERB || name == "brief" {
-            self.child_or_brief(request, reply);
-            return None;
-        }
+        let (request, reply) = match crate::features::early_feature_verb(self, request, reply) {
+            Ok(()) => return None,
+            Err(parts) => parts,
+        };
         // `bg-spawn` is the one thing a job cannot do itself: on Windows a `kelir bg run` inside a call sits
         // in the call's Job Object, which forbids breakaway (it has to — an escapable job cannot be
         if name == "bg-spawn" {
@@ -91,7 +89,7 @@ impl Session {
 
     /// `accept` for a verb a wait is about to apply at once (`say --now`, `model`): the answer goes out
     /// *after* the verb landed, so it says `applies: "now"` and `state.model` (or the queued text) is what
-    pub(super) async fn accept_at_once(&mut self, incoming: Incoming) -> AtOnce {
+    pub(crate) async fn accept_at_once(&mut self, incoming: Incoming) -> AtOnce {
         let Incoming {
             request,
             reply,
@@ -107,14 +105,10 @@ impl Session {
             let _ = reply.send(self.status_answer());
             return AtOnce::Rejected;
         }
-        if crate::mcp::broker::is_mcp_verb(&name) {
-            self.mcp_do(|mcp, session| mcp.verb(session, request, reply));
-            return AtOnce::Rejected;
-        }
-        if name == crate::child::VERB || name == "brief" {
-            self.child_or_brief(request, reply);
-            return AtOnce::Rejected;
-        }
+        let (request, reply) = match crate::features::early_feature_verb(self, request, reply) {
+            Ok(()) => return AtOnce::Rejected,
+            Err(parts) => parts,
+        };
         if name == "bg-spawn" {
             let answer = self.bg_spawn_answer(&from, &request);
             let _ = reply.send(answer);
@@ -163,7 +157,7 @@ impl Session {
 
     /// The `bg-spawn` answer: the shim only ever answers a job, and a job is the only sender allowed to
     /// ask.
-    pub(super) fn bg_spawn_answer(&mut self, from: &str, request: &Request) -> Response {
+    pub(crate) fn bg_spawn_answer(&mut self, from: &str, request: &Request) -> Response {
         if from != "job" {
             return Response::error("bg-spawn: an internal verb; jobs report themselves");
         }
@@ -190,7 +184,7 @@ impl Session {
 
     /// `bg-claim`, retired: nothing sends it, so it answers an id and nothing else, from a small
     /// budget of its own (it must not use the one `bg-spawn` mints from).
-    pub(super) fn bg_claim_answer(&mut self) -> Response {
+    pub(crate) fn bg_claim_answer(&mut self) -> Response {
         match self.trust.claim_ack() {
             Ok(id) => Response::ok("bg-claim", 0, "now", json!({"id": id})),
             Err(error) => Response::error(error),
@@ -199,7 +193,7 @@ impl Session {
 
     /// Record a refused verb, unless the refusal budget is spent: a token holder can name foreign
     /// jobs one by one and the log must not grow by one event per try.
-    pub(super) fn refuse_verb(
+    pub(crate) fn refuse_verb(
         &mut self,
         name: &str,
         args: &Value,
@@ -215,7 +209,7 @@ impl Session {
         Ok(())
     }
 
-    pub(super) fn parse_verb(&self, request: &Request, from: &str) -> Result<Verb, String> {
+    pub(crate) fn parse_verb(&self, request: &Request, from: &str) -> Result<Verb, String> {
         let name = request.verb.as_str();
         if name == "bg" && from != "job" {
             return Err("bg: an internal verb; jobs report themselves".to_string());
@@ -242,7 +236,7 @@ impl Session {
     }
 
     /// Log the arrival, before it is answered or applied.
-    pub(super) fn log_verb(
+    pub(crate) fn log_verb(
         &mut self,
         name: &str,
         args: &Value,
@@ -261,8 +255,8 @@ impl Session {
     }
 
     /// Apply the verbs due at `boundary`.
-    pub(super) async fn apply(&mut self, boundary: Boundary) -> Result<Applied, String> {
-        self.mcp_do(|mcp, session| mcp.flush(session));
+    pub(crate) async fn apply(&mut self, boundary: Boundary) -> Result<Applied, String> {
+        crate::features::flush_features(self);
         let mut applied = Applied::default();
         for pending in self.scheduler.due(boundary) {
             self.apply_pending(pending, &mut applied).await?;
@@ -272,7 +266,7 @@ impl Session {
     }
 
     /// Apply the pending verbs that are *actions* rather than messages.
-    pub(super) async fn apply_actions(&mut self) -> Result<(), String> {
+    pub(crate) async fn apply_actions(&mut self) -> Result<(), String> {
         let actions = self.scheduler.take_where(Verb::is_action);
         if actions.is_empty() {
             return Ok(());
@@ -287,7 +281,7 @@ impl Session {
 
     /// Apply one verb. The caller decides when: a boundary, or a wait the verb
     /// is allowed to cut short.
-    pub(super) async fn apply_pending(
+    pub(crate) async fn apply_pending(
         &mut self,
         pending: Pending,
         applied: &mut Applied,

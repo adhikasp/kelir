@@ -1,29 +1,31 @@
 //! Session-local types and their small helpers.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use super::*;
 
-pub(super) struct Options {
-    pub(super) json: bool,
-    pub(super) ask: bool,
-    pub(super) keep: bool,
+pub(crate) struct Options {
+    pub(crate) json: bool,
+    pub(crate) ask: bool,
+    pub(crate) keep: bool,
     /// Interactive: an inline viewport owns the terminal and every turn is
     /// rendered through `tui::UiEvent`s instead of stdout.
-    pub(super) tui: bool,
-    pub(super) common: CommonArgs,
+    pub(crate) tui: bool,
+    pub(crate) common: CommonArgs,
     /// The task words from the command line (`run`, `ask`); empty for the TUI.
-    pub(super) task: Vec<String>,
+    pub(crate) task: Vec<String>,
     /// Continue this session (id or unique prefix) from its log.
-    pub(super) resume: Option<String>,
+    pub(crate) resume: Option<String>,
     /// A bound name's session id for a fresh run; otherwise a new id is minted.
-    pub(super) id: Option<String>,
+    pub(crate) id: Option<String>,
     /// This process is a child session: who started it, where the root is.
-    pub(super) child: Option<crate::child::Handoff>,
+    pub(crate) child: Option<crate::child::Handoff>,
     /// A scheduled run's explicit options and pre-task sources, or `None` for
     /// an ordinary interactive/CLI run.
-    pub(super) run_options: Option<(crate::namedrun::RunOptions, Vec<(String, EventBody)>)>,
+    pub(crate) run_options: Option<(crate::namedrun::RunOptions, Vec<(String, EventBody)>)>,
 }
 
-pub(super) enum Failure {
+pub(crate) enum Failure {
     /// Exit 2: bad invocation or configuration.
     Usage(String),
     /// Exit 1: the run itself failed.
@@ -31,200 +33,200 @@ pub(super) enum Failure {
 }
 
 impl Failure {
-    pub(super) fn code(&self) -> u8 {
+    pub(crate) fn code(&self) -> u8 {
         match self {
             Failure::Usage(_) => 2,
             Failure::Run(_) => 1,
         }
     }
 
-    pub(super) fn message(&self) -> &str {
+    pub(crate) fn message(&self) -> &str {
         match self {
             Failure::Usage(message) | Failure::Run(message) => message,
         }
     }
 }
 
-pub(super) struct Prepared {
-    pub(super) cfg: Config,
-    pub(super) provider_name: String,
-    pub(super) model: String,
-    pub(super) client: Client,
+pub(crate) struct Prepared {
+    pub(crate) cfg: Config,
+    pub(crate) provider_name: String,
+    pub(crate) model: String,
+    pub(crate) client: Client,
     /// The provider config the client was built from, its key included: the
     /// session keeps it as `active_provider`.
-    pub(super) provider_cfg: crate::config::ProviderConfig,
+    pub(crate) provider_cfg: crate::config::ProviderConfig,
     /// Where this session's key came from (`env OPENROUTER_API_KEY`,
     /// `opencode auth export opencode`). Recorded in `session_started`.
-    pub(super) key_origin: Option<String>,
-    pub(super) id: String,
-    pub(super) dir: PathBuf,
-    pub(super) task: String,
-    pub(super) cwd: PathBuf,
+    pub(crate) key_origin: Option<String>,
+    pub(crate) id: String,
+    pub(crate) dir: PathBuf,
+    pub(crate) task: String,
+    pub(crate) cwd: PathBuf,
     /// The frozen system prompt: the text, its hash, and the sources that went
     /// in (`session_started.system` and `sources[]`).
-    pub(super) system: crate::sources::Rendered,
-    pub(super) sock: String,
-    pub(super) json: bool,
-    pub(super) ask: bool,
-    pub(super) keep: bool,
-    pub(super) tui: bool,
-    pub(super) herdr: Option<Herdr>,
-    pub(super) resume: Option<Reopened>,
+    pub(crate) system: crate::sources::Rendered,
+    pub(crate) sock: String,
+    pub(crate) json: bool,
+    pub(crate) ask: bool,
+    pub(crate) keep: bool,
+    pub(crate) tui: bool,
+    pub(crate) herdr: Option<Herdr>,
+    pub(crate) resume: Option<Reopened>,
     /// Sources a scheduled run passes in explicitly.
-    pub(super) run_sources: Vec<EventBody>,
-    pub(super) task_from: &'static str,
-    pub(super) step_cap: Option<u32>,
+    pub(crate) run_sources: Vec<EventBody>,
+    pub(crate) task_from: &'static str,
+    pub(crate) step_cap: Option<u32>,
     /// Set when this process is a child session.
-    pub(super) child: Option<crate::child::Handoff>,
+    pub(crate) child: Option<crate::child::Handoff>,
     /// The window compaction measures against, and where it came from
     /// (`config`, `api`, `cache`, `default`).
-    pub(super) window: u64,
-    pub(super) window_source: &'static str,
+    pub(crate) window: u64,
+    pub(crate) window_source: &'static str,
     /// Why the window is what it is, when that needs saying: the short reason the provider's list
     /// did not answer, in words. `None` for a configured window and for a list that answered.
-    pub(super) window_note: Option<String>,
+    pub(crate) window_note: Option<String>,
     /// The provider's model list as this process learned it, so a `model` swap
     /// resolves without the network.
-    pub(super) models: Option<crate::models::Cache>,
+    pub(crate) models: Option<crate::models::Cache>,
     /// A metadata fetch still running (or its answer, waiting to be taken): resolved at the next
     /// `before_step`, so a slow list never holds the first request.
-    pub(super) models_fetch: Option<Fetch>,
+    pub(crate) models_fetch: Option<Fetch>,
     /// The opt-in concurrency governor for the provider this session starts with
     /// (`max_concurrent_requests`); `None` when the provider config has no limit.
-    pub(super) governor: Option<crate::governor::Governor>,
+    pub(crate) governor: Option<crate::governor::Governor>,
 }
 
 /// What a resume reads out of the log before the session continues it.
-pub(super) struct Reopened {
-    pub(super) events: Vec<LogEvent>,
+pub(crate) struct Reopened {
+    pub(crate) events: Vec<LogEvent>,
     /// The log was not closed cleanly (a turn was running, or the process was
     /// killed between turns): resume continues from the model's next step.
-    pub(super) in_flight: bool,
+    pub(crate) in_flight: bool,
     /// Calls the log shows as requested but never settled.
-    pub(super) unsettled: Vec<UnsettledCall>,
+    pub(crate) unsettled: Vec<UnsettledCall>,
     /// Torn or unreadable log lines, reported as `error` events.
-    pub(super) damage: Vec<String>,
-    pub(super) step: u32,
-    pub(super) turns: u32,
+    pub(crate) damage: Vec<String>,
+    pub(crate) step: u32,
+    pub(crate) turns: u32,
     /// The tool names frozen at `session_started`, so a resumed session sends
     /// the same tool list (and keeps its cache prefix).
-    pub(super) tools: Vec<String>,
+    pub(crate) tools: Vec<String>,
     /// The frozen system text; kept so the log is never rewritten.
-    pub(super) system_text: String,
+    pub(crate) system_text: String,
     /// The sources the frozen system was rendered from, as `session_started`
     /// recorded them: the watcher re-checks exactly these.
-    pub(super) sources: Vec<crate::event::SourceInfo>,
-    pub(super) cwd: PathBuf,
+    pub(crate) sources: Vec<crate::event::SourceInfo>,
+    pub(crate) cwd: PathBuf,
 }
 
 /// The log and its identity: the one writer, its blobs, the folded events and
 /// whether the session was reopened and already named.
-pub(super) struct Log {
-    pub(super) writer: crate::event::EventLog,
-    pub(super) blobs: Blobs,
-    pub(super) events: Vec<LogEvent>,
-    pub(super) id: String,
-    pub(super) dir: PathBuf,
-    pub(super) config_dir: PathBuf,
-    pub(super) titled: bool,
+pub(crate) struct Log {
+    pub(crate) writer: crate::event::EventLog,
+    pub(crate) blobs: Blobs,
+    pub(crate) events: Vec<LogEvent>,
+    pub(crate) id: String,
+    pub(crate) dir: PathBuf,
+    pub(crate) config_dir: PathBuf,
+    pub(crate) titled: bool,
 }
 
 /// The provider side of a session: the client, the active config and the
 /// provider-fields a 400 has taught us to drop.
-pub(super) struct Provider {
-    pub(super) client: Client,
-    pub(super) active_provider: crate::config::ProviderConfig,
-    pub(super) provider_name: String,
-    pub(super) model: String,
-    pub(super) refused_fields: BTreeSet<String>,
-    pub(super) governor: Option<crate::governor::Governor>,
+pub(crate) struct Provider {
+    pub(crate) client: Client,
+    pub(crate) active_provider: crate::config::ProviderConfig,
+    pub(crate) provider_name: String,
+    pub(crate) model: String,
+    pub(crate) refused_fields: BTreeSet<String>,
+    pub(crate) governor: Option<crate::governor::Governor>,
 }
 
 /// Where a session's output goes: stdout shapes, the UI sink and the Herdr status.
-pub(super) struct Out {
-    pub(super) json: bool,
-    pub(super) echo_assistant: bool,
-    pub(super) keep: bool,
-    pub(super) tui: bool,
-    pub(super) ui: Option<mpsc::UnboundedSender<UiEvent>>,
-    pub(super) herdr: Option<Herdr>,
+pub(crate) struct Out {
+    pub(crate) json: bool,
+    pub(crate) echo_assistant: bool,
+    pub(crate) keep: bool,
+    pub(crate) tui: bool,
+    pub(crate) ui: Option<mpsc::UnboundedSender<UiEvent>>,
+    pub(crate) herdr: Option<Herdr>,
 }
 
 /// The compaction request and the context-size bookkeeping behind it.
-pub(super) struct CompactState {
-    pub(super) request: Option<CompactRequest>,
-    pub(super) last_prompt_tokens: Option<u64>,
-    pub(super) floor: Option<u64>,
+pub(crate) struct CompactState {
+    pub(crate) request: Option<CompactRequest>,
+    pub(crate) last_prompt_tokens: Option<u64>,
+    pub(crate) floor: Option<u64>,
 }
 
 /// The run as a whole: the task, its delivery and the resume/in-flight flags.
-pub(super) struct Run {
+pub(crate) struct Run {
     /// Session-wide step counter, turn number and steps taken in this turn.
-    pub(super) step: u32,
-    pub(super) turn: u32,
-    pub(super) turn_steps: u32,
-    pub(super) has_task: bool,
-    pub(super) final_text: String,
-    pub(super) run_sources: Vec<EventBody>,
-    pub(super) task_from: &'static str,
-    pub(super) step_cap: Option<u32>,
-    pub(super) resumed: bool,
-    pub(super) in_flight: bool,
-    pub(super) retryable_failure: bool,
-    pub(super) pending_task: String,
+    pub(crate) step: u32,
+    pub(crate) turn: u32,
+    pub(crate) turn_steps: u32,
+    pub(crate) has_task: bool,
+    pub(crate) final_text: String,
+    pub(crate) run_sources: Vec<EventBody>,
+    pub(crate) task_from: &'static str,
+    pub(crate) step_cap: Option<u32>,
+    pub(crate) resumed: bool,
+    pub(crate) in_flight: bool,
+    pub(crate) retryable_failure: bool,
+    pub(crate) pending_task: String,
 }
 
 /// The tools frozen at session start and the calls live in this batch.
-pub(super) struct ToolState {
-    pub(super) names: Vec<String>,
-    pub(super) disabled: BTreeSet<String>,
-    pub(super) live_calls: Vec<String>,
+pub(crate) struct ToolState {
+    pub(crate) names: Vec<String>,
+    pub(crate) disabled: BTreeSet<String>,
+    pub(crate) live_calls: Vec<String>,
 }
 
-pub(super) struct Session {
+pub(crate) struct Session {
     /// The log, the folded events and the identity they belong to.
-    pub(super) log: Log,
-    pub(super) cfg: Config,
-    pub(super) provider: Provider,
+    pub(crate) log: Log,
+    pub(crate) cfg: Config,
+    pub(crate) provider: Provider,
     /// The frozen tool context of skills and sources.
-    pub(super) ctx: Ctx,
-    pub(super) out: Out,
+    pub(crate) ctx: Ctx,
+    pub(crate) out: Out,
     /// The loop's own inbox sender: broker tasks, children and bg jobs hand
     /// finished work back through it.
-    pub(super) inbox: Option<mpsc::UnboundedSender<Incoming>>,
-    pub(super) scheduler: Scheduler,
-    pub(super) compact: CompactState,
-    pub(super) tools: ToolState,
-    pub(super) run: Run,
+    pub(crate) inbox: Option<mpsc::UnboundedSender<Incoming>>,
+    pub(crate) scheduler: Scheduler,
+    pub(crate) compact: CompactState,
+    pub(crate) tools: ToolState,
+    pub(crate) run: Run,
     /// Every feature's state, dispatched through the `Feature` boundaries.
-    pub(super) features: crate::features::Features,
+    pub(crate) features: crate::features::Features,
     /// This session's socket trust boundary: its token and the jobs it owns.
-    pub(super) trust: std::sync::Arc<crate::trust::Trust>,
+    pub(crate) trust: std::sync::Arc<crate::trust::Trust>,
     /// What this session has spent, folded from the log as it is written.
-    pub(super) tally: crate::usage::Tally,
+    pub(crate) tally: crate::usage::Tally,
     /// This session's place in the family of sessions and its registry of children.
-    pub(super) kids: children::Kids,
+    pub(crate) kids: crate::features::children::Kids,
     /// The retry or slot wait in progress, for `status`.
-    pub(super) retry_wait: std::cell::Cell<Option<RetryWait>>,
+    pub(crate) retry_wait: std::cell::Cell<Option<RetryWait>>,
 }
 
 /// A retry or slot wait in progress: ends at, status, attempt, is-a-slot-wait.
 type RetryWait = (Instant, Option<u16>, u32, bool);
 
-pub(super) struct CompactRequest {
-    pub(super) by: &'static str,
-    pub(super) focus: Option<String>,
-    pub(super) immediate: bool,
+pub(crate) struct CompactRequest {
+    pub(crate) by: &'static str,
+    pub(crate) focus: Option<String>,
+    pub(crate) immediate: bool,
 }
 
-pub(super) struct CompactedInfo {
-    pub(super) through_seq: u64,
-    pub(super) tokens_before: u64,
-    pub(super) tokens_after: u64,
-    pub(super) pinned: usize,
+pub(crate) struct CompactedInfo {
+    pub(crate) through_seq: u64,
+    pub(crate) tokens_before: u64,
+    pub(crate) tokens_after: u64,
+    pub(crate) pinned: usize,
 }
 
-pub(super) enum CompactRun {
+pub(crate) enum CompactRun {
     /// Nothing old enough to summarise.
     Nothing,
     /// A `compacted` event was written.
@@ -240,7 +242,7 @@ pub(super) enum CompactRun {
 
 /// The result the `compact` tool call itself gets: the work happens at the next
 /// boundary, not inside the call.
-pub(super) fn compact_queued(focus: &Option<String>) -> String {
+pub(crate) fn compact_queued(focus: &Option<String>) -> String {
     match focus {
         Some(focus) => format!(
             "compaction queued (focus: {focus}): the earlier conversation is summarised at the \
@@ -254,14 +256,14 @@ pub(super) fn compact_queued(focus: &Option<String>) -> String {
 
 /// Is this process armed to die at `point`? The documented test hook
 /// (`KELIR_CRASH_AT=<point>`) is a no-op unless it names this point exactly.
-pub(super) fn crash_armed(point: &str) -> bool {
+pub(crate) fn crash_armed(point: &str) -> bool {
     crate::envs::var_os("KELIR_CRASH_AT")
         .map(|value| value.to_string_lossy().trim() == point)
         .unwrap_or(false)
 }
 
 /// Die the way a crash does: abort, no unwinding, no `session_ended`.
-pub(super) fn crash_now(point: &str) -> ! {
+pub(crate) fn crash_now(point: &str) -> ! {
     let _ = writeln!(
         std::io::stderr(),
         "kelir: KELIR_CRASH_AT={point}: aborting (test hook)"
@@ -270,13 +272,13 @@ pub(super) fn crash_now(point: &str) -> ! {
     std::process::abort()
 }
 
-pub(super) fn crash_at(point: &str) {
+pub(crate) fn crash_at(point: &str) {
     if crash_armed(point) {
         crash_now(point);
     }
 }
 
-pub(super) enum TurnEnd {
+pub(crate) enum TurnEnd {
     Done,
     Stopped(String),
     /// The turn paused and waits for a human. Not a failure: the session stays alive (`--keep`)
@@ -286,34 +288,34 @@ pub(super) enum TurnEnd {
     End,
 }
 
-pub(super) enum TurnStart {
+pub(crate) enum TurnStart {
     Messages(Vec<Message>),
     End,
 }
 
-pub(super) enum Idle {
+pub(crate) enum Idle {
     Turn,
     End,
 }
 
 /// A `user` event to inject at a boundary.
-pub(super) struct Message {
-    pub(super) text: String,
-    pub(super) delivery: &'static str,
-    pub(super) from: String,
+pub(crate) struct Message {
+    pub(crate) text: String,
+    pub(crate) delivery: &'static str,
+    pub(crate) from: String,
 }
 
 #[derive(Default)]
-pub(super) struct Applied {
+pub(crate) struct Applied {
     /// The `end` verb was applied.
-    pub(super) end: bool,
+    pub(crate) end: bool,
     /// The `stop` verb ended the turn, with this reason.
-    pub(super) stopped: Option<String>,
+    pub(crate) stopped: Option<String>,
     /// How many messages were injected (a `say` means another step).
-    pub(super) messages: usize,
+    pub(crate) messages: usize,
 }
 
-pub(super) enum StreamEnd {
+pub(crate) enum StreamEnd {
     Assembled(crate::stream::Assembler),
     Stopped(String),
     End,
@@ -323,21 +325,21 @@ pub(super) enum StreamEnd {
 }
 
 /// What a pause says happened, for `turn_ended.final_text` (and its `reason`).
-pub(super) struct PauseReport {
+pub(crate) struct PauseReport {
     /// `paused` because of this: an explicit `max_steps` cap (`steps`) or an
     /// unavailable provider (`provider`).
-    pub(super) reason: PauseReason,
+    pub(crate) reason: PauseReason,
     /// Provider requests made inside the budget (`provider` only).
-    pub(super) attempts: u32,
+    pub(crate) attempts: u32,
     /// How long the waits inside the budget took (`provider` only).
-    pub(super) waited: Duration,
+    pub(crate) waited: Duration,
     /// The last failure's short reason ("rate limited (429)"), `provider` only.
-    pub(super) detail: String,
+    pub(crate) detail: String,
 }
 
 /// The two ways a turn pauses; both log `outcome: "paused"`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum PauseReason {
+pub(crate) enum PauseReason {
     /// An explicit `max_steps` cap was reached.
     Steps,
     /// The provider stayed unavailable past the waiting budget.
@@ -345,7 +347,7 @@ pub(super) enum PauseReason {
 }
 
 impl PauseReason {
-    pub(super) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             PauseReason::Steps => "steps",
             PauseReason::Provider => "provider",
@@ -355,7 +357,7 @@ impl PauseReason {
 
 impl PauseReport {
     /// The step cap: "turn paused after 40 steps; say continue to resume".
-    pub(super) fn steps(steps: u32) -> PauseReport {
+    pub(crate) fn steps(steps: u32) -> PauseReport {
         PauseReport {
             reason: PauseReason::Steps,
             attempts: steps,
@@ -366,7 +368,7 @@ impl PauseReport {
 
     /// "provider unavailable after 7 attempts / 30 min: rate limited (429);
     /// say continue to retry".
-    pub(super) fn message(&self) -> String {
+    pub(crate) fn message(&self) -> String {
         if self.reason == PauseReason::Steps {
             return format!(
                 "turn paused after {} {}; say continue to resume",
@@ -388,7 +390,7 @@ impl PauseReport {
 
 /// Where a request comes from, so it can be rebuilt after a wait: a `model` verb during the
 /// wait changes the model (and the provider), and the next attempt has to use it.
-pub(super) enum RequestFor<'a> {
+pub(crate) enum RequestFor<'a> {
     /// A step: the fold, built from the session's current model.
     Step,
     /// The compaction's own request: it is built once, from the model it was
@@ -397,7 +399,7 @@ pub(super) enum RequestFor<'a> {
 }
 
 impl RequestFor<'_> {
-    pub(super) fn build(&self, session: &Session) -> provider::BuiltRequest {
+    pub(crate) fn build(&self, session: &Session) -> provider::BuiltRequest {
         match self {
             RequestFor::Built(request) => (*request).clone(),
             RequestFor::Step => {
@@ -415,7 +417,7 @@ impl RequestFor<'_> {
 }
 
 /// What [`Session::accept_at_once`] did with a verb.
-pub(super) enum AtOnce {
+pub(crate) enum AtOnce {
     /// Accepted and applied now; the turn may have ended because of it.
     Applied(Option<Box<StreamEnd>>),
     /// Refused (the client has its error); nothing was applied, so nothing
@@ -425,7 +427,7 @@ pub(super) enum AtOnce {
 
 /// Does this request ask for a verb that is applied the moment it arrives, and so is answered
 /// only after it landed? `say --now` and `model`.
-pub(super) fn at_once_verb(request: &Request) -> bool {
+pub(crate) fn at_once_verb(request: &Request) -> bool {
     match request.verb.as_str() {
         "model" => true,
         "say" => request
@@ -437,7 +439,7 @@ pub(super) fn at_once_verb(request: &Request) -> bool {
     }
 }
 
-pub(super) enum Attempt {
+pub(crate) enum Attempt {
     Ok(crate::stream::Assembler),
     Failed(provider::ProviderError),
     /// A verb ended the turn while the request was in flight.
@@ -445,7 +447,7 @@ pub(super) enum Attempt {
 }
 
 /// What a retry or slot wait ended as.
-pub(super) enum Waited {
+pub(crate) enum Waited {
     /// The wait ran out: try again.
     Timeout,
     /// A verb applied at once ends the wait and the attempt is re-sent right away (`say --now`,
@@ -457,13 +459,13 @@ pub(super) enum Waited {
 
 /// What waiting for a governor slot ended as: a slot (or none, when the
 /// governor is off), or a verb ending the turn.
-pub(super) enum SlotWait {
+pub(crate) enum SlotWait {
     Taken(Option<crate::governor::Slot>),
     Interrupted(StreamEnd),
 }
 
 #[derive(Default)]
-pub(super) struct Batch {
-    pub(super) stopped: Option<String>,
-    pub(super) end: bool,
+pub(crate) struct Batch {
+    pub(crate) stopped: Option<String>,
+    pub(crate) end: bool,
 }

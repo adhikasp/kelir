@@ -1,10 +1,12 @@
 //! The turn half of the session loop.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use super::types::*;
 use super::*;
 
 impl Session {
-    pub(super) async fn drive_turn(&mut self, rx: &mut Inbox) -> Result<TurnEnd, String> {
+    pub(crate) async fn drive_turn(&mut self, rx: &mut Inbox) -> Result<TurnEnd, String> {
         self.run.final_text.clear();
         self.run.retryable_failure = false;
         self.emit(UiEvent::TurnStarted {
@@ -246,46 +248,8 @@ impl Session {
                     let verdict = self
                         .gates_call(crate::gates::Event::TurnEnd, None, payload)
                         .await?;
-                    match verdict {
-                        crate::gates::Verdict::Deny { gate, reason } if !blocked => {
-                            self.gates_do(|gates, _| gates.set_turn_blocked(true));
-                            let reason = if reason.trim().is_empty() {
-                                "no reason given".to_string()
-                            } else {
-                                reason
-                            };
-                            self.record(EventBody::User {
-                                text: format!(
-                                    "[gate {gate}] Your answer was not accepted: {reason}"
-                                )
-                                .into(),
-                                from: "gate".into(),
-                                delivery: "next".into(),
-                                attachments: Vec::new(),
-                            })?;
-                            self.sync();
-                            continue;
-                        }
-                        crate::gates::Verdict::Deny { gate, .. } => {
-                            // Blocks at most once per turn: a second deny is
-                            // logged, not enforced.
-                            let _ = self.record(EventBody::Error {
-                                location: "gate".into(),
-                                message: format!(
-                                    "turn_end: the deny from gate {gate} was ignored (this turn was already blocked once)"
-                                ),
-                                retryable: false,
-                                status: None,
-                                attempt: None,
-                                retry_in_ms: None,
-                            });
-                        }
-                        crate::gates::Verdict::Rewrite(value) => {
-                            if let Some(new) = value.get("text").and_then(Value::as_str) {
-                                self.run.final_text = new.to_string();
-                            }
-                        }
-                        crate::gates::Verdict::Allow => {}
+                    if crate::features::gates::apply_turn_verdict(self, verdict, blocked)? {
+                        continue;
                     }
                 }
                 // ---------------------------------------------------- after_step
@@ -331,7 +295,7 @@ impl Session {
 
     /// A 400 that names one of the capability fields kelir added: remove it from the request being retried
     /// and remember it, so no later request in this session pays the same 400.
-    pub(super) fn drop_refused_field(
+    pub(crate) fn drop_refused_field(
         &mut self,
         request: &mut provider::BuiltRequest,
         error: &provider::ProviderError,
@@ -359,7 +323,7 @@ impl Session {
     }
 
     /// Re-read a key that is about to expire, before the next request uses it.
-    pub(super) fn refresh_expiring_key(&mut self) {
+    pub(crate) fn refresh_expiring_key(&mut self) {
         let Some(expires) = self.provider.active_provider.key_expires_at_ms else {
             return;
         };
@@ -406,7 +370,7 @@ impl Session {
 
     /// Re-read the key after a refusal that means "this credential is stale" (HTTP 401/403) and
     /// rebuild the request with it, once per request.
-    pub(super) fn reread_credential(
+    pub(crate) fn reread_credential(
         &mut self,
         error: &provider::ProviderError,
         request: &mut provider::BuiltRequest,
@@ -454,7 +418,7 @@ impl Session {
     }
 
     /// An `error` event and a sync, for the two credential paths.
-    pub(super) fn record_error(&mut self, message: String, status: Option<u16>, attempt: u32) {
+    pub(crate) fn record_error(&mut self, message: String, status: Option<u16>, attempt: u32) {
         let _ = self.record(EventBody::Error {
             location: "provider".into(),
             message,
@@ -467,7 +431,7 @@ impl Session {
 
     /// Stream one response, taking verbs while it is in flight. A `stop` ends the turn without
     /// committing the half-response; anything else waits for the next boundary.
-    pub(super) async fn stream(
+    pub(crate) async fn stream(
         &mut self,
         rx: &mut Inbox,
         request: RequestFor<'_>,
@@ -625,7 +589,7 @@ impl Session {
     }
 
     /// One provider request, with verbs taken while it is in flight.
-    pub(super) async fn attempt(
+    pub(crate) async fn attempt(
         &mut self,
         rx: &mut Inbox,
         request: &provider::BuiltRequest,
@@ -674,7 +638,7 @@ impl Session {
     }
 
     /// Wait `wait`, taking verbs.
-    pub(super) async fn wait_for(
+    pub(crate) async fn wait_for(
         &mut self,
         rx: &mut Inbox,
         wait: Duration,
@@ -719,7 +683,7 @@ impl Session {
 
     /// Handle one verb that arrived *during* a retry or slot wait. Returns
     /// whether the wait should end with the request re-sent at once.
-    pub(super) async fn take_wait_verb(
+    pub(crate) async fn take_wait_verb(
         &mut self,
         incoming: Incoming,
         interrupt: &mut Option<StreamEnd>,
@@ -773,7 +737,7 @@ impl Session {
 
     /// Apply one verb now (the body of [`Session::apply`]'s loop for one
     /// `Pending`).
-    pub(super) async fn apply_one(
+    pub(crate) async fn apply_one(
         &mut self,
         pending: Pending,
         end: &mut Option<StreamEnd>,

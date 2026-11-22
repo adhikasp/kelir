@@ -1,10 +1,12 @@
 //! The tool half of the session loop: run a batch, settle a call, kill a tree.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use super::types::*;
 use super::*;
 
 impl Session {
-    pub(super) async fn run_tools(
+    pub(crate) async fn run_tools(
         &mut self,
         rx: &mut Inbox,
         step: u32,
@@ -26,20 +28,16 @@ impl Session {
             {
                 continue;
             }
-            let payload = json!({
-                "tool": name,
-                "call_id": calls[index].id,
-                "input": calls[index].args,
-            });
-            match self
-                .gates_call(crate::gates::Event::BeforeTool, Some(&name), payload)
-                .await?
-            {
-                crate::gates::Verdict::Deny { gate, reason } => {
-                    vetoed[index] = Some((gate, reason));
-                }
-                crate::gates::Verdict::Rewrite(input) => calls[index].args = input,
-                crate::gates::Verdict::Allow => {}
+            let (args, veto) = crate::features::gates::apply_tool_verdict(
+                self,
+                &name,
+                &calls[index].id,
+                calls[index].args.clone(),
+            )
+            .await?;
+            calls[index].args = args;
+            if let Some(veto) = veto {
+                vetoed[index] = Some(veto);
             }
         }
         let calls = &calls[..];
@@ -368,13 +366,13 @@ impl Session {
     }
 
     /// One call is done: it is no longer a target for `stop --call`.
-    pub(super) fn settle_call(&mut self, call_id: &str) {
+    pub(crate) fn settle_call(&mut self, call_id: &str) {
         self.tools.live_calls.retain(|id| id != call_id);
     }
 
     /// The `stopped` result of a call that had already written output: the byte and line counts,
     /// the file, and the last 1 KB, so the model can pick up the partial work.
-    pub(super) fn stopped_outcome(&self, dir: &str, reason: &str) -> ToolOutcome {
+    pub(crate) fn stopped_outcome(&self, dir: &str, reason: &str) -> ToolOutcome {
         let out_path = self.ctx.call_dir(dir).join("out");
         match crate::spill::partial(&out_path) {
             Ok(partial) if partial.bytes > 0 => ToolOutcome::stopped_with_output(
@@ -390,7 +388,7 @@ impl Session {
 
     /// Kill every call that has a process, and gate the ones that do not.
     /// Calls already settled keep their real result.
-    pub(super) fn kill_batch(
+    pub(crate) fn kill_batch(
         &self,
         plan: &[(String, ToolCall)],
         slots: &[Option<(ToolOutcome, Duration)>],
@@ -416,7 +414,7 @@ impl Session {
     }
 
     /// Take down calls that registered a process after the kill.
-    pub(super) fn retake(
+    pub(crate) fn retake(
         &self,
         plan: &[(String, ToolCall)],
         slots: &[Option<(ToolOutcome, Duration)>],
@@ -440,7 +438,7 @@ impl Session {
 
     /// Wait for a governor slot, polling (there is nothing to be told about: the slot appears
     /// when another process closes its handle). The status line says so while it lasts.
-    pub(super) async fn await_slot(
+    pub(crate) async fn await_slot(
         &mut self,
         rx: &mut Inbox,
         governor: &crate::governor::Governor,
@@ -481,7 +479,7 @@ impl Session {
 
     /// Say what is happening and start the status line's countdown. The `error`
     /// event was already recorded, so NDJSON carries it; this is the human line.
-    pub(super) fn show_wait(&mut self, status: Option<u16>, wait: Duration, attempt: u32) {
+    pub(crate) fn show_wait(&mut self, status: Option<u16>, wait: Duration, attempt: u32) {
         let line = crate::retry::wait_line(status, wait, attempt);
         self.emit(UiEvent::Info(format!("» {line}")));
         if !self.out.json && !self.out.tui {

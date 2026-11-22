@@ -2,6 +2,8 @@
 //! One session is one process and one append-only log.
 //! Every verb that arrives on the session socket is logged and then applied at exactly one
 //! [`Boundary`], never between a tool call and its result.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use std::collections::BTreeSet;
 use std::io::IsTerminal as _;
@@ -55,8 +57,6 @@ const CONTINUE_NOTE: &str = "[kelir] the session was interrupted between turns; 
 mod tests;
 
 mod boot;
-mod children;
-mod children_ops;
 mod compactloop;
 mod lifecycle;
 mod mainloop;
@@ -64,14 +64,13 @@ mod model;
 mod report;
 mod toolloop;
 mod turnloop;
-mod types;
-mod util;
+pub(crate) mod types;
+pub(crate) mod util;
 mod verbloop;
 mod view;
 
 use self::boot::drive;
 pub(crate) use self::boot::provider_base;
-use self::children_ops::*;
 use self::types::*;
 pub(crate) use self::util::*;
 
@@ -345,7 +344,7 @@ impl crate::features::gates::GatesCore for Session {
 impl Session {
     /// Lend the MCP feature and the core to one operation without overlapping
     /// borrows: the feature is moved out for the duration and put straight back.
-    pub(super) fn mcp_do<R>(
+    pub(crate) fn mcp_do<R>(
         &mut self,
         f: impl FnOnce(&mut crate::features::mcp::Mcp, &mut Session) -> R,
     ) -> R {
@@ -356,7 +355,7 @@ impl Session {
     }
 
     /// Same borrow split for the gates feature as [`Session::mcp_do`].
-    pub(super) fn gates_do<R>(
+    pub(crate) fn gates_do<R>(
         &mut self,
         f: impl FnOnce(&mut crate::features::gates::Gates, &mut Session) -> R,
     ) -> R {
@@ -369,7 +368,7 @@ impl Session {
     /// Async counterpart to [`Session::gates_do`]: a closure returning a future
     /// that borrows its arguments cannot be named here, so call the feature
     /// method directly while it is taken out.
-    pub(super) async fn gates_prompt(
+    pub(crate) async fn gates_prompt(
         &mut self,
         text: String,
         from: &str,
@@ -380,7 +379,7 @@ impl Session {
         result
     }
 
-    pub(super) async fn gates_call(
+    pub(crate) async fn gates_call(
         &mut self,
         event: crate::gates::Event,
         tool: Option<&str>,
@@ -392,7 +391,7 @@ impl Session {
         result
     }
 
-    pub(super) async fn gates_start(&mut self) -> bool {
+    pub(crate) async fn gates_start(&mut self) -> bool {
         let (provider, model, resumed) = (
             self.provider.provider_name.clone(),
             self.provider.model.clone(),
@@ -404,7 +403,7 @@ impl Session {
         result
     }
 
-    pub(super) async fn gates_end(&mut self, reason: &str) {
+    pub(crate) async fn gates_end(&mut self, reason: &str) {
         let mut gates = self.features.gates.take().expect("gates feature");
         gates.end(self, reason).await;
         self.features.gates = Some(gates);
@@ -412,7 +411,7 @@ impl Session {
 
     /// The date the session's frozen system prompt was rendered with (the
     /// `date:` line in its Environment block).
-    pub(super) fn rendered_date(&self) -> Option<String> {
+    pub(crate) fn rendered_date(&self) -> Option<String> {
         let text = self.log.events.iter().find_map(|event| {
             if let EventBody::SessionStarted { system, .. } = &event.body {
                 system.text.resolve_text(&self.log.dir).ok()
@@ -433,7 +432,7 @@ impl Session {
     /// the day changed (the frozen system prompt keeps the old one, and the
     /// provider's cache lives in that prefix), then any source a scheduled
     /// run passed in explicitly.
-    pub(super) fn record_plan_sources(&mut self, resumed: bool) -> Result<(), String> {
+    pub(crate) fn record_plan_sources(&mut self, resumed: bool) -> Result<(), String> {
         let mut sources: Vec<EventBody> = Vec::new();
         if resumed
             && self.kids.root.is_none()
@@ -454,7 +453,7 @@ impl Session {
 
     /// `model` swaps the provider/model for the rest of the session: a thin
     /// delegation, so a verb remains a core decision and the state lives in the feature.
-    pub(super) fn swap_model(&mut self, target: &str) -> Result<(), String> {
+    pub(crate) fn swap_model(&mut self, target: &str) -> Result<(), String> {
         let Session {
             log:
                 Log {

@@ -1,15 +1,18 @@
 //! Root registry operations and child settling.
 
 use serde_json::{Value, json};
+use std::path::Path;
 use tokio::sync::oneshot;
 
-use super::children::*;
-use super::*;
 use crate::child::{self, ChildNote, Entry, Handoff, KIND_BRIEF, Registry};
+use crate::core::session::types::Session;
+use crate::features::children::{Plan, REMOTE_TEXT, ask_loop, ask_root, internal, state_of};
+use crate::ipc::{Request, Response};
+use crate::verbs::Verb;
 
 impl Session {
     /// Kill the live descendants of `asker` that `target` (or `tree`) names.
-    pub(super) fn kill_below(&mut self, asker: &str, target: Option<&str>, tree: bool) -> Response {
+    pub(crate) fn kill_below(&mut self, asker: &str, target: Option<&str>, tree: bool) -> Response {
         self.reap_children();
         let below: Vec<Entry> = self
             .kids
@@ -86,7 +89,7 @@ impl Session {
     }
 
     /// The live children below this session, for `status`.
-    pub(super) fn live_children(&self) -> usize {
+    pub(crate) fn live_children(&self) -> usize {
         if self.kids.is_root() {
             self.kids.registry.live_descendants()
         } else {
@@ -96,7 +99,7 @@ impl Session {
 }
 
 /// The message a background child's completion becomes.
-pub(super) fn wake_text(note: &ChildNote) -> String {
+pub(crate) fn wake_text(note: &ChildNote) -> String {
     let head = format!(
         "[child {} {}{}]",
         note.session,
@@ -130,7 +133,7 @@ pub(super) fn wake_text(note: &ChildNote) -> String {
 
 /// Admit, start, wait for and settle one child. Runs on its own task; every
 /// change to the log goes through the session's loop.
-pub(super) async fn run_child(plan: Plan, reply: oneshot::Sender<Response>) {
+pub(crate) async fn run_child(plan: Plan, reply: oneshot::Sender<Response>) {
     let mut reply = Some(reply);
     let refuse = |reply: &mut Option<oneshot::Sender<Response>>, message: String| {
         if let Some(reply) = reply.take() {
@@ -348,19 +351,19 @@ impl Merge for Value {
 }
 
 #[cfg(unix)]
-pub(super) fn signalled(status: &std::process::ExitStatus) -> bool {
+pub(crate) fn signalled(status: &std::process::ExitStatus) -> bool {
     use std::os::unix::process::ExitStatusExt as _;
     status.signal().is_some()
 }
 
 #[cfg(not(unix))]
-pub(super) fn signalled(_status: &std::process::ExitStatus) -> bool {
+pub(crate) fn signalled(_status: &std::process::ExitStatus) -> bool {
     false
 }
 
 /// The last lines of the child host's stderr, for a child that died without
 /// saying why.
-pub(super) fn host_error(dir: &Path) -> String {
+pub(crate) fn host_error(dir: &Path) -> String {
     let text = std::fs::read_to_string(dir.join("host.err")).unwrap_or_default();
     let tail: Vec<&str> = text.lines().rev().take(5).collect();
     let tail: Vec<&str> = tail.into_iter().rev().collect();
@@ -373,7 +376,7 @@ pub(super) fn host_error(dir: &Path) -> String {
 
 /// Tell the registry (and this session's own loop) the child is over. Returns
 /// the outcome the registry settled it with (a kill wins over the exit).
-pub(super) async fn settle_child(
+pub(crate) async fn settle_child(
     plan: &Plan,
     child_id: &str,
     session: &str,
@@ -420,7 +423,7 @@ pub(super) async fn settle_child(
 impl Session {
     /// Who a task's `user` event says it came from: the command line, the
     /// parent that started this child, or the parent asking a brief.
-    pub(super) fn task_from(&self) -> &'static str {
+    pub(crate) fn task_from(&self) -> &'static str {
         if self.kids.root.is_none() {
             if crate::channel::is_channel_mode() {
                 return "channel";
@@ -435,7 +438,7 @@ impl Session {
 
     /// The `child` verb, or `brief` as `kelir ctl <session> brief "<question>"`
     /// (validated by the verb parser, then run like `kelir brief`).
-    pub(super) fn child_or_brief(&mut self, request: Request, reply: oneshot::Sender<Response>) {
+    pub(crate) fn child_or_brief(&mut self, request: Request, reply: oneshot::Sender<Response>) {
         if request.verb == "brief" {
             return match crate::verbs::parse("brief", &request.args) {
                 Ok(Verb::Brief { question }) => {
@@ -457,7 +460,7 @@ impl Session {
 impl Session {
     /// A resumed root cannot reach what an earlier process started (those children leave with their
     /// parent), so the log's unsettled children are settled `lost` and the registry starts empty.
-    pub(super) fn settle_lost_children(&mut self) {
+    pub(crate) fn settle_lost_children(&mut self) {
         if !self.kids.is_root() {
             return;
         }
@@ -478,7 +481,7 @@ impl Session {
 impl Session {
     /// The root's registry as `status` shows it: who, where in the tree, what
     /// state, which pid. Nothing secret (no link, no token).
-    pub(super) fn child_list(&self) -> Value {
+    pub(crate) fn child_list(&self) -> Value {
         Value::Array(
             self.kids
                 .registry

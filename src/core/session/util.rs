@@ -1,4 +1,6 @@
 //! Free helpers for result events, prompt rendering and task input.
+// These private loop modules expose crate-visible helpers to the feature modules.
+#![allow(clippy::redundant_pub_crate)]
 
 use super::*;
 

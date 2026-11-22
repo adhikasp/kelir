@@ -394,6 +394,76 @@ impl Feature for Gates {
     }
 }
 
+pub(crate) fn apply_turn_verdict(
+    session: &mut crate::core::session::types::Session,
+    verdict: crate::gates::Verdict,
+    blocked: bool,
+) -> Result<bool, String> {
+    use crate::event::EventBody;
+    match verdict {
+        crate::gates::Verdict::Deny { gate, reason } if !blocked => {
+            session.gates_do(|gates, _| gates.set_turn_blocked(true));
+            let reason = if reason.trim().is_empty() {
+                "no reason given".to_string()
+            } else {
+                reason
+            };
+            session.record(EventBody::User {
+                text: format!("[gate {gate}] Your answer was not accepted: {reason}").into(),
+                from: "gate".into(),
+                delivery: "next".into(),
+                attachments: Vec::new(),
+            })?;
+            session.sync();
+            Ok(true)
+        }
+        crate::gates::Verdict::Deny { gate, .. } => {
+            // Blocks at most once per turn: a second deny is logged, not enforced.
+            let _ = session.record(EventBody::Error {
+                location: "gate".into(),
+                message: format!(
+                    "turn_end: the deny from gate {gate} was ignored (this turn was already blocked once)"
+                ),
+                retryable: false,
+                status: None,
+                attempt: None,
+                retry_in_ms: None,
+            });
+            Ok(false)
+        }
+        crate::gates::Verdict::Rewrite(value) => {
+            if let Some(new) = value.get("text").and_then(serde_json::Value::as_str) {
+                session.run.final_text = new.to_string();
+            }
+            Ok(false)
+        }
+        crate::gates::Verdict::Allow => Ok(false),
+    }
+}
+
+/// Apply a `before_tool` verdict: returns the (possibly rewritten) call input
+/// and, when the gate denied it, the reason to record on the outcome.
+pub(crate) async fn apply_tool_verdict(
+    session: &mut crate::core::session::types::Session,
+    name: &str,
+    call_id: &str,
+    input: serde_json::Value,
+) -> Result<(serde_json::Value, Option<(String, String)>), String> {
+    let payload = serde_json::json!({
+        "tool": name,
+        "call_id": call_id,
+        "input": input,
+    });
+    match session
+        .gates_call(crate::gates::Event::BeforeTool, Some(name), payload)
+        .await?
+    {
+        crate::gates::Verdict::Deny { gate, reason } => Ok((input, Some((gate, reason)))),
+        crate::gates::Verdict::Rewrite(args) => Ok((args, None)),
+        crate::gates::Verdict::Allow => Ok((input, None)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
