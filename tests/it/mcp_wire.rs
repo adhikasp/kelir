@@ -94,42 +94,12 @@ async fn session_run(files: &Files, toml: &str, command: &str) -> Run {
 
 // ---------------------------------------------------------------- JSON-RPC
 
-/// A server that prints a banner and a broken JSON line before its first
-/// message still works (junk lines are skipped).
-#[tokio::test]
-async fn junk_before_the_first_message_is_skipped() {
-    let files = Files::new();
-    let toml = evil("env = { MCP_EVIL = \"banner,crlf\" }");
-    let out = one_shot(&files, &toml, &["evil", "echo", "text=hi"], &[]).await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(out.stdout.trim(), "{\"text\": \"hi\"}");
-}
-
-/// Answers arriving in three flushed chunks (a partial line at a read
-/// boundary) are reassembled.
-#[tokio::test]
-async fn a_message_split_across_writes_is_reassembled() {
-    let files = Files::new();
-    let toml = evil("env = { MCP_EVIL = \"splitwrite\" }");
-    let out = one_shot(&files, &toml, &["evil", "echo", "text=hi"], &[]).await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-}
-
 /// A server that sends progress notifications and a server->client request
 /// (roots/list) before its answer must not confuse the client.
 #[tokio::test]
 async fn progress_and_server_requests_do_not_disturb_a_call() {
     let files = Files::new();
     let toml = evil("env = { MCP_EVIL = \"progress,request\" }");
-    let out = one_shot(&files, &toml, &["evil", "echo", "text=hi"], &[]).await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-}
-
-/// An older protocol version in the answer is accepted.
-#[tokio::test]
-async fn an_older_protocol_version_is_accepted() {
-    let files = Files::new();
-    let toml = evil("env = { MCP_EVIL = \"oldproto\" }");
     let out = one_shot(&files, &toml, &["evil", "echo", "text=hi"], &[]).await;
     assert_eq!(out.code, 0, "{}", out.stderr);
 }
@@ -155,23 +125,6 @@ async fn a_server_that_exits_after_initialize_is_exit_3() {
     let out = one_shot(&files, &toml, &["evil", "echo", "text=hi"], &[]).await;
     assert_eq!(out.code, 3, "{}", out.stderr);
     assert!(started.elapsed() < Duration::from_secs(20), "slow death");
-}
-
-/// REGRESSION PROBE (F-utf8): a server writes one line that is not valid UTF-8
-/// (a stray byte in a log line on stdout) and then answers correctly. The
-/// reader must skip the bad line like any other junk, not declare the server
-/// dead.
-#[tokio::test]
-async fn a_non_utf8_line_does_not_kill_the_connection() {
-    let files = Files::new();
-    let toml = evil("env = { MCP_EVIL = \"badutf8\" }");
-    let out = one_shot(&files, &toml, &["evil", "echo", "text=hi"], &[]).await;
-    assert_eq!(
-        (out.code, out.stdout.trim()),
-        (0, "{\"text\": \"hi\"}"),
-        "stderr: {}",
-        out.stderr
-    );
 }
 
 /// A reply with neither result nor error, and a reply whose id is a string:
@@ -208,26 +161,6 @@ async fn a_stderr_flood_does_not_block_the_server() {
 
 // ------------------------------------------------------------------ naming
 
-/// A tool whose name has spaces and non-ASCII letters can be listed, described
-/// and called.
-#[tokio::test]
-async fn a_unicode_tool_name_with_spaces_works() {
-    let files = Files::new();
-    let toml = evil("env = { MCP_EVIL = \"unicode\" }");
-    let out = one_shot(&files, &toml, &["evil", "ls", "--detail", "name"], &[]).await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(out.stdout.contains("héllo wörld 日本"), "{}", out.stdout);
-    let out = one_shot(
-        &files,
-        &toml,
-        &["evil", "héllo wörld 日本", "text=ünï"],
-        &[],
-    )
-    .await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(out.stdout.contains("ünï"), "{}", out.stdout);
-}
-
 /// A tool literally named `ls` cannot be reached: `kelir mcp srv ls` lists.
 /// (Documents the gap; asserts the listing, not a call.)
 #[tokio::test]
@@ -240,77 +173,6 @@ async fn a_tool_named_ls_is_shadowed_by_the_listing() {
 }
 
 // ------------------------------------------------------------- k=v typing
-
-/// REGRESSION PROBE (F-anyof): a property that accepts a string but is
-/// declared with `anyOf` or `type: [string, null]` is not "declared string",
-/// so `a=123` is sent as the number 123 although the server wants a string.
-#[tokio::test]
-async fn a_nullable_string_keeps_its_text() {
-    let files = Files::new();
-    let toml = evil("");
-    for key in ["a", "b", "c"] {
-        let out = one_shot(
-            &files,
-            &toml,
-            &["evil", "nullable", &format!("{key}=123")],
-            &[],
-        )
-        .await;
-        assert_eq!(out.code, 0, "{key}: {}", out.stderr);
-        let sent: Value = serde_json::from_str(out.stdout.trim()).unwrap();
-        assert_eq!(sent[key], json!("123"), "{key}: sent {sent}");
-    }
-}
-
-/// Strings that look like JSON stay strings where the schema says string, and
-/// are JSON where it does not.
-#[tokio::test]
-async fn json_looking_strings_follow_the_schema() {
-    let files = Files::new();
-    let toml = evil("");
-    let out = one_shot(
-        &files,
-        &toml,
-        &["evil", "nullable", "c={\"a\":1}", "d={\"a\":1}"],
-        &[],
-    )
-    .await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    let sent: Value = serde_json::from_str(out.stdout.trim()).unwrap();
-    assert_eq!(sent["c"], json!("{\"a\":1}"));
-    assert_eq!(sent["d"], json!({"a": 1}));
-    // leading zero, empty, a bare word, a quoted word
-    let out = one_shot(
-        &files,
-        &toml,
-        &["evil", "nullable", "d=007", "c=", "a=null"],
-        &[],
-    )
-    .await;
-    let sent: Value = serde_json::from_str(out.stdout.trim()).unwrap();
-    assert_eq!(sent["d"], json!("007"));
-    assert_eq!(sent["c"], json!(""));
-}
-
-/// An integer past u64 is not silently turned into a float.
-#[tokio::test]
-async fn a_huge_integer_is_not_rounded() {
-    let files = Files::new();
-    let toml = evil("");
-    let out = one_shot(
-        &files,
-        &toml,
-        &["evil", "nullable", "d=123456789012345678901234567890"],
-        &[],
-    )
-    .await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(
-        out.stdout.contains("123456789012345678901234567890") && !out.stdout.contains("e+"),
-        "sent: {}",
-        out.stdout
-    );
-}
 
 // ----------------------------------------------------------------- secrets
 

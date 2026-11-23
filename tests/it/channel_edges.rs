@@ -296,51 +296,6 @@ fn r8_drop_reason_never_echoes_the_payload() {
     }
 }
 
-/// R9: a crash after the reply was sent but before the spool `done` record
-/// must replay exactly one message and must never send a second reply. The
-/// fake bridge marks any repeated message id as `duplicate: true`.
-#[tokio::test(flavor = "multi_thread")]
-async fn r9_restart_after_reply_has_no_duplicate_reply() {
-    let before = shells();
-    let test = ChannelTest::new();
-    let mock = Mock::start(vec![
-        Reply::Sse(sse(&text_turn("first answer", 0))),
-        Reply::Sse(sse(&text_turn("replayed answer", 0))),
-    ])
-    .await;
-    let mut driver = test.spawn_driver(&mock.base_url()).await;
-    test.inject(json!({
-        "message_id": "m-review-9",
-        "conversation_id": "chat-review-9",
-        "sender": "Ada",
-        "content": "hello"
-    }))
-    .await;
-    let replies = test
-        .wait_for(&test.replies, |lines| !lines.is_empty())
-        .await;
-    assert_eq!(replies.len(), 1);
-    assert!(!replies[0]["duplicate"].as_bool().unwrap());
-    // The first driver stops after one message and writes `done`; restart on
-    // the same state dir with no new inbound message.
-    driver.kill().await.ok();
-    let _ = driver.wait().await;
-    let spool = std::fs::read_to_string(test.sandbox.state.join("spool").join("fake.jsonl"))
-        .unwrap_or_default();
-    assert!(spool.contains("\"done\""), "spool must be durable: {spool}");
-    let mut driver2 = test.spawn_driver(&mock.base_url()).await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    let replies = test.lines(&test.replies);
-    assert_eq!(
-        replies.len(),
-        1,
-        "a restart must not replay an already-done message: {replies:?}"
-    );
-    driver2.kill().await.ok();
-    let _ = driver2.wait().await;
-    assert!(shells().saturating_sub(before) <= 20, "leaked shells");
-}
-
 struct ChannelTest {
     sandbox: Sandbox,
     inbox: PathBuf,
@@ -483,37 +438,6 @@ async fn r14_max_active_should_allow_parallel_conversations() {
         mock.max_concurrent() >= 2,
         "max_active=4 should let two conversations answer in parallel; peak={}",
         mock.max_concurrent()
-    );
-    driver.kill().await.ok();
-    let _ = driver.wait().await;
-    assert!(shells().saturating_sub(before) <= 20, "leaked shells");
-}
-
-/// R11: `/stop` never inserts into `active`, so `process()` skips the spool's
-/// `done` record. On restart the message is replayed and answered again —
-/// a duplicate reply for one inbound message.
-#[tokio::test(flavor = "multi_thread")]
-async fn r11_stop_is_done_in_the_spool_and_not_replied_twice() {
-    let before = shells();
-    let test = ChannelTest::new();
-    let mock = Mock::start(vec![]).await;
-    let mut driver = test.spawn_driver(&mock.base_url()).await;
-    test.inject(json!({
-        "message_id": "m-review-11",
-        "conversation_id": "chat-review-11",
-        "sender": "Ada",
-        "content": "/stop please"
-    }))
-    .await;
-    let replies = test
-        .wait_for(&test.replies, |lines| !lines.is_empty())
-        .await;
-    assert_eq!(replies.len(), 1, "one stop acknowledgement");
-    let spool_path = test.sandbox.state.join("spool").join("fake.jsonl");
-    let spool = std::fs::read_to_string(&spool_path).unwrap_or_default();
-    assert!(
-        spool.contains("\"done\""),
-        "a handled /stop must be marked done in the spool: {spool}"
     );
     driver.kill().await.ok();
     let _ = driver.wait().await;

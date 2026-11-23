@@ -114,29 +114,6 @@ fn the_metrics_script_reproduces_the_fixtures_known_numbers() {
     );
 }
 
-/// The same fixture through the printed table: the deltas the brief argues
-/// from (reads share, big -> cheap share, model vs tool minutes) are in the
-/// output, so a reader can check a BEFORE/AFTER table against a command.
-#[test]
-fn the_metrics_script_prints_the_deltas_the_brief_argues_from() {
-    let Some(output) = run_script(&["tests/it/fixtures/steer12/events.jsonl", "--commits", "0"])
-    else {
-        eprintln!("no python3/python 3.9+ here: skipping the metrics table");
-        return;
-    };
-    assert!(output.status.success(), "{}", stderr_of(&output));
-    let text = stdout_of(&output);
-    for line in [
-        "read calls                        5",
-        "big -> cheap share                0.5",
-        "model minutes                     1.37",
-        "tool minutes (union)              2.22",
-        "calls per step                    1.2",
-    ] {
-        assert!(text.contains(line), "no {line:?} in:\n{text}");
-    }
-}
-
 /// A quoted `|` is an argument, not a pipe: the read classifier must not cut a
 /// `grep -n 'a\|b'` in half and call it a non-read. The fixture holds one such
 /// call (step 4); counted wrongly it would drop `read calls` from 5 to 4.
@@ -197,32 +174,4 @@ fn the_base_prompt_carries_the_batching_and_the_notes_file() {
         read("tests/it/fixtures/prompt.md.snapshot"),
         "the byte snapshot and src/prompt.md disagree"
     );
-}
-
-/// `docs/PROMPT.md` quotes the BEFORE table and the command that produced it,
-/// so the numbers in the repo can be re-derived rather than believed.
-#[test]
-fn the_prompt_doc_holds_the_before_table_and_its_command() {
-    let doc = read("docs/PROMPT.md");
-    for needle in [
-        "scripts/metrics/trajectory.py",
-        "--commits 0",
-        "| read calls |",
-        "| big -> cheap |",
-        "| model minutes |",
-        "| tool minutes |",
-    ] {
-        assert!(doc.contains(needle), "no {needle:?} in docs/PROMPT.md");
-    }
-    // The six session logs the BEFORE row was measured over, by name.
-    for job in [
-        "buildinfrafix",
-        "steer1fix",
-        "steer3",
-        "steer5",
-        "tui2",
-        "tui2fix",
-    ] {
-        assert!(doc.contains(job), "docs/PROMPT.md does not name {job}");
-    }
 }

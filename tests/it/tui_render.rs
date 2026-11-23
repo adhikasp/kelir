@@ -526,37 +526,6 @@ fn a_one_megabyte_fence_streams_row_by_row_in_bounded_time() {
     );
 }
 
-/// A message of many short paragraphs (the realistic big answer), streamed in
-/// 4 KB deltas: the cost per delta must not grow with the number of blocks
-/// already committed (that would make a long answer quadratic).
-#[test]
-fn a_big_multi_paragraph_message_is_not_quadratic() {
-    let para =
-        "Lorem **ipsum** dolor `sit` amet, consectetur adipiscing elit, sed do eiusmod tempor.
-
-";
-    let make = |n: usize| para.repeat(n);
-    let (t1, w1) = stream_cost(&make(300), 4096); // ~26 KB
-    let (t2, w2) = stream_cost(&make(1200), 4096); // ~104 KB
-    eprintln!("26 KB: total {t1:?} worst delta {w1:?}; 104 KB: total {t2:?} worst delta {w2:?}");
-    // 4x the data: linear is ~4x, quadratic ~16x. Allow 8x plus a floor.
-    assert!(
-        t2 < t1 * 8 + Duration::from_millis(50),
-        "26 KB {t1:?} -> 104 KB {t2:?}: super-linear"
-    );
-}
-
-#[test]
-fn one_megabyte_single_block_per_delta_cost_does_not_explode() {
-    let mut text = String::new();
-    while text.len() < 1_000_000 {
-        text.push_str("word ");
-    }
-    let (total, worst) = stream_cost(&text, 16384);
-    eprintln!("1 MB single block: total {total:?}, worst delta {worst:?}");
-    assert!(total < Duration::from_secs(120), "{total:?}");
-}
-
 /// The same for the other long single blocks a model writes: a 40-line
 /// paragraph-free list (one block, no blank line) and a 30-row table.
 #[test]

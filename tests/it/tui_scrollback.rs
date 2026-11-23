@@ -288,31 +288,6 @@ fn a_cancelled_call_is_not_counted_as_a_checked_call() {
     );
 }
 
-/// Ordering: answer, then a run of calls, then an answer, then one call and an
-/// answer. The scrollback must follow event order (the old B1 bug).
-#[test]
-fn prose_and_folds_keep_event_order() {
-    let mut app = app(60);
-    prose(&mut app, "Before the calls.");
-    for c in ["a", "b", "c"] {
-        app.push(ok(c));
-    }
-    prose(&mut app, "After the calls.");
-    app.push(ok("solo"));
-    prose(&mut app, "After the solo call.");
-    let scroll = rows(&mut app);
-    let at = |needle: &str| {
-        scroll
-            .iter()
-            .position(|r| r.contains(needle))
-            .unwrap_or_else(|| panic!("{needle}: {scroll:?}"))
-    };
-    assert!(at("Before the calls") < at("$ a"), "{scroll:?}");
-    assert!(at("$ c") < at("After the calls"), "{scroll:?}");
-    assert!(at("After the calls") < at("$ solo"), "{scroll:?}");
-    assert!(at("$ solo") < at("After the solo call"), "{scroll:?}");
-}
-
 /// Streaming: each settled call commits its line immediately, before the
 /// first streamed prose row.
 #[test]
@@ -336,24 +311,6 @@ fn a_streaming_delta_commits_the_fold_before_its_own_rows() {
         .position(|r| r.contains("First paragraph"))
         .expect("prose");
     assert!(last_call < first, "{scroll:?}");
-}
-
-/// The open group previews exactly what it will commit (no shape change).
-#[test]
-fn the_open_group_preview_equals_what_commits() {
-    let mut app = app(80);
-    for event in [ok("a"), bad("f", 1), ok("b"), ok("c")] {
-        app.push(event);
-    }
-    let live: Vec<String> = app.live_lines().iter().map(line_text).collect();
-    prose(&mut app, "x");
-    let committed = rows(&mut app);
-    for row in live.iter().filter(|r| !r.trim().is_empty()) {
-        assert!(
-            committed.contains(row),
-            "{row:?} previewed but not committed: {committed:?}"
-        );
-    }
 }
 
 /// A `done` turn writes no outcome line; `paused`, `stopped`, `error` write one

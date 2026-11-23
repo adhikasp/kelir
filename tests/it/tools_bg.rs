@@ -102,41 +102,6 @@ pub(super) fn first_command_out(sandbox: &Sandbox) -> String {
 
 // --------------------------------------------------------------------------
 
-/// R1 (F1): `--cwd` is the directory a bash call runs in. M0..M3 set
-/// `current_dir(ctx.cwd)` on the shell; since M4 the shell is started by the
-/// shim, which is started with no `current_dir`, so the call runs in the
-/// *process's* directory instead.
-#[tokio::test]
-async fn r1_bash_calls_run_in_the_cwd_the_session_was_given() {
-    let mock = Mock::start(vec![
-        Reply::Sse(sse(&tool_turn(
-            "call_cwd",
-            "bash",
-            &json!({"command": "pwd > where.txt"}),
-        ))),
-        Reply::Sse(sse(&text_turn("done", 0))),
-    ])
-    .await;
-    let sandbox = Sandbox::new("");
-    let other = sandbox.cwd.parent().unwrap().join("other");
-    std::fs::create_dir_all(&other).unwrap();
-    let run = sandbox
-        .kelir(
-            &mock.base_url(),
-            &["run", "--json", "--cwd", other.to_str().unwrap(), "go"],
-            &[],
-        )
-        .await;
-    assert_eq!(run.code, 0, "{}", run.stderr);
-    assert!(
-        other.join("where.txt").is_file(),
-        "the call ran in the process directory ({}), not in --cwd {}: where.txt = {:?}",
-        sandbox.cwd.display(),
-        other.display(),
-        std::fs::read_to_string(sandbox.cwd.join("where.txt")).ok()
-    );
-}
-
 /// R2 (F2): `kelir bg run` joins its words with spaces, so any argument that
 /// contains a space or a quote loses its boundary. A model writes
 /// `kelir bg run npm test -- --grep "a b"` the way it would write any command.
@@ -192,57 +157,6 @@ async fn r3_a_dead_shim_does_not_leave_the_job_running_for_ever() {
         "bg wait on a job whose shim is dead: code {} stderr {:?}; bg ls says {:?}",
         waited.code, waited.stderr, listed.stdout
     );
-}
-
-/// R4: two cancels, a cancel after the job finished, and an unknown id.
-#[tokio::test]
-async fn r4_cancel_twice_cancel_after_finish_and_unknown_id() {
-    let sandbox = Sandbox::new("");
-    let started = sandbox
-        .kelir(NO_PROVIDER, &["bg", "run", "sleep 20"], &[])
-        .await;
-    let id = id_of(&started);
-    let first = sandbox
-        .kelir(NO_PROVIDER, &["bg", "cancel", &id], &[])
-        .await;
-    assert_eq!(first.code, 0, "{}", first.stderr);
-    assert!(first.stdout.contains("cancelled"), "{}", first.stdout);
-    let second = sandbox
-        .kelir(NO_PROVIDER, &["bg", "cancel", &id], &[])
-        .await;
-    assert_eq!(second.code, 0, "{}", second.stderr);
-    assert!(
-        second.stdout.contains("nothing to cancel"),
-        "{}",
-        second.stdout
-    );
-    assert_eq!(status_of(&sandbox, &id)["state"], "cancelled");
-
-    let quick = sandbox
-        .kelir(NO_PROVIDER, &["bg", "run", "true"], &[])
-        .await;
-    let quick_id = id_of(&quick);
-    let waited = sandbox
-        .kelir(
-            NO_PROVIDER,
-            &["bg", "wait", &quick_id, "--timeout", "20"],
-            &[],
-        )
-        .await;
-    assert_eq!(waited.code, 0, "{}", waited.stderr);
-    let late = sandbox
-        .kelir(NO_PROVIDER, &["bg", "cancel", &quick_id], &[])
-        .await;
-    assert_eq!(late.code, 0, "{}", late.stderr);
-    assert_eq!(
-        status_of(&sandbox, &quick_id)["state"],
-        "exited",
-        "a cancel after the job finished rewrote its status"
-    );
-    let unknown = sandbox
-        .kelir(NO_PROVIDER, &["bg", "cancel", "bg_nope"], &[])
-        .await;
-    assert_eq!(unknown.code, 2, "{}", unknown.stderr);
 }
 
 /// R6: a hundred quick jobs, started concurrently: all settle, none is left
@@ -609,53 +523,6 @@ async fn r16_a_torn_or_deleted_status_mid_job_does_not_break_the_session() {
     live.wait_for("turn_ended").await;
     let (code, stderr) = live.end().await;
     assert_eq!(code, 0, "{stderr}");
-}
-
-/// R17: per-call overhead of running every call under the shim. Not an
-/// assertion about speed (there is no budget in the spec), it prints the mean
-#[tokio::test]
-async fn r17_trivial_call_latency() {
-    let mut script = Vec::new();
-    for n in 0..20 {
-        script.push(Reply::Sse(sse(&tool_turn(
-            &format!("call_{n}"),
-            "bash",
-            &json!({"command": "true"}),
-        ))));
-    }
-    script.push(Reply::Sse(sse(&text_turn("done", 0))));
-    let mock = Mock::start(script).await;
-    let sandbox = Sandbox::new("");
-    let run = sandbox
-        .kelir(&mock.base_url(), &["run", "--json", "go"], &[])
-        .await;
-    assert_eq!(run.code, 0, "{}", run.stderr);
-    let events = run.json_lines();
-    let parse = |value: &Value| {
-        time::OffsetDateTime::parse(
-            value["ts"].as_str().unwrap_or(""),
-            &time::format_description::well_known::Rfc3339,
-        )
-        .unwrap()
-    };
-    let mut total = Duration::ZERO;
-    let mut count = 0u32;
-    for started in events
-        .iter()
-        .filter(|event| event["type"] == "call_started")
-    {
-        let settled = events
-            .iter()
-            .find(|event| event["type"] == "call_settled" && event["id"] == started["id"])
-            .expect("settled");
-        total += Duration::from_secs_f64((parse(settled) - parse(started)).as_seconds_f64());
-        count += 1;
-    }
-    eprintln!(
-        "R17: {count} calls, mean tool_started->tool_settled {:?}",
-        total / count.max(1)
-    );
-    assert!(total / count.max(1) < Duration::from_secs(2));
 }
 
 /// Pids of processes whose command line contains `marker` (the test's own

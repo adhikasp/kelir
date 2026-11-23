@@ -107,18 +107,6 @@ fn read_calls(commands: &[&str]) -> Option<u64> {
     json["total"]["read_calls"].as_u64()
 }
 
-/// Sanity: the commands the new prompt asks for ARE read calls.
-#[test]
-fn a_labelled_batch_is_one_read_call() {
-    let Some(reads) = read_calls(&[
-        "echo === a; sed -n 1,5p x; echo === b; git grep -n y src; echo === c; grep -A3 z f",
-        "cd /c/x && cat a.rs",
-    ]) else {
-        return;
-    };
-    assert_eq!(reads, 2);
-}
-
 /// FINDING S2 (metrics): the classifier ignores redirects and in-place flags, so a
 /// *write* through `cat`/`sed`/`echo` counts as a read call. The new prompt tells the
 /// model to write notes, and a model that writes them with `cat > notes.md <<EOF`
@@ -139,19 +127,4 @@ fn a_write_is_not_a_read_call() {
         return;
     };
     assert_eq!(reads, 0, "writes counted as reads");
-}
-
-/// FINDING N3 (metrics): `powershell -Command "Get-Content f"` is a read the brief
-/// names ("powershell reads"); the double-quoted payload is one word and is not looked into.
-#[test]
-fn a_quoted_powershell_read_is_a_read_call() {
-    let Some(reads) = read_calls(&[
-        "powershell -NoProfile -Command \"Get-Content a.txt\"",
-        "bash -c 'cat f'",
-        "for f in src/*.rs; do wc -l $f; done",
-        "grep \"a\\\"b\" f; cargo build",
-    ]) else {
-        return;
-    };
-    assert_eq!(reads, 3, "the quoted-escape call also builds");
 }

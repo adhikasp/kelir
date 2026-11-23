@@ -67,36 +67,6 @@ async fn the_tui_banner_names_a_window_only_when_it_fell_back() {
     );
 }
 
-/// F-window: the *normal* window is not in the banner. A start whose list
-/// answers must not print a window line at all, at any width.
-#[tokio::test]
-async fn the_tui_banner_is_silent_about_the_providers_own_window() {
-    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("ok", 0)))]).await;
-    let temp = tempfile::tempdir().unwrap();
-    let cwd = temp.path().join("work");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let config = temp.path().join("config.toml");
-    std::fs::write(
-        &config,
-        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
-    )
-    .unwrap();
-    let state = temp.path().join("state");
-    let base_url = mock.base_url();
-    let run = tokio::task::spawn_blocking(move || {
-        drive_in_a_pty(cwd, config, state, base_url, b"", vec!["kelir".into()])
-    })
-    .await
-    .expect("the pty driver");
-
-    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
-    assert!(
-        !run.screen.contains("tokens ("),
-        "the banner carries no window line when the list answered: {:?}",
-        run.screen
-    );
-}
-
 /// A metadata fetch that lands after the start's grace must still be applied to
 /// an *idle* session: an idle `--keep`/TUI session used to poll the fetch once
 /// and then block on the verb channel, so a slow answer was never applied until

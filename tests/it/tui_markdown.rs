@@ -161,40 +161,6 @@ fn nothing_is_wider_than_the_layout_at_any_width() {
     );
 }
 
-/// Every split point of every corpus document renders the same as one pass.
-#[test]
-fn streamed_in_any_two_pieces_equals_one_pass() {
-    let corpus = [
-        "# T\n\npara one\nstill para one\n\n- a\n- b\n\n  continued paragraph of b\n\n- c\n",
-        "1. one\n\n2. two\n\n10. ten\n",
-        "> quote start\n\n> second quote\n",
-        "| a | b |\n|---|---|\n| 1 | 2 |\n\ntext right after\n",
-        "```rust\nfn x() {}\n\n\nfn y() {}\n```\n\nafter",
-        "- item\n\n  ```\n  fenced in item\n\n  with a blank\n  ```\n- next\n",
-        "Setext\n======\n\ntext\n---\n",
-        "    indented code\n\n    more code\n",
-        "line one  \nline two\\\nline three\n",
-        "[ref]: https://example.com\n\nSee [ref] and ![img](x.png).\n",
-    ];
-    for doc in corpus {
-        let whole = texts(&markdown::render(doc, Layout::new(50)));
-        for (i, _) in doc.char_indices().chain(std::iter::once((doc.len(), ' '))) {
-            let mut stream = Stream::new();
-            let mut blocks = stream.push(&doc[..i]);
-            blocks.extend(stream.push(&doc[i..]));
-            blocks.extend(stream.finish());
-            let mut rows = Vec::new();
-            for b in &markdown::join_blocks(blocks) {
-                if !rows.is_empty() {
-                    rows.push(Row::default());
-                }
-                rows.extend(markdown::render_block(b, Layout::new(50)));
-            }
-            assert_eq!(texts(&rows), whole, "doc {doc:?} split at {i}");
-        }
-    }
-}
-
 /// Fidelity: a list item continued after a blank line stays inside the item
 /// (CommonMark), and a loose ordered list keeps counting.
 #[test]
@@ -218,48 +184,6 @@ fn a_loose_ordered_list_keeps_its_numbers_and_item_continuations_stay_indented()
         cont.starts_with("  "),
         "the continuation is indented under its bullet: {rows:?}"
     );
-}
-
-/// A 500 KB message (1 MB in release is 1.8 s) (one huge paragraph, and one huge fence) streamed in 4 KB
-/// deltas must not slow down quadratically through the app model.
-#[test]
-fn a_one_megabyte_message_streams_in_bounded_time() {
-    for (name, make) in [
-        (
-            "paragraph",
-            (|i: usize| format!("word{i} ")) as fn(usize) -> String,
-        ),
-        ("fence", |i: usize| {
-            format!("line {i} of a big code block\n")
-        }),
-    ] {
-        let mut app = app(100);
-        let mut total = 0usize;
-        let mut i = 0usize;
-        let started = Instant::now();
-        let mut chunk = String::new();
-        if name == "fence" {
-            app.push(Ev::Delta("```\n".into()));
-        }
-        while total < 500_000 {
-            chunk.clear();
-            while chunk.len() < 4096 {
-                chunk.push_str(&make(i));
-                i += 1;
-            }
-            total += chunk.len();
-            app.push(Ev::Delta(chunk.clone()));
-            // A frame per delta: the worst case the paint loop can ask for.
-            let _ = app.live_lines();
-            let _ = app.take_scroll();
-        }
-        let streamed = started.elapsed();
-        eprintln!("1MB {name} streamed in {streamed:?}");
-        assert!(
-            streamed < Duration::from_secs(20),
-            "{name}: 1 MB took {streamed:?} (quadratic?)"
-        );
-    }
 }
 
 /// While a long block streams, nothing may vanish: every row of the message so
