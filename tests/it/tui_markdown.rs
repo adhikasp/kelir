@@ -4,9 +4,8 @@
 
 // Test crates target behaviour, not pedantic style (#23).
 #![allow(clippy::pedantic, clippy::nursery)]
-use std::time::{Duration, Instant};
 
-use kelir::markdown::{self, Layout, Row, Stream};
+use kelir::markdown::{self, Layout, Row};
 use kelir::tui::App;
 use serde_json::json;
 use unicode_width::UnicodeWidthStr;

@@ -1,21 +1,10 @@
 //! tui status tests: the_idle_status_line_stays_cal, the_tui_reports_a_pause_to_her, the_tui_reports_a_paused_turn_, the_tui_reports_an_error_to_he, the_tui_shows_the_retry_countd.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::io::{Read as _, Write as _};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-
-use crate::support::{ApplyEv as _, Ev, Mock, Reply, run_task, sse, text_turn, tool_turn};
-use kelir::commands::{self, Action, Parsed};
-use kelir::tui::{self, App, Phase};
-use kelir::verbs;
-use serde_json::json;
+use crate::support::{Mock, Reply, sse, text_turn, tool_turn};
 
 use super::tui_output::{herdr_records, plain};
-use super::tui_pty::{
-    PtyInput, PtyRun, drive_idle_in_a_pty, drive_in_a_pty, drive_pty_in_idle_or_turn,
-    panic_in_a_pty, tiny_png,
-};
+use super::tui_pty::drive_in_a_pty;
 
 /// The failure word: `error` goes out over the same OSC record — and a failed
 /// turn does not end the session.

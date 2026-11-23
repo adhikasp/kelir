@@ -1,12 +1,8 @@
 //! hint memory adversarial tests: a_memory_note_the_model_writes, memory_dir_missing_or_a_file_i, memory_survives_delete_rename_, memory_with_a_symlink_loop_doe, pdf_and_odd_media_names_are_ha.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use crate::support::*;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::hint_adversarial::*;
 

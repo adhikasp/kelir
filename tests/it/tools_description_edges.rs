@@ -7,7 +7,7 @@
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use crate::support::*;
-use kelir::tools_view::{DESCRIPTION_MAX, description};
+use kelir::tools_view::description;
 use serde_json::json;
 
 const SIMPLE: &str = "printf 'hello\\n'";

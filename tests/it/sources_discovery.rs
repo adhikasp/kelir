@@ -1,10 +1,7 @@
 //! sources discovery tests: a_huge_instruction_file_still_, a_malformed_skill_is_not_recor, a_non_utf8_instruction_file_is, a_symlink_or_junction_loop_in_, an_ancestors_instruction_file_, an_explicit_prompt_file_is_rec, awkward_files_are_tolerated, base_prompt_layers_and_the_ski, nothing_outside_the_intended_p, project_wins_over_machine_and_, the_system_render_is_byte_iden.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::{Path, PathBuf};
-
-use crate::support::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::sources_edges::*;
 

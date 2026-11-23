@@ -1,12 +1,9 @@
 //! hint herdr adversarial tests: a_pane_id_that_looks_like_a_fl, hc_hanging_is_bounded_near_one, hc_labels_cannot_inject_lines_, hc_printing_a_huge_answer_fail, hc_valid_json_with_huge_labels.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::support::*;
-use serde_json::{Value, json};
 
 use super::hint_adversarial::*;
 

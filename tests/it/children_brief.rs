@@ -1,13 +1,11 @@
 //! children brief tests: a_brief_cannot_delegate_and_ls, a_brief_shares_the_parents_pre, ls_shows_the_tree_and_kill_tak.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use super::children_tree::*;
 use crate::support::*;
-use crate::support::{CEILING, LiveSession, Mock, Reply, TreeGuard};
+use crate::support::{Mock, Reply};
 use serde_json::{Value, json};
 
 #[tokio::test]

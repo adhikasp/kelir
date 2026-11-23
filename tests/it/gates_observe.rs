@@ -1,13 +1,9 @@
 //! gates observe tests: a_gate_gets_no_token_no_socket, observe_lists_the_gates_and_wh, observe_prints_env_names_of_a_.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::{Path, PathBuf};
-use std::process::Output;
-use std::time::{Duration, Instant};
-
 use super::gates_core::*;
 use crate::support::*;
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[tokio::test]
 async fn observe_lists_the_gates_and_what_fired_without_secrets() {

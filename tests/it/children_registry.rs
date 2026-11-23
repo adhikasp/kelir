@@ -1,13 +1,12 @@
 //! children registry tests: a_resumed_root_settles_the_chi, registry_operations_need_a_chi.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::children_tree::*;
 use crate::support::*;
-use crate::support::{CEILING, LiveSession, Mock, Reply, TreeGuard};
+use crate::support::{CEILING, LiveSession, Mock};
 use serde_json::{Value, json};
 
 #[tokio::test]

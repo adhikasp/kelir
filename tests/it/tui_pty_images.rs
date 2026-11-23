@@ -1,21 +1,10 @@
 //! tui pty images tests: a_csi_u_shift_enter_adds_a_new, a_pasted_image_path_becomes_a_, a_typed_image_path_is_a_chip_i.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::io::{Read as _, Write as _};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use crate::support::{Mock, Reply, sse, text_turn};
 
-use crate::support::{ApplyEv as _, Ev, Mock, Reply, run_task, sse, text_turn, tool_turn};
-use kelir::commands::{self, Action, Parsed};
-use kelir::tui::{self, App, Phase};
-use kelir::verbs;
-use serde_json::json;
-
-use super::tui_output::{herdr_records, plain};
-use super::tui_pty::{
-    PtyInput, PtyRun, drive_idle_in_a_pty, drive_in_a_pty, drive_pty_in_idle_or_turn,
-    panic_in_a_pty, tiny_png,
-};
+use super::tui_output::plain;
+use super::tui_pty::{PtyInput, drive_in_a_pty, drive_pty_in_idle_or_turn, tiny_png};
 
 /// A bracketed paste of a PNG path (which is what a terminal sends for a drag
 /// and drop or a clipboard path) becomes a chip, the prompt carries the

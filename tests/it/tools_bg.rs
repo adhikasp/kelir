@@ -417,6 +417,7 @@ async fn r13_a_wake_never_lands_between_the_results_of_one_batch() {
     }
     assert!(worst.is_none(), "{}", worst.unwrap_or_default());
 }
+#[tokio::test]
 async fn r15_garbage_in_the_bg_directory_is_survivable() {
     let sandbox = Sandbox::new("");
     let bg = global_job_root(&sandbox.state);
@@ -483,6 +484,7 @@ async fn r15_garbage_in_the_bg_directory_is_survivable() {
         .await;
     assert_eq!(started.code, 0, "{}", started.stderr);
 }
+#[tokio::test]
 async fn r16_a_torn_or_deleted_status_mid_job_does_not_break_the_session() {
     let mock = Mock::start(vec![
         Reply::Sse(sse(&tool_turn(

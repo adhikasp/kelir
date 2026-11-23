@@ -1,12 +1,7 @@
 //! gates examples tests: git_sync_by_default_commits_tr, git_sync_commits_but_does_not_, git_sync_dry_run_changes_nothi, git_sync_refuses_secret_like_n, note_check_appends_the_checker, numbered_answers_resolves_do_1.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::{Path, PathBuf};
-use std::process::Output;
-use std::time::{Duration, Instant};
-
 use super::gates_core::*;
-use crate::support::*;
 use serde_json::{Value, json};
 
 #[test]

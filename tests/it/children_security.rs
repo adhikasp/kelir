@@ -1,14 +1,11 @@
 //! children security tests: killing_the_root_hard_leaves_n, stopping_the_call_stops_its_fo.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::children_tree::*;
-use crate::support::*;
-use crate::support::{CEILING, LiveSession, Mock, Reply, TreeGuard};
-use serde_json::{Value, json};
+use crate::support::{CEILING, LiveSession, Mock};
 
 #[tokio::test]
 async fn killing_the_root_hard_leaves_no_orphans() {

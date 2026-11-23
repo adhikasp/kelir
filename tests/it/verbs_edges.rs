@@ -4,7 +4,6 @@
 use std::time::{Duration, Instant};
 
 use crate::support::*;
-use serde_json::Value;
 
 use super::verbs_core::*;
 

@@ -1,14 +1,11 @@
 //! children lifecycle tests: an_idle_keep_session_wakes_on_, ctl_brief_prints_the_answer_an, only_the_root_writes_the_herdr.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::children_tree::*;
 use crate::support::*;
-use crate::support::{CEILING, LiveSession, Mock, Reply, TreeGuard};
-use serde_json::{Value, json};
+use crate::support::{CEILING, LiveSession, Mock, Reply};
 
 #[tokio::test]
 async fn an_idle_keep_session_wakes_on_a_background_child() {

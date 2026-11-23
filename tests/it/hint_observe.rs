@@ -1,11 +1,10 @@
 //! hint observe tests: observe_names_an_unknown_sessi, observe_raw_is_the_body_the_mo.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::support::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::hint_core::*;
 

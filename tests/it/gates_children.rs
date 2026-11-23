@@ -1,10 +1,6 @@
 //! gates children tests: a_child_session_runs_its_own_s, a_gate_that_starts_kelir_does_.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::{Path, PathBuf};
-use std::process::Output;
-use std::time::{Duration, Instant};
-
 use super::gates_core::*;
 use crate::support::*;
 use serde_json::{Value, json};

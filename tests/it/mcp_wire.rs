@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::support::*;
-use serde_json::{Value, json};
+use serde_json::json;
 
 const EVIL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/it/support/mcp_evil.py");
 const GOOD: &str = concat!(

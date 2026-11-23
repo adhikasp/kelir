@@ -1,11 +1,10 @@
 //! tools bg processes tests: r11_a_leftover_background_chil, r18_a_killed_session_takes_exe, r19_cancel_takes_exec_grandchi.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::Path;
 use std::time::Duration;
 
 use crate::support::*;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::tools_bg::*;
 

@@ -1,11 +1,7 @@
 //! buildinfra guard tests: every_gate_stage_logs_to_its_o, the_gate_reports_the_summary_l, the_gate_script_keeps_the_meas, the_load_helper_kills_only_the, the_remote_script_reuses_its_w, the_scripts_name_bash_and_are_.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::process::Command;
-
 use super::buildinfra_gate::*;
-use crate::support::*;
-use serde_json::json;
 
 /// The load helper starts its busy loops itself and kills exactly those pids,
 /// on every path; it never signals a group or an image name.

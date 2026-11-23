@@ -1,14 +1,10 @@
 //! jobs limits tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use crate::support::*;
 use serde_json::{Value, json};
 
-use super::jobs::{clean, completions, finish, kelir, of_type, start, status, text, until};
+use super::jobs::{clean, completions, kelir, of_type, status, text};
 
 /// A step cap must settle the cap-th tool call before pausing. Ported from
 /// review_m9fix.rs (jobs.toml cap replaced by --max-steps).

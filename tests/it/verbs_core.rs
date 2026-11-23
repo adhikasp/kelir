@@ -8,8 +8,6 @@
 // Test crates target behaviour, not pedantic style (#23).
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::time::{Duration, Instant};
-
 use crate::support::*;
 use serde_json::Value;
 

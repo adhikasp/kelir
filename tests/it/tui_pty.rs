@@ -2,12 +2,10 @@
 //! status reports, images, key handling and panic recovery.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use super::tui_output::{herdr_records, plain};
+use super::tui_output::plain;
 use std::io::{Read as _, Write as _};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-use crate::support::{Mock, Reply, sse, text_turn, tool_turn};
 
 // -------------------------------------------------------------------- PTY
 
@@ -414,7 +412,7 @@ pub(super) fn drive_and_count_idle_bytes(
 /// A bracketed paste of a PNG path (which is what a terminal sends for a drag
 /// and drop or a clipboard path) becomes a chip, the prompt carries the
 /// pointer, and no image bytes are in it.
-
+///
 /// A 4x3 PNG: bytes a real decoder would accept as a header.
 pub(super) fn tiny_png() -> Vec<u8> {
     let mut bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -432,7 +430,7 @@ pub(super) fn tiny_png() -> Vec<u8> {
 /// A provider that is *down* is a pause, not a failure (STEER-5), so the
 /// failure here is a provider that refuses the model: 400 is an answer, not an
 /// outage, and it is never retried.
-
+///
 /// Start the TUI with `KELIR_TEST_PANIC=1` and collect what the terminal saw.
 pub(super) fn panic_in_a_pty(
     cwd: std::path::PathBuf,

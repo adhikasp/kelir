@@ -1,21 +1,12 @@
 //! tui window tests: a_model_swap_announces_the_new, a_slow_list_is_applied_to_an_i, the_tui_banner_is_silent_about, the_tui_banner_names_a_window_.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::io::{Read as _, Write as _};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::support::{ApplyEv as _, Ev, Mock, Reply, run_task, sse, text_turn, tool_turn};
-use kelir::commands::{self, Action, Parsed};
-use kelir::tui::{self, App, Phase};
-use kelir::verbs;
-use serde_json::json;
+use crate::support::{Mock, Reply, sse, text_turn};
 
-use super::tui_output::{herdr_records, plain};
-use super::tui_pty::{
-    PtyInput, PtyRun, drive_idle_in_a_pty, drive_in_a_pty, drive_pty_in_idle_or_turn,
-    panic_in_a_pty, tiny_png,
-};
+use super::tui_output::plain;
+use super::tui_pty::{drive_idle_in_a_pty, drive_in_a_pty};
 
 /// F-window: the banner stays silent about the window the provider answered,
 /// and says one dim line when the start could not read the list — because that

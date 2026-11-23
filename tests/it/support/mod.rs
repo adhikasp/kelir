@@ -2,14 +2,12 @@
 //! harness that drives the real `kelir` binary against it.
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
 mod harness;

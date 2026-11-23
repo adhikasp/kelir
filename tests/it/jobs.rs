@@ -509,6 +509,7 @@ pub(super) fn fwd(path: impl AsRef<Path>) -> String {
 // and review_m9fix.rs under the new flags. Tests of jobs.toml, `kelir job`,
 // `runs.jsonl` history, --wait, the per-job notify list and new_session_every
 // went away with those features and are deliberately not ported.
+#[tokio::test]
 async fn a_corrupt_name_file_is_tolerated_and_replaced() {
     let mock = Mock::start(vec![text("ok")]).await;
     let sb = Sandbox::new("");

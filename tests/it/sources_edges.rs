@@ -165,15 +165,6 @@ async fn live_with(tree: Tree, cwd: PathBuf, mut script: Vec<Reply>, extra_args:
     }
 }
 
-fn tail_texts(request: &Recorded) -> Vec<String> {
-    request
-        .messages()
-        .iter()
-        .skip(1)
-        .map(|m| m["content"].as_str().unwrap_or("").to_string())
-        .collect()
-}
-
 #[tokio::test]
 async fn cache_prefix_only_grows_across_two_source_changes() {
     let tree = Tree::new();

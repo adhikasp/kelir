@@ -1,11 +1,10 @@
 //! hint herdr tests: a_failing_or_malformed_hc_omit, a_hanging_hc_costs_about_a_sec, a_missing_hc_omits_the_line, in_a_pane_the_frozen_system_ca, outside_herdr_there_is_no_line, the_same_pane_renders_the_same.
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::support::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::hint_core::*;
 
