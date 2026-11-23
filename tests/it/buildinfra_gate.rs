@@ -163,7 +163,7 @@ fn the_nextest_profile_matches_the_gate_rules() {
     // tests, so nextest will see that prefix.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for (module, filter) in [
-        ("tui_pty", "test(/^tui::/)"),
+        ("tui_pty_cases", "test(/^tui::/)"),
         ("bg_promotion", "test(/^bg::/)"),
         ("tools_process", "test(/^tools::tools_process::/)"),
         ("tools_bg", "test(/^tools::tools_bg::/)"),

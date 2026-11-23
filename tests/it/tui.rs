@@ -6,6 +6,9 @@ mod tui_output;
 #[path = "tui_pty.rs"]
 mod tui_pty;
 
+#[path = "tui_pty_cases.rs"]
+mod tui_pty_cases;
+
 #[path = "tui_render.rs"]
 mod tui_render;
 
