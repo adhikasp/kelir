@@ -70,6 +70,17 @@ pub fn allowed_env(name: &str) -> bool {
     upper.starts_with("LC_") || INHERITED.contains(&upper.as_str())
 }
 
+/// On Windows the environment is case-insensitive and a runner may expose `Path`; normalise
+/// inherited keys to the allow-list spelling there. Unix names are case sensitive, so `lc_all`
+/// and `LC_ALL` are different variables and must be kept as given.
+fn inherited_key(name: std::borrow::Cow<'_, str>) -> String {
+    if cfg!(windows) {
+        name.to_ascii_uppercase()
+    } else {
+        name.into_owned()
+    }
+}
+
 /// The allow-listed parent environment plus the caller's own variables. Gates, hooks, credential
 /// helpers and MCP servers all get exactly this, never the whole parent environment.
 pub fn scrubbed_env(extra: impl IntoIterator<Item = (String, String)>) -> BTreeMap<String, String> {
@@ -77,7 +88,11 @@ pub fn scrubbed_env(extra: impl IntoIterator<Item = (String, String)>) -> BTreeM
         .filter(|(key, _)| allowed_env(&key.to_string_lossy()))
         .map(|(key, value)| {
             (
-                key.to_string_lossy().into_owned(),
+                // Windows env names are case-insensitive and a runner may set `Path`
+                // instead of `PATH`. Normalise to the allow-list spelling there so callers
+                // (and tests) can find a variable by its documented name. Unix names are
+                // case sensitive: `lc_all` is not `LC_ALL`, so leave them as the OS gave them.
+                inherited_key(key.to_string_lossy()),
                 value.to_string_lossy().into_owned(),
             )
         })
@@ -489,6 +504,22 @@ mod tests {
         }
     }
 
+    /// Uppercasing inherited keys is a Windows-only fix for runners that set `Path`. On Unix a
+    /// lowercase `lc_all` is a different variable from `LC_ALL`; changing it would be wrong.
+    #[test]
+    fn inherited_key_is_uppercased_only_on_windows() {
+        assert!(allowed_env("LC_ALL"));
+        assert!(allowed_env("lc_all"));
+        assert_eq!(
+            inherited_key("Path".into()),
+            if cfg!(windows) { "PATH" } else { "Path" }
+        );
+        assert_eq!(
+            inherited_key("lc_all".into()),
+            if cfg!(windows) { "LC_ALL" } else { "lc_all" }
+        );
+    }
+
     #[tokio::test]
     async fn a_timed_out_child_leaves_no_tree_and_reports_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -500,16 +531,18 @@ mod tests {
             "cmd /C \"ping -n 30 127.0.0.1 > NUL & echo alive > '{}'\"",
             flag.to_string_lossy()
         );
+        // On Windows every child must be in a named Job or `run` refuses to start it (an
+        // unowned tree could not be killed on timeout); cfg-shaped so neither OS needs `mut`.
+        #[cfg(unix)]
         let spec = Spec {
             timeout: Some(Duration::from_millis(400)),
-            ..Spec::new(
-                if cfg!(windows) { "cmd" } else { "sh" },
-                if cfg!(windows) {
-                    vec!["/C".into(), script]
-                } else {
-                    vec!["-c".into(), script]
-                },
-            )
+            ..Spec::new("sh", vec!["-c".into(), script])
+        };
+        #[cfg(windows)]
+        let spec = Spec {
+            timeout: Some(Duration::from_millis(400)),
+            job_name: Some(format!("kelir-timeout-test-{}", std::process::id())),
+            ..Spec::new("cmd", vec!["/C".into(), script])
         };
         let started = Instant::now();
         let finished = run(spec).await.unwrap();

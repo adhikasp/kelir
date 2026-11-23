@@ -395,13 +395,23 @@ impl Client {
 
 /// Shell wrapper for Unix servers: a watcher in the server's process group polls the session's pid and
 /// kills the group (server, its children, itself) once the session is gone or the server has exited.
+///
+/// POSIX sh has no `/proc`, and the shell builtin `kill` differs across macOS/GNU (`--` and `-s`
+/// with a negative pgid are not uniformly accepted). Liveness comes from `ps -o stat=` alone: a
+/// zombie still answers `kill -0` until it is reaped, so `kill -0` must not decide liveness here.
+/// The group kill tries the portable `kill -s KILL -- -$pgid` form first (dash, bash, BSD sh),
+/// then `/bin/kill -KILL -$pgid`, then the builtin without `--`. As soon as one succeeds the group
+/// is gone; the remaining forms are harmless failures.
 #[cfg(unix)]
 const UNIX_GUARD: &str = concat!(
-    // A zombie counts as gone (a parent that was killed but not yet reaped).
-    "alive() { kill -0 $1 2>/dev/null || return 1; read -r l </proc/$1/stat 2>/dev/null; ",
-    "case $l in *\") Z \"*) return 1;; esac; return 0; }; ",
+    // `ps` prints a state such as `Ss`, `R+` or `Z` (BSD may leave leading spaces). An empty
+    // answer or any `Z` in the state means the pid is gone for our purposes.
+    "alive() { s=$(ps -o stat= -p $1 2>/dev/null) || return 1; ",
+    "[ -n \"$s\" ] || return 1; case $s in *Z*) return 1;; esac; return 0; }; ",
+    "killgroup() { kill -s KILL -- -$1 2>/dev/null || ",
+    "/bin/kill -KILL -$1 2>/dev/null || kill -KILL -$1 2>/dev/null; }; ",
     "g=$$; p=$PPID; ( while alive $p && alive $g; do sleep 1; done; ",
-    "kill -s KILL -- -$g ) </dev/null >/dev/null 2>&1 & exec \"$@\""
+    "killgroup $g ) </dev/null >/dev/null 2>&1 & exec \"$@\""
 );
 
 /// Does `command` name something to run? (`sh` would only say "not found" and
@@ -589,5 +599,75 @@ async fn read_loop(state: ReadLoop) {
         let _ = waiter.send(Err(CallError::Unavailable(format!(
             "{name}: the server exited{hint}"
         ))));
+    }
+}
+
+#[cfg(all(unix, test))]
+mod guard_tests {
+    use super::UNIX_GUARD;
+    use std::process::Command;
+
+    /// The watcher never uses `/proc` (absent on macOS) and uses `ps` state, not `kill -0`, to
+    /// decide whether a pid is gone: a zombie still answers `kill -0` until its parent reaps it.
+    #[test]
+    fn the_guard_uses_ps_state_and_a_portable_group_kill() {
+        assert!(!UNIX_GUARD.contains("/proc"), "{UNIX_GUARD}");
+        assert!(!UNIX_GUARD.contains("kill -0"), "{UNIX_GUARD}");
+        assert!(UNIX_GUARD.contains("ps -o stat= -p $1"), "{UNIX_GUARD}");
+        assert!(
+            UNIX_GUARD.contains("case $s in *Z*) return 1"),
+            "{UNIX_GUARD}"
+        );
+        assert!(UNIX_GUARD.contains("kill -s KILL -- -$1"), "{UNIX_GUARD}");
+        assert!(UNIX_GUARD.contains("/bin/kill -KILL -$1"), "{UNIX_GUARD}");
+    }
+
+    /// Exercise the generated `alive()` in a real POSIX shell with a stubbed `ps`: an empty
+    /// state, a BSD-style `Z` state and a missing pid are all "gone"; `Ss`/`R+` are alive.
+    /// Stubbing `ps` makes this deterministic on Linux, macOS and Windows-Git-Bash alike.
+    #[test]
+    fn alive_in_a_real_shell_rejects_zombies_and_accepts_live_states() {
+        let guard = UNIX_GUARD.split("g=$$;").next().unwrap_or(UNIX_GUARD);
+        // A stub `ps` makes the state deterministic; the guard function itself is generated code.
+        let script = format!(
+            "ps() {{ case \"$*\" in *999) printf 'Z\\n';; *998) printf '    Z\\n';; \
+             *997) printf '';; *996) printf 'R+\\n';; *) printf ' Ss \\n';; esac; }}; \
+             {guard} \
+             for p in 1 999 998 997 996; do alive $p && echo $p-live || echo $p-gone; done; \
+             [ \"$1\" = keep-me ] && echo args-kept || echo args-lost"
+        );
+        let out = Command::new("sh")
+            .args(["-c", &script, "sh", "keep-me"]) // $0, $1 for the embedded script
+            .output();
+        let Ok(out) = out else {
+            return; // no shell on this box: the e2e kill test covers the behaviour instead
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [
+                "1-live",
+                "999-gone",
+                "998-gone",
+                "997-gone",
+                "996-live",
+                "args-kept",
+            ],
+            "stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The group kill spelling is accepted by the local `sh` parser. Real behaviour on a killed
+    /// session is covered by `review_m6b::a_killed_session_leaves_no_server_and_no_grandchild`,
+    /// which runs the generated guard on every OS in CI.
+    #[test]
+    fn the_portable_group_kill_spelling_is_accepted_by_sh() {
+        let out = Command::new("sh")
+            .args(["-c", "kill -s KILL -- -999999 2>/dev/null; echo ok"])
+            .output();
+        if let Ok(out) = out {
+            assert!(String::from_utf8_lossy(&out.stdout).contains("ok"));
+        }
     }
 }

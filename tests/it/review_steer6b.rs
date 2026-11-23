@@ -499,42 +499,54 @@ async fn s2_a_400_naming_parallel_tool_calls_is_retried_without_it() {
 // ------------------------------------------------------------------ N1 / N4
 
 /// N1: ordinary output that merely contains the marker, exit 0, in the middle:
-/// no "cut" notice. A real cut heredoc (shell diagnostic) still gets it.
+/// no "cut" notice. A real cut heredoc (shell diagnostic) still gets it on the
+/// shells that emit one.
 #[tokio::test]
 async fn n1_marker_in_ordinary_output_is_quiet_and_a_real_cut_is_not() {
-    let run = drive(
-        vec![
-            (
-                "q".into(),
-                json!({"command": "printf 'unexpected EOF here\nline2\nline3\nline4\nline5\nend\n'"}),
-            ),
-            ("t".into(), json!({"command": "printf 'tail unexpected EOF'"})),
-            ("f".into(), json!({"command": "printf 'unexpected EOF\nx\n'; exit 2"})),
-            ("cut".into(), json!({"command": "cat <<'WANTED'\nline one\nWRONG\n"})),
-        ],
-        "",
-        &[],
-    )
-    .await;
+    let calls = vec![
+        (
+            "q".into(),
+            json!({"command": "printf 'unexpected EOF here\nline2\nline3\nline4\nline5\nend\n'"}),
+        ),
+        (
+            "t".into(),
+            json!({"command": "printf 'tail unexpected EOF'"}),
+        ),
+        (
+            "f".into(),
+            json!({"command": "printf 'unexpected EOF\nx\n'; exit 2"}),
+        ),
+        (
+            "cut".into(),
+            json!({"command": "cat <<'WANTED'\nline one\nWRONG\n"}),
+        ),
+    ];
+    let run = drive(calls, "", &[]).await;
     let notice = "may have been cut";
     assert!(
         !result_of(&run, "q").contains(notice),
         "{}",
         result_of(&run, "q")
     );
-    eprintln!(
-        "marker at the end, exit 0 -> notice: {}",
-        result_of(&run, "t").contains(notice)
-    );
-    eprintln!(
-        "marker + exit 2 -> notice: {}",
-        result_of(&run, "f").contains(notice)
-    );
+    // macOS CI's /bin/bash 3.2 accepts an unterminated heredoc silently (exit 0, no
+    // stderr, proven in runs 45077676641/45079574869/45081619649), so no detector
+    // can honestly claim a cut there. The test still asserts the cut call runs and
+    // produces the body it read; the notice is asserted where a diagnostic exists.
+    #[cfg(not(target_os = "macos"))]
     assert!(
         result_of(&run, "cut").contains(notice),
-        "{}",
-        result_of(&run, "cut")
+        "result: {:?}; out file: {:?}",
+        result_of(&run, "cut"),
+        std::fs::read_to_string(
+            settled(&run, "cut")["out_path"]
+                .as_str()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default()
+        )
+        .unwrap_or_default()
     );
+    #[cfg(target_os = "macos")]
+    assert_eq!(result_of(&run, "cut"), "line one\nWRONG\n");
 }
 
 /// N4: KELIR_TEST_SHELL_RAW=cr keeps CRLF terminators on a POSIX script; default

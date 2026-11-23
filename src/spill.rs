@@ -628,6 +628,17 @@ mod tests {
         ]
         .join("\n");
         assert!(truncation_notice(&early, Some(0)).is_some());
+        // BSD /bin/sh (macOS) prints the same warning with a `sh: line N: warning:` prefix
+        // and a different delimiter word (`end-of-file`, not `EOF`).
+        let bsd = [
+            "sh: line 3: warning: here-document at line 1 delimited by end-of-file (wanted `WANTED')",
+            "line one",
+            "WRONG",
+        ]
+        .join("\n");
+        assert!(truncation_notice(&bsd, Some(0)).is_some());
+        // /bin/bash 3.2 (the macOS system bash) in CI emits no diagnostic at all for a cut
+        // heredoc, so there is no nameless form to detect; see the PR review evidence.
         // The `sh` variant of the same message, without `warning:`.
         let dash = ["sh: -c: line 1: unexpected EOF while looking for matching `\"'"].join("\n");
         assert!(truncation_notice(&dash, Some(2)).is_some());

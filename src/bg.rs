@@ -814,14 +814,17 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
     // `--dir` is the root (`calls/` or the global `bg/`); this job owns exactly one
     // directory below it. All of this shim's files go there and nowhere else.
     let dir = args.dir.clone();
-    let job = job_dir(&dir, &args.id);
+    let job_dir = job_dir(&dir, &args.id);
     // The shim holds the session token for as long as the job lives: close the process to its own
     // user's ordinary memory reads (Windows; on Unix `/proc/<pid>/mem` is closed to a sibling).
     if let Err(error) = harden_process() {
         eprintln!("kelir bg-shim: {error}");
     }
-    if let Err(error) = std::fs::create_dir_all(&job) {
-        eprintln!("kelir bg-shim: cannot create {}: {error}", job.display());
+    if let Err(error) = std::fs::create_dir_all(&job_dir) {
+        eprintln!(
+            "kelir bg-shim: cannot create {}: {error}",
+            job_dir.display()
+        );
         return 1;
     }
     // A command that came as a file (it is too long for an argument list) is
@@ -864,7 +867,20 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
         }
     };
 
-    let out_file = match std::fs::File::create(&args.out) {
+    // Truncate the output file first, then open two independent append handles to it: the two
+    // streams must interleave in write order, and a shared fd offset loses writes on some Unixes
+    // (macOS diagnostics were overwritten when stderr reused stdout's offset). A plain
+    // `File::create` handle cannot be substituted: its offset is no longer at 0 when the parent
+    // spawns the child, which loses the first writes (proven by the e2e MCP exit-code tests).
+    if let Err(error) = std::fs::File::create(&args.out) {
+        fail(
+            &dir,
+            &status,
+            &format!("cannot create the output file: {error}"),
+        );
+        return 1;
+    }
+    let out_file = match std::fs::OpenOptions::new().append(true).open(&args.out) {
         Ok(file) => file,
         Err(error) => {
             fail(
@@ -875,13 +891,13 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
             return 1;
         }
     };
-    let out_for_err = match out_file.try_clone() {
+    let out_for_err = match std::fs::OpenOptions::new().append(true).open(&args.out) {
         Ok(file) => file,
         Err(error) => {
             fail(
                 &dir,
                 &status,
-                &format!("cannot duplicate the output handle: {error}"),
+                &format!("cannot reopen the output handle: {error}"),
             );
             return 1;
         }
@@ -899,7 +915,9 @@ pub async fn shim_main(args: BgShimArgs) -> u8 {
         .out
         .parent()
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| job.clone());
+        .unwrap_or_else(|| job_dir.to_path_buf());
+    // `job_dir` is the per-call directory (the Windows-only `Job` handle below is a different
+    // binding and deliberately not cloned: the handle owns kill-on-close and must have one owner).
     // A caller that already wrote the script (the bash call, which had to keep the shim's own
     // argv short) decided it; otherwise the shim decides from the command and the shell.
     let shell_input = match &script {

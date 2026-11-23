@@ -132,10 +132,11 @@ pub mod reap {
                     }
                 }
             }
-            // macOS `ps` can lag a freshly forked child; `/proc` on Linux is
-            // immediate. Only the former needs a delay between sweeps.
+            // macOS `ps` can lag a freshly forked child, and a daemon that forks just after the
+            // gate exits may only appear after a few sweeps; `/proc` on Linux is immediate.
+            // Give macOS 20 x 50 ms = 1 s of scanning before the reaper gives up.
             #[cfg(target_os = "macos")]
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 
@@ -185,11 +186,37 @@ pub mod reap {
             .collect()
     }
 
-    /// macOS: one `ps axww -E` gives both pids and their environments.
+    /// macOS: one `ps` call lists both pids and their environments. The spelling is probed once
+    /// (first successful call wins) and cached; each reaper sweep then costs exactly one `ps`.
+    /// The alternatives are defensive: no CI log has shown a failure for any one spelling.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn ps_args() -> &'static [&'static str] {
+        use std::sync::OnceLock;
+        static ARGS: OnceLock<&'static [&'static str]> = OnceLock::new();
+        ARGS.get_or_init(|| {
+            const CANDIDATES: [&[&str]; 3] = [
+                &["axww", "-E", "-o", "pid=,command="],
+                &["axww", "e", "-o", "pid=,command="],
+                &["axwwe", "-o", "pid=,command="],
+            ];
+            for args in CANDIDATES {
+                if crate::sys::runner::std_command_name("ps")
+                    .args(args)
+                    .output()
+                    .is_ok_and(|out| out.status.success())
+                {
+                    return args;
+                }
+            }
+            // No spelling worked: keep one so a sweep still returns an empty set cheaply.
+            CANDIDATES[0]
+        })
+    }
+
     #[cfg(target_os = "macos")]
     fn marked_pids(needle: &str) -> std::collections::BTreeSet<u32> {
         let Ok(output) = crate::sys::runner::std_command_name("ps")
-            .args(["axww", "-E", "-o", "pid=,command="])
+            .args(ps_args())
             .output()
         else {
             return std::collections::BTreeSet::new();
@@ -2502,6 +2529,41 @@ sleep 1
         // or an environment entry.
         assert_eq!(found, [42, 44, 45].into_iter().collect());
         assert!(reap::parse_marked_pids(ps, "KELIR_GATE_RUN=zzz").is_empty());
+    }
+
+    /// All three cached `ps` spellings are parsed the same way: the token may appear as an
+    /// environment entry or a command word, never as a prefix of either.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn each_ps_spelling_feeds_the_same_exact_token_parser() {
+        let spellings: [&[&str]; 3] = [
+            &["axww", "-E", "-o", "pid=,command="],
+            &["axww", "e", "-o", "pid=,command="],
+            &["axwwe", "-o", "pid=,command="],
+        ];
+        // One successful spelling is selected once, not three calls per sweep; the chosen
+        // candidate depends on the platform's `ps`, which is the point of the cache.
+        assert!(
+            spellings.contains(&reap::ps_args()),
+            "{:?}",
+            reap::ps_args()
+        );
+        for args in spellings {
+            let out = crate::sys::runner::std_command_name("ps")
+                .args(args)
+                .output()
+                .unwrap();
+            // Whatever the runner's `ps` accepts, parsing its output must find only exact tokens.
+            let text = String::from_utf8_lossy(&out.stdout);
+            let found = reap::parse_marked_pids(&text, "KELIR_GATE_RUN=not-a-real-token");
+            assert!(found.is_empty(), "args={args:?}, found={found:?}");
+        }
+        // Synthetic output of any spelling is parsed identically.
+        let sample = " 7 sh -c KELIR_GATE_RUN=abc sleep\n 8 env KELIR_GATE_RUN=abcd\n";
+        assert_eq!(
+            reap::parse_marked_pids(sample, "KELIR_GATE_RUN=abc"),
+            std::iter::once(7).collect()
+        );
     }
 
     /// Linux: the sweep finds a process that left the group by its token.
