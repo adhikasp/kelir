@@ -1,4 +1,4 @@
-//! tui window tests: a_model_swap_announces_the_new, a_slow_list_is_applied_to_an_i, the_tui_banner_is_silent_about, the_tui_banner_names_a_window_.
+//! TUI banner and window-size tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use std::time::Duration;

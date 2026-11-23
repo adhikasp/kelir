@@ -6,13 +6,13 @@
 // Test crates target behaviour, not pedantic style (#23).
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use std::path::Path;
-
-use crate::support::*;
-
 fn python() -> &'static str {
     if cfg!(windows) { "python" } else { "python3" }
 }
+
+use std::path::Path;
+
+use crate::support::*;
 
 fn fwd(path: impl AsRef<Path>) -> String {
     path.as_ref().to_string_lossy().replace('\\', "/")

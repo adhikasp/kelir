@@ -1,4 +1,4 @@
-//! resume prompt tests: a_compaction_asked_for_while_a, a_compaction_that_cannot_shrin, a_queued_compaction_survives_a, the_auto_trigger_compacts_at_e, the_compact_tool_is_queued_and.
+//! Resume and compaction prompt tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use super::resume_crash::{all_contents, events_of};

@@ -1,4 +1,4 @@
-//! gates observe tests: a_gate_gets_no_token_no_socket, observe_lists_the_gates_and_wh, observe_prints_env_names_of_a_.
+//! Gate visibility through `observe`.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use super::gates_core::*;

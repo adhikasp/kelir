@@ -1,4 +1,4 @@
-//! children brief tests: a_brief_cannot_delegate_and_ls, a_brief_shares_the_parents_pre, ls_shows_the_tree_and_kill_tak.
+//! Child `brief` delegation and lifecycle tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use std::sync::Arc;

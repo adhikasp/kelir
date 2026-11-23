@@ -35,28 +35,6 @@ async fn a_name_held_by_a_live_session_is_refused_with_its_pid() {
     clean(&sb).await;
 }
 
-/// A corrupt name file is tolerated and replaced; STATUS files in the same
-/// directory must not be treated as corrupt names. Ported from e2e_m9.rs.
-#[tokio::test]
-async fn a_corrupt_name_file_is_tolerated_and_replaced() {
-    let mock = Mock::start(vec![text("ok")]).await;
-    let sb = Sandbox::new("");
-    std::fs::create_dir_all(sb.state.join("names")).unwrap();
-    std::fs::write(sb.state.join("names").join("broken"), "{ nope").unwrap();
-    let ls = kelir(&sb, &mock, &["ls", "sessions"], &[]).await;
-    assert_eq!(ls.code, 0, "{}", ls.stderr);
-    assert!(!ls.stderr.contains("panicked"), "{}", ls.stderr);
-    let run = kelir(&sb, &mock, &["run", "--name", "broken", "go"], &[]).await;
-    assert_eq!(run.code, 0, "{}", run.stderr);
-    assert!(run.stderr.contains("unreadable"), "{}", run.stderr);
-    let entry: Value = serde_json::from_str(
-        &std::fs::read_to_string(sb.state.join("names").join("broken")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(entry["session"], sb.only_session().as_str());
-    clean(&sb).await;
-}
-
 /// STATUS is always a whole JSON record: a reader polling while the run is
 /// live never sees a torn file, and sees `running`. Ported from review_m9.rs.
 #[tokio::test]

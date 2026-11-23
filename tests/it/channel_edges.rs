@@ -45,25 +45,6 @@ fn note(method: &str, params: Value) -> kelir::mcp::rpc::Notification {
     }
 }
 
-fn shells() -> usize {
-    #[cfg(windows)]
-    let output = std::process::Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq sh.exe", "/NH", "/FO", "CSV"])
-        .output();
-    #[cfg(not(windows))]
-    let output = std::process::Command::new("ps").arg("-e").output();
-    output
-        .map(|out| {
-            let text = String::from_utf8_lossy(&out.stdout);
-            text.lines()
-                .filter(|line| {
-                    line.to_ascii_lowercase().contains("sh.exe") || line.contains(" sh ")
-                })
-                .count()
-        })
-        .unwrap_or(0)
-}
-
 async fn wait_until_result<F: Fn() -> bool>(ready: F, timeout: Duration) -> Result<(), ()> {
     let started = std::time::Instant::now();
     loop {
@@ -75,19 +56,6 @@ async fn wait_until_result<F: Fn() -> bool>(ready: F, timeout: Duration) -> Resu
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-/// R1: a torn tail that cuts a multi-byte character must be repaired, not
-/// silently turn the whole spool into an empty file (seq restarts at 1, every
-/// later record unreadable: total message loss).
-/// Parse one config document and return the mcp-server validation error, if any.
-fn parse_layer(text: &str, _label: &str) -> Result<(), String> {
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    kelir::config::load(Some(&path))
-        .map(|_| ())
-        .map_err(|e| e.to_string())
 }
 
 #[test]
@@ -135,7 +103,7 @@ fn r2_a_compacted_done_id_must_still_be_deduped() {
 async fn r3_reply_must_use_the_messages_reply_to() {
     // Drive the real `kelir channel` against the fake bridge and assert the
     // `reply` tool receives the bridge's explicit reply_to, not the message id.
-    let before = shells();
+    let before = shell_count();
     let test = ChannelTest::new();
     let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("answer", 0)))]).await;
     let mut driver = test.spawn_driver(&mock.base_url()).await;
@@ -162,7 +130,7 @@ async fn r3_reply_must_use_the_messages_reply_to() {
     }
     driver.kill().await.ok();
     let _ = driver.wait().await;
-    assert!(shells().saturating_sub(before) <= 20, "leaked shells");
+    assert!(shell_count().saturating_sub(before) <= 20, "leaked shells");
 }
 
 /// R4: a permission-relay capability using `_` instead of `-` is accepted and
@@ -187,7 +155,7 @@ fn r4_permission_relay_variants_must_be_forbidden() {
 fn r4b_config_rejects_permission_relay() {
     let text = "[mcp.servers.fake]\ncommand = 'python'\ndeclare_capabilities = ['claude/channel/permission_relay']\n";
     assert!(
-        parse_layer(text, "review").is_err(),
+        config_err(text).is_err(),
         "a permission relay capability must be refused in config.toml"
     );
 }
@@ -398,7 +366,7 @@ impl ChannelTest {
 /// loop, so no two turns can ever be in flight at once.
 #[tokio::test(flavor = "multi_thread")]
 async fn r14_max_active_should_allow_parallel_conversations() {
-    let before = shells();
+    let before = shell_count();
     let gate = std::sync::Arc::new(tokio::sync::Notify::new());
     let mock = Mock::start(vec![
         Reply::Gated(gate.clone(), sse(&text_turn("first", 0))),
@@ -441,7 +409,7 @@ async fn r14_max_active_should_allow_parallel_conversations() {
     );
     driver.kill().await.ok();
     let _ = driver.wait().await;
-    assert!(shells().saturating_sub(before) <= 20, "leaked shells");
+    assert!(shell_count().saturating_sub(before) <= 20, "leaked shells");
 }
 
 /// R13: `outcome()` scans the whole log for *any* deny gate. In a resumed

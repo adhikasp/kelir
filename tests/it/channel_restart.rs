@@ -17,25 +17,6 @@ use serde_json::{Value, json};
 
 use crate::support::*;
 
-fn shells() -> usize {
-    #[cfg(windows)]
-    let output = std::process::Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq sh.exe", "/NH", "/FO", "CSV"])
-        .output();
-    #[cfg(not(windows))]
-    let output = std::process::Command::new("ps").arg("-e").output();
-    output
-        .map(|out| {
-            let text = String::from_utf8_lossy(&out.stdout);
-            text.lines()
-                .filter(|line| {
-                    line.to_ascii_lowercase().contains("sh.exe") || line.contains(" sh ")
-                })
-                .count()
-        })
-        .unwrap_or(0)
-}
-
 struct ChannelTest {
     sandbox: Sandbox,
     inbox: PathBuf,
@@ -136,7 +117,7 @@ impl ChannelTest {
 /// have DIFFERENT ids (names/ entries), proving the task-local plan id works.
 #[tokio::test(flavor = "multi_thread")]
 async fn r15_two_new_conversations_get_distinct_sessions_and_both_answer() {
-    let before = shells();
+    let before = shell_count();
     let mock = Mock::start(vec![
         Reply::Sse(sse(&text_turn("answer A", 0))),
         Reply::Sse(sse(&text_turn("answer B", 0))),
@@ -199,21 +180,7 @@ async fn r15_two_new_conversations_get_distinct_sessions_and_both_answer() {
     }
     driver.kill().await.ok();
     let _ = driver.wait().await;
-    assert!(shells().saturating_sub(before) <= 20, "leaked shells");
-}
-
-/// B1 strong probe: a multi-byte character cut inside a spool record must lose
-/// nothing before the tear. The repaired file must contain exactly the good
-/// prefix (all complete records before the torn one), and `.torn` must hold
-/// exactly the dropped bytes for inspection.
-/// Parse one config document and return the mcp-server validation error, if any.
-fn parse_layer(text: &str, _label: &str) -> Result<(), String> {
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    kelir::config::load(Some(&path))
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    assert!(shell_count().saturating_sub(before) <= 20, "leaked shells");
 }
 
 #[test]
@@ -266,7 +233,7 @@ fn r17_torn_multibyte_tail_keeps_every_good_byte_and_the_exact_torn_suffix() {
 /// asserts the single reply's text is exactly "stopped".
 #[tokio::test(flavor = "multi_thread")]
 async fn r18_stop_is_done_and_not_replied_twice_across_restart() {
-    let before = shells();
+    let before = shell_count();
     let mock = Mock::start(vec![]).await;
     let test = ChannelTest::new();
     let mut driver = test
@@ -302,7 +269,7 @@ async fn r18_stop_is_done_and_not_replied_twice_across_restart() {
     );
     driver2.kill().await.ok();
     let _ = driver2.wait().await;
-    assert!(shells().saturating_sub(before) <= 20, "leaked shells");
+    assert!(shell_count().saturating_sub(before) <= 20, "leaked shells");
 }
 
 /// B3 strong probe: a config with both a forbidden capability and a secret in
@@ -321,7 +288,7 @@ fn r20_config_rejects_forbidden_variants_without_echoing_env_secret() {
             "[mcp.servers.fake]\ncommand = 'python'\ndeclare_capabilities = ['{cap}']\n\
              [mcp.servers.fake.env]\nAPI_TOKEN = '{secret}'\n"
         );
-        let err = parse_layer(&text, "review")
+        let err = config_err(&text)
             .err()
             .unwrap_or_else(|| panic!("capability {cap} must be refused"));
         assert!(!err.contains(secret), "error echoed the env secret: {err}");

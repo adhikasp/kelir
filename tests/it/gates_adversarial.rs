@@ -5,6 +5,10 @@
 // Test crates target behaviour, not pedantic style (#23).
 #![allow(clippy::pedantic, clippy::nursery)]
 
+fn python() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -16,10 +20,6 @@ const PROBE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/it/support/gate_probe.py"
 );
-
-fn python() -> &'static str {
-    if cfg!(windows) { "python" } else { "python3" }
-}
 
 fn fwd(path: impl AsRef<Path>) -> String {
     path.as_ref().to_string_lossy().replace('\\', "/")

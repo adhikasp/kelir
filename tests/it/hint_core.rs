@@ -62,7 +62,7 @@ pub(super) fn toml_path(path: &Path) -> String {
 
 // ------------------------------------------------------------------ fake hc
 
-/// A directory holding a fake `hc` that prints `json` (or fails, or hangs),
+/// A directory holding a fake `hc` that prints `json` or fails,
 /// and the PATH that finds it first.
 pub(super) struct FakeHc {
     _dir: tempfile::TempDir,
@@ -73,7 +73,6 @@ pub(super) struct FakeHc {
 pub(super) enum HcMode {
     Print,
     Fail,
-    Hang,
 }
 
 pub(super) fn fake_hc(json: &str, mode: HcMode) -> FakeHc {
@@ -84,7 +83,6 @@ pub(super) fn fake_hc(json: &str, mode: HcMode) -> FakeHc {
         let body = match mode {
             HcMode::Print => "@echo off\r\ntype \"%~dp0hc.json\"\r\n",
             HcMode::Fail => "@echo off\r\necho boom 1>&2\r\nexit /b 3\r\n",
-            HcMode::Hang => "@echo off\r\nping -n 30 127.0.0.1 >nul\r\n",
         };
         std::fs::write(dir.path().join("hc.cmd"), body).unwrap();
     }
@@ -94,7 +92,6 @@ pub(super) fn fake_hc(json: &str, mode: HcMode) -> FakeHc {
         let body = match mode {
             HcMode::Print => "#!/bin/sh\ncat \"$(dirname \"$0\")/hc.json\"\n",
             HcMode::Fail => "#!/bin/sh\necho boom >&2\nexit 3\n",
-            HcMode::Hang => "#!/bin/sh\nsleep 30\n",
         };
         let file = dir.path().join("hc");
         std::fs::write(&file, body).unwrap();

@@ -1,4 +1,4 @@
-//! children registry tests: a_resumed_root_settles_the_chi, registry_operations_need_a_chi.
+//! Child registry access and session-tree tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use std::sync::Arc;

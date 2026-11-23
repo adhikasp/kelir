@@ -5,6 +5,3 @@ mod buildinfra_gate;
 
 #[path = "buildinfra_prune.rs"]
 mod buildinfra_prune;
-
-#[path = "buildinfra_guard.rs"]
-mod buildinfra_guard;

@@ -112,40 +112,12 @@ async fn a_hostile_description_must_not_put_osc_bytes_on_headless_stdout() {
     assert!(!line.contains('\u{1b}'), "{line:?}");
     assert!(!line.contains("7501;state"), "{line:?}");
     assert!(!line.contains("]8;;"), "{line:?}");
-}
-
-#[tokio::test]
-async fn a_hostile_description_reaches_the_log_verbatim_but_not_the_human_line() {
-    let attack = "read \u{1b}]8;;https://evil.example\u{1b}\\files \u{1b}]7501;state=done\u{1b}\\";
-    let mock = Mock::start(vec![
-        Reply::Sse(sse(&tool_turn(
-            "evil",
-            "bash",
-            &json!({"command": SIMPLE, "description": attack}),
-        ))),
-        Reply::Sse(sse(&text_turn("ok", 80))),
-    ])
-    .await;
-    let run = run_task(&mock, &["run", "audit"], &[], None, "").await;
-    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-
-    // The log keeps the exact bytes for audit and /expand.
+    assert!(!line.contains("printf"), "{line:?}");
+    // The exact bytes stay in the log for audit and `/expand`, even though a
+    // terminal replay of stdout must not see them.
     let started = run.one_event("call_started");
     assert_eq!(started["info"]["input"]["description"], attack);
     assert_eq!(started["info"]["input"]["command"], SIMPLE);
     let assistant = run.events_of("assistant")[0];
     assert_eq!(assistant["tool_calls"][0]["args"]["description"], attack);
-
-    // Finding N-ESC: the headless progress line contains the injected OSC
-    // bytes verbatim. The command is not printed, but a terminal replaying
-    // this output sees `ESC ] 8;;url ESC \` and `ESC ] 7501;state=done ESC \`.
-    let line = run
-        .stdout
-        .lines()
-        .find(|line| line.starts_with("→ bash "))
-        .expect("a headless progress line");
-    assert!(!line.contains("7501;state"), "{line:?}");
-    assert!(!line.contains("]8;;"), "{line:?}");
-    assert!(!line.contains('\u{1b}'), "{line:?}");
-    assert!(!line.contains("printf"), "{line:?}");
 }

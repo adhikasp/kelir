@@ -1,4 +1,4 @@
-//! verbs session tests: later_starts_a_second_turn, model_swap_applies_at_the_next, model_swap_can_change_the_prov, say_during_a_stream_gets_anoth, say_mid_turn_is_in_the_next_re, say_now_stops_the_running_call, say_while_idle_starts_a_turn, stop_call_stops_one_of_two_par, stop_call_with_an_unknown_id_i, stop_ends_the_turn, tools_disable_returns_disabled.
+//! Session verb (say, stop, model, end) tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use std::time::{Duration, Instant};

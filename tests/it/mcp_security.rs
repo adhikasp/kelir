@@ -8,6 +8,10 @@
 // Test crates target behaviour, not pedantic style (#23).
 #![allow(clippy::pedantic, clippy::nursery)]
 
+fn python() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -18,10 +22,6 @@ const SERVER: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/it/support/m6b_server.py"
 );
-
-fn python() -> &'static str {
-    if cfg!(windows) { "python" } else { "python3" }
-}
 
 fn toml_for(args_extra: &str, env: &[(&str, &str)]) -> String {
     let env_text = env
@@ -408,18 +408,6 @@ async fn the_servers_command_line_has_no_env_values() {
     kill_pid(live.pid());
 }
 
-/// Configuration errors never echo a value, for many ways to break a file
-/// around a secret (all through the library parser the session and the CLI use).
-/// Parse one config document and return the mcp-server validation error, if any.
-fn parse_layer(text: &str, _label: &str) -> Result<(), String> {
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    kelir::config::load(Some(&path))
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
 #[test]
 fn config_errors_never_echo_a_secret() {
     let secret = "sk-CANARY-fuzz-0042";
@@ -466,7 +454,7 @@ fn config_errors_never_echo_a_secret() {
         format!("[mcp.servers.a]\ncommand='x'\nenv = {{ T = \"{secret}, expected a string\" , }}"),
     ];
     for (n, text) in shapes.iter().enumerate() {
-        if let Err(error) = parse_layer(text, "config.toml") {
+        if let Err(error) = config_err(text) {
             // A key NAME may legitimately be reported (`unknown field`), but a
             // value never; for shapes where the secret is a key, the message
             // may name it, so only value-position shapes are asserted below.

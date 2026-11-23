@@ -692,3 +692,40 @@ stderr: {}",
         }
     }
 }
+
+// ------------------------------------------------------- shared test helpers
+
+/// The Python interpreter used by the scripted MCP / channel fixtures.
+pub fn py() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
+/// Count `sh` processes, on either OS, for the no-leak assertions.
+pub fn shell_count() -> usize {
+    #[cfg(windows)]
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq sh.exe", "/NH", "/FO", "CSV"])
+        .output();
+    #[cfg(not(windows))]
+    let output = std::process::Command::new("ps").arg("-e").output();
+    output
+        .map(|out| {
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.lines()
+                .filter(|line| {
+                    line.to_ascii_lowercase().contains("sh.exe") || line.contains(" sh ")
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Parse a config document through the real loader and return its error, if any.
+pub fn config_err(text: &str) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    kelir::config::load(Some(&path))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}

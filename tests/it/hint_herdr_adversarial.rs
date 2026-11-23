@@ -1,4 +1,4 @@
-//! hint herdr adversarial tests: a_pane_id_that_looks_like_a_fl, hc_hanging_is_bounded_near_one, hc_labels_cannot_inject_lines_, hc_printing_a_huge_answer_fail, hc_valid_json_with_huge_labels.
+//! Adversarial fake-`hc` Herdr hint tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use std::time::Duration;

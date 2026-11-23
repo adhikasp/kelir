@@ -1,4 +1,4 @@
-//! gates children tests: a_child_session_runs_its_own_s, a_gate_that_starts_kelir_does_.
+//! Nested gate behaviour in child sessions.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use super::gates_core::*;

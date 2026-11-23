@@ -1,4 +1,4 @@
-//! tools bg promotion tests: r12_a_graceful_exit_leaves_a_p, r14_run_json_does_not_hold_the, r15_garbage_in_the_bg_director, r16_a_torn_or_deleted_status_m.
+//! Background-job promotion and crash-recovery tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use std::path::Path;

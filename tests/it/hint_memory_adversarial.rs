@@ -1,4 +1,4 @@
-//! hint memory adversarial tests: a_memory_note_the_model_writes, memory_dir_missing_or_a_file_i, memory_survives_delete_rename_, memory_with_a_symlink_loop_doe, pdf_and_odd_media_names_are_ha.
+//! Memory-directory and adversarial source tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use crate::support::*;
@@ -101,6 +101,7 @@ async fn memory_survives_delete_rename_huge_and_non_utf8() {
     assert_eq!(code, 0, "{stderr}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn memory_with_a_symlink_loop_does_not_hang_or_fail() {
     let cwd = tempfile::tempdir().unwrap();

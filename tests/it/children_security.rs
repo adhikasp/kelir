@@ -1,4 +1,4 @@
-//! children security tests: killing_the_root_hard_leaves_n, stopping_the_call_stops_its_fo.
+//! Child process cleanup and security tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use std::sync::Arc;

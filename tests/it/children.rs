@@ -14,3 +14,6 @@ mod children_lifecycle;
 
 #[path = "children_brief.rs"]
 mod children_brief;
+
+#[path = "children_notify.rs"]
+mod children_notify;

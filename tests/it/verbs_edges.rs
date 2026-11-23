@@ -1,4 +1,4 @@
-//! verbs edges tests: a_bad_verb_never_reaches_the_s, a_headless_run_drains_queued_l, a_rejected_model_fails_the_tur, a_stop_in_idle_is_answered_as_, a_stopped_call_reports_its_par, a_verb_to_a_dead_session_error, end_ends_the_session, end_mid_turn_stops_the_call_an, every_bash_child_gets_kelir_so, stop_during_a_provider_backoff, two_clients_can_send_at_once.
+//! Verb rejection and edge-case tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use std::time::{Duration, Instant};

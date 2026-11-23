@@ -1,4 +1,4 @@
-//! tui status tests: the_idle_status_line_stays_cal, the_tui_reports_a_pause_to_her, the_tui_reports_a_paused_turn_, the_tui_reports_an_error_to_he, the_tui_shows_the_retry_countd.
+//! TUI status-line reporting tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use crate::support::{Mock, Reply, sse, text_turn, tool_turn};

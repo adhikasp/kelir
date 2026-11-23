@@ -6,6 +6,10 @@
 // Test crates target behaviour, not pedantic style (#23).
 #![allow(clippy::pedantic, clippy::nursery)]
 
+fn python() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -17,10 +21,6 @@ const GOOD: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/it/support/mcp_server.py"
 );
-
-fn python() -> &'static str {
-    if cfg!(windows) { "python" } else { "python3" }
-}
 
 fn evil(extra: &str) -> String {
     format!(

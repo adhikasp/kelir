@@ -1,7 +1,5 @@
-//! hint herdr tests: a_failing_or_malformed_hc_omit, a_hanging_hc_costs_about_a_sec, a_missing_hc_omits_the_line, in_a_pane_the_frozen_system_ca, outside_herdr_there_is_no_line, the_same_pane_renders_the_same.
+//! Frozen-system Herdr line and hint tests.
 #![allow(clippy::pedantic, clippy::nursery)]
-
-use std::time::Duration;
 
 use crate::support::*;
 use serde_json::Value;
@@ -84,20 +82,6 @@ async fn a_failing_or_malformed_hc_omits_the_line_with_a_note() {
             .collect();
         assert!(notes.iter().any(|note| note.contains("herdr")), "{notes:?}");
     }
-}
-
-#[tokio::test]
-async fn a_hanging_hc_costs_about_a_second_and_never_fails_the_session() {
-    let hc = fake_hc(PANE_JSON, HcMode::Hang);
-    let started = std::time::Instant::now();
-    let run = run_with_pane(Some(&hc), Some("t9")).await;
-    assert_eq!(run.code, 0, "{}", run.stderr);
-    assert!(
-        started.elapsed() < Duration::from_secs(15),
-        "took {:?}",
-        started.elapsed()
-    );
-    assert!(!system_text(&run).contains("herdr:"));
 }
 
 #[tokio::test]

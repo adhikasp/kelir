@@ -1,4 +1,4 @@
-//! hint observe tests: observe_names_an_unknown_sessi, observe_raw_is_the_body_the_mo.
+//! `observe` output versus the body the model received.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use std::time::Duration;

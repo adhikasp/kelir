@@ -1,4 +1,4 @@
-//! tui pty images tests: a_csi_u_shift_enter_adds_a_new, a_pasted_image_path_becomes_a_, a_typed_image_path_is_a_chip_i.
+//! TUI PTY image-path and key-handling tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use crate::support::{Mock, Reply, sse, text_turn};

@@ -1,4 +1,4 @@
-//! children lifecycle tests: an_idle_keep_session_wakes_on_, ctl_brief_prints_the_answer_an, only_the_root_writes_the_herdr.
+//! Child keep-session and herdr lifecycle tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use std::time::{Duration, Instant};

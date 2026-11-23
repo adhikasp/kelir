@@ -1,4 +1,4 @@
-//! mcp session tests: a_big_result_spills_and_still_, a_call_inside_a_bash_call_is_l, a_channel_server_is_connected_, a_crashed_server_is_exit_3_and, a_server_does_not_outlive_a_se, a_socket_client_cannot_forge_a, a_tool_error_in_a_session_is_e, an_mcp_result_is_snapshotted_i, call_reaches_a_tool_named_like, list_changed_refreshes_the_too, the_broker_keeps_one_server_fo, timeout_is_exit_4_and_the_call.
+//! MCP tool calls inside live sessions.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use crate::support::*;

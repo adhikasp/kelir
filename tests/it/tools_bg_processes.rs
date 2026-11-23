@@ -1,4 +1,4 @@
-//! tools bg processes tests: r11_a_leftover_background_chil, r18_a_killed_session_takes_exe, r19_cancel_takes_exec_grandchi.
+//! Background-job child-process cleanup tests.
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use std::time::Duration;
