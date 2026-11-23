@@ -1,7 +1,7 @@
 //! Integration tests filed by feature: `cli`.
 
-#[path = "e2e_steer11.rs"]
-mod e2e_steer11;
+#[path = "cli_docs.rs"]
+mod cli_docs;
 
-#[path = "review_m2.rs"]
-mod review_m2;
+#[path = "cli_status.rs"]
+mod cli_status;

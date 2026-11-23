@@ -1,13 +1,19 @@
 //! Integration tests filed by feature: `tools`.
 
-#[path = "e2e_bashdesc.rs"]
-mod e2e_bashdesc;
+#[path = "tools_description.rs"]
+mod tools_description;
 
-#[path = "e2e_bashdesc_adversarial.rs"]
-mod e2e_bashdesc_adversarial;
+#[path = "tools_description_edges.rs"]
+mod tools_description_edges;
 
-#[path = "review_m4.rs"]
-mod review_m4;
+#[path = "tools_bg.rs"]
+mod tools_bg;
 
-#[path = "review_m4b.rs"]
-mod review_m4b;
+#[path = "tools_process.rs"]
+mod tools_process;
+
+#[path = "tools_bg_promotion.rs"]
+mod tools_bg_promotion;
+
+#[path = "tools_bg_processes.rs"]
+mod tools_bg_processes;

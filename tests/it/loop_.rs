@@ -1,13 +1,13 @@
 //! Integration tests filed by feature: `loop_`.
 
-#[path = "e2e.rs"]
-mod e2e;
+#[path = "loop_core.rs"]
+mod loop_core;
 
-#[path = "e2e_steer6.rs"]
-mod e2e_steer6;
+#[path = "loop_model.rs"]
+mod loop_model;
 
-#[path = "review_steer6.rs"]
-mod review_steer6;
+#[path = "loop_shell.rs"]
+mod loop_shell;
 
-#[path = "review_steer6b.rs"]
-mod review_steer6b;
+#[path = "loop_boundaries.rs"]
+mod loop_boundaries;

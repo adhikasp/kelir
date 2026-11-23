@@ -1,13 +1,25 @@
 //! Integration tests filed by feature: `hint`.
 
-#[path = "e2e_m5b.rs"]
-mod e2e_m5b;
+#[path = "hint_core.rs"]
+pub(super) mod hint_core;
 
-#[path = "review_m5b.rs"]
-mod review_m5b;
+#[path = "hint_adversarial.rs"]
+mod hint_adversarial;
 
-#[path = "review_steer12.rs"]
-mod review_steer12;
+#[path = "context_reads.rs"]
+mod context_reads;
 
-#[path = "steer12.rs"]
-mod steer12;
+#[path = "context_metrics.rs"]
+mod context_metrics;
+
+#[path = "hint_herdr.rs"]
+mod hint_herdr;
+
+#[path = "hint_observe.rs"]
+mod hint_observe;
+
+#[path = "hint_herdr_adversarial.rs"]
+mod hint_herdr_adversarial;
+
+#[path = "hint_memory_adversarial.rs"]
+mod hint_memory_adversarial;

@@ -1,28 +1,28 @@
 //! Integration tests filed by feature: `providers`.
 
-#[path = "e2e_steer2.rs"]
-mod e2e_steer2;
+#[path = "providers_auth.rs"]
+mod providers_auth;
 
-#[path = "e2e_steer4.rs"]
-mod e2e_steer4;
+#[path = "providers_limits.rs"]
+mod providers_limits;
 
-#[path = "e2e_steer5.rs"]
-mod e2e_steer5;
+#[path = "providers_retry.rs"]
+mod providers_retry;
 
-#[path = "e2e_steer8.rs"]
-mod e2e_steer8;
+#[path = "providers_status.rs"]
+mod providers_status;
 
-#[path = "review_m0.rs"]
-mod review_m0;
+#[path = "providers_basics.rs"]
+mod providers_basics;
 
-#[path = "review_steer1.rs"]
-mod review_steer1;
+#[path = "providers_windows.rs"]
+mod providers_windows;
 
-#[path = "review_steer2.rs"]
-mod review_steer2;
+#[path = "providers_secrets.rs"]
+mod providers_secrets;
 
-#[path = "review_steer5.rs"]
-mod review_steer5;
+#[path = "providers_governor.rs"]
+mod providers_governor;
 
-#[path = "review_steer8.rs"]
-mod review_steer8;
+#[path = "providers_status_edges.rs"]
+mod providers_status_edges;

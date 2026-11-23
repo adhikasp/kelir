@@ -1,16 +1,16 @@
 //! Integration tests filed by feature: `platform`.
 
-#[path = "e2e_steer7.rs"]
-mod e2e_steer7;
+#[path = "platform_security.rs"]
+mod platform_security;
 
-#[path = "review_steer4.rs"]
-mod review_steer4;
+#[path = "platform_limits.rs"]
+mod platform_limits;
 
-#[path = "review_steer7.rs"]
-mod review_steer7;
+#[path = "platform_ownership.rs"]
+mod platform_ownership;
 
-#[path = "review_steer7b.rs"]
-mod review_steer7b;
+#[path = "platform_forgery.rs"]
+mod platform_forgery;
 
-#[path = "review_steer7d.rs"]
-mod review_steer7d;
+#[path = "platform_process.rs"]
+mod platform_process;

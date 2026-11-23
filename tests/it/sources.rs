@@ -1,7 +1,10 @@
 //! Integration tests filed by feature: `sources`.
 
-#[path = "e2e_m5.rs"]
-mod e2e_m5;
+#[path = "sources_live.rs"]
+mod sources_live;
 
-#[path = "review_m5a.rs"]
-mod review_m5a;
+#[path = "sources_edges.rs"]
+mod sources_edges;
+
+#[path = "sources_discovery.rs"]
+mod sources_discovery;

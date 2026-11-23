@@ -1,7 +1,7 @@
 //! Integration tests filed by feature: `attachments`.
 
-#[path = "e2e_tui2.rs"]
-mod e2e_tui2;
+#[path = "tui_images.rs"]
+mod tui_images;
 
-#[path = "review_tui2.rs"]
-mod review_tui2;
+#[path = "tui_markdown.rs"]
+mod tui_markdown;

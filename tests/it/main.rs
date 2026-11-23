@@ -1,7 +1,4 @@
 //! The rewrite's one integration-test binary, one source file per feature.
-//!
-//! Every migrated source keeps its old file name as a nested module, so
-//! `docs/rewrite/test-map.md` maps each old test to its new path exactly.
 
 // Test crates target behaviour, not pedantic style (#23).
 #![allow(clippy::pedantic, clippy::nursery)]
@@ -26,6 +23,12 @@ mod gates;
 mod hint;
 
 mod jobs;
+
+#[path = "jobs_status.rs"]
+mod jobs_status;
+
+#[path = "jobs_limits.rs"]
+mod jobs_limits;
 
 mod loop_;
 

@@ -1,7 +1,16 @@
 //! Integration tests filed by feature: `children`.
 
-#[path = "e2e_m7.rs"]
-mod e2e_m7;
+#[path = "children_tree.rs"]
+mod children_tree;
 
-#[path = "review_m11.rs"]
-mod review_m11;
+#[path = "children_registry.rs"]
+mod children_registry;
+
+#[path = "children_security.rs"]
+mod children_security;
+
+#[path = "children_lifecycle.rs"]
+mod children_lifecycle;
+
+#[path = "children_brief.rs"]
+mod children_brief;

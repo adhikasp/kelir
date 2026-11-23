@@ -1,10 +1,16 @@
 //! Integration tests filed by feature: `mcp`.
 
-#[path = "e2e_m6.rs"]
-mod e2e_m6;
+#[path = "mcp_core.rs"]
+mod mcp_core;
 
-#[path = "review_m6.rs"]
-mod review_m6;
+#[path = "mcp_session.rs"]
+mod mcp_session;
 
-#[path = "review_m6b.rs"]
-mod review_m6b;
+#[path = "mcp_security_extra.rs"]
+mod mcp_security_extra;
+
+#[path = "mcp_wire.rs"]
+mod mcp_wire;
+
+#[path = "mcp_security.rs"]
+mod mcp_security;

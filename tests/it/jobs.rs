@@ -21,16 +21,21 @@ fn count_spawn() {
     assert!(n <= SPAWN_CAP, "runaway: {n} processes spawned");
 }
 
-fn text(answer: &str) -> Reply {
+pub(super) fn text(answer: &str) -> Reply {
     Reply::Sse(sse(&text_turn(answer, 0)))
 }
 
-async fn kelir(sb: &Sandbox, mock: &Mock, args: &[&str], env: &[(&str, &str)]) -> Output {
+pub(super) async fn kelir(
+    sb: &Sandbox,
+    mock: &Mock,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
     count_spawn();
     sb.kelir(&mock.base_url(), args, env).await
 }
 
-async fn start(
+pub(super) async fn start(
     sb: &Sandbox,
     mock: &Mock,
     args: &[&str],
@@ -49,7 +54,7 @@ async fn start(
     sb.guard.spawn(&mut command).await.expect("spawn kelir")
 }
 
-async fn finish(child: tokio::process::Child) -> Output {
+pub(super) async fn finish(child: tokio::process::Child) -> Output {
     let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
         .await
         .expect("kelir did not finish")
@@ -61,7 +66,7 @@ async fn finish(child: tokio::process::Child) -> Output {
     }
 }
 
-async fn until(what: &str, mut ready: impl FnMut() -> bool) {
+pub(super) async fn until(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !ready() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
@@ -69,25 +74,25 @@ async fn until(what: &str, mut ready: impl FnMut() -> bool) {
     }
 }
 
-fn status(sb: &Sandbox, name: &str) -> Value {
+pub(super) fn status(sb: &Sandbox, name: &str) -> Value {
     let path = sb.state.join("names").join(format!("{name}.status.json"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("no STATUS for {name}: {error}"));
     serde_json::from_str(&text).unwrap()
 }
 
-fn of_type<'a>(log: &'a [Value], kind: &str) -> Vec<&'a Value> {
+pub(super) fn of_type<'a>(log: &'a [Value], kind: &str) -> Vec<&'a Value> {
     log.iter().filter(|event| event["type"] == kind).collect()
 }
 
-fn completions(mock: &Mock) -> Vec<crate::support::Recorded> {
+pub(super) fn completions(mock: &Mock) -> Vec<crate::support::Recorded> {
     mock.requests()
         .into_iter()
         .filter(|request| request.method == "POST")
         .collect()
 }
 
-async fn clean(sb: &Sandbox) {
+pub(super) async fn clean(sb: &Sandbox) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while sb.guard.active() > 0 {
         assert!(
@@ -495,7 +500,7 @@ async fn scheduled_run_honours_json() {
     clean(&sb).await;
 }
 
-fn fwd(path: impl AsRef<Path>) -> String {
+pub(super) fn fwd(path: impl AsRef<Path>) -> String {
     path.as_ref().to_string_lossy().replace('\\', "/")
 }
 
@@ -504,36 +509,6 @@ fn fwd(path: impl AsRef<Path>) -> String {
 // and review_m9fix.rs under the new flags. Tests of jobs.toml, `kelir job`,
 // `runs.jsonl` history, --wait, the per-job notify list and new_session_every
 // went away with those features and are deliberately not ported.
-
-/// A live session still refuses a second `--name` run, naming the holder pid,
-/// without starting a turn. Ported from e2e_m9.rs.
-#[tokio::test]
-async fn a_name_held_by_a_live_session_is_refused_with_its_pid() {
-    let gate = Arc::new(tokio::sync::Notify::new());
-    let mock = Mock::start(vec![Reply::Gated(gate.clone(), sse(&text_turn("slow", 0)))]).await;
-    let sb = Sandbox::new("");
-    let holder = start(&sb, &mock, &["run", "--name", "busy", "hold"], &[]).await;
-    let pid = holder.id().unwrap();
-    until("the first request", || mock.request_count() >= 1).await;
-
-    let refused = kelir(&sb, &mock, &["run", "--name", "busy", "second"], &[]).await;
-    assert_eq!(refused.code, 1, "{}", refused.stderr);
-    assert!(
-        refused.stderr.contains(&format!("pid {pid}")),
-        "{}",
-        refused.stderr
-    );
-    assert!(refused.stderr.contains("busy"), "{}", refused.stderr);
-    assert_eq!(mock.request_count(), 1, "no second turn started");
-
-    gate.notify_one();
-    assert_eq!(finish(holder).await.code, 0);
-    clean(&sb).await;
-}
-
-/// A corrupt name file is tolerated and replaced; STATUS files in the same
-/// directory must not be treated as corrupt names. Ported from e2e_m9.rs.
-#[tokio::test]
 async fn a_corrupt_name_file_is_tolerated_and_replaced() {
     let mock = Mock::start(vec![text("ok")]).await;
     let sb = Sandbox::new("");
@@ -760,323 +735,5 @@ async fn named_session_owner_file_names_the_live_holder_and_is_pid_reuse_safe() 
     );
     gate.notify_one();
     assert_eq!(finish(holder).await.code, 0);
-    clean(&sb).await;
-}
-
-/// STATUS is always a whole JSON record: a reader polling while the run is
-/// live never sees a torn file, and sees `running`. Ported from review_m9.rs.
-#[tokio::test]
-async fn status_files_are_always_parseable_while_the_run_is_live() {
-    let gate = Arc::new(tokio::sync::Notify::new());
-    let mock = Mock::start(vec![Reply::Gated(gate.clone(), sse(&text_turn("late", 0)))]).await;
-    let sb = Sandbox::new("");
-    let holder = start(
-        &sb,
-        &mock,
-        &["run", "--name", "atomic", "--single-flight", "hold"],
-        &[],
-    )
-    .await;
-    let path = sb.state.join("names").join("atomic.status.json");
-    until("STATUS", || path.exists()).await;
-    let mut saw_running = false;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        let text = std::fs::read_to_string(&path).unwrap();
-        let value: Value = serde_json::from_str(&text).expect("a torn STATUS");
-        saw_running |= value["outcome"] == "running";
-        if mock.request_count() > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(saw_running, "the running state was published");
-    gate.notify_one();
-    assert_eq!(finish(holder).await.code, 0);
-    clean(&sb).await;
-}
-
-/// Two processes naming a free name at once still end with one session and
-/// one `session_started`. Ported from review_m9.rs.
-#[tokio::test]
-async fn two_first_runs_of_one_new_name_do_not_share_a_session() {
-    let mock = Mock::start(vec![
-        Reply::SseAfter(Duration::from_secs(2), sse(&text_turn("one", 0))),
-        text("two"),
-    ])
-    .await;
-    let sb = Sandbox::new("");
-    let a = start(&sb, &mock, &["run", "--name", "race2", "first"], &[]).await;
-    let b = start(&sb, &mock, &["run", "--name", "race2", "second"], &[]).await;
-    let out_a = finish(a).await;
-    let out_b = finish(b).await;
-    let ids = sb.session_ids();
-    assert_eq!(ids.len(), 1, "one name must bind one session: {ids:?}");
-    let log = sb.log(&ids[0]);
-    assert_eq!(
-        of_type(&log, "session_started").len(),
-        1,
-        "one session must start once (codes {} {})",
-        out_a.code,
-        out_b.code
-    );
-    clean(&sb).await;
-}
-
-/// A step cap must settle the cap-th tool call before pausing. Ported from
-/// review_m9fix.rs (jobs.toml cap replaced by --max-steps).
-#[tokio::test]
-async fn a_cap_th_answer_after_a_tool_pauses_after_the_tool_result() {
-    let answer = "late answer on the cap";
-    let mut capped = tool_call_chunks("c1", "edit", &json!({"path":"f.txt","old":"","new":"x\n"}));
-    capped.push(crate::support::finish("tool_calls"));
-    capped.extend(text_turn(answer, 0));
-    let mock = Mock::start(vec![
-        Reply::Sse(sse(&crate::support::tool_turn(
-            "c0",
-            "edit",
-            &json!({"path":"f0.txt","old":"","new":"x\n"}),
-        ))),
-        Reply::Sse(sse(&capped)),
-        Reply::Sse(sse(&text_turn("never asked", 0))),
-    ])
-    .await;
-    let sb = Sandbox::new("");
-    let out = kelir(
-        &sb,
-        &mock,
-        &[
-            "run",
-            "--name",
-            "latecap",
-            "--single-flight",
-            "--max-steps",
-            "2",
-            "go",
-        ],
-        &[],
-    )
-    .await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    let now = status(&sb, "latecap");
-    assert_eq!(now["outcome"], "paused", "{now}");
-    assert_eq!(now["steps"], 2, "{now}");
-    assert_eq!(completions(&mock).len(), 2, "no third request past the cap");
-    let id = sb.only_session();
-    let log = sb.log(&id);
-    let ended = of_type(&log, "turn_ended").pop().expect("turn_ended");
-    assert_eq!(ended["outcome"], "paused");
-    assert_eq!(ended["reason"], "steps");
-    assert_eq!(ended["final_text"], answer, "the cap-th answer is kept");
-    assert_eq!(of_type(&log, "call_settled").len(), 2, "both calls settled");
-    let types: Vec<&str> = log
-        .iter()
-        .map(|event| event["type"].as_str().unwrap_or(""))
-        .collect();
-    let last_tool = types
-        .iter()
-        .rposition(|kind| *kind == "call_settled")
-        .unwrap();
-    let turn_end = types
-        .iter()
-        .rposition(|kind| *kind == "turn_ended")
-        .unwrap();
-    assert!(last_tool < turn_end, "never between a call and its result");
-    clean(&sb).await;
-}
-
-/// The cap is a scheduling rule, not model text: the request prefix is
-/// byte-identical to an uncapped run. Ported from review_m9fix.rs.
-#[tokio::test]
-async fn the_job_cap_is_not_in_the_model_prompt_and_is_not_misreported() {
-    let sb = Sandbox::new("");
-    let mock = Mock::start(vec![text("finished")]).await;
-    let out = kelir(
-        &sb,
-        &mock,
-        &[
-            "run",
-            "--name",
-            "secretcap",
-            "--single-flight",
-            "--max-steps",
-            "1",
-            "go",
-        ],
-        &[],
-    )
-    .await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    let paused = status(&sb, "secretcap");
-    assert_eq!(paused["outcome"], "paused", "{paused}");
-    assert!(
-        !serde_json::to_string(&paused)
-            .unwrap()
-            .contains("job_step_cap")
-    );
-    assert!(
-        paused["error"]
-            .as_str()
-            .is_some_and(|error| error.to_lowercase().contains("paused")),
-        "STATUS says why it paused: {paused}"
-    );
-    let paused_events = serde_json::to_string(&sb.log(&sb.only_session())).unwrap();
-    assert!(
-        !paused_events.contains("job_step_cap"),
-        "internal name leaked"
-    );
-    let first = completions(&mock)[0].messages().to_vec();
-
-    // Lift the cap in the SAME sandbox: same session, prompt and paths.
-    let mock2 = Mock::start(vec![text("finished again")]).await;
-    let out2 = kelir(
-        &sb,
-        &mock2,
-        &["run", "--name", "secretcap", "--single-flight", "go"],
-        &[],
-    )
-    .await;
-    assert_eq!(out2.code, 0, "{}", out2.stderr);
-    assert_eq!(status(&sb, "secretcap")["outcome"], "done");
-    let second = completions(&mock2)[0].messages().to_vec();
-    assert_eq!(first[0], second[0], "the system prompt must be identical");
-    assert_eq!(
-        &second[..first.len()],
-        &first[..],
-        "cached prefix untouched"
-    );
-    assert_eq!(first.len(), second.len() - 2, "only tail messages are new");
-    let joined = serde_json::to_string(&first).unwrap();
-    assert!(!joined.contains("max_steps"), "{joined}");
-    assert!(!joined.contains("step cap"), "{joined}");
-    assert!(!joined.contains("job_step_cap"), "{joined}");
-    clean(&sb).await;
-}
-
-/// A `--fresh` run puts carry before the job source, both at the tail.
-/// Ported from review_m9fix.rs's rotation test.
-#[tokio::test]
-async fn a_fresh_run_adds_carry_then_job_after_the_frozen_prefix() {
-    let mock = Mock::start(vec![text("the old session learned X"), text("fresh start")]).await;
-    let sb = Sandbox::new("");
-    assert_eq!(
-        kelir(
-            &sb,
-            &mock,
-            &["run", "--name", "rot", "--single-flight", "go"],
-            &[]
-        )
-        .await
-        .code,
-        0
-    );
-    let old = sb.only_session();
-    assert_eq!(
-        kelir(
-            &sb,
-            &mock,
-            &["run", "--name", "rot", "--single-flight", "--fresh", "go"],
-            &[]
-        )
-        .await
-        .code,
-        0
-    );
-    let reqs = completions(&mock);
-    assert_eq!(reqs.len(), 2);
-    let second = reqs[1].messages();
-    let tail: Vec<&str> = second[second.len() - 2..]
-        .iter()
-        .map(|message| message["content"].as_str().unwrap_or(""))
-        .collect();
-    assert_eq!(tail.len(), 2, "carry, task: {tail:?}");
-    assert!(tail[0].starts_with("[source: carry "), "{tail:?}");
-    assert!(tail[0].contains("the old session learned X"), "{tail:?}");
-    assert_eq!(tail[1], "go");
-    let new_id: String = serde_json::from_str::<Value>(
-        &std::fs::read_to_string(sb.state.join("names").join("rot")).unwrap(),
-    )
-    .unwrap()["session"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_ne!(new_id, old);
-    let new_log = sb.log(&new_id);
-    let kinds: Vec<&str> = of_type(&new_log, "source")
-        .iter()
-        .map(|source| source["kind"].as_str().unwrap_or(""))
-        .collect();
-    assert_eq!(kinds, vec!["carry"], "the tail source: {kinds:?}");
-    clean(&sb).await;
-}
-
-/// A young unreadable lock is respected and the skip explains why. Ported
-/// from review_m9fix.rs (without the removed history line).
-#[tokio::test]
-async fn an_unreadable_young_lock_is_respected_and_the_skip_explains_why() {
-    let sb = Sandbox::new("");
-    std::fs::create_dir_all(sb.state.join("names")).unwrap();
-    let lock = sb.state.join("names").join("unreadable.lock");
-    std::fs::write(&lock, b"not json at all").unwrap();
-    let mock = Mock::start(vec![]).await;
-    let out = kelir(
-        &sb,
-        &mock,
-        &["run", "--name", "unreadable", "--single-flight", "go"],
-        &[],
-    )
-    .await;
-    assert_eq!(out.code, 75, "{}", out.stderr);
-    assert!(out.stderr.contains("unreadable"), "{}", out.stderr);
-    assert_eq!(
-        std::fs::read_to_string(&lock).unwrap(),
-        "not json at all",
-        "a fresh unreadable lock is never taken over"
-    );
-    let skipped = status(&sb, "unreadable");
-    assert_eq!(skipped["outcome"], "skipped");
-    assert_eq!(skipped["exit_code"], 75);
-    assert!(
-        skipped["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("unreadable")
-    );
-    assert!(mock.requests().is_empty(), "no model turn on a skip");
-    clean(&sb).await;
-}
-
-/// A dead OLD lock whose recorded pid (1) is alive is taken over because the
-/// start time does not match. Ported from review_m9fix.rs.
-#[tokio::test]
-async fn an_old_lock_with_a_recycled_pid_is_taken_over() {
-    let sb = Sandbox::new("");
-    std::fs::create_dir_all(sb.state.join("names")).unwrap();
-    let lock = sb.state.join("names").join("recycled.lock");
-    let record = json!({
-        "token": "dead-token",
-        "pid": 1,
-        "start": 1_u64,
-        "cmd": "old kelir",
-        "started": "2020-01-01T00:00:00Z"
-    });
-    std::fs::write(&lock, record.to_string()).unwrap();
-    let old = std::fs::File::options().write(true).open(&lock).unwrap();
-    old.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000))
-        .unwrap();
-    drop(old);
-
-    let mock = Mock::start(vec![text("fresh run")]).await;
-    let out = kelir(
-        &sb,
-        &mock,
-        &["run", "--name", "recycled", "--single-flight", "go"],
-        &[],
-    )
-    .await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(status(&sb, "recycled")["outcome"], "done");
-    assert_eq!(completions(&mock).len(), 1);
-    assert!(!lock.exists(), "the taken-over lock was released");
     clean(&sb).await;
 }

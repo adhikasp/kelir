@@ -1,7 +1,10 @@
 //! Integration tests filed by feature: `buildinfra`.
 
-#[path = "buildinfra_tests.rs"]
-mod buildinfra_tests;
+#[path = "buildinfra_gate.rs"]
+mod buildinfra_gate;
 
-#[path = "buildinfra_review_tests.rs"]
-mod buildinfra_review_tests;
+#[path = "buildinfra_prune.rs"]
+mod buildinfra_prune;
+
+#[path = "buildinfra_guard.rs"]
+mod buildinfra_guard;

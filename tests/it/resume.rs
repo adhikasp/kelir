@@ -1,13 +1,16 @@
 //! Integration tests filed by feature: `resume`.
 
-#[path = "e2e_m3.rs"]
-mod e2e_m3;
+#[path = "resume_crash.rs"]
+mod resume_crash;
 
-#[path = "m8fix.rs"]
-mod m8fix;
+#[path = "resume_jobs.rs"]
+mod resume_jobs;
 
-#[path = "review_m3.rs"]
-mod review_m3;
+#[path = "resume_edges.rs"]
+mod resume_edges;
 
-#[path = "review_m8.rs"]
-mod review_m8;
+#[path = "gates_adversarial.rs"]
+mod gates_adversarial;
+
+#[path = "resume_prompt.rs"]
+mod resume_prompt;

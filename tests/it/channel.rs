@@ -1,10 +1,10 @@
 //! Integration tests filed by feature: `channel`.
 
-#[path = "e2e_m10.rs"]
-mod e2e_m10;
+#[path = "channel_core.rs"]
+mod channel_core;
 
-#[path = "review_m10.rs"]
-mod review_m10;
+#[path = "channel_edges.rs"]
+mod channel_edges;
 
-#[path = "review_m10fix.rs"]
-mod review_m10fix;
+#[path = "channel_restart.rs"]
+mod channel_restart;

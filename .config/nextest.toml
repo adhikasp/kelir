@@ -43,5 +43,5 @@ test-group = 'pty'
 max-threads = 2
 
 [[profile.default.overrides]]
-filter = 'test(/^bg::/) | test(/^tools::review_m4b::/) | test(/^tools::review_m4::/) | test(/^resume::m8fix::/) | test(/^resume::review_m8::/) | test(/^gates::/)'
+filter = 'test(/^bg::/) | test(/^tools::tools_bg::/) | test(/^tools::tools_process::/) | test(/^resume::resume_jobs::/) | test(/^resume::resume_edges::/) | test(/^gates::/)'
 test-group = 'process-heavy'
