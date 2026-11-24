@@ -1,0 +1,6 @@
+# Shape exceptions: one per line, <path>: <reason>.
+# Lines starting with '#' and blank lines are ignored. A path with no reason,
+# or a reason that no longer matches a current violation, is an error.
+#
+# No exception is needed today. Keep this file short: an exception is a debt
+# with a reason, not a way to silence a rule.

@@ -29,12 +29,12 @@ after `kill -9` of the session (F6b).
 | F6 | should-fix | `src/mcp/rpc.rs:131` | (a) The server inherits the whole session environment: `server-everything get-env` showed it received `KELIR_OPENROUTER_API_KEY` and `HC_*`; only `KELIR_SOCK/CALL_ID/SESSION_DIR` are removed. Third-party `npx` packages should not get provider keys; use an allow-list (PATH, HOME, TEMP, SystemRoot, as the MCP SDKs do) plus the server's `env`. (b) Linux: no `PDEATHSIG`, so after `kill -9` of the session a server lives until it notices stdin EOF; the TS SDK stdio transport historically does not exit on EOF. Untested with a real node server on Linux. |
 | F7 | should-fix | `src/mcp/args.rs:149` | An untyped `k=v` integer beyond u64 (`d=123456789012345678901234567890`) is parsed to f64 and sent as `1.2345678901234568e+29`: silent corruption of an id. Test `a_huge_integer_is_not_rounded` fails. |
 | F8 | should-fix | `src/session.rs` (`mcp_request`, resume) | A session killed mid-call leaves `mcp_started` with no `mcp_settled` forever; after `--resume` the bash call settles `unknown` but the MCP call never does. Repro: canned model runs `kelir mcp demo slow seconds=60`, `taskkill /F` the session, resume. Resume should write `mcp_settled outcome=unknown`. |
-| N1 | nit | `src/mcp/broker.rs:74` | The broker reads `mcp.toml` once at session start while the one-shot path re-reads it; editing the file mid-session has no effect (the live model lost many steps to this). Document it in `docs/reference/mcp.md` or reload per request. |
+| N1 | nit | `src/mcp/broker.rs:74` | The broker reads `config.toml` once at session start while the one-shot path re-reads it; editing the file mid-session has no effect (the live model lost many steps to this). Document it in `docs/reference/mcp.md` or reload per request. |
 | N2 | nit | `src/mcp/rpc.rs:449` | `notifications/tools/list_changed` is ignored, so the tool cache (also used for validation) is stale for the whole session. |
 | N3 | nit | `src/mcp/args.rs:70` | A tool literally named `ls` is unreachable (`kelir mcp srv ls` always lists). |
 | N4 | nit | `src/docs/tables.rs` (mcp rows), `src/verbs.rs` (tools error) | Backslash continuation lost: runs of ~20 spaces inside the event table text in `docs/reference/events.md` and in the `tools:` error message. |
 | N5 | nit | `src/mcp/rpc.rs:295-305` | Race: a request whose `is_alive()` check passes just before the reader sees EOF is inserted after the waiters were drained and waits the full timeout, giving exit 4 ("unknown outcome") for a server that visibly died (should be 3). |
-| S1 | security note (spec-mandated) | `src/mcp/config.rs` `project_path` | The project `.kelir/mcp.toml` can name any `command`, and `channel = true` starts it at session start with no prompt, so opening a cloned repo runs its command. The spec asks for the layering; consider a trust gate (STEER-7 has `src/trust.rs`) before auto-starting project-defined servers. |
+| S1 | security note (spec-mandated) | `src/mcp/config.rs` `project_path` | The project `.kelir/config.toml` can name any `command`, and `channel = true` starts it at session start with no prompt, so opening a cloned repo runs its command. The spec asks for the layering; consider a trust gate (STEER-7 has `src/trust.rs`) before auto-starting project-defined servers. |
 
 ## STEER-7 (session token): what must change when merged
 
@@ -98,7 +98,7 @@ the wall time is serial, kelir does not serialise), junk/CRLF/split writes (ok),
 
 | Line | Status |
 |---|---|
-| mcp.toml layering | done, tested (unit + e2e); F1, N1 |
+| config.toml layering | done, tested (unit + e2e); F1, N1 |
 | CLI shapes, `--detail`, `--schema`, `--envelope`, `--json -` | done |
 | Exit codes 0/1/2/3/4, 4 never retried | done (e2e); F5 is the one path that could retry |
 | Broker, lazy start, `parent_call_id`, spill | done; F8 |

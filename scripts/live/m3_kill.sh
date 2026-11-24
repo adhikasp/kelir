@@ -87,11 +87,11 @@ kill_at "K2 after-settle" '[ $(count tool_settled) -ge $((B_se + 2)) ]' 0
 resume 2
 kill_at "K3 mid-stream" '[ $(count step_started) -gt $(count assistant) ] && [ $(count tool_settled) -ge $((B_se + 1)) ]' 0.4
 # K4: between the assistant message and tool_started. A tight poll cannot hit a window
-# of microseconds, so this resume runs with the documented test hook KELIR_CRASH_AT=usage
+# of microseconds, so this resume runs with the documented test hook KELIR_TEST_CRASH_AT=usage
 # (abort right after `usage` is fsync'd, before any tool call starts). Still the real
 # binary and the real model.
-say "RESUME #3 with KELIR_CRASH_AT=usage"
-KELIR_CRASH_AT=usage "$BIN" resume --json "$SID" > "$S/out3.ndjson" 2> "$S/err3.txt" &
+say "RESUME #3 with KELIR_TEST_CRASH_AT=usage"
+KELIR_TEST_CRASH_AT=usage "$BIN" resume --json "$SID" > "$S/out3.ndjson" 2> "$S/err3.txt" &
 PID=$!
 wait "$PID"
 say "KILLED K4 (hook, exit $?) | landed after: $(landing)"

@@ -32,19 +32,41 @@ jobs:
           fi
           bash scripts/no-binary-check.sh range "$BASE_SHA" "${{ github.sha }}"
 
+      # `rust-toolchain.toml` is the single source of truth. Read the pin out of
+      # the file so CI cannot silently name a different toolchain; the shape
+      # stage (scripts/shape.sh) checks this on the local tree too.
       - name: Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        shell: bash
+        id: toolchain
+        run: |
+          pin="$(awk -F'"' '/^channel[[:space:]]*=/ {print $2; exit}' rust-toolchain.toml)"
+          test -n "$pin"
+          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
         with:
-          components: rustfmt, clippy
+          toolchain: ${{ steps.toolchain.outputs.pin }}
+          components: rustfmt, clippy, rust-src
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Shape
+        shell: bash
+        run: bash scripts/gate.sh --shape-only
+
       - name: Format
         run: cargo fmt --check
 
+      # Cargo's own lint table is `warn`; CI is where warnings fail, so a local
+      # `cargo clippy` can still be iterative.
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: |
+          cargo nextest run --no-fail-fast -j 4
+          cargo test --doc

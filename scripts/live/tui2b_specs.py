@@ -42,13 +42,13 @@ steps = (start + say("one") + [{"wait_for": "alpha and beta", "timeout": 30}, {"
 for c in (100, 60, 40):
     w("ord%d" % c, dict(turns=turns, steps=steps, rows=60, cols=c))
 bad = {"status": 503, "body": "{\"error\":{\"message\":\"overloaded\"}}"}
-w("exhaust", dict(turns=[[bad], [bad], [bad], [{"text": "back at last\n"}]], cfg="retry_base_ms = 700\nretry_cap_ms = 700\nretry_max_attempts = 2\n",
+w("exhaust", dict(turns=[[bad], [bad], [bad], [{"text": "back at last\n"}]], cfg="[retry]\nbase_ms = 700\ncap_ms = 700\nmax_attempts = 2\n",
                   steps=start + say("hi") + [{"wait": 6}, {"snap": "paused"}] + say("continue") + [{"wait": 4}, {"snap": "after"}] + quit_, rows=30, cols=100))
 rl = [{"status": 429, "body": "{\"error\":{\"message\":\"slow\"}}"}]
-w("rlstop", dict(turns=[rl, rl, [{"text": "never shown\n"}]], cfg="retry_base_ms = 8000\nretry_cap_ms = 8000\n",
+w("rlstop", dict(turns=[rl, rl, [{"text": "never shown\n"}]], cfg="[retry]\nbase_ms = 8000\ncap_ms = 8000\n",
                  steps=start + say("hi") + [{"wait": 2.5}, {"snap": "w1"}, {"wait": 2}, {"snap": "w2"}, {"send": "\u001b"}, {"wait": 1.5}, {"snap": "stopped"}] + quit_,
                  rows=30, cols=100, timeout=120))
-w("rlsay", dict(turns=[rl, [{"text": "answer after the retry\n"}]], cfg="retry_base_ms = 5000\nretry_cap_ms = 5000\n",
+w("rlsay", dict(turns=[rl, [{"text": "answer after the retry\n"}]], cfg="[retry]\nbase_ms = 5000\ncap_ms = 5000\n",
                 steps=start + say("hi") + [{"wait": 1.5}, {"snap": "w1"}] + say("stop") + [{"wait": 2}, {"snap": "w2"}] + quit_, rows=30, cols=100, timeout=120))
 md = ("# Loose lists\n\n1. First item of the list\n\n   Continuation paragraph of the first item that is long enough to wrap around the pane.\n\n"
       "   - nested a\n\n     nested a continuation paragraph\n\n   - nested b\n\n2. Second item\n\n   ```rust\n   let x = 1;\n   ```\n\n   tail paragraph of second\n\n"

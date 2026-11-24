@@ -35,10 +35,10 @@ sent.
 ## Retries
 
 A retryable answer (429, 5xx, a reset connection) is retried with exponential
-backoff: `retry_base_ms` (2 s) doubling up to `retry_cap_ms` (120 s), with jitter;
+backoff: `[retry] base_ms` (2 s) doubling up to `cap_ms` (120 s), with jitter;
 a provider's own `Retry-After` or reset header wins when it is under the cap and
-above a floor. `retry_max_wait` (30 min) is the total budget per request and
-`retry_max_attempts` (unset) an optional count cap. Running out **pauses** the
+above a floor. `[retry] max_wait` (30 min) is the total budget per request and
+`[retry] max_attempts` (unset) an optional count cap. Running out **pauses** the
 turn — `turn_ended` with `reason: "provider"`, exit code 0, and the log carries
 one `error` event per attempt with `status`, `attempt` and `retry_in_ms`.
 
@@ -74,9 +74,8 @@ it lands).
 - **Parallel calls**: `parallel_tool_calls` is sent only to OpenRouter models
   that advertise it.
 
-There is no price table in this source: each request's spend arrives in the
-stream's `usage` chunk (`cost` included) and is recorded per step in the `usage`
-event, so a session's total is the sum of its log.
+Each request's token counts arrive in the stream's `usage` chunk and are
+recorded per step in the `usage` event, so a session's totals are the sum of its log.
 
 ## Adding a provider
 

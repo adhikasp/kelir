@@ -1,9 +1,8 @@
 //! Per-OS state and config directories.
-//!
-//! State: `%LOCALAPPDATA%\kelir` (Windows), `~/Library/Application Support/kelir`
-//! (macOS), `$XDG_STATE_HOME/kelir` or `~/.local/state/kelir` (Linux).
-//! Config: `%APPDATA%\kelir` (Windows), the same Application Support dir
-//! (macOS), `$XDG_CONFIG_HOME/kelir` or `~/.config/kelir` (Linux).
+//! State: `%LOCALAPPDATA%\kelir` (Windows), `~/Library/Application Support/kelir` (macOS),
+//! `$XDG_STATE_HOME/kelir` or `~/.local/state/kelir` (Linux).
+//! Config: `%APPDATA%\kelir` (Windows), the same Application Support dir (macOS),
+//! `$XDG_CONFIG_HOME/kelir` or `~/.config/kelir` (Linux).
 
 use std::path::{Path, PathBuf};
 
@@ -13,16 +12,12 @@ fn env_path(var: &str) -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
-/// The home directory, from `$HOME`/`%USERPROFILE%`.
-///
-/// `KELIR_HOME` overrides it: the tests point it at a scratch directory so a
-/// run never reads the machine's own `~/.claude/skills` (discovery must see the
-/// same inputs every time, and a person's home is not a test fixture).
 pub fn home() -> PathBuf {
-    env_path("KELIR_HOME")
-        .or_else(|| env_path("HOME"))
-        .or_else(|| env_path("USERPROFILE"))
-        .unwrap_or_else(|| PathBuf::from("."))
+    env_path("KELIR_HOME").unwrap_or_else(|| {
+        // `std::env::home_dir` is un-deprecated (1.87) and has a Unix fallback (1.90): it is the OS's answer,
+        // not a hand-rolled env lookup.
+        std::env::home_dir().unwrap_or_else(|| PathBuf::from("."))
+    })
 }
 
 /// Root of all kelir state (`sessions/<id>/…` lives below it).
@@ -75,15 +70,44 @@ pub fn sessions_dir() -> PathBuf {
     state_dir().join("sessions")
 }
 
+/// Directory for calls that have no session: `kelir bg run` from a plain shell and
+/// one-shot `kelir mcp`. Session calls use [`calls_dir`] instead, so both kinds of
+/// call have exactly one directory per call, with the same shape.
+pub fn global_calls_dir() -> PathBuf {
+    state_dir().join(CALLS)
+}
+
+/// The directory of one session-less call (`bg_<ulid>` or `mcp_<ulid>`).
+pub fn global_call_dir(id: &str) -> PathBuf {
+    global_calls_dir().join(id)
+}
+
+/// Where the running channel driver writes its live status snapshot: beside its
+/// documented `spool/`, in the one channel directory. `kelir ctl status` reads it.
+pub fn channel_status_path_in(state: &Path) -> PathBuf {
+    state.join("spool").join("status.json")
+}
+
 /// `<state>/sessions/<id>`.
 pub fn session_dir(id: &str) -> PathBuf {
     sessions_dir().join(id)
 }
 
-/// Create a directory only the user can reach: mode 0700 on Unix, where a
-/// umask like `002` would otherwise make the session log and its socket
-/// group-readable. Windows inherits the profile's ACL, which already denies
-/// other users (M1 review N4).
+const CALLS: &str = "calls";
+
+/// All per-call artefacts: `<session>/calls/`. Every tool, MCP, background and child call
+/// owns one directory below this, from `call_started` to the final `call_settled`.
+pub fn calls_dir(session_dir: &Path) -> PathBuf {
+    session_dir.join(CALLS)
+}
+
+/// A call's directory: `<session>/calls/<call-id>/` (bash, edit, MCP and bg alike).
+pub fn call_dir(session_dir: &Path, id: &str) -> PathBuf {
+    calls_dir(session_dir).join(id)
+}
+
+/// Create a directory only the user can reach: mode 0700 on Unix, where a umask like `002` would
+/// otherwise make the session log and its socket group-readable.
 pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -121,11 +145,6 @@ pub fn sessions_newest_first_in(base: &Path) -> Vec<String> {
 }
 
 /// Resolve `kelir ctl <session>`: an exact id, a unique prefix, or `latest`.
-///
-/// Returns the candidates in the order to try them: one for an exact id, the
-/// matches for a prefix, and the newest session alone for `latest` (a verb sent
-/// to `latest` must never land on an older session because the newest one is
-/// dead).
 pub fn session_candidates(spec: &str) -> Result<Vec<String>, String> {
     session_candidates_in(&sessions_dir(), spec)
 }
@@ -158,7 +177,7 @@ pub fn session_candidates_in(base: &Path, spec: &str) -> Result<Vec<String>, Str
     }
 }
 
-/// Resolve `kelir resume <spec>`: an exact id, a unique prefix, or `latest`
+/// Resolve `kelir run --resume <spec>`: an exact id, a unique prefix, or `latest`
 /// (the newest session, dead or alive — resuming is how a dead one continues).
 pub fn resolve_session(spec: &str) -> Result<String, String> {
     resolve_session_in(&sessions_dir(), spec)
@@ -207,58 +226,9 @@ mod tests {
     fn state_dir_ends_with_kelir_or_override() {
         let dir = state_dir();
         assert!(dir.is_absolute() || dir.starts_with("."));
-        // Every platform puts kelir in a directory of that name unless the
-        // caller overrode it via the environment (tests do, at times).
         if crate::envs::var_os("KELIR_STATE_DIR").is_none() {
             assert_eq!(dir.file_name().unwrap(), "kelir");
         }
-    }
-
-    #[test]
-    fn session_dir_is_under_sessions() {
-        let dir = session_dir("ses_test");
-        assert!(dir.ends_with("sessions/ses_test") || dir.ends_with("sessions\\ses_test"));
-    }
-
-    #[test]
-    fn sessions_are_listed_newest_first() {
-        let base = temp_sessions("order", &["ses_01a", "ses_03c", "ses_02b"]);
-        assert_eq!(
-            sessions_newest_first_in(&base),
-            vec![
-                "ses_03c".to_string(),
-                "ses_02b".to_string(),
-                "ses_01a".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn an_exact_id_wins_over_a_prefix() {
-        let base = temp_sessions("exact", &["ses_01a", "ses_02b"]);
-        assert_eq!(
-            session_candidates_in(&base, "ses_01a").unwrap(),
-            vec!["ses_01a".to_string()]
-        );
-    }
-
-    #[test]
-    fn a_prefix_resolves_to_its_matches_newest_first() {
-        let base = temp_sessions("prefix", &["ses_aaa1", "ses_aaa2", "ses_bbb"]);
-        assert_eq!(
-            session_candidates_in(&base, "ses_aaa").unwrap(),
-            vec!["ses_aaa2".to_string(), "ses_aaa1".to_string()]
-        );
-    }
-
-    #[test]
-    fn latest_is_the_newest_session_only() {
-        let base = temp_sessions("latest", &["ses_01a", "ses_02b"]);
-        assert_eq!(
-            session_candidates_in(&base, "latest").unwrap(),
-            vec!["ses_02b".to_string()],
-            "a dead newest session must not fall through to an older one"
-        );
     }
 
     #[test]
@@ -282,15 +252,44 @@ mod tests {
         assert!(resolve_session_in(&base, " ").is_err());
         let empty = temp_sessions("resume-empty", &[]);
         assert!(resolve_session_in(&empty, "latest").is_err());
-    }
 
-    #[test]
-    fn an_unknown_session_is_an_error() {
-        let base = temp_sessions("missing", &["ses_01a"]);
-        let error = session_candidates_in(&base, "ses_zzz").unwrap_err();
-        assert!(error.contains("no session matches"), "{error}");
-        let empty = temp_sessions("empty", &[]);
-        assert!(session_candidates_in(&empty, "latest").is_err());
-        assert!(session_candidates_in(&base, "  ").is_err());
+        // Exact ids win over a prefix; a prefix resolves newest first; `latest` takes only the
+        // newest session; an unknown spec is an error.
+        let order = temp_sessions("order", &["ses_01a", "ses_03c", "ses_02b"]);
+        assert_eq!(
+            sessions_newest_first_in(&order),
+            vec![
+                "ses_03c".to_string(),
+                "ses_02b".to_string(),
+                "ses_01a".to_string()
+            ]
+        );
+        assert_eq!(
+            session_candidates_in(&order, "ses_01a").unwrap(),
+            vec!["ses_01a".to_string()]
+        );
+        let prefix = temp_sessions("prefix", &["ses_aaa1", "ses_aaa2", "ses_bbb"]);
+        assert_eq!(
+            session_candidates_in(&prefix, "ses_aaa").unwrap(),
+            vec!["ses_aaa2".to_string(), "ses_aaa1".to_string()]
+        );
+        assert_eq!(
+            session_candidates_in(&order, "latest").unwrap(),
+            vec!["ses_03c".to_string()]
+        );
+        for bad in ["ses_zzz", "  "] {
+            assert!(
+                session_candidates_in(&order, bad).is_err(),
+                "{bad} should not resolve"
+            );
+        }
+        // Every session's files stay under the sessions tree.
+        assert!(
+            session_dir("ses_test").ends_with("sessions/ses_test")
+                || session_dir("ses_test").ends_with("sessions\\ses_test")
+        );
+        let session = Path::new("state").join("sessions").join("ses_1");
+        assert_eq!(calls_dir(&session), session.join("calls"));
+        assert_eq!(call_dir(&session, "12-3-2"), session.join("calls/12-3-2"));
     }
 }

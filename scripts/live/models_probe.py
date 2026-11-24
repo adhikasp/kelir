@@ -1,7 +1,7 @@
 """A tiny OpenAI-compatible server that misbehaves on `GET /models` on purpose.
 
 For the STEER-1 review (provider model metadata). It answers
-`POST /chat/completions` with one short assistant turn, so `kelir ask` ends, and
+`POST /chat/completions` with one short assistant turn, so `kelir run --ask` ends, and
 answers `GET /models` according to the mode. Every request is appended to the log
 file as one JSON line: the wall-clock time it arrived, the method, the path, and
 the request header *names* only. No header value is ever written, so a run with a

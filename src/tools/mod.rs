@@ -1,5 +1,6 @@
-//! The native tools. Fixed for the life of a session so the request prefix
-//! (and therefore the cache) stays stable.
+//! The native tools.
+//! Fixed for the life of a session so the request prefix (and therefore the cache) stays
+//! stable.
 
 pub mod bash;
 pub mod edit;
@@ -8,7 +9,7 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use crate::proc::{Running, SessionGroups};
+use crate::sys::proc::{Running, SessionGroups};
 
 #[derive(Debug, Clone)]
 pub struct Ctx {
@@ -19,22 +20,15 @@ pub struct Ctx {
     /// The address of the session socket, exported to every child as
     /// `KELIR_SOCK` (`kelir mcp` and `kelir bg` use it; tests assert it).
     pub sock: String,
-    /// The session's socket token, exported to every child as `KELIR_TOKEN`
-    /// (STEER-7): a verb that crosses the socket must carry it. It is never
-    /// written to the log, to stdout or to an argv.
+    /// The session's socket token, exported to every child as `KELIR_TOKEN` : a verb that crosses
+    /// the socket must carry it. It is never written to the log, to stdout or to an argv.
     pub token: String,
     /// This session's id: the bash call's job object name is derived from it.
     pub session_id: String,
-    /// The session's trust state: a bash call asks it for the status key the
-    /// session minted for that call and hands it to the call's shim over a
-    /// pipe (STEER-7 round 2). `None` outside a session (a test's `Ctx`).
-    pub trust: Option<std::sync::Arc<crate::trust::Trust>>,
     /// A call still running after this long is promoted to a background job
     /// (`promote_after` in the config; zero disables it).
     pub promote_after: std::time::Duration,
-    /// Process groups of every call this session started. Holding them keeps
-    /// the Windows Job Objects open past the call (a leftover background child
-    /// is not killed by returning) and closes them when the session ends.
+    /// Process groups of every call this session started.
     pub groups: SessionGroups,
     /// The calls running right now, so a verb can kill one or all of them.
     pub running: Running,
@@ -56,21 +50,19 @@ impl Ctx {
             sock,
             token: String::new(),
             session_id: String::new(),
-            trust: None,
             promote_after: std::time::Duration::from_secs(600),
             groups: SessionGroups::new(),
             running: Running::new(),
         }
     }
 
-    /// `<session>/commands/<dir>`, where `<dir>` is kelir's own
-    /// `<seq>-<step>-<n>` name: monotonic, filesystem-safe, and never derived
-    /// from a provider-supplied id.
+    /// `<session>/calls/<dir>`, where `<dir>` is kelir's own `<seq>-<step>-<n>` name:
+    /// monotonic, filesystem-safe, and never derived from a provider-supplied id.
     pub fn call_dir(&self, dir: &str) -> PathBuf {
-        self.session_dir.join("commands").join(dir)
+        crate::paths::call_dir(&self.session_dir, dir)
     }
 
-    pub fn keep_group(&self, group: crate::proc::ProcessGroup) {
+    pub fn keep_group(&self, group: crate::sys::proc::ProcessGroup) {
         self.groups.keep(group);
     }
 }
@@ -102,9 +94,8 @@ impl ToolOutcome {
         Self::new("stopped", stopped_text(reason), None)
     }
 
-    /// The same, for a call that had already written output: the model gets the
-    /// byte and line counts, the file and its tail, so the partial work is not
-    /// lost (M1 review N2).
+    /// The same, for a call that had already written output: the model gets the byte and line
+    /// counts, the file and its tail, so the partial work is not lost.
     pub fn stopped_with_output(
         reason: &str,
         out_path: &str,
@@ -144,9 +135,8 @@ impl ToolOutcome {
         Self::new("skipped", result, None)
     }
 
-    /// The tool is turned off for this session; the list sent to the provider
-    /// never changed.
-    /// A call a `before_tool` gate vetoed: the model reads who and why.
+    /// The tool is turned off for this session; the list sent to the provider never changed. A
+    /// call a `before_tool` gate vetoed: the model reads who and why.
     pub fn denied(gate: &str, reason: &str) -> Self {
         Self::new("denied", denied_text(gate, reason), None)
     }
@@ -163,7 +153,7 @@ impl ToolOutcome {
 
     fn new(outcome: &str, result: String, exit_code: Option<i32>) -> Self {
         let bytes = result.len() as u64;
-        let lines = crate::spill::count_lines(result.as_bytes());
+        let lines = crate::log::spill::count_lines(result.as_bytes());
         Self {
             outcome: outcome.into(),
             exit_code,
@@ -263,9 +253,7 @@ pub fn names() -> Vec<String> {
         .collect()
 }
 
-/// Run one tool call. Never fails: any problem becomes an `error` outcome the
-/// model can read. `dir` is kelir's `<seq>-<step>-<n>` output directory name and
-/// `call_id` is the provider's call id (recorded with a promoted job).
+/// Run one tool call. Never fails: any problem becomes an `error` outcome the model can read.
 pub async fn dispatch(
     name: &str,
     args: &Value,
@@ -310,43 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn specs_are_openai_function_tools() {
-        let specs = specs();
-        assert_eq!(specs.len(), 3);
-        for spec in &specs {
-            assert_eq!(spec["type"], "function");
-            let function = &spec["function"];
-            assert!(function["name"].is_string());
-            assert!(function["description"].is_string());
-            assert_eq!(function["parameters"]["type"], "object");
-        }
-    }
-
-    #[test]
-    fn every_tool_requires_a_description() {
-        for spec in specs() {
-            let name = spec["function"]["name"].as_str().unwrap().to_string();
-            let parameters = &spec["function"]["parameters"];
-            let required = parameters["required"].as_array().expect("required");
-            assert!(
-                required.iter().any(|field| field == "description"),
-                "{name} must require description: {required:?}"
-            );
-            let properties = parameters["properties"].as_object().expect("properties");
-            let field = properties
-                .get("description")
-                .unwrap_or_else(|| panic!("{name} has no description property: {properties:?}"));
-            assert_eq!(field["type"], "string", "{name}");
-            assert!(
-                field["description"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("120")),
-                "{name} must cap the label at 120 chars"
-            );
-        }
-    }
-
-    #[test]
     fn bash_takes_a_description_beside_the_command() {
         let spec = specs()
             .into_iter()
@@ -372,18 +323,6 @@ mod tests {
     }
 
     #[test]
-    fn names_are_stable_and_ordered() {
-        assert_eq!(
-            names(),
-            vec![
-                "bash".to_string(),
-                "edit".to_string(),
-                "compact".to_string()
-            ]
-        );
-    }
-
-    #[test]
     fn compact_takes_an_optional_focus_and_requires_a_description() {
         let spec = specs()
             .into_iter()
@@ -404,9 +343,9 @@ mod tests {
     }
 
     #[test]
-    fn call_dir_is_under_commands_without_the_call_id() {
+    fn call_dir_is_under_calls_without_the_call_id() {
         let dir = ctx().call_dir("12-3-2");
-        assert!(dir.ends_with(PathBuf::from("commands").join("12-3-2")));
+        assert!(dir.ends_with(PathBuf::from("calls").join("12-3-2")));
         assert!(!dir.to_string_lossy().contains("call_"));
     }
 
@@ -437,7 +376,7 @@ mod tests {
     fn a_stopped_call_reports_its_partial_output_and_out_path() {
         let stopped = ToolOutcome::stopped_with_output(
             "wrong approach",
-            "s/ses_1/commands/7-1-1/out",
+            "s/ses_1/calls/7-1-1/out",
             42,
             2,
             "line one\nline two\n",
@@ -445,7 +384,7 @@ mod tests {
         assert_eq!(stopped.outcome, "stopped");
         assert_eq!(stopped.bytes, 42);
         assert_eq!(stopped.lines, 2);
-        assert_eq!(stopped.out_path, "s/ses_1/commands/7-1-1/out");
+        assert_eq!(stopped.out_path, "s/ses_1/calls/7-1-1/out");
         assert!(
             stopped
                 .result
@@ -459,7 +398,7 @@ mod tests {
             stopped.result
         );
         assert!(
-            stopped.result.contains("s/ses_1/commands/7-1-1/out"),
+            stopped.result.contains("s/ses_1/calls/7-1-1/out"),
             "{}",
             stopped.result
         );

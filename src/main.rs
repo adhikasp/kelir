@@ -1,16 +1,10 @@
 use clap::Parser;
 use std::process::ExitCode;
 
-use kelir::cli::{Cli, Command};
+use kelir::main_cli::{Cli, Command, LsArgs};
 
-/// Windows: stop children (and their children) from inheriting this process's
-/// own stdout/stderr handles.
-///
-/// A background job must not hold the caller's pipe open: with the inherit flag
-/// on, `kelir run --json | jq` would stay open until a promoted job exits, even
-/// though kelir itself is long gone. `CreateProcess` still hands a child the
-/// stdio handles it is asked for (they are made inheritable per spawn), so this
-/// takes nothing away from a child that needs one.
+/// Windows: stop children (and their children) from inheriting this process's own
+/// stdout/stderr handles.
 #[cfg(windows)]
 fn close_handle_inheritance() {
     use windows_sys::Win32::Foundation::{
@@ -37,43 +31,49 @@ async fn main() -> ExitCode {
     close_handle_inheritance();
     let cli = Cli::parse();
     let code = match cli.command {
-        Some(Command::Run(args)) => kelir::session::run(args).await,
-        Some(Command::Ask(args)) => kelir::session::ask(args).await,
+        Some(Command::Run(args)) => kelir::core::session::run(args).await,
         // Flags before the subcommand fill in what it did not set.
-        Some(Command::Tui(args)) => kelir::session::tui(args.with_fallback(cli.tui)).await,
-        Some(Command::Resume(args)) => kelir::session::resume(args).await,
-        Some(Command::Ctl(args)) => kelir::ctl::ctl(args).await,
-        Some(Command::Attach(args)) => kelir::attach::run(args).await,
-        Some(Command::View(args)) => kelir::session::view(args).await,
-        Some(Command::Observe(args)) => kelir::observe::cli(&args),
-        Some(Command::Bg(args)) => kelir::bg::cli(args.command).await,
-        Some(Command::Mcp(args)) => kelir::mcp::cli::run(args.words).await,
-        Some(Command::Brief(args)) => kelir::childcli::brief(args).await,
-        Some(Command::Ls(args)) => kelir::childcli::ls(args).await,
-        Some(Command::Kill(args)) => kelir::childcli::kill(args).await,
-        Some(Command::Job(args)) => match args.command {
-            kelir::cli::JobCommand::Run(args) => kelir::jobrun::run(args).await,
-            kelir::cli::JobCommand::Status(args) => kelir::jobrun::status(args),
-            kelir::cli::JobCommand::History(args) => kelir::jobrun::history(args),
+        Some(Command::Tui(args)) => kelir::core::session::tui(args.with_fallback(cli.tui)).await,
+        Some(Command::Ctl(args)) => kelir::ipc::ctl::ctl(args).await,
+        Some(Command::Attach(args)) => kelir::ipc::attach::run(args).await,
+        Some(Command::View(args)) => kelir::core::session::view(args).await,
+        Some(Command::Observe(args)) => kelir::ipc::observe::cli(&args),
+        Some(Command::Bg(args)) => kelir::features::bg::cli(args.command).await,
+        Some(Command::Mcp(args)) => kelir::features::mcp::cli::run(args.words).await,
+        Some(Command::Brief(args)) => kelir::features::children::cli::brief(args).await,
+        Some(Command::Ls(LsArgs { command, json, all })) => match command {
+            Some(kelir::main_cli::LsCommand::Sessions(a)) => {
+                kelir::features::names::sessions_ls(&a)
+            }
+            Some(kelir::main_cli::LsCommand::Rename(a)) => {
+                kelir::features::names::sessions_rename(&a)
+            }
+            Some(kelir::main_cli::LsCommand::Forget(a)) => {
+                kelir::features::names::sessions_forget(&a)
+            }
+            None => {
+                kelir::features::children::cli::ls(kelir::main_cli::LsArgs {
+                    command: None,
+                    json,
+                    all,
+                })
+                .await
+            }
         },
-        Some(Command::Sessions(args)) => match args.command {
-            kelir::cli::SessionsCommand::Ls(args) => kelir::names::sessions_ls(&args),
-            kelir::cli::SessionsCommand::Rename(args) => kelir::names::sessions_rename(&args),
-            kelir::cli::SessionsCommand::Forget(args) => kelir::names::sessions_forget(&args),
-        },
-        Some(Command::Channel(args)) => kelir::channel::run(args).await,
-        Some(Command::ChildHost) => kelir::session::child_host().await,
-        Some(Command::Doctor(args)) => kelir::doctor::doctor(args),
+        Some(Command::Kill(args)) => kelir::features::children::cli::kill(args).await,
+        Some(Command::Channel(args)) => kelir::features::channel::run(args).await,
+        Some(Command::ChildHost) => kelir::core::session::child_host().await,
+        Some(Command::Doctor(args)) => kelir::ipc::doctor::doctor(args),
         Some(Command::Docs(args)) => kelir::docs::cli(&args),
-        Some(Command::BgShim(args)) => kelir::bg::shim_main(args).await,
+        Some(Command::BgShim(args)) => kelir::features::bg::shim_main(args).await,
         #[cfg(unix)]
         Some(Command::GateGuard(args)) => {
-            kelir::gates::reap::guard_main(args.parent, args.group, &args.token, args.ttl)
+            kelir::features::gates::reap::guard_main(args.parent, args.group, &args.token, args.ttl)
         }
         #[cfg(not(unix))]
         Some(Command::GateGuard(_)) => 0,
         // `kelir` with no subcommand is the interactive session.
-        None => kelir::session::tui(cli.tui).await,
+        None => kelir::core::session::tui(cli.tui).await,
     };
     ExitCode::from(code)
 }

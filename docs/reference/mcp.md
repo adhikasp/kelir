@@ -1,28 +1,28 @@
-# MCP: `mcp.toml` and `kelir mcp`
+# MCP: `config.toml` and `kelir mcp`
 
-**Summary:** how MCP servers are configured (`mcp.toml`, two layers) and used
+**Summary:** how MCP servers are configured (`config.toml`, two layers) and used
 (`kelir mcp` from a bash call): the commands, the exit codes, the broker in the
 session process, what is logged, channel servers.
 **Read this when:** you are adding or debugging an MCP server, reading
-`mcp_started`/`mcp_settled` in a log, or wondering why a call came back with
+`call_started{kind:"mcp"}` / `call_settled{kind:"mcp"}` in a log, or wondering why a call came back with
 exit 3 or 4 (`src/mcp/`: `config.rs`, `rpc.rs`, `broker.rs`, `cli.rs`).
 
 The model gets no MCP tool schemas in its request. It runs a CLI from `bash`,
 reads the schema only when it needs it, and pipes the result like any other
 command: `kelir mcp notes search q=invoice | jq '.hits[0]'`.
 
-## `mcp.toml`
+## `config.toml`
 
 Two layers, machine then project, merged **by server name** (a project's
-`[servers.x]` replaces the machine's whole, never field by field):
+`[mcp.servers.x]` replaces the machine's whole, never field by field):
 
 | layer | file |
 |---|---|
-| machine | `<config dir>/mcp.toml`; `KELIR_MCP_CONFIG` replaces the path |
-| project | the nearest `.kelir/mcp.toml`, walking up from the working directory |
+| machine | `<config dir>/config.toml`; `KELIR_CONFIG` replaces the path |
+| project | the nearest `.kelir/config.toml`, walking up from the working directory |
 
 ```toml
-[servers.notes]
+[mcp.servers.notes]
 command = "npx"                         # required; a bare Windows name finds .exe, .cmd, .bat
 args = ["-y", "some-mcp-server"]
 env = { NOTES_DIR = "C:/notes" }        # extra environment for the server; never printed
@@ -55,10 +55,10 @@ the error and exits 2.
   watcher in its process group that kills the group when the session is gone,
   even if the server ignores stdin EOF. On Windows a Job Object does this.
 - **When the file is read.** The session reads both layers once, when it
-  starts. Editing `mcp.toml` has no effect on a running session (`kelir resume`
+  starts. Editing `config.toml` has no effect on a running session (`kelir run --resume`
   or a new session picks it up); a one-shot `kelir mcp` outside a session
   reads it on every command.
-- **A project file is code.** `.kelir/mcp.toml` can name any `command`, and
+- **A project file is code.** `.kelir/config.toml` can name any `command`, and
   `channel = true` starts it when the session starts. Only open projects you
   trust; a trust prompt for project-defined servers belongs with the verb
   authentication work (STEER-7).
@@ -88,8 +88,8 @@ kelir mcp <server> <tool> [k=v …] [--json '{…}'] [--schema] [--envelope]
 - `--schema` prints the tool's `inputSchema` and calls nothing.
 - stdout is `structuredContent` as compact JSON when the tool sent it, else the
   text blocks joined by newlines. `--envelope` prints the whole result object.
-- Images, audio and binary resources are decoded to files (`commands/mcp_…/` in
-  a session, `<state>/mcp/<id>/` outside one) and the paths are printed — on
+- Images, audio and binary resources are decoded to files (`calls/mcp_…/` in
+  a session, `<state>/calls/mcp_<id>/` outside one) and the paths are printed — on
   stdout after the text, or on stderr when stdout is JSON that a pipe will parse.
 - A tool that answers `isError` prints its text on **stderr** and exits 1, so
   `| jq` never reads an error as data.
@@ -98,7 +98,7 @@ kelir mcp <server> <tool> [k=v …] [--json '{…}'] [--schema] [--envelope]
 |---|---|
 | 0 | ok |
 | 1 | the tool reported `isError` (or the server answered with a JSON-RPC error) |
-| 2 | usage: bad words, unknown server or tool, arguments that fail the schema, bad `mcp.toml` |
+| 2 | usage: bad words, unknown server or tool, arguments that fail the schema, bad `config.toml` |
 | 3 | server unavailable: it would not start, did not initialize, or died during the call |
 | 4 | timeout: no answer within the server's `timeout`. The outcome is **unknown** and the call is **never retried** |
 
@@ -115,16 +115,15 @@ Inside a session `KELIR_SOCK` is set, and `kelir mcp` sends every request to the
 - A request that fails after it reached the session (the session died or
   closed the socket mid-call) is exit 4, not a one-shot retry: the tool may
   have run. Only a failed *connect* falls back to starting the server in the
-  CLI. A session that is killed mid-call and resumed gets `mcp_settled` with
-  `outcome: "unknown"` (exit 4) for the call, and the call is not re-run.
+  CLI. A session that is killed mid-call and resumed gets `call_settled` with
+  `kind: "mcp"` and `outcome: "unknown"` (exit 4) for the call, and the call is not re-run.
 - A server that dies while starting is exit 3 with the last line of its
   stderr in the message (`(server stderr: …)`), the one place it says why.
 - `notifications/tools/list_changed` makes the broker read the tool list again
   at the next request.
-- Each call is an `mcp_started` / `mcp_settled` pair in the log, written by the
-  session (the only writer). `parent_call_id` is the bash call it was made from,
-  so a log reads `tool_started → mcp_started → mcp_settled → tool_settled`.
-  `mcp_settled.out_path` is the file holding the whole result (a result over
+- Each call is a `call_started` / `call_settled` pair in the log, written by the
+  session (the only writer), with `kind: "mcp"` and `info.name = "<server>/<tool>"`.
+  `call_settled.out_path` is the file holding the whole result (a result over
   10 KB is never inline in the log); the CLI still prints the whole result, so a
   pipe sees every byte, and the bash call's own 10 KB rule gives the model a
   spill notice when the output is not piped.
@@ -140,11 +139,11 @@ Inside a session `KELIR_SOCK` is set, and `kelir mcp` sends every request to the
   falling back to an unlogged one-shot call. Outside a session (no `KELIR_SOCK`)
   there is no token and none is needed. `mcp-settle` and `mcp-notify` travel
   in-process, not through the listener, and keep their key as the second layer.
-- **Secrets.** The `env` table of `mcp.toml` goes to the server child only; it
-  is never printed, logged or echoed in an error. `mcp_started.args` records the
-  *shape* of the arguments (keys kept, strings replaced by `<string, N bytes>`),
-  never their values: the values are in the `tool_started` of the bash call that
-  carried them. A server is started with an allow-listed environment (no
+- **Secrets.** The `env` table of `config.toml` goes to the server child only; it
+  is never printed, logged or echoed in an error. `call_started.info.input` records
+  the *shape* of the arguments (keys kept, strings replaced by `<string, N bytes>`),
+  never their values: the values are in the enclosing bash call's `call_started`
+  event. A server is started with an allow-listed environment (no
   `KELIR_*`, so no token or socket), no secret on its command line, and dies
   with the session.
 - `kelir ctl <session> tools '{"disable":"mcp:<server>.<tool>"}'` (or

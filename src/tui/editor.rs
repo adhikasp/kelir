@@ -1,0 +1,1099 @@
+//! The input editor: a small multi-line buffer with a cursor and history.
+//! The state machine takes [`Key`] values, not terminal events, so every rule here is unit-
+//! tested without a terminal.
+//! The TUI translates `crossterm` events into [`Key`] and renders the buffer.
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Key {
+    Char(char),
+    /// A newline inside the message (Alt-Enter, Shift-Enter, Ctrl-J).
+    Newline,
+    /// Enter: submit the buffer.
+    Enter,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    /// Ctrl-K: cut from the cursor to the end of the line.
+    KillToEnd,
+    /// Ctrl-Backspace: delete the word before the cursor (GUI convention).
+    KillPrevWord,
+    /// Ctrl-Delete (and Alt-Backspace): delete the word after the cursor.
+    KillNextWord,
+    /// Alt-Left / Alt-Right: move by one word.
+    WordLeft,
+    WordRight,
+    /// Ctrl-U: clear the whole buffer.
+    Clear,
+    /// A bracketed paste, newlines and all.
+    Paste(String),
+    /// Insert a chip (a saved image) at the cursor, as one atomic element.
+    Chip(Chip),
+    /// Remove the chip whose label is at the cursor (or just before it), as one element:
+    /// Backspace on a chip removes the whole thing, never one character of its label.
+    RemoveChip,
+    /// Drop every chip from the buffer (a submitted or cleared prompt): the chip decision belongs
+    /// to the text, so this is what a caller after `Submitted` uses to forget them.
+    DropChips,
+    HistoryPrev,
+    HistoryNext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// The buffer changed (or the cursor moved).
+    Edited,
+    /// Enter on a non-empty buffer: the text, and the buffer is empty again.
+    /// The caller reads [`Editor::take_chips`] for the images the text named.
+    Submitted(String),
+    /// The key means nothing here (or the buffer was empty on Enter).
+    Ignored,
+    /// A chip was removed: the caller deletes its file (nothing else referred to it yet).
+    ChipRemoved(Chip),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chip {
+    /// The per-prompt number: also the number in the label and the saved file.
+    pub seq: u32,
+    /// `attachments/1-clipboard.png`, relative to the session dir.
+    pub rel: String,
+    /// The pointer the prompt carries: `[image: attachments/1-…, 1280x720, …]`.
+    pub pointer: String,
+    /// The label in the buffer: `[image 1]`.
+    pub label: String,
+}
+
+impl Chip {
+    pub fn new(seq: u32, rel: &str, pointer: &str) -> Self {
+        Self {
+            seq,
+            rel: rel.to_string(),
+            pointer: pointer.to_string(),
+            label: crate::features::attachments::chip_label(seq),
+        }
+    }
+
+    /// The label inside a line, if it is there.
+    pub fn find(&self, line: &str) -> Option<usize> {
+        line.find(&self.label)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Editor {
+    pub(super) lines: Vec<String>,
+    pub(super) chips: Vec<Chip>,
+    pub(super) row: usize,
+    /// Cursor column, in `char`s, never past the end of the line.
+    pub(super) col: usize,
+    pub(super) history: Vec<String>,
+    /// Where in `history` the buffer is, while browsing.
+    pub(super) browsing: Option<usize>,
+    /// The buffer as it was before browsing started.
+    pub(super) draft: Option<Vec<String>>,
+    pub(super) width: usize,
+}
+
+/// One painted row of the editor. `logical` is the buffer line it came from; `start..end` is
+/// the half-open range of *characters* on that line that this row shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisualRow {
+    pub logical: usize,
+    pub start: usize,
+    pub end: usize,
+    pub first: bool,
+}
+
+impl VisualRow {
+    /// Display columns before this row's first character on its logical line.
+    fn start_col(&self, line: &str) -> usize {
+        use unicode_width::UnicodeWidthChar as _;
+        line.chars()
+            .take(self.start)
+            .map(|c| c.width().unwrap_or(0))
+            .sum()
+    }
+}
+
+/// The offset into a slice of chars at (or just before) a display column.
+fn column_to_index_chars(chars: &[char], column: usize) -> usize {
+    use unicode_width::UnicodeWidthChar as _;
+    let mut used = 0usize;
+    for (index, c) in chars.iter().enumerate() {
+        let width = c.width().unwrap_or(0);
+        if used + width > column {
+            return index;
+        }
+        used += width;
+    }
+    chars.len()
+}
+
+impl Default for Editor {
+    fn default() -> Self {
+        Self {
+            lines: vec![String::new()],
+            chips: Vec::new(),
+            row: 0,
+            col: 0,
+            history: Vec::new(),
+            browsing: None,
+            draft: None,
+            width: 80,
+        }
+    }
+}
+
+impl Editor {
+    pub fn text(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.len() == 1 && self.lines[0].is_empty()
+    }
+
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+
+    pub fn cursor(&self) -> (usize, usize) {
+        (self.row, self.col)
+    }
+
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    pub fn chips(&self) -> &[Chip] {
+        &self.chips
+    }
+
+    /// Take the chips (after a submit: the caller decides what happens to
+    /// them).
+    pub fn take_chips(&mut self) -> Vec<Chip> {
+        std::mem::take(&mut self.chips)
+    }
+
+    /// Insert a chip at the cursor as one atomic element: a space before it when
+    /// the cursor is mid-word, the label, and a space after it.
+    pub fn insert_chip(&mut self, chip: Chip) {
+        self.stop_browsing();
+        let label = chip.label.clone();
+        self.chips.push(chip);
+        let row = self.row;
+        let col = self.char_to_byte(row, self.col);
+        let before_space = self.lines[row][..col]
+            .chars()
+            .last()
+            .is_some_and(|c| c != ' ');
+        let mut text = String::new();
+        if before_space {
+            text.push(' ');
+        }
+        text.push_str(&label);
+        text.push(' ');
+        let added = text.chars().count();
+        self.lines[row].insert_str(col, &text);
+        self.col += added;
+    }
+
+    /// Take the word that ends at the cursor (a keystroke burst's path, before it is typed), leaving the
+    /// buffer and the cursor as they were minus that word.
+    pub fn take_word_before_cursor(&mut self) -> Option<String> {
+        let row = self.row;
+        let col = self.char_to_byte(row, self.col);
+        let line = self.lines[row].clone();
+        let chars: Vec<char> = line[..col].chars().collect();
+        let mut end = chars.len();
+        while end > 0 && chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+        if end == 0 {
+            return None;
+        }
+        // A closing quote belongs to the word: find its opener.
+        let closer = chars[end - 1];
+        let (start, drop_to) = if closer == '"' || closer == '\'' {
+            match chars[..end - 1].iter().rposition(|c| *c == closer) {
+                Some(open) => (open, end),
+                None => (end - 1, end),
+            }
+        } else {
+            let open = chars[..end]
+                .iter()
+                .rposition(|c| c.is_whitespace())
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            (open, end)
+        };
+        let word: String = chars[start..drop_to].iter().collect();
+        if word.trim_matches(['"', '\'', '&', ' ']).is_empty() {
+            return None;
+        }
+        // Take the word and the single space before it: the chip inserts its own
+        // spacing, and the burst's space is part of what the path brought.
+        let from = if start > 0 && chars[start - 1] == ' ' {
+            start - 1
+        } else {
+            start
+        };
+        let to_byte = |index: usize| -> usize {
+            line[..col]
+                .char_indices()
+                .nth(index)
+                .map(|(offset, _)| offset)
+                .unwrap_or(col)
+        };
+        self.lines[row].replace_range(to_byte(from)..to_byte(drop_to), "");
+        self.col = chars[..from].len();
+        Some(word)
+    }
+
+    /// Remove the chip the cursor belongs to (just before it, or starting at
+    /// it). Returns it so the caller can delete the file.
+    pub fn remove_chip_at_cursor(&mut self) -> Option<Chip> {
+        let row = self.row;
+        let col = self.char_to_byte(row, self.col);
+        let line = self.lines[row].clone();
+        // The chip the cursor belongs to: the label that starts at the cursor, or the one the cursor is inside
+        // or immediately after (a chip is one element, so anywhere on its label means the whole chip).
+        let mut hit: Option<(usize, usize, usize)> = None;
+        for (index, chip) in self.chips.iter().enumerate() {
+            let mut from = 0usize;
+            while let Some(found) = line[from..].find(&chip.label) {
+                let start = from + found;
+                let end = start + chip.label.len();
+                if start <= col && col <= end + 1 {
+                    hit = Some((index, start, end));
+                    break;
+                }
+                from = end;
+            }
+            if hit.is_some() {
+                break;
+            }
+        }
+        let (index, start, end) = hit?;
+        let chip = self.chips.remove(index);
+        // Take one trailing space with the label, so the sentence stays even.
+        let end = if line[end..].starts_with(' ') {
+            end + 1
+        } else {
+            end
+        };
+        self.lines[row].replace_range(start..end, "");
+        self.col = line[..start].chars().count();
+        Some(chip)
+    }
+
+    /// Tell the editor how wide the terminal is, so visual rows (wrapping) and the cursor's display
+    /// position can be computed.
+    pub fn set_width(&mut self, width: usize) {
+        self.width = width.max(1);
+    }
+
+    /// Split the buffer into visual rows no wider than the terminal.
+    pub fn visual_rows(&self) -> Vec<VisualRow> {
+        use unicode_width::UnicodeWidthChar as _;
+        let text_width = self.width.saturating_sub(crate::tui::PROMPT_WIDTH).max(1);
+        let mut rows = Vec::new();
+        for (logical, line) in self.lines.iter().enumerate() {
+            let mut start = 0usize;
+            let mut columns = 0usize;
+            for (index, c) in line.chars().enumerate() {
+                let cw = c.width().unwrap_or(0);
+                if columns + cw > text_width && index > start {
+                    rows.push(VisualRow {
+                        logical,
+                        start,
+                        end: index,
+                        first: logical == 0 && rows.is_empty(),
+                    });
+                    start = index;
+                    columns = 0;
+                }
+                columns += cw;
+            }
+            rows.push(VisualRow {
+                logical,
+                start,
+                end: line.chars().count(),
+                first: logical == 0 && rows.is_empty(),
+            });
+        }
+        rows
+    }
+
+    /// The window of *visual* rows to draw when only `rows` fit: it scrolls
+    /// just enough to keep the cursor's wrapped row visible.
+    pub fn display_window(&self, rows: usize) -> (usize, usize) {
+        let rows = rows.max(1);
+        let total = self.visual_rows().len();
+        if total <= rows {
+            return (0, total.max(1));
+        }
+        let (cursor_row, _) = self.cursor_display();
+        let first = if cursor_row < rows {
+            0
+        } else {
+            (cursor_row + 1).saturating_sub(rows)
+        };
+        (first, rows)
+    }
+
+    /// The cursor as the renderer needs it on the *wrapped* view: `(visual row, display column)`, the
+    /// prompt width included.
+    pub fn cursor_display(&self) -> (usize, usize) {
+        use unicode_width::UnicodeWidthChar as _;
+        let (visual, _) = self.cursor_visual();
+        let line = &self.lines[self.row];
+        let before: usize = line
+            .chars()
+            .take(self.col)
+            .map(|c| c.width().unwrap_or(0))
+            .sum();
+        let row_start_col: usize = line
+            .chars()
+            .take(self.visual_rows()[visual].start)
+            .map(|c| c.width().unwrap_or(0))
+            .sum();
+        (visual, crate::tui::PROMPT_WIDTH + before - row_start_col)
+    }
+
+    /// Which visual row the cursor is on, and its index among all rows.
+    fn cursor_visual(&self) -> (usize, usize) {
+        let rows = self.visual_rows();
+        let candidates: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.logical == self.row)
+            .map(|(index, _)| index)
+            .collect();
+        for &index in &candidates {
+            if self.col < rows[index].end {
+                return (index, rows.len());
+            }
+        }
+        (candidates.last().copied().unwrap_or(0), rows.len())
+    }
+
+    /// The display column the cursor is on within its visual row, excluding
+    /// the prompt. Wide characters count two, matching [`Self::visual_rows`].
+    fn visual_column(&self) -> usize {
+        use unicode_width::UnicodeWidthChar as _;
+        let (visual, _) = self.cursor_visual();
+        let row = &self.visual_rows()[visual];
+        let before: usize = self.lines[self.row]
+            .chars()
+            .take(self.col)
+            .map(|c| c.width().unwrap_or(0))
+            .sum();
+        before.saturating_sub(row.start_col(&self.lines[self.row]))
+    }
+
+    /// Move one visual (wrapped) row, preserving the display column. Returns
+    /// false when there is no such row (the caller then falls back to history).
+    fn move_visual(&mut self, direction: isize) -> bool {
+        let rows = self.visual_rows();
+        let (visual, _) = self.cursor_visual();
+        let target = visual as isize + direction;
+        if target < 0 || target >= rows.len() as isize {
+            return false;
+        }
+        let row = rows[target as usize].clone();
+        // Keep the display column *within the current visual row*; that is what a person sees and
+        // follows when pressing up/down. Clamp to the target row's length.
+        let wanted = self.visual_column();
+        let chars: Vec<char> = self.lines[row.logical]
+            .chars()
+            .skip(row.start)
+            .take(row.end - row.start)
+            .collect();
+        self.col = row.start + column_to_index_chars(&chars, wanted);
+        self.row = row.logical;
+        true
+    }
+
+    pub fn handle(&mut self, key: Key) -> Outcome {
+        // A line feed that arrives as a character (a paste, an unusual
+        // terminal) is a newline, never a literal 0x0A in the buffer.
+        if key == Key::Char('\n') {
+            return self.handle(Key::Newline);
+        }
+        match key {
+            Key::Char(c) => {
+                self.stop_browsing();
+                let row = self.row;
+                let col = self.char_to_byte(row, self.col);
+                self.lines[row].insert(col, c);
+                self.col += 1;
+                Outcome::Edited
+            }
+            Key::Newline => {
+                self.stop_browsing();
+                let row = self.row;
+                let col = self.char_to_byte(row, self.col);
+                let rest = self.lines[row].split_off(col);
+                self.lines.insert(row + 1, rest);
+                self.row += 1;
+                self.col = 0;
+                Outcome::Edited
+            }
+            Key::Paste(text) => {
+                self.stop_browsing();
+                let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                for (index, segment) in text.split('\n').enumerate() {
+                    if index > 0 {
+                        self.split_line();
+                    }
+                    for c in segment.chars() {
+                        let row = self.row;
+                        let col = self.char_to_byte(row, self.col);
+                        self.lines[row].insert(col, c);
+                        self.col += 1;
+                    }
+                }
+                Outcome::Edited
+            }
+            Key::Enter => {
+                let text = self.text();
+                if text.trim().is_empty() {
+                    return Outcome::Ignored;
+                }
+                if self.history.last() != Some(&text) {
+                    self.history.push(text.clone());
+                }
+                self.reset();
+                // The chips stay for the caller: they are what the submitted
+                // text now points at.
+                Outcome::Submitted(text)
+            }
+            Key::Chip(chip) => {
+                self.insert_chip(chip);
+                Outcome::Edited
+            }
+            Key::RemoveChip => match self.remove_chip_at_cursor() {
+                Some(chip) => Outcome::ChipRemoved(chip),
+                None => Outcome::Ignored,
+            },
+            Key::DropChips => {
+                self.chips.clear();
+                Outcome::Edited
+            }
+            Key::Backspace => {
+                self.stop_browsing();
+                if self.col > 0 {
+                    let row = self.row;
+                    let end = self.char_to_byte(row, self.col);
+                    let start = self.char_to_byte(row, self.col - 1);
+                    self.lines[row].replace_range(start..end, "");
+                    self.col -= 1;
+                } else if self.row > 0 {
+                    let line = self.lines.remove(self.row);
+                    self.row -= 1;
+                    self.col = self.lines[self.row].chars().count();
+                    self.lines[self.row].push_str(&line);
+                } else {
+                    return Outcome::Ignored;
+                }
+                Outcome::Edited
+            }
+            Key::Delete => {
+                self.stop_browsing();
+                let row = self.row;
+                if self.col < self.lines[row].chars().count() {
+                    let start = self.char_to_byte(row, self.col);
+                    let end = self.char_to_byte(row, self.col + 1);
+                    self.lines[row].replace_range(start..end, "");
+                } else if self.row + 1 < self.lines.len() {
+                    let next = self.lines.remove(self.row + 1);
+                    self.lines[row].push_str(&next);
+                } else {
+                    return Outcome::Ignored;
+                }
+                Outcome::Edited
+            }
+            Key::Left => {
+                if self.col > 0 {
+                    self.col -= 1;
+                } else if self.row > 0 {
+                    self.row -= 1;
+                    self.col = self.lines[self.row].chars().count();
+                } else {
+                    return Outcome::Ignored;
+                }
+                Outcome::Edited
+            }
+            Key::Right => {
+                if self.col < self.lines[self.row].chars().count() {
+                    self.col += 1;
+                } else if self.row + 1 < self.lines.len() {
+                    self.row += 1;
+                    self.col = 0;
+                } else {
+                    return Outcome::Ignored;
+                }
+                Outcome::Edited
+            }
+            Key::Up => {
+                if self.move_visual(-1) {
+                    Outcome::Edited
+                } else {
+                    self.history_prev()
+                }
+            }
+            Key::Down => {
+                if self.move_visual(1) {
+                    Outcome::Edited
+                } else {
+                    self.history_next()
+                }
+            }
+            Key::Home => {
+                // GUI Home goes to the start of the visual (wrapped) row,
+                // then to the very start on a second press.
+                let rows = self.visual_rows();
+                let visual = self.cursor_visual().0;
+                let start = rows[visual].start;
+                self.col = if self.col == start && start > 0 {
+                    0
+                } else {
+                    start
+                };
+                Outcome::Edited
+            }
+            Key::End => {
+                // Mirror of Home: end of the visual row, then the logical end.
+                let rows = self.visual_rows();
+                let visual = self.cursor_visual().0;
+                let end = rows[visual].end;
+                let logical_end = self.lines[self.row].chars().count();
+                self.col = if self.col == end && end < logical_end {
+                    logical_end
+                } else {
+                    end
+                };
+                Outcome::Edited
+            }
+            Key::KillToEnd => {
+                self.stop_browsing();
+                let row = self.row;
+                let at = self.char_to_byte(row, self.col);
+                self.lines[row].truncate(at);
+                Outcome::Edited
+            }
+            Key::KillPrevWord => {
+                self.stop_browsing();
+                let (start, end) = self.word_before_cursor();
+                if start == end {
+                    return self.handle(Key::Backspace);
+                }
+                match self.remove_range(start, end) {
+                    Some(chip) => Outcome::ChipRemoved(chip),
+                    None => Outcome::Edited,
+                }
+            }
+            Key::KillNextWord => {
+                self.stop_browsing();
+                let (start, end) = self.word_after_cursor();
+                if start == end {
+                    return self.handle(Key::Delete);
+                }
+                match self.remove_range(start, end) {
+                    Some(chip) => Outcome::ChipRemoved(chip),
+                    None => Outcome::Edited,
+                }
+            }
+            Key::WordLeft => {
+                let col = self.word_left_start();
+                self.col = col;
+                Outcome::Edited
+            }
+            Key::WordRight => {
+                let col = self.word_right_start();
+                self.col = col;
+                Outcome::Edited
+            }
+            Key::Clear => {
+                self.reset();
+                Outcome::Edited
+            }
+            Key::HistoryPrev => self.history_prev(),
+            Key::HistoryNext => self.history_next(),
+        }
+    }
+
+    /// The character range of the word immediately before the cursor, in the current line, including the
+    /// whitespace run between it and the cursor.
+    fn word_before_cursor(&self) -> (usize, usize) {
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        let col = self.col.min(chars.len());
+        let mut end = col;
+        while end > 0 && chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+        if end == 0 {
+            return (0, col);
+        }
+        let mut start = end;
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        // Extend back over the whitespace run before the word, so one press
+        // removes the word and the gap it left, like a GUI text field.
+        while start > 0 && chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        (start, col)
+    }
+
+    /// Word left for navigation: the start of the word before the cursor, skipping the whitespace
+    /// in between (Ctrl-Left lands on the word, not on the space after it).
+    fn word_left_start(&self) -> usize {
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        let mut col = self.col.min(chars.len());
+        while col > 0 && chars[col - 1].is_whitespace() {
+            col -= 1;
+        }
+        while col > 0 && !chars[col - 1].is_whitespace() {
+            col -= 1;
+        }
+        col
+    }
+
+    /// Where Ctrl-Right lands: the start of the next word.
+    fn word_right_start(&self) -> usize {
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        let mut col = self.col.min(chars.len());
+        while col < chars.len() && !chars[col].is_whitespace() {
+            col += 1;
+        }
+        while col < chars.len() && chars[col].is_whitespace() {
+            col += 1;
+        }
+        col
+    }
+
+    /// The character range of the word immediately after the cursor, in the current line.
+    fn word_after_cursor(&self) -> (usize, usize) {
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        let col = self.col.min(chars.len());
+        let mut start = col;
+        while start < chars.len() && chars[start].is_whitespace() {
+            start += 1;
+        }
+        let mut end = start;
+        while end < chars.len() && !chars[end].is_whitespace() {
+            end += 1;
+        }
+        while end < chars.len() && chars[end].is_whitespace() {
+            end += 1;
+        }
+        (col, end)
+    }
+
+    /// Remove `start..end` (character indices) from the cursor's line and put the cursor at `start`.
+    fn remove_range(&mut self, start: usize, end: usize) -> Option<Chip> {
+        let row = self.row;
+        let line = self.lines[row].clone();
+        let hit = self.chips.iter().position(|chip| {
+            let mut from = 0usize;
+            while let Some(found) = line[from..].find(&chip.label) {
+                let cs: usize = line[..from + found].chars().count();
+                let ce = cs + chip.label.chars().count();
+                // Overlap with [start, end).
+                if cs < end && ce > start {
+                    return true;
+                }
+                from = from + found + chip.label.len();
+            }
+            false
+        });
+        let removed = hit.map(|index| self.chips.remove(index));
+        let from = self.char_to_byte(row, start);
+        let to = self.char_to_byte(row, end);
+        self.lines[row].replace_range(from..to, "");
+        self.col = start;
+        removed
+    }
+
+    // ----------------------------------------------------------- internals
+
+    fn split_line(&mut self) {
+        let row = self.row;
+        let col = self.char_to_byte(row, self.col);
+        let rest = self.lines[row].split_off(col);
+        self.lines.insert(row + 1, rest);
+        self.row += 1;
+        self.col = 0;
+    }
+
+    fn reset(&mut self) {
+        self.lines = vec![String::new()];
+        self.row = 0;
+        self.col = 0;
+        self.browsing = None;
+        self.draft = None;
+    }
+
+    fn char_to_byte(&self, row: usize, col: usize) -> usize {
+        let line = &self.lines[row];
+        line.char_indices()
+            .nth(col)
+            .map(|(index, _)| index)
+            .unwrap_or(line.len())
+    }
+
+    fn stop_browsing(&mut self) {
+        if self.browsing.take().is_some() {
+            self.draft = None;
+        }
+    }
+
+    fn history_prev(&mut self) -> Outcome {
+        if self.history.is_empty() {
+            return Outcome::Ignored;
+        }
+        let next = match self.browsing {
+            None => {
+                self.draft = Some(self.lines.clone());
+                self.history.len() - 1
+            }
+            Some(0) => return Outcome::Ignored,
+            Some(index) => index - 1,
+        };
+        self.browsing = Some(next);
+        self.load(&self.history[next].clone());
+        Outcome::Edited
+    }
+
+    fn history_next(&mut self) -> Outcome {
+        let Some(index) = self.browsing else {
+            return Outcome::Ignored;
+        };
+        if index + 1 < self.history.len() {
+            self.browsing = Some(index + 1);
+            let text = self.history[index + 1].clone();
+            self.load(&text);
+        } else {
+            self.browsing = None;
+            let draft = self.draft.take().unwrap_or_else(|| vec![String::new()]);
+            self.lines = draft;
+            self.row = self.lines.len() - 1;
+            self.col = self.lines[self.row].chars().count();
+        }
+        Outcome::Edited
+    }
+
+    fn load(&mut self, text: &str) {
+        crate::tui::editor_impl::load(self, text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn type_text(editor: &mut Editor, text: &str) {
+        for c in text.chars() {
+            editor.handle(Key::Char(c));
+        }
+    }
+
+    fn typed(text: &str) -> Editor {
+        let mut editor = Editor::default();
+        type_text(&mut editor, text);
+        editor
+    }
+
+    fn keys(editor: &mut Editor, count: usize, key: Key) {
+        for _ in 0..count {
+            editor.handle(key.clone());
+        }
+    }
+
+    #[test]
+    fn typing_editing_and_word_ops_follow_the_cursor() {
+        // (initial text, keys applied after typing, expected text, expected cursor).
+        type CursorCase<'a> = (&'a str, &'a [Key], &'a str, (usize, usize));
+        let cases: [CursorCase<'_>; 13] = [
+            (
+                "hello",
+                &[Key::Left, Key::Left, Key::Char('X')],
+                "helXlo",
+                (0, 4),
+            ),
+            (
+                "ab",
+                &[Key::Left, Key::Newline, Key::Backspace],
+                "ab",
+                (0, 1),
+            ),
+            (
+                "ab\ncd",
+                &[
+                    Key::Clear,
+                    Key::Char('a'),
+                    Key::Char('b'),
+                    Key::Home,
+                    Key::Delete,
+                ],
+                "b",
+                (0, 0),
+            ),
+            (
+                "ab",
+                &[
+                    Key::Clear,
+                    Key::Char('a'),
+                    Key::Char('b'),
+                    Key::End,
+                    Key::Delete,
+                ],
+                "ab",
+                (0, 2),
+            ),
+            (
+                "one\ntwo",
+                &[
+                    Key::Home,
+                    Key::KillToEnd,
+                    Key::Home,
+                    Key::Char('T'),
+                    Key::End,
+                    Key::Char('!'),
+                ],
+                "one\nT!",
+                (1, 2),
+            ),
+            ("a\r\nb\rc", &[], "a\nb\nc", (2, 1)),
+            ("abc", &[Key::Newline, Key::Backspace], "abc", (0, 3)),
+            (
+                "hello  world",
+                &[Key::KillPrevWord, Key::KillPrevWord],
+                "",
+                (0, 0),
+            ),
+            (
+                "one two three",
+                &[
+                    Key::Home,
+                    Key::KillNextWord,
+                    Key::KillNextWord,
+                    Key::KillNextWord,
+                ],
+                "",
+                (0, 0),
+            ),
+            (
+                "one two three",
+                &[Key::WordLeft, Key::WordLeft, Key::WordRight],
+                "one two three",
+                (0, 8),
+            ),
+            (
+                "héllo",
+                &[Key::Home, Key::Right, Key::Backspace],
+                "éllo",
+                (0, 0),
+            ),
+            ("", &[Key::Backspace, Key::Delete], "", (0, 0)),
+            (
+                "ab\ncd",
+                &[Key::Left, Key::Left, Key::Backspace],
+                "abcd",
+                (0, 2),
+            ),
+        ];
+        for (input, after, expected, cursor) in cases {
+            let mut editor = Editor::default();
+            if input == "a\r\nb\rc" {
+                editor.handle(Key::Paste(input.into()));
+            } else {
+                type_text(&mut editor, input);
+            }
+            for key in after {
+                editor.handle(key.clone());
+            }
+            assert_eq!(editor.text(), expected, "{input:?} {after:?}");
+            assert_eq!(editor.cursor(), cursor, "{input:?} {after:?}");
+        }
+    }
+
+    #[test]
+    fn submission_history_and_blank_buffers() {
+        let mut editor = typed("do it");
+        assert_eq!(
+            editor.handle(Key::Enter),
+            Outcome::Submitted("do it".into())
+        );
+        assert!(editor.is_empty());
+        assert_eq!(editor.handle(Key::Enter), Outcome::Ignored);
+        assert_eq!(editor.history(), &["do it".to_string()]);
+
+        let mut editor = typed("one");
+        assert_eq!(editor.handle(Key::Newline), Outcome::Edited);
+        type_text(&mut editor, "two");
+        assert_eq!(editor.text(), "one\ntwo");
+        assert_eq!(editor.cursor(), (1, 3));
+        assert_eq!(
+            editor.handle(Key::Enter),
+            Outcome::Submitted("one\ntwo".into())
+        );
+
+        let mut empty = Editor::default();
+        assert_eq!(empty.handle(Key::Enter), Outcome::Ignored);
+        type_text(&mut empty, "   ");
+        assert_eq!(empty.handle(Key::Enter), Outcome::Ignored);
+        assert_eq!(empty.text(), "   ");
+
+        let mut editor = Editor::default();
+        type_text(&mut editor, "first");
+        editor.handle(Key::Enter);
+        type_text(&mut editor, "second");
+        editor.handle(Key::Enter);
+        assert_eq!(editor.handle(Key::HistoryPrev), Outcome::Edited);
+        assert_eq!(editor.text(), "second");
+        editor.handle(Key::HistoryPrev);
+        assert_eq!(editor.text(), "first");
+        assert_eq!(editor.handle(Key::HistoryPrev), Outcome::Ignored);
+        editor.handle(Key::HistoryNext);
+        assert_eq!(editor.text(), "second");
+        editor.handle(Key::HistoryNext);
+        assert_eq!(editor.text(), "", "back to the draft");
+        // A multi-line draft moves the cursor first.
+        type_text(&mut editor, "a\nb");
+        assert_eq!(editor.cursor(), (1, 1));
+        editor.handle(Key::Up);
+        assert_eq!(editor.cursor(), (0, 1));
+        assert_eq!(editor.text(), "a\nb");
+
+        let mut editor = Editor::default();
+        type_text(&mut editor, "old");
+        editor.handle(Key::Enter);
+        editor.handle(Key::HistoryPrev);
+        type_text(&mut editor, "!");
+        assert_eq!(editor.text(), "old!");
+        editor.handle(Key::HistoryNext);
+        assert_eq!(editor.text(), "old!", "editing stopped the browsing");
+    }
+
+    #[test]
+    fn visual_rows_wrap_and_the_window_follows_the_cursor() {
+        let mut editor = Editor::default();
+        editor.set_width(12); // PROMPT_WIDTH (2) + 10 text columns
+        type_text(&mut editor, "abcdefghijklmnopqrstuvwxyz");
+        let rows = editor.visual_rows();
+        assert_eq!(rows.len(), 3);
+        assert_eq!((rows[0].start, rows[0].end, rows[0].first), (0, 10, true));
+        assert_eq!((rows[1].start, rows[1].end, rows[1].first), (10, 20, false));
+        assert_eq!((rows[2].start, rows[2].end, rows[2].first), (20, 26, false));
+        let joined: String = rows
+            .iter()
+            .map(|r| editor.lines()[r.logical][r.start..r.end].to_string())
+            .collect();
+        assert_eq!(joined, "abcdefghijklmnopqrstuvwxyz");
+
+        assert_eq!(editor.cursor_display(), (2, 8));
+        assert_eq!(editor.display_window(2), (1, 2));
+        editor.handle(Key::Home);
+        assert_eq!(editor.cursor_display(), (2, 2));
+        editor.handle(Key::Home);
+        assert_eq!(editor.cursor_display(), (0, 2));
+        // Up keeps the visual column, not the logical index.
+        type_text(&mut editor, "");
+        keys(&mut editor, 26, Key::Right);
+        editor.handle(Key::Up);
+        assert_eq!(editor.cursor(), (0, 16));
+        assert_eq!(editor.cursor_display(), (1, 8));
+        editor.handle(Key::Down);
+        assert_eq!(editor.cursor(), (0, 26));
+        editor.handle(Key::Left);
+        editor.handle(Key::Up);
+        assert_eq!(editor.cursor(), (0, 15));
+        assert_eq!(editor.cursor_display(), (1, 7));
+
+        let mut editor = Editor::default();
+        editor.set_width(12);
+        type_text(&mut editor, "abcdefghijklmnopqrst\nsecond");
+        assert_eq!(editor.cursor(), (1, 6));
+        editor.handle(Key::Up);
+        assert_eq!(editor.row, 0);
+        assert_eq!(editor.cursor_display().0, 1);
+
+        let mut editor = Editor::default();
+        editor.set_width(12);
+        type_text(&mut editor, "日本abcde");
+        assert_eq!(editor.visual_rows().len(), 1);
+        type_text(&mut editor, "fg");
+        let rows = editor.visual_rows();
+        assert_eq!((rows[0].start, rows[0].end), (0, 8));
+        assert_eq!((rows[1].start, rows[1].end), (8, 9));
+
+        let mut editor = Editor::default();
+        for index in 0..10 {
+            if index > 0 {
+                editor.handle(Key::Newline);
+            }
+            type_text(&mut editor, &index.to_string());
+        }
+        assert_eq!(editor.lines().len(), 10);
+        assert_eq!(editor.display_window(3), (7, 3));
+        editor.handle(Key::HistoryPrev);
+        assert_eq!(editor.display_window(3), (7, 3));
+        let short = typed("x");
+        assert_eq!(short.display_window(3), (0, 1));
+    }
+
+    #[test]
+    fn chips_are_atomic_and_survive_submission() {
+        let mut editor = typed("look");
+        editor.insert_chip(Chip::new(1, "attachments/1-a.png", "[image: x]"));
+        assert_eq!(editor.text(), "look [image 1] ");
+        assert_eq!(editor.cursor(), (0, 15));
+        editor.handle(Key::Char('!'));
+        assert_eq!(editor.text(), "look [image 1] !");
+        assert_eq!(editor.handle(Key::RemoveChip), Outcome::Ignored);
+        editor.handle(Key::Left);
+        assert!(
+            matches!(editor.handle(Key::RemoveChip), Outcome::ChipRemoved(chip) if chip.seq == 1)
+        );
+        assert_eq!(editor.text(), "look !");
+        assert!(editor.chips().is_empty());
+        assert_eq!(editor.handle(Key::RemoveChip), Outcome::Ignored);
+
+        let mut editor = Editor::default();
+        editor.insert_chip(Chip::new(1, "attachments/1-a.png", "[image: x]"));
+        editor.handle(Key::Char(' '));
+        editor.insert_chip(Chip::new(2, "attachments/2-b.png", "[image: y]"));
+        assert_eq!(editor.text(), "[image 1]  [image 2] ");
+        assert_eq!(editor.chips().len(), 2);
+        let chip = editor.remove_chip_at_cursor().expect("the cursor's chip");
+        assert_eq!(chip.seq, 2);
+        assert_eq!(editor.text(), "[image 1]  ");
+
+        let mut editor = Editor::default();
+        editor.insert_chip(Chip::new(3, "attachments/3-c.png", "[image: z]"));
+        editor.handle(Key::Home);
+        keys(&mut editor, 5, Key::Right);
+        let chip = editor
+            .remove_chip_at_cursor()
+            .expect("a chip at the cursor");
+        assert_eq!(chip.seq, 3);
+        assert_eq!(editor.text().trim(), "");
+
+        let mut editor = Editor::default();
+        editor.insert_chip(Chip::new(1, "attachments/1-a.png", "[image: x]"));
+        assert!(matches!(editor.handle(Key::Enter), Outcome::Submitted(_)));
+        assert!(editor.is_empty());
+        assert_eq!(editor.chips().len(), 1);
+        assert_eq!(editor.take_chips().len(), 1);
+        assert!(editor.chips().is_empty());
+    }
+}

@@ -21,7 +21,7 @@ in `kelir ls`, it is capped, it ends with you).
 - **`kelir run --child "<task>"`**: a worker with a fresh context. It blocks until the
   turn ends; its final text is stdout, exit 0 when it finished. `--model <name>`,
   `--provider <name>`, `--cwd <dir>` choose model and place.
-- **`kelir ask "<question>"`** and plain **`kelir run "<task>"`** start an unrelated
+- **`kelir run --ask "<question>"`** and plain **`kelir run "<task>"`** start an unrelated
   session (no tree, no caps): use them only when you do not want a child.
 
 Do the work yourself when it is small, needs your full context, or is one edit.
@@ -33,7 +33,7 @@ you do next) or slow (a long build you do not have to watch).
 ```sh
 kelir run --child "list every caller of parse_config and say which ignore errors"
 kelir run --child --background "run the full test suite, report failures"   # handle now
-kelir ls                      # the tree: state, cost, cache hits, task
+kelir ls                      # the tree: state, cache hits, task
 kelir kill <session>          # stop one child and everything below it
 ```
 
@@ -53,8 +53,8 @@ the same file.
 
 A start can be refused with exit code 3 and a line naming the cap: depth (3 by default),
 live children per agent (10) and live descendants of the whole tree (16). Wait for one to
-finish or stop one with `kelir kill`. Each child spends tokens of its own and there is no
-spend cap: `kelir ls` shows cost per session and per tree.
+finish or stop one with `kelir kill`. Each child uses tokens of its own and there is no
+spend cap: `kelir ls` shows the cache-hit ratio per session and per tree.
 
 ## Reading results
 

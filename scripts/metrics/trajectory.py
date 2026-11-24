@@ -7,8 +7,8 @@
 
 Why: "fewer, bigger tool steps" is a claim about wall time, and the log already
 holds every number needed to test it — every model call (`step_started` to
-`assistant`), every tool call (`tool_started` to `tool_settled`), every token
-count (`usage`) and every command (`tool_started.input`). Metrics that are not
+`assistant`), every tool call (`call_started` to `call_settled`), every token
+count (`assistant.usage` / `step_usage`) and every command (`call_started.info.input`). Metrics that are not
 printed from this file are opinions (STEER-12).
 
 usage:
@@ -29,7 +29,7 @@ options:
 The metrics (one row per session, then a total):
 
   steps            model calls (`step_started` events; one request each)
-  tool_calls       tool calls issued (`tool_started` events)
+  tool_calls       tool calls issued (`call_started{kind:"tool"}` events)
   calls/step       tool calls per step: 1.0 is a single-call trajectory
   read_calls       calls that only read: every command in the call is one of
                    sed/grep/cat/ls/head/tail/rg/wc/find/Get-Content/... (or a
@@ -37,7 +37,7 @@ The metrics (one row per session, then a total):
                    once, and any non-read command in the call makes it not a read
                    call, which is the rule the prompt asks the model to follow.
   model_min        sum of (assistant.ts - step_started.ts): generation time
-  tool_min         union of (tool_started.ts -> tool_settled.ts), so calls that
+  tool_min         union of (call_started.ts -> call_settled.ts), so calls that
                    ran concurrently are not counted twice
   big_steps        steps with >= --big-tokens completion tokens
   big_cheap        of those, steps whose every tool call was a read call
@@ -434,12 +434,19 @@ class Session:
         for event in self.of_type("step_started"):
             steps.setdefault(event.get("step"), parse_ts(event.get("ts")))
         assistants = self.of_type("assistant")
-        # A `usage` with a `kind` is a compaction's own request, not a step.
+        # Usage rides on `assistant`; a `step_usage` is the usage of the
+        # preceding step's request (it has no `step` of its own in v1).
         usage = {
-            event.get("step"): event
-            for event in self.of_type("usage")
-            if not event.get("kind")
+            event.get("step"): event.get("usage")
+            for event in assistants
+            if isinstance(event.get("usage"), dict)
         }
+        current = None
+        for event in self.events:
+            if event.get("type") == "step_started":
+                current = event.get("step")
+            elif event.get("type") == "step_usage" and not event.get("kind"):
+                usage.setdefault(current, event)
 
         model_seconds = 0.0
         steps_with_response = set()
@@ -454,10 +461,12 @@ class Session:
 
         started_at = {}
         intervals = []
-        for event in self.of_type("tool_started"):
-            started_at[event.get("call_id")] = parse_ts(event.get("ts"))
-        for event in self.of_type("tool_settled"):
-            began = started_at.get(event.get("call_id"))
+        for event in self.of_type("call_started"):
+            if event.get("kind") == "tool":
+                started_at[event.get("id")] = parse_ts(event.get("ts"))
+        for event in self.of_type("call_settled"):
+            if event.get("kind") == "tool":
+                began = started_at.get(event.get("id"))
             ended = parse_ts(event.get("ts"))
             if began is not None and ended is not None:
                 intervals.append((began, ended))
@@ -465,9 +474,10 @@ class Session:
 
         calls = sum(len(event.get("tool_calls") or []) for event in assistants)
         commands = {}
-        for event in self.of_type("tool_started"):
-            if event.get("name") == "bash":
-                commands[event.get("call_id")] = (event.get("input") or {}).get(
+        for event in self.of_type("call_started"):
+            info = event.get("info") or {}
+            if event.get("kind") == "tool" and info.get("name") == "bash":
+                commands[event.get("id")] = (info.get("input") or {}).get(
                     "command", ""
                 )
         read_calls = sum(1 for command in commands.values() if is_read_call(command))

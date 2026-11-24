@@ -9,7 +9,8 @@
 #   --no-lock           do not take the machine-wide gate lock (you are already inside it)
 #   --jobs N            CARGO_BUILD_JOBS and nextest test threads (default 4; BUILD-INFRA rule 1)
 #   --out DIR           where the logs go (default: <scratch>/gate-<job>-<stamp>)
-#   --quick             fmt + clippy only (the loop you run before every commit)
+#   --quick             fmt + shape + clippy only (the loop you run before every commit)
+#   --shape-only        run just the shape stage (what CI calls)
 #   --load              also run the suite 3x in a row under artificial CPU load, no retries
 #                       (STEER-9 stress mode; KELIR_GATE_LOAD sets the busy loops, default 4)
 #
@@ -25,7 +26,7 @@
 #     doctests (the crate has none today; this keeps it that way).
 set -uo pipefail
 # No core dumps (BUILD-INFRA rule 6, docs/BUILD.md). The suite includes tests
-# that abort a `kelir` on purpose (the `KELIR_CRASH_AT` crash injection), and on
+# that abort a `kelir` on purpose (the `KELIR_TEST_CRASH_AT` crash injection), and on
 # a box whose core pattern writes to a store each abort left a ~290 KB core:
 # 2,660 files / 904 MB on 2026-11-20. The limit is set in the shell that starts
 # the test binaries — before fmt, so nothing this gate spawns can dump — and is
@@ -45,6 +46,7 @@ use_lock=1
 jobs="${KELIR_GATE_JOBS:-4}"
 out=""
 quick=0
+shape_only=0
 load=0
 extra=()
 while [ $# -gt 0 ]; do
@@ -70,9 +72,10 @@ while [ $# -gt 0 ]; do
     --jobs) jobs="${2:?--jobs needs a value}"; shift 2 ;;
     --out) out="${2:?--out needs a value}"; shift 2 ;;
     --quick) quick=1; shift ;;
+    --shape-only) shape_only=1; shift ;;
     --load) load=1; shift ;;
     --) shift; extra+=("$@"); break ;;
-    -h | --help) sed -n '2,32p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,33p' "$0"; exit 0 ;;
     *) echo "gate: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -196,10 +199,20 @@ nextest_names_report() { # <logfile>
 }
 
 gate_body() {
+  if [ "$shape_only" = 1 ]; then
+    run_stage shape "$out/shape.log" bash "$root/scripts/shape.sh"
+    [ "$failed" = 0 ] && say "gate: shape ok" || say "gate: shape FAILED"
+    return
+  fi
   say "gate: $(git rev-parse --short HEAD) $(git log -1 --format=%s)"
   say "gate: $root  jobs=$jobs  log=$log"
 
   run_stage fmt "$out/fmt.log" cargo fmt --check
+  run_stage shape "$out/shape.log" bash "$root/scripts/shape.sh"
+  # Severity comes from `Cargo.toml [lints]`; passing `-- -D warnings` here
+  # would be applied after the table and undo its allow-list (#23).
+  # The workspace lint table is authoritative; do not re-enable the pedantic
+  # allow-list with a blanket `-D warnings` (lint-groups-priority).
   run_stage clippy "$out/clippy.log" cargo clippy --all-targets -- -D warnings
   if [ "$quick" = 1 ]; then
     [ "$failed" = 0 ] && say "gate: quick ok" || say "gate: quick FAILED"

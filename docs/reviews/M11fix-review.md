@@ -60,7 +60,7 @@ After the reviewer's test fix (`1d3c163`):
 - **Scrubbed env / 30 s timeout on this path:** `r5`'s hook writes `$KELIR_NOTIFY_EVENT` to its marker
   and the marker appears, proving the bg notify hook runs with the scrubbed environment's two
   `KELIR_NOTIFY_*` variables. `src/notify.rs:18,22-28,31-41,113-150` fixes the 30 s bound
-  (shortened in tests by `KELIR_NOTIFY_TIMEOUT_MS`), the allow-list env scrub and the whole-tree kill
+  (shortened in tests by `KELIR_TEST_NOTIFY_TIMEOUT_MS`), the allow-list env scrub and the whole-tree kill
   on hook exit; `src/notify.rs:291-311,334-388` gives per-dir/per-kind rate limiting.
 
 ## Gate (exact counts)

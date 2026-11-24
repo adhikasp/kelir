@@ -4,7 +4,7 @@
 `notifications/claude/channel`, capability negotiation, the durable spool,
 one named session per conversation, single-flight, bounded concurrency, rate
 limits, fallback replies and `/stop`.
-**Read this when:** you are configuring a channel bridge (`mcp.toml` with
+**Read this when:** you are configuring a channel bridge (`config.toml` with
 `channel = true`), debugging why a message was dropped or answered twice, or
 reading `spool/<server>.jsonl` after a crash (`src/channel.rs`, `src/mcp/`).
 
@@ -15,9 +15,9 @@ credentials and infrastructure. No token or path to one is stored in this repo.
 ## Protocol
 
 At session start the channel server is connected and `initialize` declares the
-capabilities in `[servers.<name>] declare_capabilities` (default
+capabilities in `[mcp.servers.<name>] declare_capabilities` (default
 `claude/channel`). Any capability whose name contains `permission` or
-`approval` (any case, any separator) is refused in `mcp.toml` and filtered at
+`approval` (any case, any separator) is refused in `config.toml` and filtered at
 `initialize`: kelir has no approvals. Inbound messages arrive as `notifications/claude/channel` with
 `message_id`, `conversation_id`, `sender`, `content`/`text`, optional
 `attachments` and `reply_to`. Unknown, malformed and oversized notifications
@@ -37,7 +37,7 @@ Every inbound message is appended to `spool/<server>.jsonl` and fsync'd before
 anything else happens to it. Records are append-only: `inbound`, `claimed`,
 `done`. A restart replays unfinished messages, deduped by message id; a turn
 whose user event was already logged is not re-run. The file is compacted when it
-passes `channel_spool_limit`, keeping unfinished messages and one `done` record
+passes `[channel] spool_limit`, keeping unfinished messages and one `done` record
 per id; a `done` id stays deduped after compaction and restart. A torn tail is repaired on open and kept beside the spool.
 
 ## Trust
@@ -52,5 +52,5 @@ M8 `prompt_submit` gates run on the envelope. Nothing from an MCP server's
 
 While any turn runs, the process reports OSC 7501 `working`, otherwise `idle`.
 `kelir channel --status-once` prints a JSON status line at startup; the live
-snapshot is in the state dir at `channel-status/status.json` (conversations,
+snapshot is in the state dir at `spool/status.json` (conversations,
 queue depth, active turns, spool backlog, reply/fallback counts).

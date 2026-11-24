@@ -27,16 +27,27 @@ variables above still win when set. Isolate a run with the two `*_DIR` variables
   events.jsonl            # append-only, fsync'd per batch, monotonic seq: the only source of truth
   events.jsonl.torn       # the fragment of a torn last line, kept when it was cut off
   sock                    # the session socket (a pipe name on Windows)
-  commands/<call-id>/out  # a tool call's whole output, from the first byte
+  token                   # 64-hex per-session socket token, owner-only; read by kelir ctl
+  calls/<call-id>/out     # a tool call's whole output, from the first byte
+  calls/mcp_<ulid>/        # one `kelir mcp` call: `out` (its text) and any decoded image/blob files
+  calls/<bg-id>/<bg-id>.status  # a session job: one dir per job, JSON written atomically (tmp + rename)
+  calls/<bg-id>/<bg-id>.out     # that job's output
   gates/g<n>.sh|.bat|.ps1 # the command text of gate number n, written for the shell (`gates`)
-  commands/mcp_<ulid>/    # a `kelir mcp` call: `out` (its text) and any decoded image/blob files
   blobs/<seq>-<field>     # a payload over 10 KB, referenced from its event
   attachments/<n>-<name>  # an image `kelir view` queued
-  bg/<bg-id>.status       # a job's state, written by its shim: survives kelir exiting
-  bg/<bg-id>.out          # a job's output
   owner                   # {"pid","start"} of the process that owns the session (who holds a name)
+  transcript.txt          # written on demand by Ctrl-Shift-Y in the TUI: the whole owned transcript
   host.err                # a child session only: its progress lines and errors (its stdout is its answer)
 ```
+
+`token` is 32 random bytes as 64 lowercase hex characters, written with owner-only permissions
+(`0600` on Unix, a protected DACL on Windows) and removed when the session ends. Every socket
+request must carry it; `kelir ctl` reads the file itself and a tool child inherits it as
+`KELIR_TOKEN`. A `calls/<bg-id>/<bg-id>.status` record is plain JSON (id, state, start/finish times, command,
+output path and, when settled, exit code); there are no signature, capability or sequence fields.
+The shim writes it to a temp file and renames it into place so a reader never sees a partial
+record, and keeps the final settled record in `calls/<bg-id>/<bg-id>.final` so a later `running` record cannot
+un-settle the job.
 
 Session ids are ULIDs, so the directory names sort into creation order and
 `ctl latest` can pick the newest; `kelir ls` shows them as a tree (a child's
@@ -50,17 +61,18 @@ Session ids are ULIDs, so the directory names sort into creation order and
 <state>/
   sessions/<id>/…         # above
   names/<name>            # a named session: {"session","created","updated"} (owner-only dir)
-  spool/<server>.jsonl    # channel mode's fsync'd, append-only inbound queue (src/channel.rs)
-  channel-status/status.json # live channel driver status snapshot
-  jobs/<job>/             # lock, STATUS.json, STATUS.md, runs.jsonl, notes/ (`docs/reference/jobs.md`)
+  spool/<server>.jsonl     # channel mode's fsync'd, append-only inbound queue (src/channel.rs)
+  spool/status.json       # live channel driver status snapshot, beside its spool
   models-<endpoint>.json  # one endpoint's model list, cached for a day, written temp-then-rename
   locks/<provider>-<slot> # the concurrency governor's advisory locks
-  bg/<bg-id>.*            # jobs started outside a session (kelir bg run from a plain shell)
-  mcp/<ulid>/             # decoded images/blobs of a one-shot `kelir mcp` call (outside a session)
+  calls/<bg-id>/<bg-id>.* # jobs started outside a session (kelir bg run from a plain shell)
+  calls/mcp_<ulid>/       # one-shot `kelir mcp` call's decoded files outside a session
 ```
 
 `locks/` holds OS file locks, not pid files: a kelir that crashes leaks nothing
-because the kernel releases the lock. `models-<endpoint>.json` is named after the
+because the kernel releases the lock. Each `bg/<id>/<id>.status` is one JSON
+object (`src/bg.rs:Status`): `id`, `kind`, `state`, `cmd`, `out` and the pids,
+written temp-then-rename. `models-<endpoint>.json` is named after the
 *endpoint* (provider name plus a hash of the normalised base URL), so a proxy or
 a second gateway sharing a state dir never inherits another server's numbers.
 
@@ -74,8 +86,8 @@ kelir creates.
 2. Otherwise `<config>/config.toml`, then the nearest `.kelir/config.toml`
    walking up from the cwd (the project's, merged per key over the machine's).
 
-`mcp.toml` follows the same two layers, in its own file: `<config>/mcp.toml`
-(or `KELIR_MCP_CONFIG`), then the nearest `.kelir/mcp.toml`, merged per server
+`config.toml` follows the same two layers, in its own file: `<config>/config.toml`
+(or `KELIR_CONFIG`), then the nearest `.kelir/config.toml`, merged per server
 name (`docs/reference/mcp.md`).
 
 ## The pieces, and the file that owns each
@@ -84,24 +96,23 @@ name (`docs/reference/mcp.md`).
 |---|---|---|
 | `events.jsonl` | `src/event.rs` | the log (`docs/reference/events.md`) |
 | `blobs/` | `src/event.rs` | a payload too big to be inline |
-| `commands/<call-id>/out` | `src/tools/bash.rs`, `src/spill.rs` | a tool call's whole output |
-| `commands/mcp_<ulid>/` | `src/mcp/broker.rs`, `src/mcp/mod.rs` | a `kelir mcp` call's text and decoded blobs |
+| `calls/<call-id>/out` | `src/tools/bash.rs`, `src/spill.rs` | a tool call's whole output |
+| `calls/mcp_<ulid>/` | `src/mcp/broker.rs`, `src/mcp/mod.rs` | a `kelir mcp` call's text and decoded blobs |
 | `gates/` | `src/gates.rs` | the script each gate's command string is run from |
-| `bg/` | `src/bg.rs` | background jobs (they outlive the session on purpose) |
+| `calls/<id>/` | `src/bg.rs`, `src/tools/bash.rs` | one session job: status, output, markers (they outlive the session on purpose) |
 | `host.err` | `src/child.rs` | a child session's stderr (written by its parent's spawn) |
 | `attachments/` | `src/attachments.rs` | images `kelir view` queued |
 | `sock` | `src/ipc.rs` | verbs in, status out |
 | `models-*.json` | `src/models.rs` | the provider's model metadata |
 | `locks/` | `src/governor.rs` | at most N requests in flight per provider |
 | `names/` | `src/names.rs` | named sessions; the session `owner` file |
-| `spool/` | `src/channel.rs` | channel mode's durable inbound queue, one file per server |
-| `channel-status/` | `src/channel.rs` | the live `kelir channel` status snapshot |
-| `jobs/<job>/` | `src/jobrun.rs`, `src/jobs.rs`, `src/joblock.rs` | the job lock, STATUS, run history, notes |
+| `spool/` | `src/channel.rs` | channel mode's inbound queue and the live `kelir channel` status snapshot (`spool/status.json`) |
+| `names/<name>.*` | `src/namedrun.rs`, `src/names.rs` | name binding, single-flight lock, STATUS |
 
 ## Cleaning up, safely
 
 A finished session is a directory; delete it when you no longer need its log.
 Do not delete a session's directory while a `kelir` owns it: the socket, the log
-and a job's status files are all live. `kelir resume <id>` is how a stopped
+and a job's status files are all live. `kelir run --resume <id>` is how a stopped
 session is picked up, and it is also what folds in a job that settled while
-nothing was running — a job's `bg/<id>.status` is the only record until then.
+nothing was running — a job's `calls/<id>/<id>.status` is the only record until then.

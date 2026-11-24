@@ -1,7 +1,7 @@
 # BUILD-INFRA: the Linux gate must not leak core dumps
 
 Observed 2026-11-20 on the Linux gate machine: the system core-dump store grew to ~900 MB / 2,660 files, ~290 KB each, from
-`.../target/debug/kelir` SIGABRT: the deliberate `KELIR_CRASH_AT` crash-injection tests (M3) that the gate runs abort the process on
+`.../target/debug/kelir` SIGABRT: the deliberate `KELIR_TEST_CRASH_AT` crash-injection tests (M3) that the gate runs abort the process on
 purpose. A core file from an intentional abort is pure waste.
 
 ## Build

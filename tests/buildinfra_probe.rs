@@ -4,6 +4,8 @@
 //! `bash scripts/gate.sh -- --run-ignored only -E 'binary(buildinfra_probe)'`
 //! to see how the gate reports a retried test, a failing test and a leaked child.
 
+// Test crates target behaviour, not pedantic style (#23).
+#![allow(clippy::pedantic, clippy::nursery)]
 fn attempt() -> u32 {
     std::env::var("NEXTEST_ATTEMPT")
         .ok()

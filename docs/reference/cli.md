@@ -1,16 +1,17 @@
 # CLI (subcommands and flags)
 
 **Summary:** `kelir` with no subcommand is the interactive session; `run`,
-`ask`, `resume`, `ctl`, `view`, `bg`, `doctor` and `docs` are the others. The
+`ctl`, `view`, `bg`, `ls`, `doctor` and `docs` are the others. The
 agent reaches the CLIs below through `bash`, so none of them costs tool-schema
 text.
 **Read this when:** scripting kelir, or adding a subcommand (`src/cli.rs`,
 `src/main.rs`).
 
 Every command takes clap's own `--help`, which is the same table one screen
-away; the block below is generated from clap so a flag cannot exist in one and
-not the other. Exit codes: `0` success, `1` a refusal or a failed run, `2` a
-usage error (a bad flag, an unreadable config, an unknown provider).
+away. The table below is written out by hand; the drift test (`cargo test --lib
+docs`) checks the names that matter. Exit codes: `0` success, `1` a refusal or
+a failed run, `2` a usage error (a bad flag, an unreadable config, an unknown
+provider).
 
 ## `kelir` (no subcommand), `kelir tui`
 
@@ -18,18 +19,13 @@ The interactive session. Flags: `--model`, `--provider`, `--cwd`, `--config`,
 `--max-steps`, `--resume <ID>`. Keys and rows: `docs/reference/tui.md`. Without
 a TTY it is a usage error (exit 2).
 
-## `kelir run [TASK] [--json] [--keep] [--resume ID]`
+## `kelir run [TASK] [--ask] [--json] [--keep] [--resume ID]`
 
-Run one task to completion. `--json` streams the event log as NDJSON on stdout;
-`--keep` stays alive between turns (accepting `say`/`later`/`end`).
-
-## `kelir ask <QUESTION>`
-
-One question, the final text on stdout.
-
-## `kelir resume <ID> [TASK]`
-
-Continue a session from its event log; never re-runs a tool call.
+Run one task to completion. `--ask` prints only the final text; `--resume
+<ID>` continues a session from its log without re-running tool calls.
+`--json` streams the event
+log as NDJSON on stdout; `--keep` stays alive between turns (accepting
+`say`/`later`/`end`).
 
 ## `kelir ctl <SESSION> <VERB> [ARGS]`
 
@@ -68,7 +64,7 @@ The model does not have to look: that is the point of the pointer.
 ## `kelir bg run|ls|out|wait|cancel`
 
 Background jobs (`docs/reference/verbs.md` has the events). A job outlives the
-session on purpose: its shim writes `bg/<id>.status`, and the next `resume`
+session on purpose: its shim writes `calls/<id>/<id>.status`, and the next `run --resume`
 folds a job that settled meanwhile into the log.
 
 ## `kelir doctor [--json] [--provider <name>]`
@@ -77,27 +73,21 @@ Which key each provider would use, and where it comes from: the source, never
 the secret. Exit 0 when every provider that matters has a usable key, 1 when the
 session's own provider (or an expired credential) does not.
 
-## `kelir docs [TOPIC] [--list] [--find <words>] [--generate] [--check]`
+## `kelir docs [TOPIC] [--list] [--search <words>]`
 
 The reference, embedded in this binary with `include_str!`, so it works in a
-session with no checkout on disk. `--list` names the topics; a bare `kelir docs`
-is the index; `kelir docs <topic>` prints one file; `--find <words>` is a
-ranked search over them.
+session with no checkout on disk. `--list` names the topics and their
+`**Summary:**` lines; a bare `kelir docs` is the index; `kelir docs <topic>`
+prints one file; `--search <words>` prints matching lines as
+`topic:line: text`, best-matching topic first. `--skill <name>` prints a
+builtin skill in full. Exit codes: `0` a read, `1` an unknown topic or a search
+with no hit (the message suggests a topic).
 
-`--generate` rewrites the blocks between `<!-- generated:kind -->` markers from
-the code, and `--check` fails when one is stale: those two are for a person
-with a checkout (`docs/reference/` under the current directory, or the
-directory `KELIR_DOCS_ROOT` names) and are the only part of `docs` that touches
-a file. Exit codes: `0` a read or a clean `--check`, `1` an unknown topic or a
-search with no hit (the message suggests a topic), `2` `--generate` together
-with `--check`.
+The whole surface:
 
-The whole surface, generated:
-
-<!-- generated:cli -->
 ### `kelir run`
 
-Run a task to completion
+Run a task to completion; `--ask` prints the final text only
 
 | flag | takes | what it does |
 |---|---|---|
@@ -107,25 +97,17 @@ Run a task to completion
 | `--config` | `<CONFIG>` | Config file to use instead of the machine/project search |
 | `--max-steps` | `<N>` | Cap one turn at N steps, then pause it (overrides `max_steps`). There is no cap by default; `0` also means no cap |
 | `<TASK>` | `<TASK>` | The task. Read from stdin when omitted |
+| `--ask` | nothing | Ask one question and print only the final text |
 | `--json` | nothing | Stream the event log as NDJSON on stdout |
 | `--keep` | nothing | Stay alive after the turn ends, accepting `say`, `later` and `end` |
 | `--resume` | `<ID>` | Continue a session from its log instead of starting one |
 | `--child` | nothing | Start the task as a child of the session this tool call runs in (it needs `KELIR_SOCK`): the child's final text is this command's stdout |
 | `--background` | nothing | With `--child`: return a handle at once; the child's completion wakes the parent at its next boundary |
 | `--name` | `<NAME>` | Run in the named session: create it, or resume it and add the task as a new message (`a-z`, `0-9`, `.`, `_`, `-`; up to 64 characters) |
-
-### `kelir ask`
-
-Ask one question and print the final text
-
-| flag | takes | what it does |
-|---|---|---|
-| `--model` | `<MODEL>` | Model id for this run (overrides the config) |
-| `--provider` | `<PROVIDER>` | Provider name: `openrouter` or `opencode-go` (there are exactly two) |
-| `--cwd` | `<CWD>` | Working directory for the session (defaults to the current directory) |
-| `--config` | `<CONFIG>` | Config file to use instead of the machine/project search |
-| `--max-steps` | `<N>` | Cap one turn at N steps, then pause it (overrides `max_steps`). There is no cap by default; `0` also means no cap |
-| `<QUESTION>` | `<QUESTION>` | The question. Read from stdin when omitted |
+| `--single-flight` | nothing | Take the name's single-flight lock, write its STATUS, and skip with exit 75 when another run holds the lock. Needs `--name` |
+| `--timeout` | `<D>` | Wall-clock deadline for the run (`90`, `30m`, `2h`, `1d`, `1w`): stop the turn at the deadline and exit 124. Needs `--single-flight` |
+| `--task-file` | `<PATH>` | Read the task from a file instead of the command line |
+| `--fresh` | nothing | Start a fresh session and rebind the name, carrying its last summary or answer into the new one (scheduler decides when: a weekly cron line) |
 
 ### `kelir tui`
 
@@ -139,22 +121,6 @@ Start the interactive session (the default with no subcommand)
 | `--config` | `<CONFIG>` | Config file to use instead of the machine/project search |
 | `--max-steps` | `<N>` | Cap one turn at N steps, then pause it (overrides `max_steps`). There is no cap by default; `0` also means no cap |
 | `--resume` | `<ID>` | Continue a session from its log |
-
-### `kelir resume`
-
-Continue a session from its log (never re-runs a tool call)
-
-| flag | takes | what it does |
-|---|---|---|
-| `--model` | `<MODEL>` | Model id for this run (overrides the config) |
-| `--provider` | `<PROVIDER>` | Provider name: `openrouter` or `opencode-go` (there are exactly two) |
-| `--cwd` | `<CWD>` | Working directory for the session (defaults to the current directory) |
-| `--config` | `<CONFIG>` | Config file to use instead of the machine/project search |
-| `--max-steps` | `<N>` | Cap one turn at N steps, then pause it (overrides `max_steps`). There is no cap by default; `0` also means no cap |
-| `<ID>` | `<ID>` | Session id, or a unique prefix of one |
-| `<TASK>` | `<TASK>` | A message to add before the turn continues. Read from stdin with `-` |
-| `--json` | nothing | Stream the event log as NDJSON on stdout |
-| `--keep` | nothing | Stay alive after the turn ends |
 
 ### `kelir attach`
 
@@ -233,12 +199,33 @@ Ask a side question on a snapshot of this session (`brief "<question>"`)
 
 ### `kelir ls`
 
-List sessions as a tree: state, depth, model, cost, cache hits, task
+List sessions and children as a tree: state, depth, model, cache hits, task
 
 | flag | takes | what it does |
 |---|---|---|
 | `--json` | nothing | Print the tree as JSON |
 | `--all` | nothing | Every session on disk (the default: this session's tree, or the newest roots when run outside a session) |
+
+`kelir ls sessions`, `kelir ls rename <old> <new>` and `kelir ls forget <name>`
+are the named-session subcommands.
+
+### `kelir ls sessions`
+
+List named sessions: name, state, last activity, tokens
+
+| flag | takes | what it does |
+|---|---|---|
+| `--json` | nothing | Print JSON instead of a table |
+| `--named` | nothing | Only sessions that have a name |
+| `--all` | nothing | Every session, children included |
+
+### `kelir ls rename`
+
+Give a session's name to another name; arguments `<OLD> <NEW>`.
+
+### `kelir ls forget`
+
+Drop a name; the session and its log stay. Argument `<NAME>`.
 
 ### `kelir kill`
 
@@ -248,20 +235,6 @@ Stop a child (and everything below it): `kill <session>` or `kill --tree`
 |---|---|---|
 | `<SESSION>` | `<SESSION>` | The child (session id or a unique prefix) to stop, with everything below it |
 | `--tree` | nothing | Stop every descendant of this session (from a tool call), or of the session named |
-
-### `kelir job`
-
-Jobs for a scheduler to call: run, status, history
-
-| flag | takes | what it does |
-|---|---|---|
-
-### `kelir sessions`
-
-Named sessions: ls, rename, forget
-
-| flag | takes | what it does |
-|---|---|---|
 
 ### `kelir channel`
 
@@ -299,12 +272,9 @@ Read kelir's own reference (config, CLI, verbs, files, …)
 |---|---|---|
 | `<TOPIC>` | `<TOPIC>` | The topic: `config`, `cli`, `verbs`, `env`, `events`, `files`, … |
 | `--list` | nothing | List the topics and their one-line summaries |
-| `--find` | `<WORDS>` | Ranked search over every topic: which file mentions these words |
-| `--generate` | nothing | Rewrite the generated blocks (`cli`, `env`, `events`, `verbs`, `config`) from the code. Needs a checkout |
-| `--check` | nothing | Fail when a generated block is stale: CI and the drift test |
+| `--search` | `<WORDS>` | Case-insensitive search over all topics: `topic:line: text`, best topic first |
 | `--skill` | `<NAME>` | Print a builtin skill (`kelir`, `delegation`, `herdr`) in full: they are compiled in and have no file to read |
 
-<!-- /generated -->
 
 ## `kelir mcp …`
 
@@ -322,9 +292,11 @@ kelir mcp <server> call <tool> ...   (a tool named ls or call)
 
 Exit codes: 0 ok, 1 the tool reported `isError`, 2 usage, 3 server
 unavailable, 4 timeout (unknown outcome, never retried). The whole story —
-`mcp.toml`, typing of `k=v`, the broker, channel servers — is `kelir docs mcp`.
+`config.toml`, typing of `k=v`, the broker, channel servers — is `kelir docs mcp`.
 
 ## `kelir bg-shim`
 
 Internal (hidden): the detachable job shim. Not for humans, so it is not in the
-generated block above.
+table above. `--dir` is the job root (`calls/` or the global `bg/`); the job owns
+`<root>/<id>/`. `--session-dir` names the owning session for a session-less
+`bg run` job, so its command can still reach `kelir bg`.

@@ -349,14 +349,14 @@ in the kelir repo; no 'telegram' strings in src/docs beyond neutral examples):
 1. Generic channel behaviour: the final-text reply is a FALLBACK only when the model did not call
    the channel's reply tool this turn. The existing error/paused/timeout fallback stays.
 2. The instruction line telling the model how to reply must NOT be hardcoded. Make it a per-server
-   config in mcp.toml, e.g. `[servers.x] channel_instructions = "..."`, appended to the channel
+   config in config.toml, e.g. `[servers.x] channel_instructions = "..."`, appended to the channel
    envelope / system prompt. the maintainera supplies the concrete wording from the maintainer (Telegram bridge);
    the repo ships only neutral examples.
 3. Add an e2e test with the fake channel server proving exactly one reply when the model calls the
    reply tool, and the fallback reply when it does not. Drive the fake server deterministically.
 
 Repro setup (maintainer-side, the maintainer — NOT copied into the repo): pane tg-dm-490161027-312337
-(kelir channel), MCP config `~/.local/state/telegram-session/routes/dm-490161027-312337/kelir-mcp.toml`,
+(kelir channel), MCP config `~/.local/state/telegram-session/routes/dm-490161027-312337/kelir-config.toml`,
 adapter `scripts/the maintainer/telegram-session/kelir-tg-shim`. No secrets or personal paths in the repo.
 
 Queue order: after the current CI fix lands and public CI is green. Report to

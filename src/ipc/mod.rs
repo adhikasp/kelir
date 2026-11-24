@@ -1,0 +1,987 @@
+//! The session socket: newline-delimited JSON over a Unix socket (a named pipe on Windows),
+//! served by the session process.
+//! Request: `{"verb": "say", "args": {"text": "hi"}, "from": "ctl", "token": "…"}`.
+//! Answer: one line, `{"ok": true, …}` or `{"ok": false, "error": "…"}`.
+
+pub mod attach;
+pub mod ctl;
+pub mod doctor;
+pub mod observe;
+pub mod tail;
+
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+#[cfg(not(windows))]
+use interprocess::local_socket::GenericFilePath;
+#[cfg(windows)]
+use interprocess::local_socket::GenericNamespaced;
+use interprocess::local_socket::tokio::prelude::*;
+use interprocess::local_socket::tokio::{Listener as LocalListener, Stream as LocalStream};
+use interprocess::local_socket::{ConnectOptions, ListenerOptions, Name};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{mpsc, oneshot};
+
+/// The socket's file name on Unix; on Windows the pipe name carries the id.
+pub const SOCKET_FILE: &str = "sock";
+pub const LOCK_FILE: &str = "session.lock";
+/// A Unix socket path must fit in `sun_path` (108 bytes on Linux, 104 on the
+/// BSDs and macOS); this leaves the last byte for the terminator.
+#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
+const MAX_SOCKET_PATH: usize = 107;
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+const MAX_SOCKET_PATH: usize = 103;
+/// Where a session records the socket path it bound when that is not
+/// `<session dir>/sock` (see [`socket_path`]).
+#[cfg(unix)]
+pub const SOCKET_POINTER_FILE: &str = "sock.path";
+/// Named-pipe prefix on Windows.
+#[cfg(windows)]
+const PIPE_PREFIX: &str = "kelir-";
+/// How long a client waits for a connection or an answer.
+pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
+pub const MAX_LINE: usize = 64 * 1024;
+/// How long a connection may sit without sending its request.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Request {
+    pub verb: String,
+    #[serde(default)]
+    pub args: Value,
+    /// Who sent it: `ctl`, `tui`, `gate`…
+    #[serde(default = "default_from")]
+    pub from: String,
+    /// The session's token ([`crate::sys::trust::TOKEN_ENV`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+fn default_from() -> String {
+    "ctl".into()
+}
+
+impl Request {
+    pub fn new(verb: impl Into<String>, args: Value, from: impl Into<String>) -> Self {
+        Self {
+            verb: verb.into(),
+            args,
+            from: from.into(),
+            token: None,
+        }
+    }
+
+    /// The same request, carrying a token (what the client side does).
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
+    }
+}
+
+/// One answer line. Exactly one per request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Response {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verb: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// Where the verb will apply: `now`, `next_step`, `after_tools`, `turn_end`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applies: Option<String>,
+    /// The session's state when it answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Response {
+    pub fn ok(verb: &str, seq: u64, applies: &str, state: Value) -> Self {
+        Self {
+            ok: true,
+            verb: Some(verb.to_string()),
+            seq: Some(seq),
+            applies: Some(applies.to_string()),
+            state: Some(state),
+            error: None,
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            verb: None,
+            seq: None,
+            applies: None,
+            state: None,
+            error: Some(message.into()),
+        }
+    }
+
+    pub fn line(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            r#"{"ok":false,"error":"cannot serialise the response"}"#.to_string()
+        })
+    }
+}
+
+/// A request handed to the session loop, with the channel its answer travels
+/// back on.
+#[derive(Debug)]
+pub struct Incoming {
+    pub request: Request,
+    pub reply: oneshot::Sender<Response>,
+    /// Set when the session itself raised this wake-up (its own `bg/` watcher), which is not a request at
+    /// all: there is no `Request` to answer, so the action is carried here and the loop takes it directly.
+    pub action: Option<Action>,
+}
+
+#[derive(Debug)]
+pub enum Action {
+    /// A status file in this session's `bg/` started or settled.
+    Note(crate::features::bg::Status),
+}
+
+// The address: a path on Unix, a name on Windows.
+
+/// True when `path` fits in `sun_path`.
+#[cfg(unix)]
+fn fits(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    path.as_os_str().as_bytes().len() <= MAX_SOCKET_PATH
+}
+
+/// A short place for a socket whose session dir path does not fit: `$XDG_RUNTIME_DIR` (per- user, 0700)
+/// when it exists, else the temp dir.
+#[cfg(unix)]
+fn fallback_path(id: &str) -> PathBuf {
+    let base = crate::envs::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    base.join(format!("kelir-{id}.sock"))
+}
+
+#[cfg(unix)]
+fn socket_path(dir: &Path, id: &str) -> PathBuf {
+    if let Ok(recorded) = std::fs::read_to_string(dir.join(SOCKET_POINTER_FILE)) {
+        let recorded = PathBuf::from(recorded.trim());
+        if !recorded.as_os_str().is_empty() {
+            return recorded;
+        }
+    }
+    let canonical = dir.join(SOCKET_FILE);
+    if fits(&canonical) {
+        canonical
+    } else {
+        fallback_path(id)
+    }
+}
+
+/// Record the socket path when it is not the canonical one, so `kelir ctl` and
+/// every bash child holding `KELIR_SOCK` open the socket that was really bound.
+#[cfg(unix)]
+fn record_socket_path(dir: &Path, path: &Path) {
+    let pointer = dir.join(SOCKET_POINTER_FILE);
+    if path == dir.join(SOCKET_FILE) {
+        let _ = std::fs::remove_file(pointer);
+    } else {
+        let _ = std::fs::write(pointer, crate::util::path_string(path));
+    }
+}
+
+/// The address of a session's socket, for `KELIR_SOCK`, error messages and the
+/// client.
+#[cfg(unix)]
+pub fn value(dir: &Path, id: &str) -> String {
+    crate::util::path_string(&socket_path(dir, id))
+}
+#[cfg(windows)]
+pub fn value(_dir: &Path, id: &str) -> String {
+    format!(r"\\.\pipe\{PIPE_PREFIX}{id}")
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn value(dir: &Path, _id: &str) -> String {
+    crate::util::path_string(&dir.join(SOCKET_FILE))
+}
+
+fn name(dir: &Path, id: &str) -> Result<Name<'static>, String> {
+    #[cfg(unix)]
+    {
+        let path = socket_path(dir, id);
+        if !fits(&path) {
+            return Err(format!(
+                "the session socket path {} is {} bytes and a Unix socket takes at most \
+                 {MAX_SOCKET_PATH}; set KELIR_STATE_DIR to a shorter directory",
+                crate::util::path_string(&path),
+                path.as_os_str().len(),
+            ));
+        }
+        path.to_fs_name::<GenericFilePath>()
+            .map_err(|error| format!("cannot name the session socket: {error}"))
+    }
+    #[cfg(windows)]
+    {
+        let _ = dir;
+        format!("{PIPE_PREFIX}{id}")
+            .to_ns_name::<GenericNamespaced>()
+            .map_err(|error| format!("cannot name the session pipe: {error}"))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let path = dir.join(SOCKET_FILE);
+        path.to_fs_name::<GenericFilePath>()
+            .map_err(|error| format!("cannot name the session socket: {error}"))
+    }
+}
+
+pub struct SessionLock {
+    #[cfg(unix)]
+    _file: std::fs::File,
+}
+
+/// Take the session's write lock, or say who else has it.
+pub fn lock(dir: &Path) -> Result<SessionLock, String> {
+    #[cfg(unix)]
+    {
+        let path = dir.join(LOCK_FILE);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            // The lock file is empty; opening it must not truncate another
+            // process's lock while it holds one.
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| {
+                format!(
+                    "cannot open the lock file {}: {error}",
+                    crate::util::path_string(&path)
+                )
+            })?;
+        file.try_lock()
+            .map_err(|_| "another process is writing its log".to_string())?;
+        Ok(SessionLock { _file: file })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(SessionLock {})
+    }
+}
+
+/// Bind the listener. Done before `session_started` is recorded, so a client
+/// that sees the event can connect.
+pub fn bind(dir: &Path, id: &str) -> Result<LocalListener, String> {
+    #[cfg(unix)]
+    let path = socket_path(dir, id);
+    // Only the listener cleans up: a stale file from a session that died without cleaning up would make
+    // bind fail, and it cannot be a live listener, since the session dir is new.
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(&path);
+    let address = name(dir, id)?;
+    #[cfg(windows)]
+    let options = {
+        // An explicit descriptor, not the platform default: a protected DACL with one ACE for this process's
+        // user.
+        use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
+        let descriptor = crate::sys::perm::pipe_descriptor()
+            .map_err(|error| format!("cannot build the session pipe's DACL: {error}"))?;
+        ListenerOptions::new()
+            .name(address)
+            .security_descriptor(descriptor)
+    };
+    #[cfg(not(windows))]
+    let options = ListenerOptions::new().name(address);
+    let listener = options.create_tokio().map_err(|error| {
+        format!(
+            "cannot listen on the session socket {}: {error}",
+            value(dir, id)
+        )
+    })?;
+    // `say` is a prompt-injection channel into a fully autonomous agent, so the socket is the user's
+    // alone: 0600 on Unix, an owner-only pipe DACL on Windows.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        record_socket_path(dir, &path);
+    }
+    Ok(listener)
+}
+
+/// Accept connections forever. Every connection gets its own task; answers go back on each
+/// request's own channel, so two clients never block each other.
+pub fn serve(
+    listener: LocalListener,
+    trust: Arc<crate::sys::trust::Trust>,
+    tx: mpsc::UnboundedSender<Incoming>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok(stream) => {
+                    let tx = tx.clone();
+                    let trust = trust.clone();
+                    tokio::spawn(async move { connection(stream, trust, tx).await });
+                }
+                // The listener only fails for good reasons (the pipe name was taken, the runtime is going
+                // away); retry so one bad accept cannot stop the session from being reachable.
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    });
+}
+
+async fn connection(
+    stream: LocalStream,
+    trust: Arc<crate::sys::trust::Trust>,
+    tx: mpsc::UnboundedSender<Incoming>,
+) {
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match read_bounded(&mut lines, &mut line, IDLE_TIMEOUT).await {
+            Read::Line => {}
+            // The peer is gone, said nothing in time, or sent a line nobody would send: answer that once
+            // (when there is someone to answer) and close.
+            Read::Closed => return,
+            Read::Refused(message) => {
+                let mut out = Response::error(message).line();
+                out.push('\n');
+                let _ = reply_line(&mut write, &out).await;
+                return;
+            }
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut close = false;
+        let response = match serde_json::from_str::<Request>(trimmed) {
+            Ok(request) => match trust.accepts(&request) {
+                Ok(()) => {
+                    let (reply, answer) = oneshot::channel();
+                    if tx
+                        .send(Incoming {
+                            request,
+                            reply,
+                            action: None,
+                        })
+                        .is_err()
+                    {
+                        let mut out = Response::error("the session is ending").line();
+                        out.push('\n');
+                        let _ = reply_line(&mut write, &out).await;
+                        return;
+                    }
+                    // A verb that takes long (a foreground child) is answered when it is done; if the client goes away
+                    // first, dropping the receiver tells the session nobody is waiting (the call that started the child
+                    let mut answer = answer;
+                    let given = tokio::select! {
+                        result = &mut answer => Some(result),
+                        _ = peer_gone(&mut lines) => None,
+                    };
+                    match given {
+                        Some(Ok(response)) => response,
+                        Some(Err(_)) => Response::error(DROPPED_REPLY),
+                        None => return,
+                    }
+                }
+                // An unauthenticated caller gets one answer and no more: it
+                // is not a client of this session.
+                Err(error) => {
+                    close = true;
+                    Response::error(error)
+                }
+            },
+            Err(error) => Response::error(format!("bad request line: {error}")),
+        };
+        let mut out = response.line();
+        out.push('\n');
+        if !reply_line(&mut write, &out).await {
+            return;
+        }
+        if close {
+            return;
+        }
+    }
+}
+
+/// Resolves when the peer closes its end while we wait to answer. A peer that
+/// sends more (it should not) never resolves this: the answer still goes out.
+async fn peer_gone<R>(lines: &mut BufReader<R>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    match lines.fill_buf().await {
+        Ok(buffered) if !buffered.is_empty() => std::future::pending::<()>().await,
+        _ => {}
+    }
+}
+
+/// Write one answer line, bounded in time.
+async fn reply_line<W>(write: &mut W, out: &str) -> bool
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt as _;
+    let sent = tokio::time::timeout(IO_TIMEOUT, async {
+        write.write_all(out.as_bytes()).await?;
+        write.flush().await
+    })
+    .await;
+    matches!(sent, Ok(Ok(())))
+}
+
+enum Read {
+    /// A whole line is in the buffer.
+    Line,
+    /// The peer closed without a line (a client that just connects and leaves).
+    Closed,
+    /// A line the listener will not read: too long, or not sent in time. The
+    /// string is what the peer is told before the connection closes.
+    Refused(String),
+}
+
+/// Read one request line, bounded in **length** and in **time**: at most [`MAX_LINE`] bytes are pulled
+/// in (so a megabyte with no newline is never held) and at most `idle` passes before the peer is told
+async fn read_bounded<R>(lines: &mut BufReader<R>, line: &mut String, idle: Duration) -> Read
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt as _;
+    use tokio::io::AsyncReadExt as _;
+    // `take` limits the read half, so the limit is on bytes, not on lines.
+    let mut limited = lines.take(MAX_LINE as u64);
+    let read = match tokio::time::timeout(idle, limited.read_line(line)).await {
+        Ok(Ok(read)) => read,
+        // A read error is a peer that left: nothing to answer.
+        Ok(Err(_)) => return Read::Closed,
+        // Nothing in time: the peer is told once and the connection closes.
+        Err(_) => {
+            return Read::Refused(format!(
+                "no request line within {}s; closing",
+                idle.as_secs_f32().round()
+            ));
+        }
+    };
+    if read == 0 {
+        return Read::Closed;
+    }
+    // `take` stopped at the cap without a newline: the line is too long and its
+    // tail is still coming. One refusal and a close is the whole answer.
+    if read >= MAX_LINE && !line.ends_with('\n') {
+        return Read::Refused(format!(
+            "the request line is longer than {MAX_LINE} bytes; closing"
+        ));
+    }
+    Read::Line
+}
+
+/// Connect to a session's socket. Read-only as far as the filesystem goes: the
+/// listener owns the path, so a client never creates or removes it.
+pub async fn connect(dir: &Path, id: &str) -> Result<LocalStream, String> {
+    let address = name(dir, id)?;
+    let options = ConnectOptions::new().name(address);
+    let connect = options.connect_tokio();
+    match tokio::time::timeout(IO_TIMEOUT, connect).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("connecting timed out".to_string()),
+    }
+}
+
+/// One request/answer round trip, for `kelir ctl`.
+pub async fn request(dir: &Path, id: &str, request: &Request) -> Result<Response, String> {
+    connect_and_send(dir, id, request).await
+}
+
+/// The same round trip, with the session's token read from its own directory (`kelir ctl` from a
+/// human's terminal: it knows which session it sent to, so it reads that session's `<session
+pub async fn request_with_token_file(
+    dir: &Path,
+    id: &str,
+    request: &Request,
+) -> Result<Response, String> {
+    let sent = match &request.token {
+        Some(_) => request.clone(),
+        None => request
+            .clone()
+            .with_token(crate::sys::trust::read_token(dir)),
+    };
+    connect_and_send(dir, id, &sent).await
+}
+
+/// [`request_with_token_file`] with its own wait for the answer, for a verb
+/// that is slow by nature (`brief` waits for a model).
+pub async fn request_with_token_file_within(
+    dir: &Path,
+    id: &str,
+    request: &Request,
+    wait: Duration,
+) -> Result<Response, String> {
+    let sent = match &request.token {
+        Some(_) => request.clone(),
+        None => request
+            .clone()
+            .with_token(crate::sys::trust::read_token(dir)),
+    };
+    let stream = connect(dir, id).await?;
+    round_trip(stream, &sent, wait).await
+}
+
+/// The body of [`request`], for the wrappers that add a token first (and so
+/// cannot call it without shadowing their own `request` argument).
+async fn connect_and_send(dir: &Path, id: &str, request: &Request) -> Result<Response, String> {
+    let stream = connect(dir, id).await?;
+    round_trip(stream, request, IO_TIMEOUT).await
+}
+
+/// The same round trip to an address taken from `KELIR_SOCK`, so a process that only inherited the
+/// variable (a bash child, the `kelir bg` CLI) can talk to its session without knowing the session dir
+pub async fn request_value(address: &str, request: &Request) -> Result<Response, String> {
+    let sent = match &request.token {
+        Some(_) => request.clone(),
+        None => request
+            .clone()
+            .with_token(crate::sys::trust::token_from_env()),
+    };
+    request_value_within(address, &sent, IO_TIMEOUT)
+        .await
+        .map_err(|error| error.message().to_string())
+}
+
+/// What the listener answers when the session dropped a request's reply
+/// unanswered (it was ending): the request may have been acted on.
+pub const DROPPED_REPLY: &str = "the session did not answer";
+
+/// Why [`request_value_within`] failed, and whether the request may have
+/// reached the session.
+#[derive(Debug)]
+pub enum WithinError {
+    /// The connection was never made: nothing was sent.
+    NotConnected(String),
+    /// Connected; the request may have been delivered and run.
+    AfterConnect(String),
+}
+
+impl WithinError {
+    pub fn message(&self) -> &str {
+        match self {
+            WithinError::NotConnected(message) | WithinError::AfterConnect(message) => message,
+        }
+    }
+}
+
+/// [`request_value`] with its own wait for the answer, for a verb that is slow
+/// by nature (`kelir mcp` waits for a server's tool).
+pub async fn request_value_within(
+    address: &str,
+    request: &Request,
+    wait: Duration,
+) -> Result<Response, WithinError> {
+    let sent = match &request.token {
+        Some(_) => request.clone(),
+        None => request
+            .clone()
+            .with_token(crate::sys::trust::token_from_env()),
+    };
+    let stream = connect_value(address)
+        .await
+        .map_err(WithinError::NotConnected)?;
+    round_trip(stream, &sent, wait)
+        .await
+        .map_err(WithinError::AfterConnect)
+}
+
+async fn round_trip(
+    stream: LocalStream,
+    request: &Request,
+    wait: Duration,
+) -> Result<Response, String> {
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read);
+    let mut line = serde_json::to_string(request)
+        .map_err(|error| format!("cannot serialise the request: {error}"))?;
+    line.push('\n');
+    let answer = async {
+        write
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|error| format!("cannot write to the session socket: {error}"))?;
+        write
+            .flush()
+            .await
+            .map_err(|error| format!("cannot flush the session socket: {error}"))?;
+        let mut answer = String::new();
+        let read = lines
+            .read_line(&mut answer)
+            .await
+            .map_err(|error| format!("cannot read the answer: {error}"))?;
+        if read == 0 {
+            return Err("the session closed the connection without answering".to_string());
+        }
+        serde_json::from_str(answer.trim())
+            .map_err(|error| format!("the answer is not JSON: {error}"))
+    };
+    match tokio::time::timeout(wait, answer).await {
+        Ok(result) => result,
+        Err(_) => Err("the session did not answer in time".to_string()),
+    }
+}
+
+/// Connect to an address as exported in `KELIR_SOCK`: a Unix socket path or a
+/// Windows pipe name (`\\.\pipe\kelir-<id>`).
+pub async fn connect_value(address: &str) -> Result<LocalStream, String> {
+    let address = address.trim();
+    #[cfg(unix)]
+    let options = {
+        let name = Path::new(address)
+            .to_fs_name::<GenericFilePath>()
+            .map_err(|error| format!("cannot name the session socket: {error}"))?;
+        ConnectOptions::new().name(name)
+    };
+    #[cfg(windows)]
+    let options = {
+        let pipe = address.trim_start_matches(r"\\.\pipe\").to_string();
+        let name = pipe
+            .to_ns_name::<GenericNamespaced>()
+            .map_err(|error| format!("cannot name the session pipe: {error}"))?;
+        ConnectOptions::new().name(name)
+    };
+    #[cfg(not(any(unix, windows)))]
+    let options = {
+        let name = Path::new(address)
+            .to_fs_name::<GenericFilePath>()
+            .map_err(|error| format!("cannot name the session socket: {error}"))?;
+        ConnectOptions::new().name(name)
+    };
+    let connect = options.connect_tokio();
+    match tokio::time::timeout(IO_TIMEOUT, connect).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("connecting timed out".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kelir-ipc-{name}-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Both wire directions reject unknown fields: a typo must not be read as
+    /// a valid request or answer.
+    #[test]
+    fn the_address_is_a_path_on_unix_and_a_pipe_name_on_windows() {
+        let value = value(Path::new("state/sessions/ses_1"), "ses_1");
+        if cfg!(windows) {
+            assert_eq!(value, r"\\.\pipe\kelir-ses_1");
+        } else {
+            assert!(value.ends_with("sessions/ses_1/sock"), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_request_defaults_its_sender_and_answers_are_one_line() {
+        let request: Request = serde_json::from_str(r#"{"verb":"end"}"#).unwrap();
+        assert_eq!(request.from, "ctl");
+        assert_eq!(request.args, Value::Null);
+        let ok = Response::ok("say", 7, "now", json!({"step": 2}));
+        let line = ok.line();
+        assert!(!line.contains('\n'), "{line}");
+        let back: Response = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, ok);
+        let error = Response::error("unknown verb `x`");
+        assert!(!error.ok && !error.line().contains("verb\":"));
+    }
+
+    #[test]
+    fn a_wire_envelope_refuses_unknown_fields() {
+        assert!(serde_json::from_str::<Request>(r#"{"verb":"end","verbx":"end"}"#).is_err());
+        let mut value: serde_json::Value =
+            serde_json::from_str(&Response::error("no").line()).unwrap();
+        value["extraneous"] = json!(1);
+        assert!(serde_json::from_value::<Response>(value).is_err());
+    }
+
+    /// only one process can hold a session's log, and releasing the guard releases the lock.
+    /// Repeated, because a one-shot pass proves nothing.
+    #[cfg(unix)]
+    #[test]
+    fn only_one_holder_can_lock_a_session() {
+        let dir = temp_dir("lock");
+        for round in 0..5 {
+            // A previously reacquired guard may not release its flock on
+            // macOS until shortly after the drop; retry the initial lock too.
+            let mut first = None;
+            for _ in 0..50 {
+                match lock(&dir) {
+                    Ok(guard) => {
+                        first = Some(guard);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+            let first = first.unwrap_or_else(|| panic!("round {round}: cannot take the lock"));
+            let status = crate::sys::runner::std_command(&std::env::current_exe().unwrap())
+                .args(["--exact", "ipc::tests::lock_probe", "--nocapture"])
+                .env("KELIR_TEST_IPC_LOCK_PROBE", &dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(!status.success(), "round {round}: a second process got in");
+            drop(first);
+            // The probe has exited, but its flock may not be released by the
+            // time `status()` returns; retry briefly before failing.
+            let mut reacquired = None;
+            for _ in 0..50 {
+                match lock(&dir) {
+                    Ok(guard) => {
+                        reacquired = Some(guard);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+            assert!(
+                reacquired.is_some(),
+                "round {round}: the lock outlived its guard"
+            );
+            drop(reacquired);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Helper for `only_one_holder_can_lock_a_session`: succeed only if the
+    /// lock is free. A normal test run has no test hook and exits immediately.
+    #[cfg(unix)]
+    #[test]
+    fn lock_probe() {
+        let Some(dir) = crate::envs::var("KELIR_TEST_IPC_LOCK_PROBE") else {
+            return;
+        };
+        let lock = lock(std::path::Path::new(&dir)).expect("probe acquired the lock");
+        drop(lock);
+    }
+
+    /// The race the connect-then-bind check cannot win: two lockers start
+    /// together. Exactly one wins, twenty times over.
+    #[cfg(unix)]
+    #[test]
+    fn simultaneous_lockers_have_exactly_one_winner() {
+        use std::sync::{Arc, Barrier};
+        for round in 0..20 {
+            let dir = temp_dir("lock-race");
+            let start = Arc::new(Barrier::new(2));
+            let held = Arc::new(Barrier::new(2));
+            let mut winners = 0usize;
+            std::thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for _ in 0..2 {
+                    let dir = dir.clone();
+                    let start = start.clone();
+                    let held = held.clone();
+                    handles.push(scope.spawn(move || {
+                        start.wait();
+                        let guard = lock(&dir).ok();
+                        // The loser's attempt lands while the winner still
+                        // holds the lock: both reach `held` before either drops.
+                        held.wait();
+                        let won = guard.is_some();
+                        drop(guard);
+                        won
+                    }));
+                }
+                for handle in handles {
+                    if handle.join().unwrap() {
+                        winners += 1;
+                    }
+                }
+            });
+            assert_eq!(winners, 1, "round {round}: {winners} winners");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A peer is read for at most `MAX_LINE` bytes and `IDLE_TIMEOUT`: an unterminated megabyte is refused
+    /// at the cap instead of being held, and a connection that says nothing is closed rather than kept (
+    #[tokio::test]
+    async fn a_request_line_is_bounded_in_length_and_in_time() {
+        use tokio::io::AsyncWriteExt as _;
+        // A whole line is a line.
+        let (client, server) = tokio::io::duplex(MAX_LINE * 2);
+        let mut reader = BufReader::new(server);
+        let mut line = String::new();
+        let mut client = client;
+        client.write_all(b"{\"verb\":\"say\"}\n").await.unwrap();
+        assert!(matches!(
+            read_bounded(&mut reader, &mut line, Duration::from_secs(1)).await,
+            Read::Line
+        ));
+        assert_eq!(line.trim(), "{\"verb\":\"say\"}");
+
+        // Longer than the cap, never ended: refused, and the buffer stops at the
+        // cap (the rest is never read).
+        let (mut client, server) = tokio::io::duplex(MAX_LINE * 2);
+        let writer = tokio::spawn(async move {
+            let chunk = vec![b'x'; 4096];
+            for _ in 0..(MAX_LINE / 4096 + 2) {
+                if client.write_all(&chunk).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let mut reader = BufReader::new(server);
+        let mut line = String::new();
+        match read_bounded(&mut reader, &mut line, Duration::from_secs(5)).await {
+            Read::Refused(message) => assert!(message.contains("longer than"), "{message}"),
+            _ => panic!("an unterminated line past the cap was accepted"),
+        }
+        assert!(line.len() <= MAX_LINE, "the buffer grew to {}", line.len());
+        let _ = writer.await;
+
+        // A peer that connects and says nothing is not a client.
+        let (_client, server) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(server);
+        let mut line = String::new();
+        match read_bounded(&mut reader, &mut line, Duration::from_millis(50)).await {
+            Read::Refused(message) => assert!(message.contains("no request line"), "{message}"),
+            _ => panic!("a silent peer was held open"),
+        }
+
+        // A peer that leaves before its line is simply gone.
+        let (client, server) = tokio::io::duplex(64);
+        drop(client);
+        let mut reader = BufReader::new(server);
+        let mut line = String::new();
+        assert!(matches!(
+            read_bounded(&mut reader, &mut line, Duration::from_secs(1)).await,
+            Read::Closed
+        ));
+    }
+
+    /// Bind, answer one request, and return the answer.
+    #[cfg(unix)]
+    async fn round_trip(dir: &Path, id: &str) -> Response {
+        let trust = Arc::new(crate::sys::trust::Trust::create(dir.to_path_buf()).unwrap());
+        let token = trust.token().to_string();
+        let listener = bind(dir, id).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
+        serve(listener, trust, tx);
+        tokio::spawn(async move {
+            let incoming = rx.recv().await.unwrap();
+            assert_eq!(incoming.request.verb, "say");
+            incoming
+                .reply
+                .send(Response::ok("say", 3, "queued", json!({})))
+                .unwrap();
+        });
+        request_with_token_file(dir, id, &Request::new("say", json!({"text": "hi"}), "ctl"))
+            .await
+            .unwrap_or_else(|_| {
+                assert_eq!(
+                    crate::sys::trust::read_token(dir).as_deref(),
+                    Some(token.as_str())
+                );
+                panic!("round trip failed")
+            })
+    }
+
+    /// A state dir deeper than `sun_path` still gets a working socket: the
+    /// session binds a short recorded path, and the client reads the record.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_too_long_session_dir_binds_a_short_recorded_socket() {
+        let parent = temp_dir("long");
+        let id = "ses_ipc_long";
+        let dir = parent.join("d".repeat(MAX_SOCKET_PATH));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!fits(&dir.join(SOCKET_FILE)), "the dir is not long enough");
+        if !fits(&fallback_path(id)) {
+            let _ = std::fs::remove_dir_all(&parent);
+            return;
+        }
+
+        let response = round_trip(&dir, id).await;
+        assert!(response.ok);
+        let recorded = std::fs::read_to_string(dir.join(SOCKET_POINTER_FILE)).unwrap();
+        assert!(fits(Path::new(recorded.trim())), "{recorded}");
+        assert_eq!(value(&dir, id), recorded.trim(), "clients read the record");
+        let _ = std::fs::remove_file(recorded.trim());
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// The socket half of: a request with no token, or another session's, is answered and refused
+    /// at the listener — the session never sees it, so it cannot act on it or log it.
+    #[tokio::test]
+    async fn an_unauthenticated_request_never_reaches_the_session() {
+        let id = "ses_ipc_token";
+        let dir = temp_dir("token").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let trust = Arc::new(crate::sys::trust::Trust::create(dir.clone()).unwrap());
+        let listener = bind(&dir, id).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
+        serve(listener, trust, tx);
+        let seen = tokio::spawn(async move {
+            // Nothing should ever arrive; the test ends the task.
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .ok()
+                .flatten()
+                .map(|incoming| incoming.request.verb)
+        });
+
+        for request in [
+            Request::new("say", json!({"text": "hi"}), "ctl"),
+            Request::new("say", json!({"text": "hi"}), "ctl")
+                .with_token(Some("a-token-from-another-session".into())),
+            Request::new("bg", json!({}), "job"),
+        ] {
+            let answer = super::request(&dir, id, &request).await.unwrap();
+            assert!(!answer.ok, "{answer:?}");
+            let error = answer.error.unwrap_or_default();
+            assert!(error.contains("refused"), "{error}");
+            assert!(!error.contains("a-token-from-another-session"));
+        }
+        assert_eq!(seen.await.unwrap(), None, "the session saw the request");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// The Windows pipe name keeps the session prefix: a bare id would let a
+    /// client name another program's pipe with the same id.
+    #[cfg(windows)]
+    #[test]
+    fn a_pipe_address_keeps_the_kelir_prefix() {
+        let address = super::value(std::path::Path::new("state"), "ses_example");
+        assert_eq!(address, r"\\.\pipe\kelir-ses_example");
+    }
+
+    /// A malformed address is refused with a message that names the socket,
+    /// not a generic failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unnameable_socket_address_names_the_socket_in_the_error() {
+        let error = super::connect_value("abc\0def").await.unwrap_err();
+        assert!(error.contains("cannot name the session socket"), "{error}");
+    }
+}

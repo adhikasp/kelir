@@ -34,7 +34,7 @@ After:
 
 - [ ] `bash scripts/gate.sh` (and `--linux=<machine>` where applicable) is green; result
       recorded in `docs/PROGRESS.md`.
-- [ ] `kelir docs --generate` + `cargo test --lib docs` pass if a config key, CLI flag,
+- [ ] `cargo test --lib docs` passes if a config key, CLI flag,
       env var, verb, event or TUI key changed (`CONTRIBUTING.md`).
 - [ ] Live drive verdict from the reviewer recorded.
 

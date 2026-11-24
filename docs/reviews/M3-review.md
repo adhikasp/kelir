@@ -89,7 +89,7 @@ kelir and OpenRouter to read back the real requests.
   (`m3_kill.sh`, run `kill2`): PASS.** Kills and where the log stopped: K1 mid-tool
   (`tool_started` seq 11, `echo "step 2"` had already run), K2 right after a settle (last event
   `step_started` seq 24), K3 mid-stream (`step_started` seq 31, nothing committed), K4 between
-  `usage` and `tool_started` (documented `KELIR_CRASH_AT=usage` abort, because a poll cannot hit a
+  `usage` and `tool_started` (documented `KELIR_TEST_CRASH_AT=usage` abort, because a poll cannot hit a
   microsecond window; seq 35), K5 random (`tool_started` seq 46, `echo "step 5"` had run). Each
   resume appended `resumed`; three unknown settles (`unsettled` lists matched); no `turn_ended` or
   `session_ended` until the end; `step` kept counting (a killed step 5 resumed as step 6).

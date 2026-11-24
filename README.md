@@ -57,7 +57,7 @@ database and no Node.
 | **Where behaviour lives** | tools, modes and checks compiled into the harness | a 1 KB prompt, `AGENTS.md`, skills and gates you can edit |
 | **Tools in the prompt** | dozens, plus every MCP server's schema | three (`bash`, `edit`, `compact`); MCP is a CLI the model calls through `bash` |
 | **Steering** | type into the one window the agent owns | `say`, `stop`, `model`, `compact` from any terminal, script or agent |
-| **Crash or restart** | the chat survives; whether that last command ran is a guess | `kelir resume`: an unfinished call is reported to the model as unknown, **never re-run** |
+| **Crash or restart** | the chat survives; whether that last command ran is a guess | `kelir run --resume`: an unfinished call is reported to the model as unknown, **never re-run** |
 | **A 20-minute build** | killed by a tool timeout | promoted to a background job that outlives the session and wakes it when done |
 | **What did it see?** | a rendered transcript | `kelir observe` prints the exact next request; `events.jsonl` is the whole truth |
 | **Footprint** | a language runtime per session | one 9 MB binary, ~10 MB RSS idle |
@@ -85,7 +85,7 @@ corrupt the conversation.
 ```
 ~/.local/state/kelir/sessions/ses_01…/
   events.jsonl          append-only, fsync'd, the only source of truth
-  commands/<id>/out     every tool's full output, never truncated
+  calls/<id>/out        every tool's full output, never truncated
   bg/<id>.status        background jobs, which survive kelir exiting
 ```
 
@@ -106,7 +106,7 @@ both are logged. In one 3 h 35 m session where kelir implemented its own TUI,
 - A `bash` call still running after 10 minutes is **promoted** to a background job
   instead of killed. It keeps writing its output file even after kelir exits, and
   when it finishes the session is woken with the exit code and the last kilobyte of
-  output (or picks it up on `kelir resume`).
+  output (or picks it up on `kelir run --resume`).
 - `kelir bg run|ls|out|wait|cancel` lets the model do the same on purpose.
 - Sub-agents are plain processes: `kelir run --child "<task>"` (or `--background`),
   each with its own log and cache, capped in depth and count, and killed with their
@@ -159,8 +159,8 @@ variable or a `key_cmd` (your password manager's CLI, for example).
 ```sh
 kelir                                           # interactive TUI
 kelir run "make the flaky test deterministic"   # headless; add --json for NDJSON events
-kelir ask "what does src/retry.rs do?"          # one question, prints the answer
-kelir resume <session>                          # pick a session back up
+kelir run --ask "what does src/retry.rs do?"          # one question, prints the answer
+kelir run --resume <session>                          # pick a session back up
 kelir docs gates                                # the full reference ships in the binary
 ```
 

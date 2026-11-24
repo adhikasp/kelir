@@ -3,7 +3,7 @@
 #   flaky   : 429 (Retry-After 3), 429 (no header), 503, then ok -> the turn must finish, with waits
 #   stop    : a 60 s Retry-After wait is ended by `ctl stop` within 1 s -> outcome stopped
 #   now     : the same wait, but `ctl say --now` -> does the wait end at once?
-#   pause   : budget 4 s vs Retry-After 3 forever -> paused, exit 0; then `kelir resume` retries
+#   pause   : budget 4 s vs Retry-After 3 forever -> paused, exit 0; then `kelir run --resume` retries
 #   cut     : a stream cut before any tool call -> retried
 #   overlap : two real kelir vs OpenRouter, max_concurrent_requests=1 -> peak in flight must be 1
 #   control : the same without the knob -> peak is expected to reach 2
@@ -43,7 +43,7 @@ flaky)
   cat "$W/requests.jsonl"; types "$W"/state/sessions/*/events.jsonl ;;
 stop|now)
   start_flaky "429:60,ok"
-  printf 'retry_max_wait = 600\n' > "$W/cfg/config.toml"
+  printf '[retry]\nmax_wait = 600\n' > "$W/cfg/config.toml"
   "$BIN" run --keep --json --config "$W/cfg/config.toml" --model test/m "go" > "$W/out.ndjson" 2> "$W/err.txt" & K1=$!
   for _ in $(seq 1 100); do grep -q '"retry_in_ms"' "$W"/state/sessions/*/events.jsonl 2> /dev/null && break; sleep 0.1; done
   ID=$(sid); say "wait started for session $ID"
@@ -56,7 +56,7 @@ stop|now)
   "$BIN" ctl "$ID" end > /dev/null; wait $K1; say "process exit=$?" ;;
 pause)
   start_flaky "429:3,429:3,429:3,429:3,429:3,ok"
-  printf 'retry_max_wait = 4\n' > "$W/cfg/config.toml"
+  printf '[retry]\nmax_wait = 4\n' > "$W/cfg/config.toml"
   "$BIN" run --json --config "$W/cfg/config.toml" --model test/m "go" > "$W/out.ndjson" 2> "$W/err.txt"; say "run exit=$?"
   types "$W"/state/sessions/*/events.jsonl; cat "$W/err.txt"
   ID=$(sid); say "resume $ID"

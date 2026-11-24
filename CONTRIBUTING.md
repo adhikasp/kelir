@@ -18,6 +18,22 @@
   Never send console signals to a shared process group.
 - Spec first: `docs/SPEC.md` is authoritative. Write any deviation in
   `docs/DEVIATIONS.md` with a reason.
+- Organise by subject: `core/` owns the loop, `features/` plug into its
+  boundary trait. A new feature is a new `Feature` impl, never a new `Session`
+  field (`Session` has at most 15 fields). The core knows no feature by name.
+- Comments describe what code does and why a choice was made, not when it was
+  made: no milestone, review or retro tags in `src/`. History lives in git and
+  the docs.
+- One child-process runner (`src/sys/runner.rs`, plus the bg shim): call its
+  helpers instead of `Command::new` in a new module.
+- Production code per `src/` file is at most 800 lines before `#[cfg(test)]`;
+  split a longer subject into sibling modules. An exception needs a reason in
+  `scripts/shape-allow.txt`.
+- `#![feature(…)]` goes only in `src/lib.rs`, from issue #23's Adopt list.
+  `rust-toolchain.toml` is the only toolchain pin: no `rust-version` in
+  `Cargo.toml`, and CI installs from the file.
+- Tests are filed by feature under `tests/it/` (with shared helpers in
+  `tests/support/`), not by milestone.
 
 ## Worktrees, one writer per worktree
 
@@ -44,14 +60,16 @@ binary against a real model (reviewer, not CI).
 
 ```sh
 cargo test --lib <module>          # the fast loop
-bash scripts/gate.sh --quick       # fmt + clippy before a commit
+bash scripts/gate.sh --quick       # fmt + shape + clippy before a commit
 bash scripts/gate.sh               # the full gate on this machine
+bash scripts/gate.sh --shape-only  # just the shape rules (CI)
 bash scripts/gate.sh --linux=<machine>   # include the Linux half
 ```
 
 `gate.sh` takes the one machine-wide lock, caps jobs and test threads, and
-runs fmt, clippy `-D warnings`, the full nextest suite (with retries) and the
-doc tests. The machine name for the Linux half comes only from the flag or
+runs the shape stage, fmt, clippy `-D warnings`, the full nextest suite (with
+retries) and the doc tests. `bash scripts/shape.sh --self-test` seeds each
+shape violation in a scratch copy and checks that it is detected. The machine name for the Linux half comes only from the flag or
 `KELIR_LINUX`, never from a file in the repo. Do not run stages by hand in
 parallel with someone else's gate — the lock is what keeps workers from
 flaking each other. Core dumps are disabled because crash-injection tests
@@ -60,17 +78,18 @@ abort on purpose.
 ## Docs are part of done
 
 Any change to a config key, CLI flag, env var, verb, event, file location or
-TUI key must update `docs/reference/` in the same series of commits. New keys,
-verbs and events are rows in `src/docs/tables.rs`; new env vars are rows in
-`src/envs.rs`. Then run:
+TUI key must update `docs/reference/` in the same series of commits. The tables
+there are hand-maintained markdown: edit the row in the matching topic (`config.md`,
+`verbs.md`, `events.md`, `env.md`); a new env var also goes in `src/envs.rs`,
+which is the runtime accessor. Then run:
 
 ```sh
-kelir docs --generate
 cargo test --lib docs
 ```
 
-The drift test reads the code both ways and fails if anything is on one side
-only.
+The drift test reads the code and fails if a name exists there but is missing
+from the reference. `kelir docs --search <words>` finds a topic from inside a
+session with no checkout.
 
 ## Scrub check
 

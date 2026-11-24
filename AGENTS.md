@@ -15,6 +15,34 @@ authoritative; if you must deviate, write the deviation and the reason in `docs/
 ## Rules for everyone
 
 - Work on `main` in small commits: `Mn: <what>`. Never force-push, never rewrite history.
+  This applies to the rewrite too: the temporary force-push exception for job
+  branches ended with the rewrite's final PR.
+
+## Rewrite shape rules (enforced by `scripts/shape.sh`)
+
+The rewrite is organised by subject: a small `core/` loop with features plugged
+into its boundaries. Keep it that way.
+
+- `struct Session` has at most 15 fields. A new capability is a new `Feature`
+  impl in `features/`, not a new field on `Session`. Features know the boundary
+  trait, not each other, and the core loop knows no feature by name.
+- Production code in a `src/` file stops at the first `#[cfg(test)]` and is at
+  most 800 lines. Put longer subjects in sibling modules under the same
+  directory; an exception needs a reason in `scripts/shape-allow.txt`.
+- Comments say **what** a piece of code does and why a choice was made, not
+  **when** it was written. No milestone, review or retro tags in `src/`: that
+  history belongs in git, `docs/PROGRESS.md` and `docs/DEVIATIONS.md`.
+- There is one child-process runner, `src/sys/runner.rs` (plus the bg shim).
+  New code calls its helpers; it does not call `Command::new` itself.
+- `#![feature(…)]` appears only in `src/lib.rs` and only for a feature on
+  issue #23's Adopt list. `rust-toolchain.toml` is the only toolchain pin; no
+  `rust-version` in `Cargo.toml`, and CI installs from that file.
+- Tests are filed by feature under `tests/it/`, not by milestone. A new
+  feature gets tests with its name; shared helpers live in `tests/support/`.
+
+`bash scripts/gate.sh` runs the shape stage alongside fmt, clippy and the full
+suite; CI runs the same stage. `bash scripts/shape.sh --self-test` proves that
+each rule fails on a seeded violation.
 - Public repo: no personal data, hostnames, usernames, API keys, or private paths in any file,
   test fixture or log. Keys come from the environment (`OPENROUTER_API_KEY`, `KELIR_GO_API_KEY`).
 - Footprint is a feature: binary <= 20 MB, idle RSS <= 30 MB, no SQLite, no daemon. Add a
@@ -46,13 +74,13 @@ authoritative; if you must deviate, write the deviation and the reason in `docs/
 
 `bash scripts/gate.sh` (add `--linux=<machine>` to include the Linux half; the machine comes from the
 flag or `KELIR_LINUX`, never from the repo) is the gate: it takes the one machine-wide
-gate lock, caps itself at 4 build jobs and 4 test threads, runs `cargo fmt --check`, `cargo clippy
+gate lock, caps itself at 4 build jobs and 4 test threads, runs `cargo fmt --check`, `scripts/shape.sh`, `cargo clippy
 --all-targets -- -D warnings`, the whole suite through `cargo nextest run --no-fail-fast --retries 2 -j 4`,
 `cargo test --doc`, and optionally `scripts/remote-check.sh`. One line per stage; `gate: PASS` or `gate:
 FAIL`; logs in `<scratch>/gate-<job>-<stamp>/`. A test that needed a retry is named in the summary, and
 `KELIR_GATE_STRICT_RETRIES=1` makes it fail the gate; the default keeps the gate green on the flakes STEER-9
 still owns, so a known flake is visible but does not block an unrelated landing. `cargo test --lib <module>`
-stays the fast loop for an edit; `scripts/gate.sh --quick` is fmt + clippy before a commit. For a full
+stays the fast loop for an edit; `scripts/gate.sh --quick` is fmt + shape + clippy before a commit. For a full
 integration run outside the gate use `cargo nextest run` (or `-j 8` on a 12-core box; the 4-thread
 shipped default is for when several workers share it) — never a serial `cargo test` over all targets.
 Numbers and rejected options: `docs/BUILD.md`.

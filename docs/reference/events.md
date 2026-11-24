@@ -9,41 +9,42 @@ One JSON object per line, `{"seq": n, "ts": "<RFC 3339>", "type": …, …}`. `s
 is monotonic from 1 and each batch is fsync'd. A torn last line is skipped on
 read and reported on resume; the fragment is kept in `events.jsonl.torn`.
 
+This is **format 1**. The first event carries `format: 1` and `session_started`;
+a reader refuses a log written in any other format with "written by a different
+kelir format; start a new session" rather than guessing at renamed fields. There
+is no compatibility reader: a log from a different version is not read.
+
+Format 1 has 16 event types. Calls of every kind share `call_started` /
+`call_settled`, distinguished by top-level `kind` (`tool`, `mcp`, `bg`, `child`);
+per-call details live in `info`. Usage from a provider request that has no
+assistant event (compaction, a gate-scoring call) is a `step_usage` event.
+Threshold warnings and notification outcomes are both `note`, distinguished by
+`note.kind`.
+
 **Context is always `fold(events.jsonl)`**, the same code path live and on
 resume: `src/fold.rs` renders the frozen system message, then `user`,
-`assistant`, `tool_settled.result` and `source` events in `seq` order, with
+`assistant`, `call_settled.result` and `source` events in `seq` order, with
 `compacted` replacing its range.
 
 ## Types
 
-<!-- generated:events -->
 | type | fields | written by |
 |---|---|---|
-| `session_started` | `id`, `parent?`, `depth`, `cwd`, `os`, `kelir_version`, `provider`, `model`, `system{text,hash}`, `sources[]`, `tools[]`, `reasoning_effort?`, `key_origin?` | the first event of a session: the frozen request prefix |
+| `session_started` | `format: 1`, `id`, `parent?`, `depth`, `cwd`, `os`, `kelir_version`, `provider`, `model`, `system{text,hash}`, `sources[]`, `tools[]`, `reasoning_effort?`, `key_origin?` | the first event of a session: the frozen request prefix |
 | `user` | `text`, `from`, `delivery`, `attachments[]` | a human message: the TUI, `kelir ctl say`, a job's wake-up, a channel |
 | `source` | `kind`, `name`, `text?`, `path?` | context that arrived after the start: a `hint`, a skill, an instruction or memory edit, an `attachment` or `attachment-note`, a channel message, and for named sessions and jobs a `clock` (the new date on a later day), a `job` (the one status line) or a `carry` (what a replaced session left) |
 | `step_started` | `step`, `provider`, `model`, `request_hash` | just before one provider request |
-| `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]`, `finish_reason?` | the model's answer to one step |
-| `usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `cost`, `cost_source?`, `allowance?`, `kind?` | the final stream chunk; `cost_source` says whether `cost` is the provider's own (`provider`), tokens times a known price (`table`) or not known (`unknown`, cost 0.0); `kind: "compact"` marks the summarising request and `kind: "hint"` the hint scorer's own call |
-| `warning` | `kind`, `message`, `value`, `threshold` | the session when the last prompt passes `warn_prompt_tokens` or the cost passes `warn_cost`, once per crossing; never rendered into the conversation |
+| `assistant` | `step`, `text`, `reasoning?`, `tool_calls[]`, `finish_reason?`, `usage?` | the model's answer to one step; `usage` is the final stream chunk's token counts (`prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `allowance?`, `kind?`) |
+| `step_usage` | `step`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`, `allowance?`, `kind?` | a provider request with no assistant event: `kind: "compact"` for summarising, `kind: "hint"` for the gate scorer's own call |
 | `verb` | `name`, `args`, `from`, `boundary`, `error?` | every verb received, applied or not (`boundary: "rejected"` for a refusal) |
-| `tool_started` | `call_id`, `name`, `input`, `pid?`, `dir?` | intent: written before the tool's process starts |
-| `tool_settled` | `call_id`, `outcome`, `exit_code?`, `bytes`, `lines`, `out_path`, `spilled`, `result` | the call's one commit; `result` is what the model sees |
 | `turn_ended` | `outcome`, `reason?`, `final_text` | the end of a turn; `reason` distinguishes `steps` from `provider` pausing |
-| `mcp_started` | `mcp_id`, `server`, `tool`, `args`, `parent_call_id?` | a `kelir mcp <server> <tool>` call reached the session broker with the session token (intent: written before the server is asked); `args` is the arguments' shape (keys kept, each string replaced by `<string, N bytes>`), never their values |
-| `mcp_settled` | `mcp_id`, `server`, `tool`, `outcome`, `exit_code`, `bytes`, `out_path`, `parent_call_id?` | the call's one commit; `outcome` is `ok`, `error`, `timeout`, `unavailable`, `disabled`, or `unknown` (a resume found no settlement), and the result is in the file `out_path` names |
-| `bg_started` | `bg_id`, `call_id?`, `cmd`, `pid?`, `out_path`, `pubkey?` | a promoted bash call or an explicit `kelir bg run` |
-| `bg_settled` | `bg_id`, `call_id?`, `cmd`, `exit_code?`, `state`, `out_path` | a job that settled while this session owned its log (`state`: `exited` or `cancelled`) |
+| `call_started` | `id`, `kind` (`tool`, `mcp`, `bg`, `child`), `info{name, input?, dir?, session?, parent?, depth?, background?, model?}` | intent for a tool, MCP, background or child call, written before it starts; absent `info` fields are not serialised. MCP `input` is the arguments' shape (keys kept, string values replaced by `<string, N bytes>`), never their values |
+| `call_settled` | `id`, `kind`, `outcome`, `exit_code?`, `bytes?`, `lines?`, `out_path?`, `spilled?`, `result?`, `tail?`, `state?` | the call's one commit; `outcome` includes `ok`, `error`, `stopped`, `skipped`, `denied`, `disabled`, `promoted`, `timeout`, `unavailable`, `unknown`, `done`, `paused`, `killed`, `lost`; `result` is what the model sees; MCP and bg calls record their whole output in the file `out_path` names |
 | `gate` | `gate`, `event`, `decision`, `reason`, `ms`, `rewritten?`, `error?` | every gate run, including the ones that failed open (`error` says why: crash, timeout, garbage) |
-| `notify` | `event`, `outcome`, `error?`, `hooks` | a notification hook ran (`outcome`: `ok`, `rate_limited`, `failed` or `no_hooks`); never part of the conversation the model reads |
-| `child_started` | `child_id`, `session`, `parent`, `depth`, `kind`, `task`, `background`, `model` | a child was admitted to the root's registry (`kelir run --child`, `kelir brief`); the root writes one for every descendant, a parent that is not the root writes its own children's too. `kind` is `child` or `brief` |
-| `child_settled` | `child_id`, `session`, `parent`, `depth`, `outcome`, `exit_code?`, `result` | a child ended (`outcome`: `done`, `paused`, `error`, `stopped`, `killed` or `lost`); `result` is its final text. A background child's settlement is followed by the `user` message (from `child`) that wakes the parent |
+| `note` | `kind`, `text` | a threshold crossing (`prompt_tokens`) or a notification hook outcome (`notify`, text names the hook event); never part of the conversation the model reads |
 | `compacted` | `through_seq`, `summary`, `pinned_seqs[]`, `by`, `tokens_before`, `tokens_after`, `cache_restart` | a compaction; the fold replaces everything up to `through_seq` except the pins |
-| `resumed` | `from_seq`, `unsettled[]` | a session reopened from its log |
-| `error` | `where`, `message`, `retryable`, `status?`, `attempt?`, `retry_in_ms?` | provider errors, broken sources, refused verbs; never a response body and never a key |
 | `session_ended` | `reason` | the end of the session |
 | `session_title` | `title` | the first human prompt, as a deterministic one-line label (no model call) |
-<!-- /generated -->
 
 ## Payloads over 10 KB are never inline
 
@@ -51,8 +52,8 @@ A string over `PAYLOAD_LIMIT` (10 KB) is written to `blobs/<seq>-<field>` in the
 session dir and the event holds
 `{"spilled": true, "path": …, "bytes": N, "preview": …}`. `fold` reads it back,
 so the request bytes are the same as if it had been inline. Tool *output* takes a
-different route: the whole output is in `commands/<call-id>/out` from the first
-byte, and `tool_settled.result` is the ≤10 KB head/tail the model sees
+different route: the whole output is in `calls/<call-id>/out` from the first
+byte, and a `call_settled` result is the ≤10 KB head/tail the model sees
 (`docs/reference/files.md`).
 
 ## The session id is also the cache key

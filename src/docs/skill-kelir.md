@@ -20,7 +20,7 @@ knob, a flag or an event type is what stands between you and the work.
 ```sh
 kelir docs --list                 # the topics, one line each
 kelir docs config                 # every config.toml key: type, default, override, effect
-kelir docs --find retry max wait  # ranked search: which file mentions these words
+kelir docs --search retry max wait # find which file mentions these words
 ```
 
 Topics: `README`, `config`, `cli`, `env`, `verbs`, `mcp`, `channels`, `gates`, `children`, `jobs`,
@@ -30,7 +30,7 @@ Topics: `README`, `config`, `cli`, `env`, `verbs`, `mcp`, `channels`, `gates`, `
 
 - **This session is a process plus a log.** `<state>/sessions/<id>/events.jsonl`
   is the only source of truth: every request is `fold(events.jsonl)`, live and on
-  resume. A file under `commands/<call-id>/out` holds a tool call's whole output.
+  resume. A file under `calls/<call-id>/out` holds a tool call's whole output.
 - **Everything is a verb.** `say`, `later`, `stop`, `model`, `tools`, `skills`,
   `compact`, `view`, `end`: `kelir ctl <session|latest> <verb> [args]`. They apply
   at named boundaries, never between a tool call and its result.
@@ -52,7 +52,7 @@ change goes through.
 
 - `src/config.rs`: `RawConfig`, `RawProvider`, `load` (every key).
 - `src/envs.rs`: `VARS` (every environment variable; the only place one is read).
-- `src/cli.rs`: the clap surface (`kelir docs --generate` writes the table).
+- `src/cli.rs`: the clap surface (`kelir docs cli` prints the table).
 - `src/verbs.rs`: `Verb`, `parse`, `Boundary`, `Scheduler`.
 - `src/sources.rs`: prompt, instruction files, skill discovery, the watcher.
 - `src/event.rs`, `src/fold.rs`: the log's shape and the request built from it.
@@ -61,5 +61,5 @@ change goes through.
 ## Changing kelir itself
 
 A change that adds a key, a flag, a verb, an event type or an environment
-variable is not done until the reference says so: `kelir docs --generate`, then
-`cargo test --lib docs` (the drift test reads the code both ways).
+variable is not done until the reference says so: add its row to
+`docs/reference/`, then run `cargo test --lib docs` (the drift test reads the code).

@@ -9,9 +9,33 @@ A verb arrives as `{"verb": "say", "args": {…}}` on the session socket or as
 `kelir ctl <session> <verb> [args]`. It is logged as a `verb` event first, then
 applied at **one named boundary** — never between a tool call and its result.
 
+## Wire envelopes
+
+The socket is newline-delimited JSON: one request line in, exactly one answer
+line out. Both envelopes are strict — an unknown field is refused, not ignored
+(`src/ipc.rs`; the unit test `a_wire_envelope_refuses_unknown_fields` guards it).
+
+| side | field | meaning |
+|---|---|---|
+| request | `verb` | the verb name (the request's `id`) |
+| request | `args` | verb arguments; `null` when absent |
+| request | `from` | caller: `ctl`, `tui`, `tool`, `job`, `gate` |
+| request | `token` | the session token, omitted by clients that do not need it |
+| answer | `ok` | whether the verb was accepted |
+| answer | `verb` | the verb this answers, omitted on an early error |
+| answer | `seq` | event sequence, omitted on an early error |
+| answer | `applies` | boundary: `now`, `next_step`, `after_tools`, `turn_end` |
+| answer | `state` | a read-only snapshot (for `status`) |
+| answer | `error` | the refusal reason, present when `ok` is false |
+
+The other two JSON envelopes are documented where their reader lives: the bg
+status file in `docs/reference/files.md` and `src/bg.rs:Status`, the gate's
+stdin/stdout in `docs/reference/gates.md` and `src/gates.rs:GateInput`. They
+use the same words for the same idea: `id` for an object's name, `kind` for
+its type, `ok`/`error` for an outcome.
+
 ## Verbs
 
-<!-- generated:verbs -->
 | verb | arguments | applies at | what it does |
 |---|---|---|---|
 | `say` | `<text>` or a JSON object with `text`; `--now` | `now` (with `--now`) or `queued` (the next boundary) | injects a user message (`user` event, `delivery` `now`/`next`); `--now` stops the running calls first |
@@ -22,12 +46,11 @@ applied at **one named boundary** — never between a tool call and its result.
 | `skills` | `--name <n> --path <file-or-dir>` or `--text <body>`; `--kind skill\|instruction` | `next_step` | adds or replaces one source; it arrives as a `source` message at the tail, never as a rewrite of the frozen system prompt |
 | `compact` | `[focus]` | `next_step` | summarises the earlier context at the next boundary and writes a `compacted` event; the task and the messages a human typed stay verbatim |
 | `view` | `<path>` | `now` | queues an image for the next message: a `source` event of kind `attachment` at the tail, so the cached prefix is untouched; an audio or video file is stored under the session and noted (kind `attachment-note`), not sent |
-| `bg` | one job status object, as `kelir bg run` sends it | `now` | a job reported itself or changed state; the session writes `bg_started`/`bg_settled` and, for a settled job, the wake-up `user` message |
+| `bg` | one job status object, as `kelir bg run` sends it | `now` | a job reported itself or changed state; the session writes `call_started`/`call_settled` with `kind: "bg"` and, for a settled job, the wake-up `user` message |
 | `cancel` | `<job id>` | `now` | kills one of this session's background jobs and records it `cancelled`; a job id                  the session did not start is refused |
 | `brief` | `<question>` or a JSON object with `text` | `now` | a side question as a child on a by-value snapshot of this session (the log up to                  the last settled tool batch, copied; `edit` and `compact` refused by result; the                  tool list and the provider cache key are the parent's, so the prefix hits its                  cache). The history is untouched; the answer is the reply's `result`. The tool                  call `kelir brief "<question>"` is the same thing |
-| `status` | none; `--json` prints the answer as one JSON line | `now` | read-only and never logged: answers at once, even mid-request or in a retry wait,                  with steps used/limit, turn, last prompt size and context %, cache hit ratio,                  tokens, cost and its source, last error, retry in progress, running calls,                  background jobs, children, and `mcp` (one `{name,state,tools,channel}` per configured MCP server; the state word only, never config or server output). `context.window` is `null` (with `context.window_source` `default`) until the model list answers or a window is configured, and `percent` stays `null` with it. A provider-reported cost of exactly 0 on a priced model is replaced by a table estimate (`cost.source` `table`). Needs the session token like every verb |
+| `status` | none; `--json` prints the answer as one JSON line | `now` | read-only and never logged: answers at once, even mid-request or in a retry wait,                  with steps used/limit, turn, last prompt size and context %, cache hit ratio,                  tokens, last error, retry in progress, running calls,                  background jobs, children, and `mcp` (one `{name,state,tools,channel}` per configured MCP server; the state word only, never config or server output). `context.window` is `null` (with `context.window_source` `default`) until the model list answers or a window is configured, and `percent` stays `null` with it. Needs the session token like every verb |
 | `end` | none | `now` | ends the session (`session_ended`); running calls are stopped first |
-<!-- /generated -->
 
 ## The boundaries
 
@@ -44,7 +67,7 @@ applied at **one named boundary** — never between a tool call and its result.
 `ctl` finds a session by id, by a unique prefix, or `latest`. It reads the
 session's socket address from `<state>/sessions/<id>/sock`; a session that is not
 running is an error with exit 1, not a queue: a message to a stopped session is a
-`kelir resume <id> "<message>"`.
+`kelir run --resume <id> "<message>"`.
 
 ## Who sends what
 
@@ -60,8 +83,9 @@ running is an error with exit 1, not a queue: a message to a stopped session is 
 
 1. `Verb` gets the variant and `parse` its name and arguments (validate at parse
    time: `kelir ctl` should refuse a bad invocation itself).
-2. `Verb::scope` and `Verb::applies_at` say where it lands.
-3. The `docs/tables.rs` `VERBS` row says what a reader needs.
+2. Add the new name to `Verb::NAMES`; `Verb::scope` and `Verb::applies_at` say
+   where it lands.
+3. Add its row to this file: arguments, boundary and effect in prose.
 4. The apply arm in `src/session.rs` (`apply_verb`) writes the event and says how
    it landed.
-5. `cargo test --lib docs` proves the table and the parser agree.
+5. `cargo test --lib docs` proves the reference mentions the parser's names.

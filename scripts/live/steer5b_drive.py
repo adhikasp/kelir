@@ -91,7 +91,7 @@ spawn([sys.executable, D + "/steer5b_server.py", str(PORT), LOG, SCRIPTS[SC]],
 time.sleep(0.8)
 ENV = dict(os.environ, KELIR_STATE_DIR=W + "/state", KELIR_BASE_URL=f"http://127.0.0.1:{PORT}/api/v1",
            OPENROUTER_API_KEY=FAKEKEY)
-open(W + "/cfg/config.toml", "w").write("retry_max_wait = 600\n")
+open(W + "/cfg/config.toml", "w").write("[retry]\nmax_wait = 600\n")
 out = open(W + "/out.ndjson", "wb")
 err = open(W + "/err.txt", "wb")
 k = spawn([BIN, "run", "--keep", "--json", "--config", W + "/cfg/config.toml", "--model", "test/m1", "go"],

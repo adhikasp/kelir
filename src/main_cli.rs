@@ -1,0 +1,702 @@
+//! Command line surface: `kelir run` (with `--ask`, `--resume`) and `kelir ctl`.
+
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "kelir",
+    version,
+    about = "a small, steerable coding-agent harness",
+    disable_help_subcommand = true
+)]
+pub struct Cli {
+    /// Flags for the default session (`kelir --model x`): no subcommand is the
+    /// interactive session (`kelir tui`).
+    #[command(flatten)]
+    pub tui: TuiArgs,
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Run a task to completion (`--ask` prints the final text only).
+    Run(RunArgs),
+    /// Start the interactive session (the default with no subcommand).
+    Tui(TuiArgs),
+    /// Watch a running or finished session (read-only by default).
+    Attach(AttachArgs),
+    /// Send a verb to a running session and print its answer.
+    Ctl(CtlArgs),
+    /// Queue an image for the model's next message (`view <path>`).
+    View(ViewArgs),
+    /// Background jobs: run, ls, out, wait, cancel.
+    Bg(BgArgs),
+    /// Print exactly what the model will see on its next request.
+    Observe(ObserveArgs),
+    /// MCP servers as a CLI: `ls`, `<server> ls`, `<server> <tool> [k=v …]`.
+    Mcp(McpArgs),
+    /// Ask a side question on a snapshot of this session (`brief "<question>"`).
+    Brief(BriefArgs),
+    /// List sessions and children as a tree; manage session names.
+    Ls(LsArgs),
+    /// Stop a child (and everything below it): `kill <session>` or `kill --tree`.
+    Kill(KillArgs),
+    /// Headless channel bridge: serve conversations from channel MCP servers.
+    Channel(ChannelArgs),
+    /// Show which key each provider would use (never the key itself).
+    Doctor(DoctorArgs),
+    /// Read kelir's own reference (config, CLI, verbs, files, …).
+    Docs(DocsArgs),
+    /// Internal: the background-job shim. Not for humans.
+    #[command(hide = true, name = "bg-shim")]
+    BgShim(BgShimArgs),
+    #[command(hide = true, name = "gate-guard")]
+    GateGuard(GateGuardArgs),
+    /// Internal: a child session's process (its parent hands it the task on
+    /// stdin). Not for humans.
+    #[command(hide = true, name = "child-host")]
+    ChildHost,
+}
+
+#[derive(Debug, Args, Clone, Default)]
+pub struct CommonArgs {
+    /// Model id for this run (overrides the config).
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Provider name: `openrouter` or `opencode-go` (there are exactly two).
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Working directory for the session (defaults to the current directory).
+    #[arg(long)]
+    pub cwd: Option<PathBuf>,
+    /// Config file to use instead of the machine/project search.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// Cap one turn at N steps, then pause it (overrides `max_steps`). There is
+    /// no cap by default; `0` also means no cap.
+    #[arg(long, value_name = "N")]
+    pub max_steps: Option<u32>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct RunArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// The task. Read from stdin when omitted.
+    #[arg(value_name = "TASK")]
+    pub task: Vec<String>,
+    /// Ask one question and print the final text.
+    #[arg(long)]
+    pub ask: bool,
+    /// Stream the event log as NDJSON on stdout.
+    #[arg(long)]
+    pub json: bool,
+    /// Stay alive after the turn ends, accepting `say`, `later` and `end`.
+    #[arg(long)]
+    pub keep: bool,
+    /// Continue a session from its log instead of starting one.
+    #[arg(long, value_name = "ID")]
+    pub resume: Option<String>,
+    /// Start the task as a child of the session this tool call runs in (it
+    /// needs `KELIR_SOCK`): the child's final text is this command's stdout.
+    #[arg(long)]
+    pub child: bool,
+    /// With `--child`: return a handle at once; the child's completion wakes
+    /// the parent at its next boundary.
+    #[arg(long, requires = "child")]
+    pub background: bool,
+    /// Run in the named session: create it, or resume it and add the task as a
+    /// new message (`a-z`, `0-9`, `.`, `_`, `-`; up to 64 characters).
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["resume", "child"])]
+    pub name: Option<String>,
+    /// Take the name's single-flight lock, write its STATUS, and skip with exit
+    /// 75 when another run holds the lock. Needs `--name`.
+    #[arg(long, requires = "name")]
+    pub single_flight: bool,
+    /// Wall-clock deadline for the run (`90`, `30m`, `2h`, `1d`, `1w`): stop the
+    /// turn at the deadline and exit 124. Needs `--single-flight`.
+    #[arg(long, value_name = "D", requires = "single_flight")]
+    pub timeout: Option<String>,
+    /// Read the task from a file instead of the command line.
+    #[arg(long, value_name = "PATH", conflicts_with = "task")]
+    pub task_file: Option<PathBuf>,
+    /// Start a fresh session and rebind the name, carrying its last summary or
+    /// answer into the new one (scheduler decides when: a weekly cron line).
+    #[arg(long, requires = "name")]
+    pub fresh: bool,
+}
+
+/// `kelir` with no subcommand, or `kelir tui`.
+#[derive(Debug, Args, Clone, Default)]
+pub struct TuiArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Continue a session from its log.
+    #[arg(long, value_name = "ID")]
+    pub resume: Option<String>,
+}
+
+impl TuiArgs {
+    /// Flags given before the subcommand (`kelir --model x tui`) fill in what
+    /// the subcommand did not set, so both spellings mean the same session.
+    pub fn with_fallback(self, outer: Self) -> Self {
+        Self {
+            common: CommonArgs {
+                model: self.common.model.or(outer.common.model),
+                provider: self.common.provider.or(outer.common.provider),
+                cwd: self.common.cwd.or(outer.common.cwd),
+                config: self.common.config.or(outer.common.config),
+                max_steps: self.common.max_steps.or(outer.common.max_steps),
+            },
+            resume: self.resume.or(outer.resume),
+        }
+    }
+}
+
+/// `kelir attach <session|name>`: a read-only viewer of a session's log.
+#[derive(Debug, Args, Clone)]
+pub struct AttachArgs {
+    /// Session id, a unique prefix, a name, or `latest`.
+    #[arg(value_name = "SESSION")]
+    pub session: String,
+    /// Keep reading as the session writes new events.
+    #[arg(long)]
+    pub follow: bool,
+    /// Replay only the last N events (0 = all).
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub since: usize,
+    /// Print raw NDJSON instead of the TUI's row model.
+    #[arg(long, conflicts_with = "plain")]
+    pub raw: bool,
+    /// Print unstyled text for pipes.
+    #[arg(long, conflicts_with = "raw")]
+    pub plain: bool,
+    /// Allow `say <text>` and `stop` from the viewer (sent with the session's token).
+    #[arg(long)]
+    pub steer: bool,
+    /// Config file to use instead of the machine/project search.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct CtlArgs {
+    /// Session id, a unique prefix, or `latest` (the newest session only; an
+    /// error if it is not running).
+    #[arg(value_name = "SESSION")]
+    pub session: String,
+    /// The verb: say, later, stop, model, tools, compact, skills, view, observe, cancel, status, brief, end.
+    #[arg(value_name = "VERB")]
+    pub verb: String,
+    /// Text for `say`/`later`/`stop`, or one JSON object with the verb's args.
+    #[arg(value_name = "ARGS")]
+    pub args: Vec<String>,
+    /// `say --now`: stop the running tool calls first.
+    #[arg(long)]
+    pub now: bool,
+    /// `stop --call <id>`: stop one running call; the turn continues.
+    #[arg(long, value_name = "CALL")]
+    pub call: Option<String>,
+    /// Why: goes into the stopped call's result.
+    #[arg(long, value_name = "REASON")]
+    pub reason: Option<String>,
+    /// `tools --disable <name>` (repeatable).
+    #[arg(long, value_name = "TOOL")]
+    pub disable: Vec<String>,
+    /// `tools --enable <name>` (repeatable).
+    #[arg(long, value_name = "TOOL")]
+    pub enable: Vec<String>,
+    /// `skills --path <file-or-dir>`: the file (or skill directory) to read.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<PathBuf>,
+    /// `skills --text <body>`: the source's text, inline.
+    #[arg(long, value_name = "TEXT")]
+    pub text: Option<String>,
+    /// `skills --name <name>`: the source's name (default: the path's).
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// `skills --kind <skill|instruction>` (default `skill`).
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+    /// `status --json`: print the answer as one JSON line instead of text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `kelir brief "<question>"`: a child on a by-value snapshot of this session.
+#[derive(Debug, Args, Clone)]
+pub struct BriefArgs {
+    /// The question. Read from stdin when omitted.
+    #[arg(value_name = "QUESTION")]
+    pub question: Vec<String>,
+}
+
+/// `kelir ls [sessions|rename|forget]`. One noun for nodes of the session tree:
+/// the default prints the tree; the three subcommands manage named sessions.
+#[derive(Debug, Args, Clone)]
+pub struct LsArgs {
+    #[command(subcommand)]
+    pub command: Option<LsCommand>,
+    /// Print the tree as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Every session on disk (the default: this session's tree, or the newest
+    /// roots when run outside a session).
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub enum LsCommand {
+    /// List named sessions: name, state, last activity, tokens.
+    Sessions(SessionsLsArgs),
+    /// Give a session's name to another name.
+    Rename(SessionsRenameArgs),
+    /// Drop a name (the session and its log stay).
+    Forget(SessionsForgetArgs),
+}
+
+/// `kelir kill`.
+#[derive(Debug, Args, Clone)]
+pub struct KillArgs {
+    /// The child (session id or a unique prefix) to stop, with everything below it.
+    #[arg(value_name = "SESSION")]
+    pub session: Option<String>,
+    /// Stop every descendant of the named session (with `--tree`), or of this
+    /// session when it is called from inside one.
+    #[arg(long)]
+    pub tree: bool,
+}
+
+/// `kelir channel …`: a headless channel bridge.
+#[derive(Debug, Args, Clone)]
+pub struct ChannelArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Serve only these channel servers (default: every `channel = true` server).
+    #[arg(long, value_name = "NAME")]
+    pub server: Vec<String>,
+    /// Stop after this many inbound messages have been answered (tests; default: forever).
+    #[arg(long, value_name = "N")]
+    pub max_messages: Option<u32>,
+    /// Dump one JSON status line at startup, then serve (for `ctl status` tests).
+    #[arg(long)]
+    pub status_once: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct SessionsLsArgs {
+    /// Print JSON instead of a table.
+    #[arg(long)]
+    pub json: bool,
+    /// Only sessions that have a name.
+    #[arg(long)]
+    pub named: bool,
+    /// Every session, children included (the default: the named ones and the
+    /// newest unnamed roots).
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct SessionsRenameArgs {
+    /// The current name.
+    #[arg(value_name = "OLD")]
+    pub old: String,
+    /// The new name (it must be free).
+    #[arg(value_name = "NEW")]
+    pub new: String,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct SessionsForgetArgs {
+    /// The name to drop.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+}
+
+/// `kelir view <path>`: make an image arrive in the model's next message.
+///
+/// The model reaches it through `bash`, like every other kelir CLI, so it costs
+/// no tool-schema text. It appends a `source` event (kind `attachment`) at the
+/// tail of the conversation, which renders as a user message holding one image
+/// part; every earlier message (and the provider's cached prefix) stays
+/// byte-identical.
+#[derive(Debug, Args, Clone)]
+pub struct ViewArgs {
+    /// The image: `attachments/1-x.png` (resolved against the session dir
+    /// first), or any path.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+}
+
+/// `kelir observe <session> [--raw]`: the next request, read from the log.
+#[derive(Debug, Args, Clone)]
+pub struct ObserveArgs {
+    /// Session id, a unique prefix, or `latest`.
+    #[arg(value_name = "SESSION")]
+    pub session: String,
+    /// Print only the exact JSON request body that would be sent.
+    #[arg(long)]
+    pub raw: bool,
+    /// Config file to use instead of the machine/project search.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+}
+
+/// `kelir docs [topic]`: the reference, embedded in this binary, so a session
+/// with no checkout on disk can still read how to operate kelir.
+#[derive(Debug, Args, Clone, Default)]
+#[command(after_help = "Exit 0 on a read, 1 for an unknown topic or no search hit.")]
+pub struct DocsArgs {
+    /// The topic: `config`, `cli`, `verbs`, `env`, `events`, `files`, …
+    #[arg(value_name = "TOPIC")]
+    pub topic: Option<String>,
+    /// List the topics and their one-line summaries.
+    #[arg(long)]
+    pub list: bool,
+    /// Case-insensitive search over all topics: `topic:line: text`.
+    #[arg(long, value_name = "WORDS")]
+    pub search: Option<String>,
+    /// Print a builtin skill (`kelir`, `delegation`, `herdr`) in full: they are compiled
+    /// in and have no file to read.
+    #[arg(long, value_name = "NAME")]
+    pub skill: Option<String>,
+}
+
+/// `kelir doctor`: what the two providers are wired to, and where each key
+/// comes from — the source, never the secret.
+#[derive(Debug, Args, Clone, Default)]
+#[command(after_help = "Exit 0 when every provider checked has a usable key, 1 otherwise.")]
+pub struct DoctorArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// One JSON object instead of the text report.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `kelir mcp …`: the words are parsed by `mcp::args` (after `<server> <tool>`
+/// the flags belong to the call), so clap only collects them.
+#[derive(Debug, Args, Clone)]
+#[command(
+    override_usage = "kelir mcp ls [--json]
+       kelir mcp <SERVER> ls [--detail name|desc|full]
+       kelir mcp <SERVER> <TOOL> [k=v ...] [--json '{...}'] [--schema] [--envelope]
+       kelir mcp <SERVER> call <TOOL> ...   (a tool named ls or call)",
+    after_help = "Exit codes: 0 ok, 1 the tool reported isError, 2 usage, 3 server unavailable, 4 timeout (unknown outcome, never retried)."
+)]
+pub struct McpArgs {
+    /// `ls`, `<server> ls`, or `<server> <tool>` and their flags.
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "WORDS"
+    )]
+    pub words: Vec<String>,
+}
+
+/// `kelir bg …` inside a bash call (or standalone): jobs live in the session's
+/// `calls/` when `KELIR_SESSION_DIR` is set, else in the state's global `calls/`.
+#[derive(Debug, Args, Clone)]
+pub struct BgArgs {
+    #[command(subcommand)]
+    pub command: BgCommand,
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub enum BgCommand {
+    /// Start a job and return at once: `<cmd…>` runs in the configured shell.
+    Run(BgRunArgs),
+    /// List the jobs of this session (or the state dir's).
+    Ls,
+    /// Print a job's output (`--follow` streams it until the job settles).
+    Out(BgOutArgs),
+    /// Wait for a job to settle.
+    Wait(BgWaitArgs),
+    /// Kill a job's whole process tree and record it as `cancelled`.
+    Cancel(BgCancelArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct BgRunArgs {
+    /// The command, run by the configured shell. One argument is a command line
+    /// as written, so shell syntax is allowed; several arguments are literal
+    /// words, quoted so their boundaries survive.
+    #[arg(
+        required = true,
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "COMMAND"
+    )]
+    pub command: Vec<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct BgOutArgs {
+    /// The job id (`bg_<ulid>`, or a promoted call's output dir name).
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// Keep printing as the job writes, until it settles.
+    #[arg(long)]
+    pub follow: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct BgWaitArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// Give up after this many seconds instead of waiting forever.
+    #[arg(long, value_name = "SECONDS")]
+    pub timeout: Option<u64>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct BgCancelArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+}
+
+/// `kelir gate-guard`: started by the session next to every gate run on Unix. It
+/// polls the session and, if the session dies first, kills the gate's tree.
+#[derive(Debug, Args, Clone)]
+pub struct GateGuardArgs {
+    /// The session's pid.
+    #[arg(long)]
+    pub parent: u32,
+    /// The gate shell's pid, which is also its process group.
+    #[arg(long)]
+    pub group: u32,
+    /// The run's `KELIR_GATE_RUN` token.
+    #[arg(long)]
+    pub token: String,
+    /// Give up after this many seconds.
+    #[arg(long, default_value_t = 60)]
+    pub ttl: u64,
+}
+
+/// `kelir bg-shim`: started by the session (for every bash call) and by
+/// `kelir bg run`. Everything it needs is in its arguments, so a shim is a
+/// self-contained, detachable process.
+#[derive(Debug, Args, Clone)]
+pub struct BgShimArgs {
+    /// The root (`calls/` or the global `bg/`); this job owns one directory below it.
+    #[arg(long, value_name = "DIR")]
+    pub dir: PathBuf,
+    /// The job id (also the status file's stem).
+    #[arg(long, value_name = "ID")]
+    pub id: String,
+    /// The file the command's stdout and stderr go to.
+    #[arg(long, value_name = "FILE")]
+    pub out: PathBuf,
+    /// The command, as one shell command line. Ignored when `cmd_file` is
+    /// given: a command past the Windows command-line limit travels as a file
+    /// and never on this process's own argv.
+    #[arg(
+        long,
+        value_name = "CMD",
+        allow_hyphen_values = true,
+        default_value = ""
+    )]
+    pub cmd: String,
+    /// A file holding the command (`--cmd` is then empty). The session writes
+    /// it for a command too long to pass as an argument.
+    #[arg(long, value_name = "FILE")]
+    pub cmd_file: Option<PathBuf>,
+    /// The shell program (`bash`).
+    #[arg(long, value_name = "PROGRAM")]
+    pub shell: String,
+    /// An argument of the shell's argv, before the command (`-c`).
+    #[arg(long = "shell-arg", value_name = "ARG", allow_hyphen_values = true)]
+    pub shell_args: Vec<String>,
+    /// `job` (`kelir bg run`) or `call` (a bash call's command).
+    #[arg(long, value_name = "KIND", default_value = "job")]
+    pub kind: String,
+    /// The pid of the session that owns this call: if it dies without
+    /// promoting the call, the shim takes the tree down.
+    #[arg(long, value_name = "PID")]
+    pub owner: Option<u32>,
+    /// The provider call id of the bash call that started this job.
+    #[arg(long, value_name = "CALL_ID")]
+    pub call: Option<String>,
+    /// The Windows job object the call's tree lives in.
+    #[arg(long, value_name = "NAME")]
+    pub job: Option<String>,
+    /// The session socket, exported to the command as `KELIR_SOCK`.
+    #[arg(long, value_name = "ADDRESS")]
+    pub sock: Option<String>,
+    /// The owning session dir, for a job whose root is not below a session.
+    #[arg(long, value_name = "DIR")]
+    pub session_dir: Option<std::path::PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_accepts_a_session_with_tree_for_an_external_emergency_kill() {
+        let cli = Cli::parse_from(["kelir", "kill", "--tree", "ses_01"]);
+        match cli.command {
+            Some(Command::Kill(args)) => {
+                assert_eq!(args.session.as_deref(), Some("ses_01"));
+                assert!(args.tree);
+            }
+            _ => panic!("expected kill"),
+        }
+    }
+
+    #[test]
+    fn resume_is_a_run_flag_with_an_id_a_task_and_the_flags() {
+        let cli = Cli::parse_from([
+            "kelir", "run", "--resume", "ses_01", "--json", "carry", "on",
+        ]);
+        match cli.command {
+            Some(Command::Run(args)) => {
+                assert_eq!(args.resume.as_deref(), Some("ses_01"));
+                assert_eq!(args.task, vec!["carry".to_string(), "on".to_string()]);
+                assert!(args.json);
+                assert!(!args.keep);
+            }
+            _ => panic!("expected run"),
+        }
+        // `kelir run --resume <id>` alone: continue whatever the log left in flight.
+        let cli = Cli::parse_from(["kelir", "run", "--resume", "ses_01"]);
+        match cli.command {
+            Some(Command::Run(args)) => assert!(args.task.is_empty()),
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn bg_parses_run_ls_out_wait_and_cancel() {
+        let cli = Cli::parse_from(["kelir", "bg", "run", "sleep", "60"]);
+        match cli.command {
+            Some(Command::Bg(args)) => match args.command {
+                BgCommand::Run(run) => assert_eq!(run.command, vec!["sleep", "60"]),
+                other => panic!("expected run, got {other:?}"),
+            },
+            _ => panic!("expected bg"),
+        }
+        // A quoted command, with flags inside it, stays one argument.
+        let cli = Cli::parse_from(["kelir", "bg", "run", "sleep 3; echo --ok"]);
+        match cli.command {
+            Some(Command::Bg(args)) => match args.command {
+                BgCommand::Run(run) => assert_eq!(run.command, vec!["sleep 3; echo --ok"]),
+                other => panic!("expected run, got {other:?}"),
+            },
+            _ => panic!("expected bg"),
+        }
+        assert!(Cli::try_parse_from(["kelir", "bg", "run"]).is_err());
+        assert!(matches!(
+            Cli::parse_from(["kelir", "bg", "ls"]).command,
+            Some(Command::Bg(BgArgs {
+                command: BgCommand::Ls
+            }))
+        ));
+        let cli = Cli::parse_from(["kelir", "bg", "out", "bg_1", "--follow"]);
+        match cli.command {
+            Some(Command::Bg(args)) => match args.command {
+                BgCommand::Out(out) => {
+                    assert_eq!(out.id, "bg_1");
+                    assert!(out.follow);
+                }
+                other => panic!("expected out, got {other:?}"),
+            },
+            _ => panic!("expected bg"),
+        }
+        let cli = Cli::parse_from(["kelir", "bg", "wait", "bg_1", "--timeout", "5"]);
+        match cli.command {
+            Some(Command::Bg(args)) => match args.command {
+                BgCommand::Wait(wait) => assert_eq!(wait.timeout, Some(5)),
+                other => panic!("expected wait, got {other:?}"),
+            },
+            _ => panic!("expected bg"),
+        }
+        let cli = Cli::parse_from(["kelir", "bg", "cancel", "bg_1"]);
+        match cli.command {
+            Some(Command::Bg(args)) => match args.command {
+                BgCommand::Cancel(cancel) => assert_eq!(cancel.id, "bg_1"),
+                other => panic!("expected cancel, got {other:?}"),
+            },
+            _ => panic!("expected bg"),
+        }
+    }
+
+    #[test]
+    fn the_shim_parses_its_scripted_arguments() {
+        let cli = Cli::parse_from([
+            "kelir",
+            "bg-shim",
+            "--dir",
+            "s/ses_1/calls",
+            "--id",
+            "11-2-1",
+            "--out",
+            "s/ses_1/calls/11-2-1/out",
+            "--cmd",
+            "sleep 60",
+            "--shell",
+            "bash",
+            "--shell-arg",
+            "-c",
+            "--kind",
+            "call",
+            "--owner",
+            "1234",
+            "--call",
+            "call_1",
+            "--job",
+            "kelir-bg-ses_1-11-2-1",
+        ]);
+        match cli.command {
+            Some(Command::BgShim(args)) => {
+                assert_eq!(args.id, "11-2-1");
+                assert_eq!(args.cmd, "sleep 60");
+                assert_eq!(args.shell, "bash");
+                assert_eq!(args.shell_args, vec!["-c"]);
+                assert_eq!(args.kind, "call");
+                assert_eq!(args.owner, Some(1234));
+                assert_eq!(args.call.as_deref(), Some("call_1"));
+                assert_eq!(args.job.as_deref(), Some("kelir-bg-ses_1-11-2-1"));
+            }
+            _ => panic!("expected bg-shim"),
+        }
+    }
+
+    /// `--max-steps N` is a per-session flag on every command that runs a
+    /// session, and it falls through the same way the other common flags do.
+    #[test]
+    fn the_max_steps_flag_is_common_and_overrides_the_config() {
+        match Cli::parse_from(["kelir", "run", "--max-steps", "5", "task"]).command {
+            Some(Command::Run(args)) => assert_eq!(args.common.max_steps, Some(5)),
+            _ => panic!("expected run"),
+        }
+        match Cli::parse_from(["kelir", "run", "--ask", "--max-steps", "0", "q"]).command {
+            Some(Command::Run(args)) => {
+                assert_eq!(args.common.max_steps, Some(0));
+                assert!(args.ask);
+            }
+            _ => panic!("expected run"),
+        }
+        // Unset stays unset: no cap is the default, never a zero.
+        match Cli::parse_from(["kelir", "run", "task"]).command {
+            Some(Command::Run(args)) => assert_eq!(args.common.max_steps, None),
+            _ => panic!("expected run"),
+        }
+        // Before the subcommand, `--max-steps` lands on the TUI and falls
+        // through to `tui` like the other common flags.
+        let cli = Cli::parse_from(["kelir", "--max-steps", "9", "tui"]);
+        let outer = cli.tui;
+        assert_eq!(outer.common.max_steps, Some(9));
+        match cli.command {
+            Some(Command::Tui(args)) => {
+                assert_eq!(args.with_fallback(outer).common.max_steps, Some(9));
+            }
+            _ => panic!("expected tui"),
+        }
+    }
+}

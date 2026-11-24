@@ -1,0 +1,394 @@
+//! Continuing a session from its log.
+//! `resume` never replays a tool call.
+//! A call the log shows as requested (an assistant message's `tool_calls`) or started
+//! model the outcome is unknown, so it can check rather than repeat a `rm -rf`.
+
+use crate::log::event::{EventBody, LogEvent, LogRead};
+
+/// What the model is told about a call that was started but never settled.
+pub const UNKNOWN_RESULT: &str = "unknown outcome: kelir was interrupted while this call was \
+running; it may or may not have completed. Check before retrying.";
+
+/// A call the model asked for that never produced a result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsettledCall {
+    pub call_id: String,
+    pub name: String,
+    pub started: bool,
+}
+
+/// The calls left without a result, in the order the model asked for them.
+pub fn unsettled(events: &[LogEvent]) -> Vec<UnsettledCall> {
+    let mut open: Vec<UnsettledCall> = Vec::new();
+    for event in events {
+        match &event.body {
+            EventBody::Assistant { tool_calls, .. } => {
+                for call in tool_calls {
+                    open.push(UnsettledCall {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        started: false,
+                    });
+                }
+            }
+            EventBody::CallStarted(start) if start.kind == "tool" => {
+                let call_id = &start.id;
+                let name = &start.info.name;
+                match open
+                    .iter_mut()
+                    .find(|call| call.call_id == *call_id && !call.started)
+                {
+                    Some(call) => call.started = true,
+                    None => open.push(UnsettledCall {
+                        call_id: call_id.clone(),
+                        name: name.clone(),
+                        started: true,
+                    }),
+                }
+            }
+            EventBody::CallSettled(settle) if settle.kind == "tool" => {
+                if let Some(index) = open.iter().position(|call| call.call_id == settle.id) {
+                    open.remove(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    open
+}
+
+/// Was a turn running when the log stopped? A turn with no `turn_ended` after
+/// its last step is continued on resume; a cleanly ended one is not.
+pub fn turn_in_flight(events: &[LogEvent]) -> bool {
+    let last_end = events
+        .iter()
+        .rposition(|event| matches!(event.body, EventBody::TurnEnded { .. }));
+    events
+        .iter()
+        .enumerate()
+        .skip(last_end.map(|index| index + 1).unwrap_or(0))
+        .any(|(_, event)| {
+            matches!(
+                event.body,
+                EventBody::User { .. }
+                    | EventBody::StepStarted { .. }
+                    | EventBody::Assistant { .. }
+                    | EventBody::StepUsage(_)
+                    | EventBody::CallStarted(_)
+                    | EventBody::CallSettled(_)
+            )
+        })
+}
+
+pub fn interrupted(events: &[LogEvent]) -> bool {
+    if turn_in_flight(events) {
+        return true;
+    }
+    if matches!(
+        last_turn_outcome(events).as_deref(),
+        Some("stopped") | Some("paused") | Some("error")
+    ) {
+        return true;
+    }
+    !events
+        .iter()
+        .any(|event| matches!(event.body, EventBody::SessionEnded { .. }))
+}
+
+/// The outcome of the last finished turn, if the log has one.
+pub fn last_turn_outcome(events: &[LogEvent]) -> Option<String> {
+    events.iter().rev().find_map(|event| match &event.body {
+        EventBody::TurnEnded { outcome, .. } => Some(outcome.clone()),
+        _ => None,
+    })
+}
+
+/// The seq the log continues from (0 for an empty log).
+pub fn last_seq(events: &[LogEvent]) -> u64 {
+    events.last().map(|event| event.seq).unwrap_or(0)
+}
+
+/// The highest step number in the log, so the resumed session keeps counting
+/// rather than repeating steps.
+pub fn last_step(events: &[LogEvent]) -> u32 {
+    events
+        .iter()
+        .filter_map(|event| match event.body {
+            EventBody::StepStarted { step, .. } => Some(step),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// How many turns the log has finished, so the resumed session numbers the next
+/// one correctly.
+pub fn turns_done(events: &[LogEvent]) -> u32 {
+    events
+        .iter()
+        .filter(|event| matches!(event.body, EventBody::TurnEnded { .. }))
+        .count() as u32
+}
+
+/// One message per piece of log damage, for the `error` events a resume writes. A torn last
+/// line and a line that never parsed are skipped, never dropped silently.
+pub fn log_damage(read: &LogRead) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(torn) = &read.torn_last {
+        out.push(format!(
+            "torn last log line ({} bytes) skipped: the log was cut mid-write; the session \
+             continues after it",
+            torn.len()
+        ));
+    }
+    for line in &read.bad_lines {
+        out.push(format!(
+            "unreadable log line skipped: {}",
+            crate::util::truncate_chars(line.trim(), 200)
+        ));
+    }
+    out
+}
+
+/// The result a resume gives an unsettled call, optionally with the partial
+/// output the interrupted call had already written.
+pub fn unknown_result(partial: Option<(&str, u64, u64)>) -> String {
+    match partial {
+        Some((out_path, bytes, lines)) if bytes > 0 => format!(
+            "{UNKNOWN_RESULT}\npartial output: {bytes} bytes, {lines} lines; full output at \
+             {out_path}"
+        ),
+        _ => UNKNOWN_RESULT.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log::event::{LoggedToolCall, Payload};
+    use serde_json::json;
+
+    fn assistant(seq: u64, calls: &[(&str, &str)]) -> LogEvent {
+        LogEvent::new(
+            seq,
+            EventBody::Assistant {
+                step: 1,
+                text: "".into(),
+                reasoning: None,
+                tool_calls: calls
+                    .iter()
+                    .map(|(id, name)| LoggedToolCall {
+                        id: (*id).into(),
+                        name: (*name).into(),
+                        args: Payload::value(json!({"command": "ls"})),
+                    })
+                    .collect(),
+                finish_reason: Some("tool_calls".into()),
+                usage: None,
+            },
+        )
+    }
+
+    fn started(seq: u64, id: &str) -> LogEvent {
+        LogEvent::new(
+            seq,
+            crate::log::event::call_start(
+                id.to_string(),
+                "tool",
+                crate::log::event::CallInfo {
+                    name: "bash".into(),
+                    input: Some(json!({"command": "ls"}).into()),
+                    dir: Some("7-1-1".into()),
+                    ..crate::log::event::CallInfo::default()
+                },
+            ),
+        )
+    }
+
+    fn settled(seq: u64, id: &str) -> LogEvent {
+        LogEvent::new(
+            seq,
+            crate::log::event::call_settle(
+                id.to_string(),
+                "tool",
+                "ok",
+                crate::log::event::CallSettle {
+                    exit_code: Some(0),
+                    bytes: Some(2),
+                    lines: Some(1),
+                    out_path: Some("out".into()),
+                    spilled: Some(false),
+                    result: Some("hi".into()),
+                    ..crate::log::event::CallSettle::default()
+                },
+            ),
+        )
+    }
+
+    fn turn_ended(seq: u64) -> LogEvent {
+        LogEvent::new(
+            seq,
+            EventBody::TurnEnded {
+                outcome: "done".into(),
+                reason: None,
+                final_text: "done".into(),
+            },
+        )
+    }
+
+    fn step(seq: u64) -> LogEvent {
+        LogEvent::new(
+            seq,
+            EventBody::StepStarted {
+                step: 1,
+                provider: "p".into(),
+                model: "m".into(),
+                request_hash: "0".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_started_call_without_a_result_is_unsettled_and_said_to_have_started() {
+        let events = vec![assistant(1, &[("a", "bash")]), started(2, "a")];
+        assert_eq!(
+            unsettled(&events),
+            vec![UnsettledCall {
+                call_id: "a".into(),
+                name: "bash".into(),
+                started: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_turn_without_turn_ended_is_in_flight() {
+        let done = vec![step(1), assistant(2, &[]), turn_ended(3)];
+        assert!(!turn_in_flight(&done));
+        let crashed = vec![step(1), assistant(2, &[])];
+        assert!(turn_in_flight(&crashed));
+        let crashed_mid_tool = vec![
+            step(1),
+            assistant(2, &[("a", "bash")]),
+            started(3, "a"),
+            settled(4, "a"),
+            turn_ended(5),
+            step(6),
+        ];
+        assert!(turn_in_flight(&crashed_mid_tool));
+        // Verbs and errors after the end of a turn do not make it unfinished.
+        let idle = vec![
+            turn_ended(1),
+            LogEvent::new(
+                2,
+                EventBody::Verb {
+                    name: "say".into(),
+                    args: Payload::value(json!({"text": "hi"})),
+                    from: "ctl".into(),
+                    boundary: "queued".into(),
+                    error: None,
+                },
+            ),
+        ];
+        assert!(!turn_in_flight(&idle));
+        assert!(!turn_in_flight(&[]));
+    }
+
+    #[test]
+    fn an_unclosed_log_is_interrupted_even_between_turns() {
+        let ended = |reason: &str| {
+            LogEvent::new(
+                9,
+                EventBody::SessionEnded {
+                    reason: reason.into(),
+                },
+            )
+        };
+        // A kill between two turns: the turn ended, the process did not.
+        let killed_between_turns = vec![step(1), assistant(2, &[]), turn_ended(3)];
+        assert!(!turn_in_flight(&killed_between_turns));
+        assert!(interrupted(&killed_between_turns));
+        // A clean exit is not continued without a new task.
+        let mut clean = killed_between_turns.clone();
+        clean.push(ended("done"));
+        assert!(!interrupted(&clean));
+        // A crash mid-turn is interrupted whether or not the log was closed.
+        let mut crash = vec![step(1), assistant(2, &[])];
+        assert!(interrupted(&crash));
+        crash.push(ended("error"));
+        assert!(interrupted(&crash), "the step after the last turn end");
+    }
+
+    #[test]
+    fn a_stopped_or_errored_turn_is_continued_even_when_the_log_was_closed() {
+        let ended_with = |outcome: &str| {
+            let mut events = vec![step(1), assistant(2, &[]), turn_ended(3)];
+            if let EventBody::TurnEnded { outcome: slot, .. } = &mut events[2].body {
+                *slot = outcome.to_string();
+            }
+            events
+        };
+        let mut stopped = ended_with("stopped");
+        stopped.push(LogEvent::new(
+            4,
+            EventBody::SessionEnded {
+                reason: "end".into(),
+            },
+        ));
+        assert!(interrupted(&stopped), "resume continues a stopped session");
+        let mut failed = ended_with("error");
+        failed.push(LogEvent::new(
+            4,
+            EventBody::SessionEnded {
+                reason: "error".into(),
+            },
+        ));
+        assert!(
+            interrupted(&failed),
+            "a provider outage is the commonest reason to resume"
+        );
+        let mut done = ended_with("done");
+        done.push(LogEvent::new(
+            4,
+            EventBody::SessionEnded {
+                reason: "done".into(),
+            },
+        ));
+        assert!(!interrupted(&done), "a finished session waits for a task");
+        assert_eq!(last_turn_outcome(&done).as_deref(), Some("done"));
+        assert_eq!(last_turn_outcome(&[]), None);
+        // : an explicit cap pauses a turn; a resume continues it like a
+        // stopped one.
+        let mut paused = ended_with("paused");
+        paused.push(LogEvent::new(
+            4,
+            EventBody::SessionEnded {
+                reason: "paused".into(),
+            },
+        ));
+        assert!(
+            interrupted(&paused),
+            "a paused turn is continued by a resume"
+        );
+        assert_eq!(last_turn_outcome(&paused).as_deref(), Some("paused"));
+    }
+
+    #[test]
+    fn log_damage_names_the_torn_line_and_every_bad_one() {
+        let torn = "{\"seq\": 2";
+        let read = LogRead {
+            events: vec![],
+            torn_last: Some(torn.to_string()),
+            bad_lines: vec!["not json".into()],
+        };
+        let damage = log_damage(&read);
+        assert_eq!(damage.len(), 2);
+        assert!(damage[0].contains("torn last log line"), "{}", damage[0]);
+        assert!(
+            damage[0].contains(&format!("{} bytes", torn.len())),
+            "{}",
+            damage[0]
+        );
+        assert!(damage[1].contains("not json"), "{}", damage[1]);
+    }
+}

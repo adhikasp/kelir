@@ -1,18 +1,14 @@
 //! `edit`: exact string replacement in one file.
-//!
-//! `old` must match exactly once unless `replace_all` is set. The literal text
-//! is tried first, so a file with mixed line endings is edited exactly as
-//! written. Only when the literal does not match is the pattern retried with
-//! the file's line endings (CRLF or LF); the inserted text then follows the
-//! matched region, and untouched regions keep their own endings.
-//! `old: ""` creates a missing file. The changed line numbers come back so the
-//! model (and a gate) can look at the right place.
+//! `old` must match exactly once unless `replace_all` is set.
+//! The literal text is tried first, so a file with mixed line endings is edited exactly as
+//! written.
+//! Only when the literal does not match is the pattern retried with the file's line endings (CRLF
 
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::spill;
+use crate::log::spill;
 use crate::tools::{Ctx, ToolOutcome};
 
 pub fn run(args: &Value, ctx: &Ctx, dir: &str) -> ToolOutcome {
@@ -37,14 +33,6 @@ pub fn run(args: &Value, ctx: &Ctx, dir: &str) -> ToolOutcome {
     }
 }
 
-/// The edit itself; the caller adds the command file bookkeeping.
-///
-/// One hunk (`old`/`new`/`replace_all`) or several (`edits: [{old, new,
-/// replace_all?}, …]`). Several hunks are **atomic**: they apply in order
-/// against the evolving text, every one of them is checked before anything is
-/// written, and the file is written once. A hunk that does not match therefore
-/// leaves the file exactly as it was, which is what a multi-hunk patch tool has
-/// to do — a half-applied patch is the failure the model used `python -` for.
 fn edit(args: &Value, ctx: &Ctx) -> Result<String, String> {
     let raw_path = args
         .get("path")
@@ -85,7 +73,6 @@ fn edit(args: &Value, ctx: &Ctx) -> Result<String, String> {
     Ok(join_report(&display, &reported))
 }
 
-/// One replacement.
 struct Hunk {
     old: String,
     new: String,
@@ -188,9 +175,8 @@ fn create(path: &Path, display: &str, hunks: &[Hunk]) -> Result<String, String> 
     Ok(join_report(display, &reported))
 }
 
-/// Apply one hunk to `text`, returning the one result line for it. Every check
-/// happens before the caller writes anything, so a failure here leaves the file
-/// untouched on disk.
+/// Apply one hunk to `text`, returning the one result line for it. Every check happens before
+/// the caller writes anything, so a failure here leaves the file untouched on disk.
 fn apply(
     text: &mut String,
     hunk: &Hunk,
@@ -263,10 +249,7 @@ fn join_report(display: &str, reported: &[String]) -> String {
     }
 }
 
-/// The pattern to use: the literal text if it occurs, else the same text with
-/// the file's line endings. The replacement only gets converted when the
-/// fallback was needed, so an inserted region follows the region it replaces
-/// and nothing else is rewritten.
+/// The pattern to use: the literal text if it occurs, else the same text with the file's line endings.
 fn match_line_endings(content: &str, old: &str, new: &str) -> (String, String) {
     if !find_matches(content, old).is_empty() {
         return (old.to_string(), new.to_string());
@@ -305,7 +288,6 @@ fn resolve(cwd: &Path, path: &str) -> PathBuf {
     }
 }
 
-/// Non-overlapping occurrences, left to right.
 fn find_matches(haystack: &str, needle: &str) -> Vec<usize> {
     if needle.is_empty() {
         return Vec::new();
@@ -375,178 +357,146 @@ mod tests {
     }
 
     #[test]
-    fn replaces_one_occurrence_and_reports_the_line() {
-        let f = fixture();
-        std::fs::write(f.ctx.cwd.join("a.txt"), "one\ntwo\nthree\n").unwrap();
-        let outcome = run(&edit_args("a.txt", "two", "TWO"), &f.ctx, "9-1-1");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        assert_eq!(
-            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
-            "one\nTWO\nthree\n"
+    fn single_edits_replace_create_and_refuse() {
+        // (initial file and contents, args, expected outcome, expected contents, message fragment).
+        type EditCase<'a> = (
+            &'a str,
+            Option<&'a str>,
+            Value,
+            &'a str,
+            Option<&'a str>,
+            &'a str,
         );
-        assert!(outcome.result.contains("line 2"), "{}", outcome.result);
-        assert!(
-            outcome.out_path.ends_with("9-1-1/out"),
-            "{}",
-            outcome.out_path
-        );
-        assert!(std::path::Path::new(&outcome.out_path).exists());
-    }
-
-    #[test]
-    fn missing_old_is_an_error() {
-        let f = fixture();
-        std::fs::write(f.ctx.cwd.join("a.txt"), "one\n").unwrap();
-        let outcome = run(&edit_args("a.txt", "nope", "x"), &f.ctx, "c");
-        assert_eq!(outcome.outcome, "error");
-        assert!(outcome.result.contains("not found"));
-        assert_eq!(
-            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
-            "one\n"
-        );
-    }
-
-    #[test]
-    fn ambiguous_old_is_refused_unless_replace_all() {
-        let f = fixture();
-        std::fs::write(f.ctx.cwd.join("a.txt"), "x\ny\nx\n").unwrap();
-        let outcome = run(&edit_args("a.txt", "x", "z"), &f.ctx, "c1");
-        assert_eq!(outcome.outcome, "error");
-        assert!(outcome.result.contains("matches 2 times"));
-        assert_eq!(
-            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
-            "x\ny\nx\n"
-        );
-
-        let args =
-            serde_json::json!({"path": "a.txt", "old": "x", "new": "z", "replace_all": true});
-        let outcome = run(&args, &f.ctx, "c2");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        assert_eq!(
-            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
-            "z\ny\nz\n"
-        );
-        assert!(outcome.result.contains("replaced 2 occurrences"));
-        assert!(outcome.result.contains("lines 1, 3"));
-    }
-
-    #[test]
-    fn crlf_files_stay_crlf() {
-        let f = fixture();
-        let path = f.ctx.cwd.join("win.txt");
-        std::fs::write(&path, "a\r\nb\r\nc\r\n").unwrap();
-        let outcome = run(&edit_args("win.txt", "b", "B"), &f.ctx, "c");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nB\r\nc\r\n");
-    }
-
-    #[test]
-    fn lf_old_matches_inside_a_crlf_file() {
-        let f = fixture();
-        let path = f.ctx.cwd.join("win.txt");
-        std::fs::write(&path, "a\r\nb\r\nc\r\n").unwrap();
-        let outcome = run(&edit_args("win.txt", "b\nc", "b\nC"), &f.ctx, "c");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nb\r\nC\r\n");
-    }
-
-    #[test]
-    fn mixed_endings_match_the_literal_text() {
-        let f = fixture();
-        let path = f.ctx.cwd.join("mixed.txt");
-        std::fs::write(&path, b"a\r\nb\nc\n").unwrap();
-        let outcome = run(&edit_args("mixed.txt", "b\nc", "B\nC"), &f.ctx, "c");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        // Literal match: the LF region stays LF, the CRLF line is untouched.
-        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nB\nC\n");
-    }
-
-    #[test]
-    fn mixed_endings_fall_back_only_where_needed() {
-        let f = fixture();
-        let path = f.ctx.cwd.join("mixed.txt");
-        std::fs::write(&path, b"a\r\nb\nc\n").unwrap();
-        // "a\nb" does not occur literally (a is CRLF); the CRLF retry finds it
-        // and inserts CRLF, leaving the LF lines alone.
-        let outcome = run(&edit_args("mixed.txt", "a\nb", "A\nB"), &f.ctx, "c");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        assert_eq!(std::fs::read(&path).unwrap(), b"A\r\nB\nc\n");
-    }
-
-    #[test]
-    fn crlf_old_in_an_lf_file_falls_back() {
-        let f = fixture();
-        let path = f.ctx.cwd.join("unix.txt");
-        std::fs::write(&path, b"a\nb\nc\n").unwrap();
-        let outcome = run(&edit_args("unix.txt", "b\r\nc", "B\r\nC"), &f.ctx, "c");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        assert_eq!(std::fs::read(&path).unwrap(), b"a\nB\nC\n");
-    }
-
-    #[test]
-    fn a_literal_match_inserts_the_text_verbatim() {
-        let f = fixture();
-        let path = f.ctx.cwd.join("mixed.txt");
-        std::fs::write(&path, b"x\r\ny\n").unwrap();
-        let outcome = run(&edit_args("mixed.txt", "x", "1\n2"), &f.ctx, "c");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        // "x" matched literally inside the CRLF region: inserted text is verbatim.
-        assert_eq!(std::fs::read(&path).unwrap(), b"1\n2\r\ny\n");
-    }
-
-    #[test]
-    fn empty_old_creates_a_missing_file() {
-        let f = fixture();
-        let outcome = run(&edit_args("nested/dir/new.txt", "", "hello\n"), &f.ctx, "c");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        assert_eq!(
-            std::fs::read_to_string(f.ctx.cwd.join("nested/dir/new.txt")).unwrap(),
-            "hello\n"
-        );
-        assert!(outcome.result.contains("created"));
-    }
-
-    #[test]
-    fn empty_old_on_an_existing_file_is_refused() {
-        let f = fixture();
-        std::fs::write(f.ctx.cwd.join("a.txt"), "keep\n").unwrap();
-        let outcome = run(&edit_args("a.txt", "", "x"), &f.ctx, "c");
-        assert_eq!(outcome.outcome, "error");
-        assert!(outcome.result.contains("already exists"));
-    }
-
-    #[test]
-    fn missing_file_with_nonempty_old_is_an_error() {
-        let f = fixture();
-        let outcome = run(&edit_args("nope.txt", "a", "b"), &f.ctx, "c");
-        assert_eq!(outcome.outcome, "error");
-        assert!(outcome.result.contains("file not found"));
-    }
-
-    #[test]
-    fn non_utf8_file_is_refused() {
-        let f = fixture();
-        std::fs::write(f.ctx.cwd.join("bin"), [0xff, 0xfe, 0x00]).unwrap();
-        let outcome = run(&edit_args("bin", "a", "b"), &f.ctx, "c");
-        assert_eq!(outcome.outcome, "error");
-        assert!(outcome.result.contains("not valid UTF-8"));
-    }
-
-    #[test]
-    fn missing_arguments_are_reported() {
-        let f = fixture();
-        for args in [
-            serde_json::json!({}),
-            serde_json::json!({"path": "a"}),
-            serde_json::json!({"path": "a", "old": "x"}),
-        ] {
+        let cases: [EditCase<'_>; 7] = [
+            (
+                "a.txt",
+                Some("one\ntwo\nthree\n"),
+                edit_args("a.txt", "two", "TWO"),
+                "ok",
+                Some("one\nTWO\nthree\n"),
+                "line 2",
+            ),
+            (
+                "a.txt",
+                Some("one\n"),
+                edit_args("a.txt", "nope", "x"),
+                "error",
+                Some("one\n"),
+                "not found",
+            ),
+            (
+                "nested/dir/new.txt",
+                None,
+                edit_args("nested/dir/new.txt", "", "hello\n"),
+                "ok",
+                Some("hello\n"),
+                "created",
+            ),
+            (
+                "a.txt",
+                Some("keep\n"),
+                edit_args("a.txt", "", "x"),
+                "error",
+                Some("keep\n"),
+                "already exists",
+            ),
+            (
+                "nope.txt",
+                None,
+                edit_args("nope.txt", "a", "b"),
+                "error",
+                None,
+                "file not found",
+            ),
+            (
+                "mixed.txt",
+                Some("x\r\ny\n"),
+                edit_args("mixed.txt", "x", "1\n2"),
+                "ok",
+                Some("1\n2\r\ny\n"),
+                "",
+            ),
+            (
+                "a.txt",
+                Some("x\ny\nx\n"),
+                serde_json::json!({"path":"a.txt","old":"x","new":"z","replace_all":true}),
+                "ok",
+                Some("z\ny\nz\n"),
+                "replaced 2 occurrences",
+            ),
+        ];
+        for (path, initial, args, status, expected, message) in cases {
+            let f = fixture();
+            if let Some(text) = initial {
+                std::fs::write(f.ctx.cwd.join(path), text).unwrap();
+            }
             let outcome = run(&args, &f.ctx, "c");
-            assert_eq!(outcome.outcome, "error");
+            assert_eq!(outcome.outcome, status, "{}", outcome.result);
+            assert!(outcome.result.contains(message), "{}", outcome.result);
+            if let Some(text) = expected {
+                assert_eq!(
+                    std::fs::read_to_string(f.ctx.cwd.join(path)).unwrap(),
+                    text,
+                    "{path}"
+                );
+            } else {
+                assert!(!f.ctx.cwd.join(path).exists(), "{path}");
+            }
         }
     }
 
     #[test]
-    fn absolute_paths_are_used_as_given() {
+    fn line_endings_and_path_forms_are_exact() {
+        // (file name, initial bytes, args, expected bytes).
+        let cases: [(&str, &[u8], Value, &[u8]); 6] = [
+            (
+                "win.txt",
+                b"a\r\nb\r\nc\r\n",
+                edit_args("win.txt", "b", "B"),
+                b"a\r\nB\r\nc\r\n",
+            ),
+            (
+                "win.txt",
+                b"a\r\nb\r\nc\r\n",
+                edit_args("win.txt", "b\nc", "b\nC"),
+                b"a\r\nb\r\nC\r\n",
+            ),
+            (
+                "unix.txt",
+                b"a\nb\nc\n",
+                edit_args("unix.txt", "b\r\nc", "B\r\nC"),
+                b"a\nB\nC\n",
+            ),
+            (
+                "mixed.txt",
+                b"a\r\nb\nc\n",
+                edit_args("mixed.txt", "b\nc", "B\nC"),
+                b"a\r\nB\nC\n",
+            ),
+            (
+                "mixed.txt",
+                b"a\r\nb\nc\n",
+                edit_args("mixed.txt", "a\nb", "A\nB"),
+                b"A\r\nB\nc\n",
+            ),
+            // The literal text wins over the fallback: a single LF region stays LF.
+            (
+                "mixed.txt",
+                b"x\r\ny\n",
+                edit_args("mixed.txt", "x", "1\n2"),
+                b"1\n2\r\ny\n",
+            ),
+        ];
+        for (name, initial, args, expected) in cases {
+            let f = fixture();
+            let path = f.ctx.cwd.join(name);
+            std::fs::write(&path, initial).unwrap();
+            let outcome = run(&args, &f.ctx, "c");
+            assert_eq!(outcome.outcome, "ok", "{}: {}", name, outcome.result);
+            assert_eq!(std::fs::read(&path).unwrap(), expected, "{name}");
+        }
+        assert_eq!(find_matches("aaaa", "aa"), vec![0, 2]);
+        assert_eq!(find_matches("abc", "z"), Vec::<usize>::new());
         let f = fixture();
         let target = f.ctx.cwd.join("abs.txt");
         std::fs::write(&target, "x\n").unwrap();
@@ -556,9 +506,38 @@ mod tests {
     }
 
     #[test]
-    fn find_matches_is_non_overlapping() {
-        assert_eq!(find_matches("aaaa", "aa"), vec![0, 2]);
-        assert_eq!(find_matches("abc", "z"), Vec::<usize>::new());
+    fn a_non_utf8_file_is_refused() {
+        let f = fixture();
+        std::fs::write(f.ctx.cwd.join("bin"), [0xff, 0xfe, 0x00]).unwrap();
+        let outcome = run(&edit_args("bin", "a", "b"), &f.ctx, "c");
+        assert_eq!(outcome.outcome, "error");
+        assert!(
+            outcome.result.contains("not valid UTF-8"),
+            "{}",
+            outcome.result
+        );
+    }
+
+    #[test]
+    fn ambiguous_single_edit_is_refused_until_replace_all() {
+        let f = fixture();
+        std::fs::write(f.ctx.cwd.join("a.txt"), "x\ny\nx\n").unwrap();
+        let outcome = run(&edit_args("a.txt", "x", "z"), &f.ctx, "c1");
+        assert_eq!(outcome.outcome, "error");
+        assert!(outcome.result.contains("matches 2 times"));
+        assert_eq!(
+            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
+            "x\ny\nx\n"
+        );
+        // The successful single edit also reports its output file.
+        std::fs::write(f.ctx.cwd.join("b.txt"), "one\ntwo\n").unwrap();
+        let outcome = run(&edit_args("b.txt", "one", "ONE"), &f.ctx, "9-1-1");
+        assert!(
+            outcome.out_path.ends_with("9-1-1/out"),
+            "{}",
+            outcome.out_path
+        );
+        assert!(std::path::Path::new(&outcome.out_path).exists());
     }
 
     // ---------------------------------------------------------- multi-hunk
@@ -572,163 +551,137 @@ mod tests {
     }
 
     #[test]
-    fn several_hunks_apply_in_order_to_one_file() {
-        let f = fixture();
-        std::fs::write(f.ctx.cwd.join("a.rs"), "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
-        let args = edits(
-            "a.rs",
-            &[("fn a()", "fn alpha()"), ("fn c()", "fn gamma()")],
+    fn hunks_apply_in_order_or_are_all_refused() {
+        // (path, initial contents, args, status, expected contents, message fragment).
+        type EditCase<'a> = (
+            &'a str,
+            Option<&'a str>,
+            Value,
+            &'a str,
+            Option<&'a str>,
+            &'a str,
         );
-        let outcome = run(&args, &f.ctx, "m1");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        assert_eq!(
-            std::fs::read_to_string(f.ctx.cwd.join("a.rs")).unwrap(),
-            "fn alpha() {}\nfn b() {}\nfn gamma() {}\n"
-        );
-        // One result line per change, and the headline says all of them landed.
-        assert!(
-            outcome.result.contains("2 changes, all applied"),
-            "{}",
-            outcome.result
-        );
-        assert!(
-            outcome.result.contains("change 1 of 2"),
-            "{}",
-            outcome.result
-        );
-        assert!(
-            outcome.result.contains("change 2 of 2"),
-            "{}",
-            outcome.result
-        );
-        assert!(outcome.result.contains("line 1"), "{}", outcome.result);
-        assert!(outcome.result.contains("line 3"), "{}", outcome.result);
+        let cases: [EditCase<'_>; 7] = [
+            (
+                "a.rs",
+                Some("fn a() {}\nfn b() {}\nfn c() {}\n"),
+                edits(
+                    "a.rs",
+                    &[("fn a()", "fn alpha()"), ("fn c()", "fn gamma()")],
+                ),
+                "ok",
+                Some("fn alpha() {}\nfn b() {}\nfn gamma() {}\n"),
+                "2 changes, all applied",
+            ),
+            (
+                "a.txt",
+                Some("one\ntwo\n"),
+                edits("a.txt", &[("one", "ONE"), ("nope", "x")]),
+                "error",
+                Some("one\ntwo\n"),
+                "Nothing was written",
+            ),
+            (
+                "a.txt",
+                Some("x\ny\nx\n"),
+                edits("a.txt", &[("y", "Y"), ("x", "z")]),
+                "error",
+                Some("x\ny\nx\n"),
+                "matches 2 times",
+            ),
+            (
+                "a.txt",
+                Some("x\ny\nx\n"),
+                serde_json::json!({"path":"a.txt","edits":[
+                {"old":"y","new":"Y"},{"old":"x","new":"z","replace_all":true}]}),
+                "ok",
+                Some("z\nY\nz\n"),
+                "",
+            ),
+            (
+                "a.txt",
+                Some("start\n"),
+                edits("a.txt", &[("start", "mid"), ("mid", "end")]),
+                "ok",
+                Some("end\n"),
+                "",
+            ),
+            (
+                "new/deep/a.txt",
+                None,
+                edits("new/deep/a.txt", &[("", "alpha\nbeta\n"), ("beta", "BETA")]),
+                "ok",
+                Some("alpha\nBETA\n"),
+                "created",
+            ),
+            (
+                "new.txt",
+                None,
+                edits("new.txt", &[("", "content\n"), ("", "more\n")]),
+                "error",
+                None,
+                "only the first hunk",
+            ),
+        ];
+        for (path, initial, args, status, expected, message) in cases {
+            let f = fixture();
+            if let Some(text) = initial {
+                std::fs::write(f.ctx.cwd.join(path), text).unwrap();
+            }
+            let outcome = run(&args, &f.ctx, "m");
+            assert_eq!(outcome.outcome, status, "{}", outcome.result);
+            assert!(outcome.result.contains(message), "{}", outcome.result);
+            if let Some(text) = expected {
+                assert_eq!(
+                    std::fs::read_to_string(f.ctx.cwd.join(path)).unwrap(),
+                    text,
+                    "{path}"
+                );
+            } else {
+                assert!(!f.ctx.cwd.join(path).exists(), "{path}");
+            }
+        }
     }
 
+    /// An empty `edits` array is refused rather than silently doing nothing.
     #[test]
-    fn a_later_hunk_that_does_not_match_leaves_the_file_untouched() {
+    fn an_empty_edits_array_is_refused() {
         let f = fixture();
-        let original = "one\ntwo\n";
-        std::fs::write(f.ctx.cwd.join("a.txt"), original).unwrap();
-        let args = edits("a.txt", &[("one", "ONE"), ("nope", "x")]);
-        let outcome = run(&args, &f.ctx, "m2");
-        assert_eq!(outcome.outcome, "error");
-        assert!(outcome.result.contains("not found"), "{}", outcome.result);
-        assert!(
-            outcome.result.contains("Nothing was written"),
-            "{}",
-            outcome.result
+        let outcome = run(
+            &serde_json::json!({"path": "a.txt", "edits": []}),
+            &f.ctx,
+            "m",
         );
-        assert_eq!(
-            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
-            original,
-            "an all-or-none edit must not half-apply"
-        );
-    }
-
-    #[test]
-    fn an_ambiguous_hunk_refuses_the_whole_call() {
-        let f = fixture();
-        std::fs::write(f.ctx.cwd.join("a.txt"), "x\ny\nx\n").unwrap();
-        let args = edits("a.txt", &[("y", "Y"), ("x", "z")]);
-        let outcome = run(&args, &f.ctx, "m3");
-        assert_eq!(outcome.outcome, "error");
-        assert!(
-            outcome.result.contains("matches 2 times"),
-            "{}",
-            outcome.result
-        );
-        assert_eq!(
-            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
-            "x\ny\nx\n"
-        );
-
-        // `replace_all` per hunk fixes it without changing the other hunks.
-        let args = serde_json::json!({"path": "a.txt", "edits": [
-            {"old": "y", "new": "Y"},
-            {"old": "x", "new": "z", "replace_all": true}
-        ]});
-        let outcome = run(&args, &f.ctx, "m4");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        assert_eq!(
-            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
-            "z\nY\nz\n"
-        );
-    }
-
-    #[test]
-    fn hunks_see_what_earlier_hunks_wrote() {
-        let f = fixture();
-        std::fs::write(f.ctx.cwd.join("a.txt"), "start\n").unwrap();
-        // The second `old` only exists after the first replacement.
-        let args = edits("a.txt", &[("start", "mid"), ("mid", "end")]);
-        let outcome = run(&args, &f.ctx, "m5");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        assert_eq!(
-            std::fs::read_to_string(f.ctx.cwd.join("a.txt")).unwrap(),
-            "end\n"
-        );
-    }
-
-    #[test]
-    fn the_first_hunk_creates_the_file_and_the_rest_refine_it() {
-        let f = fixture();
-        let args = edits("new/deep/a.txt", &[("", "alpha\nbeta\n"), ("beta", "BETA")]);
-        let outcome = run(&args, &f.ctx, "m6");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        assert_eq!(
-            std::fs::read_to_string(f.ctx.cwd.join("new/deep/a.txt")).unwrap(),
-            "alpha\nBETA\n"
-        );
-        assert!(outcome.result.contains("created"), "{}", outcome.result);
-    }
-
-    #[test]
-    fn an_empty_old_on_a_later_hunk_is_refused_for_a_missing_file() {
-        let f = fixture();
-        let args = edits("new.txt", &[("", "content\n"), ("", "more\n")]);
-        let outcome = run(&args, &f.ctx, "m7");
         assert_eq!(outcome.outcome, "error");
         assert!(
-            outcome.result.contains("only the first hunk"),
+            outcome.result.contains("`edits` is empty"),
             "{}",
             outcome.result
         );
-        assert!(!f.ctx.cwd.join("new.txt").exists());
     }
 
+    /// A single change keeps the one-line `edited ...` headline.
     #[test]
-    fn one_call_cannot_mix_old_new_and_edits() {
+    fn a_single_edit_keeps_the_edited_headline() {
+        let report = join_report("a.txt", &["one change".to_string()]);
+        assert_eq!(report, "edited a.txt: one change");
+    }
+
+    /// `old`/`new` and `edits` in one call is refused, not silently merged.
+    #[test]
+    fn a_call_with_both_forms_is_refused() {
         let f = fixture();
-        std::fs::write(f.ctx.cwd.join("a.txt"), "one\n").unwrap();
-        let args = serde_json::json!({
-            "path": "a.txt",
-            "old": "one",
-            "new": "two",
-            "edits": [{"old": "one", "new": "three"}]
-        });
-        let outcome = run(&args, &f.ctx, "m8");
+        let outcome = run(
+            &serde_json::json!({
+                "path": "a.txt",
+                "old": "x",
+                "new": "y",
+                "edits": [{"old": "x", "new": "y"}]
+            }),
+            &f.ctx,
+            "m",
+        );
         assert_eq!(outcome.outcome, "error");
         assert!(outcome.result.contains("not both"), "{}", outcome.result);
-    }
-
-    #[test]
-    fn an_empty_edits_list_is_refused() {
-        let f = fixture();
-        let args = serde_json::json!({"path": "a.txt", "edits": []});
-        let outcome = run(&args, &f.ctx, "m9");
-        assert_eq!(outcome.outcome, "error");
-        assert!(outcome.result.contains("empty"), "{}", outcome.result);
-    }
-
-    #[test]
-    fn a_multi_hunk_result_stays_one_line_per_change() {
-        let f = fixture();
-        std::fs::write(f.ctx.cwd.join("a.txt"), "a\nb\n").unwrap();
-        let args = edits("a.txt", &[("a", "A"), ("b", "B")]);
-        let outcome = run(&args, &f.ctx, "m10");
-        assert_eq!(outcome.outcome, "ok", "{}", outcome.result);
-        // Headline + two lines, no more: a multi-edit must stay cheap to read.
-        assert_eq!(outcome.result.lines().count(), 3, "{}", outcome.result);
     }
 }

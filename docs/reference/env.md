@@ -1,8 +1,8 @@
 # Environment variables
 
 **Summary:** every variable kelir reads, every one it sets for its children, and
-the test hooks it honours; the table is generated from `src/envs.rs`, which is
-the only place a variable is declared.
+the test hooks it honours; `src/envs.rs` is the runtime accessor and the one
+place a variable name is declared.
 **Read this when:** you are configuring a session without a config file,
 debugging "why did it pick that directory / model / colour", or adding a knob
 (`src/envs.rs`: `VARS`).
@@ -14,19 +14,16 @@ the value; `session_started.key_origin` records the same.
 
 ## The variables
 
-<!-- generated:env -->
 ### Read by kelir
 
 | variable | effect |
 |---|---|
 | `OPENROUTER_API_KEY` | the OpenRouter provider's key (never printed: `kelir doctor` reports the source) |
 | `KELIR_GO_API_KEY` | the OpenCode Go key, an override for opencode's own store |
-| `KELIR_CONFIG` | the config file to use instead of the machine/project search |
+| `KELIR_CONFIG` | the machine config file to use instead of the machine-layer search (the project layer still applies) |
 | `KELIR_CONFIG_DIR` | the machine config directory (`config.toml`, `prompt.md`, `skills/`) |
-| `KELIR_MCP_CONFIG` | the machine `mcp.toml` to use instead of `<config dir>/mcp.toml` (the project's `.kelir/mcp.toml` still layers on top) |
 | `KELIR_STATE_DIR` | the state root (sessions, model caches, bg jobs, locks) |
 | `KELIR_HOME` | replaces `$HOME`/`USERPROFILE` only (user skills, `~`); it does NOT move state or config, set `KELIR_STATE_DIR` and `KELIR_CONFIG_DIR` for that |
-| `KELIR_DOCS_ROOT` | the `docs/reference` directory `kelir docs --generate` and `--check` read (a checkout, or a copy) |
 | `KELIR_BASE_URL` | overrides a provider's base URL (a proxy, or a test's mock server) |
 | `KELIR_PROMOTE_AFTER` | seconds before a still-running bash call becomes a background job (overrides `promote_after`) |
 | `KELIR_HERDR` | force Herdr status records on (`1`) or off (`0`) |
@@ -56,17 +53,12 @@ the value; `session_started.key_origin` records the same.
 | `KELIR_SESSION_DIR` | the session's directory |
 | `KELIR_ROOT` | the root session of the tree this tool call runs in (its own id when it is the root) |
 | `KELIR_PARENT` | the session this tool call runs in: the parent of any child it starts (`kelir run --child`) |
-| `KELIR_DEPTH` | that session's depth in the tree (the root is 0); a start past `max_child_depth` is refused |
+| `KELIR_DEPTH` | that session's depth in the tree (the root is 0); a start past `[children] max_depth` is refused |
 | `KELIR_CALL_ID` | the provider call id of the bash call |
 | `KELIR_BIN` | the kelir binary, so `kelir bg`/`kelir view` work off `PATH` |
 | `KELIR_GATE_EVENT` | set for a gate only: the event it was started for (`turn_end`, …); a gate never gets `KELIR_TOKEN`, `KELIR_SOCK` or a provider key |
 | `KELIR_GATE_NAME` | set for a gate only: the gate's name, as the `gate` event records it |
 | `KELIR_GATE_RUN` | set for a gate only: a token unique to this gate run, so kelir can find and kill what the gate left behind (a `setsid` daemon); do not clear it |
-| `KELIR_JOB` | set for a job's notify hook only: the job's name |
-| `KELIR_JOB_OUTCOME` | set for a notify hook only: `done`, `error`, `stopped`, `timeout` or `paused` |
-| `KELIR_JOB_RUN` | set for a notify hook only: the run's id (`run_…`) |
-| `KELIR_JOB_SESSION` | set for a notify hook only: the id of the session the run used |
-| `KELIR_JOB_STATUS` | set for a notify hook only: the path of the job's `STATUS.json` |
 | `KELIR_NOTIFY_EVENT` | set for an event hook only: the event that fired (`turn_done`, `error`, `paused`, `bg_settled`, `child_settled`) |
 | `KELIR_NOTIFY_MESSAGE` | set for an event hook only: the terminal record's message (title and event kind) |
 
@@ -74,14 +66,13 @@ the value; `session_started.key_origin` records the same.
 
 | variable | effect |
 |---|---|
-| `KELIR_NOTIFY_TIMEOUT_MS` | shorten the 30 s notify-hook timeout (the job tests) |
-| `KELIR_TODAY` | `YYYY-MM-DD` replaces today's UTC date: a new session's system prompt and the date-change source of a resume (the job tests) |
-| `KELIR_GATE_TIMEOUT_MS` | shorten the 30 s gate timeout (the gate tests; a timed-out gate fails open) |
-| `KELIR_CRASH_AT` | abort at a named point (`before_append`, …): the crash tests |
+| `KELIR_TEST_NOTIFY_TIMEOUT_MS` | shorten the 30 s notify-hook timeout (the job tests) |
+| `KELIR_TEST_TODAY` | `YYYY-MM-DD` replaces today's UTC date: a new session's system prompt and the date-change source of a resume (the job tests) |
+| `KELIR_TEST_GATE_TIMEOUT_MS` | shorten the 30 s gate timeout (the gate tests; a timed-out gate fails open) |
+| `KELIR_TEST_CRASH_AT` | abort at a named point (`before_append`, …): the crash tests |
 | `KELIR_TEST_PANIC` | panic once the TUI owns the terminal, to prove the restore path |
-| `KELIR_SHELL_RAW` | `cr`: send a POSIX script raw, keeping CRLF terminators |
-| `KELIR_IPC_LOCK_PROBE` | a session dir: a test child tries to take the lock there, to prove a second process is refused (the IPC tests) |
-<!-- /generated -->
+| `KELIR_TEST_SHELL_RAW` | `cr`: send a POSIX script raw, keeping CRLF terminators |
+| `KELIR_TEST_IPC_LOCK_PROBE` | a session dir: a test child tries to take the lock there, to prove a second process is refused (the IPC tests) |
 
 ## Notes
 

@@ -36,10 +36,11 @@ permissions in `src/perm.rs`, and the two are wired in `src/ipc.rs` (the socket)
   `take_turn_messages` used to take everything, and the idle loop applies a pending `cancel`
   itself, so a `cancel` against an idle `--keep` session kills the job instead of waiting for a
   boundary that never comes.
-- **A job id is `owns`-checked against three things**: the in-memory registry (what this process
-  started), `bg/<id>.status` in this session's own `bg/`, and `commands/<id>/` (a promoted
-  call's id is its output dir name). The `bg/` directory is created at session start, so an
-  empty session has an empty registry rather than a missing directory.
+- **A job id is `owns`-checked against the in-memory registry** (what this process started).
+  A file is never registration on its own; the historical `bg/<id>.status` and `commands/<id>/`
+  checks were removed (see the trust boundary note below). Session jobs now live in
+  `calls/<id>/`, session-less jobs in `<state>/bg/<id>/`; the `calls/` directory is created at
+  session start, so an empty session has an empty registry rather than a missing directory.
 - **Reachability, not identity, is what the token proves.** Documented rather than defended
   against (see `docs/SPEC.md`, *Who may drive a session*): a process that can read this session's
   environment or token file runs as the user, in the session, and is trusted. The token stops a
@@ -238,7 +239,7 @@ wait itself in `session::stream`. Where this differs from the brief:
   a short POSIX command on the argument route is normalised the same way, because otherwise the
   same text would mean two things at the 6,000-byte boundary (`echo a > f<CR>` created `f<CR>`
   below it and `f` above it — STEER-6 review N10). A lone `\r` inside a payload (how a heredoc
-  writes a literal CR to a file) is untouched. `KELIR_SHELL_RAW=cr` sends the bytes exactly as
+  writes a literal CR to a file) is untouched. `KELIR_TEST_SHELL_RAW=cr` sends the bytes exactly as
   written on both POSIX routes, for a caller that needs the raw bytes. A `.bat` also starts with
   `@echo off`: without it `cmd.exe` echoes the prompt and the command line into the result, so a
   20 KB command came back as 20 KB of echo (STEER-6 review N6).
@@ -373,7 +374,7 @@ wait itself in `session::stream`. Where this differs from the brief:
   goes on. kelir dogfoods itself, so a suite run from inside a kelir session inherited
   that session's own job directory and socket: `bg out` read the *session's* jobs, and a
   test could report (or cancel) a job in the session running it. `KELIR_PROMOTE_AFTER`,
-  `KELIR_HERDR`, `KELIR_CRASH_AT` and `KELIR_TEST_PANIC` were the same hazard: an
+  `KELIR_HERDR`, `KELIR_TEST_CRASH_AT` and `KELIR_TEST_PANIC` were the same hazard: an
   ambient value in a developer shell silently changed what the suite exercised (M5-A
   fixes N2). This is test infrastructure, not shipped behaviour, but it is recorded here
   because it changes what the suite proves about process isolation.
@@ -440,7 +441,7 @@ can start in a test.
 ## M0
 
 - **`user.from` may be `cli`.** The spec lists `tui`, `ctl`, `channel`, `job`,
-  `gate`. `kelir run` / `kelir ask` are the scriptable surface, so their user
+  `gate`. `kelir run` (including `kelir run --ask`) is the scriptable surface, so their user
   events carry `"from": "cli"` instead of pretending to be one of the five.
 - **OpenCode Go base URL is `https://opencode.ai/inference/go/v1`.** The spec
   writes `https://opencode.ai/inference/go`; the OpenAI-compatible endpoint is
@@ -638,20 +639,17 @@ can start in a test.
   (`boundary: "dropped"`), the verb's answer says `applies: "dropped"` rather
   than `now` — for `ctl` clients and the TUI alike — and the UI is told
   "nothing is running" (M2 review N1).
-- **The inline viewport is a fixed 8 rows** (four live rows, a three-row editor,
-  the status line), and a terminal shorter than that gets fewer. Streaming text
-  that no longer fits is written into the scrollback as it arrives, so a long
-  answer scrolls like normal terminal output instead of growing the repaint area.
+- **The TUI owns the alternate screen and an in-app transcript.** The view has four areas: a reflowable transcript viewport, the state row, the editor and the facts row. Finished turns stay in the app; nothing is committed to the terminal's scrollback. `PageUp`/`PageDown` and `Home`/`End` navigate the owned rows, and resize reflows from the source entries while keeping the reader's scroll position.
 - **The TUI ends the session if it dies, and leaves the shell a clean
   terminal.** A panic or a terminal error in the UI task sends the `end` verb,
   so a broken UI cannot leave a pane hanging with no way in. On both paths —
-  `/quit`, a double Ctrl-C, and a panic — the viewport rows are erased (never
-  the scrollback above them), the cursor is shown and put on the first free row
-  below, bracketed paste is turned off and raw mode is dropped, so the shell's
-  next output starts on a new line instead of overwriting the banner (M2 review
-  F3, N5). The panic hook does this itself and then ratatui's hook; the normal
-  exit does not call `try_restore`, which would emit `LeaveAlternateScreen` for
-  a screen the inline viewport never entered.
+  `/quit`, a double Ctrl-C, and a panic — the cursor is shown, the alternate
+  screen and kitty keyboard handshake are left, bracketed paste is turned off
+  and raw mode is dropped, so the shell's next output starts on a new line
+  instead of overwriting the banner (M2 review F3, N5). The user's own
+  scrollback is never erased: it was untouched while the TUI ran. The panic
+  hook does this itself and then ratatui's hook; the normal exit calls the same
+  idempotent restore.
 - **A TUI session starts with no task and no `user` event.** `session_started`
   is written first; the first turn begins when the first `say` arrives, so the
   log and the request sequence are the same as any other session's.
@@ -684,9 +682,9 @@ can start in a test.
   `step` and `turn` continue from the log instead of restarting. The turn's own
   step count restarts at 0 (it is per turn), and today's `max_steps`/`--max-steps`
   applies to the resumed turn like every other config knob.
-- **`kelir resume <id>` on a finished session with no task does nothing.** It
+- **`kelir run --resume <id>` on a finished session with no task does nothing.** It
   appends the `resumed` event and one `session_ended {reason: "resumed"}`, exits
-  0 and makes no provider request. With a task (`kelir resume <id> <task>`,
+  0 and makes no provider request. With a task (`kelir run --resume <id> <task>`,
   `kelir run --resume <id> <task>`) the message is appended (delivery `next`
   when a turn was in flight, so it lands after the unknown results) and one turn
   runs.
@@ -799,7 +797,7 @@ can start in a test.
   tool's result says `compaction queued …`, the verb is queued like `model`, and
   the auto trigger sets the same request. `kelir ctl <id> compact <focus>` now
   carries the focus (before M3 the CLI dropped the words for this verb).
-- **`KELIR_CRASH_AT=<point>` is a test-only injection.** A scripted test names
+- **`KELIR_TEST_CRASH_AT=<point>` is a test-only injection.** A scripted test names
   one of `tool_started` (after the intent is fsync'd, before any process
   starts), `mid_tool` (150 ms after the calls start, side effects already made),
   `tool_settled` (after the batch is committed), `mid_stream` (on the first text
@@ -837,7 +835,7 @@ can start in a test.
   *tails* that file for the inline result (`commands/<dir>/out`, same path, same
   `Capture`, the same tool result as M0's pipes). A pipe the session read would
   block the job once the session died.
-- **`bg/<id>.status` is the job's whole state, written only by its shim.** The
+- **`calls/<id>/<id>.status` is the job's whole state, written only by its shim.** The
   spec's `state`, `pid`, `exit_code`, `started`, `finished` plus the fields the
   machinery needs: `shim` (the shim's pid: the process group on Unix, the process
   whose job holds the tree on Windows), `shim_started` and `pid_started` (when
@@ -872,7 +870,7 @@ can start in a test.
   a safety net.** `kelir bg run` sends one `bg` request (the status file as
   `args`, `from: "job"`) to the address in `KELIR_SOCK`; the session records
   `bg_started` at its next boundary (at once when idle). Independently the
-  session watches `bg/*.status` every 250 ms, so a report the socket never
+  session watches `calls/*/*<id>.status` every 250 ms, so a report the socket never
   carried (a session that was busy, a dead socket, a status written by a previous
   process) still reaches the log. Both paths record through the same `note_bg`,
   which dedupes against the log: `bg_started` once per id, `bg_settled` once per
@@ -901,10 +899,10 @@ can start in a test.
   from `exit_code`. A wake that follows a promoted `tool_settled` is written
   after the whole batch's results, never between them: a call's results must stay
   contiguous for the next request (M4 review N5).
-- **`resume` folds `bg/*.status` into the log** after the unknown-result block:
+- **`resume` folds `calls/<id>/<id>.status` into the log** after the unknown-result block:
   for every job or promoted call, `bg_started` if the log lacks it, and
   `bg_settled` + the wake message if it settled while nothing was running. A
-  wake found this way sets `has_task`, so a bare `kelir resume <id>` runs the turn
+  wake found this way sets `has_task`, so a bare `kelir run --resume <id>` runs the turn
   that reads it — "a job that finishes while the session is not running is only
   recorded" holds on the shim's side (nothing wakes a dead session), and the
   record is what the resume then acts on. A job still running is only recorded,
@@ -1313,7 +1311,7 @@ this differs from the spec text, or needed a call the brief left open:
   microseconds. So `credentials::resolve` blocks for at most `AUTH_TIMEOUT` (5 s), called from
   `prepare`/`reopen` and from a `model` verb that swaps provider, before the first request is built
   (a background task holding the key would put the secret in another place). Measured on the dev
-  box: `opencode auth export opencode` 1221 ms cold, 289/308/296 ms after; the whole `kelir ask` on
+  box: `opencode auth export opencode` 1221 ms cold, 289/308/296 ms after; the whole `kelir run --ask` on
   `opencode-go` 1964/2063 ms through the store vs 1661/1483 ms with `KELIR_GO_API_KEY` set, i.e.
   the read costs ~0.4 s of a cold start that is dominated by the first network round trip.
 - **`opencode auth export opencode` is run twice at most, and never in a loop.** When the store's
@@ -1338,11 +1336,11 @@ this differs from the spec text, or needed a call the brief left open:
 - **The session socket's trust boundary is the token, a per-job capability, and a signature on
   every status record.** SPEC said a request must carry the session token and that the session
   answers `bg`/`cancel`/`bg-spawn` only for jobs "it started or registered", where a
-  `bg/<id>.status` file or a `commands/<id>/` directory counted as registration. That is not a
+  `calls/<id>/<id>.status` file or a `commands/<id>/` directory counted as registration. That is not a
   boundary: every bash child holds the token by design (`KELIR_TOKEN`), and it can create either
   path itself (M5-A retro F8, STEER-7 review B1). Round 1 closed the socket (random ids, an
   in-memory registry, a capability per job); round 2 (steer7b review B1') found that the
-  session's own `bg/` watcher still folded any `bg/<id>.status` for a registered id into the log,
+  session's own `calls/` watcher still folded any `calls/<id>/<id>.status` for a registered id into the log,
   so a child could forge `bg_started`/`bg_settled` and a wake message from `job`, and could name
   any file in `out`. The earlier claims "files are never evidence" and "the model's own tools
   cannot impersonate a shim" were false and are withdrawn. Now **a status file is believed only if
@@ -1351,17 +1349,17 @@ this differs from the spec text, or needed a call the brief left open:
   pipe (the capability and key are no longer in the shim's environment, which a same-user process
   reads: steer7b S-A), and records the public half in `bg_started.pubkey`. A bash call's id is
   `<seq>-<step>-<n>`, not a random id (steer7b S-B2): two sessions share those names, which is
-  harmless because each session has its own `bg/`, registry and keys.
+  harmless because each session has its own `calls/`, registry and keys.
 - **No secret ever leaves the session or the job's own shim (steer7fix3, steer7c review B1/B2).**
   Round 2 handed the per-job capability and signing key to the process that claimed the job, and
   `bg-spawn` for an existing id answered any token holder with them; both let a tool child sign
   records the session believed. Now the session starts every job's shim itself (`bg-spawn`, with
   the client's environment, cwd and command), gives it the key and capability on its stdin pipe
   and answers with the id only; `bg-spawn` naming an id is refused, `bg-claim` returns an
-  acknowledgement, and `out` must be inside `bg/`. Costs: a job started by `kelir bg run` is
+  acknowledgement, and `out` must be inside this session's own `calls/` directory. Costs: a job started by `kelir bg run` is
   parented to the session (not the tool child), and the shim reports itself (it holds the
   capability). Signed records carry a monotonic sequence number and a final copy in
-  `bg/<id>.final`, which beats a replayed older record. The Windows shim also closes its process to
+  `calls/<id>/<id>.final`, which beats a replayed older record. The Windows shim also closes its process to
   same-user memory reads (Owner Rights DACL) and clears the key on exit; an elevated administrator
   with `SeDebugPrivilege`, or root, is still outside the boundary. Per-id refusal budgets
   (review nit) are not done: the budget stays shared (32 events per session).
@@ -1538,7 +1536,7 @@ follow-up commit series that restores three things the first pass lost.
 - **The hint and `observe` do not list the servers yet.** Neither exists on this base (M5-B owns
   them). `Broker::descriptions()` returns `(name, description)` for every configured server, ready
   for whoever builds the hint; `kelir mcp ls` is the pull route today.
-- **A new env var, `KELIR_MCP_CONFIG`,** replaces the machine `mcp.toml` path (the way
+- **A new env var, `KELIR_CONFIG`,** replaces the machine `config.toml` path (the way
   `KELIR_CONFIG` does for `config.toml`). The brief did not ask for it; the e2e tests need a way to
   hand a session a server list without writing into the real config dir.
 - **A server gets an allow-listed environment, not the session's (m6fix, review F6).** The spec
@@ -1547,13 +1545,13 @@ follow-up commit series that restores three things the first pass lost.
   proxy and CA variables, then the server's own `env` table, and nothing else.
 - **`kelir mcp <server> call <tool>` exists (m6fix, review N3).** The spec's three shapes make a
   tool named `ls` unreachable; `call` is the escape hatch (a tool named `call` is `call call`).
-- **A lost session after the send is exit 4, and the session reads `mcp.toml` once (m6fix).** The
+- **A lost session after the send is exit 4, and the session reads `config.toml` once (m6fix).** The
   spec says exit 4 is "unknown outcome, never retried"; a transport failure after the request
   reached the session is exactly that, so it no longer falls back to a one-shot run. Editing
-  `mcp.toml` during a session has no effect until the next start/resume (documented in
+  `config.toml` during a session has no effect until the next start/resume (documented in
   `docs/reference/mcp.md`).
 - **Project-defined servers start without a trust prompt (m6fix, review S1, open).** The spec asks
-  for the project layer and `channel = true` autostart; a cloned repo's `.kelir/mcp.toml` can name
+  for the project layer and `channel = true` autostart; a cloned repo's `.kelir/config.toml` can name
   any `command`. Documented in `docs/reference/mcp.md`; the trust gate belongs with STEER-7
   (`src/trust.rs`) and is not built here.
 - **`mcp_started.args` records the shape of the arguments, not their values (m6m, STEER-7).** The
@@ -1610,7 +1608,7 @@ follow-up commit series that restores three things the first pass lost.
   events are written when the call settles, just before `mcp_settled`.
 - **A gate's environment is an allow-list (M8)**, the MCP server list plus `SSH_AUTH_SOCK`, plus
   `KELIR_SESSION_DIR`, `KELIR_GATE_EVENT`, `KELIR_GATE_NAME` and the gate's own `env` table. Not "the
-  environment minus secrets": a user's custom `key_env` variable is withheld too. `KELIR_GATE_TIMEOUT_MS`
+  environment minus secrets": a user's custom `key_env` variable is withheld too. `KELIR_TEST_GATE_TIMEOUT_MS`
   (test hook) shortens the 30 s.
 - **Project-layer gates need a trusted project (M8 fix, review F6).** kelir has no prompt, and
   `src/trust.rs` is the session socket's boundary, not a project-trust store, so trust is *declared*:
@@ -1619,14 +1617,14 @@ follow-up commit series that restores three things the first pass lost.
   are skipped in any other project, with an `error` event (`where` `gate`) per skipped gate; `observe` marks
   them `trusted: false`; a project config's own `trusted_projects` is ignored with a warning. Side effect: the
   machine and project `[gates]` tables are no longer merged per key (the project's used to replace the
-  machine's `session_start`); both sets are kept. Project `mcp.toml` (M6) is untouched and still has no trust
+  machine's `session_start`); both sets are kept. Project `config.toml` (M6) is untouched and still has no trust
   step.
 - **The `gate` event has no `tool` field (M8).** The spec's field list is kept exactly; a gate's `reason`
   and the neighbouring `tool_started` identify the call.
 - **`delegation` describes what `main` has, not M7's CLI (M8 fix, review F7).** M7 (`kelir run --child`,
   `kelir brief`, `kelir ls`, the depth/10/16 caps, `child_started`/`child_settled`) is on `job/m7`, not merged
   when this was fixed, so the first version told the model to run commands that failed. The skill now teaches
-  plain `kelir run`, `kelir ask` and `kelir bg run`, with the limits (depth 1, three at a time) written as the
+  plain `kelir run`, `kelir run --ask` and `kelir bg run`, with the limits (depth 1, three at a time) written as the
   model's own discipline, since nothing enforces them. A unit test
   (`builtin_skills_name_only_subcommands_and_flags_kelir_help_lists`) fails if any builtin skill shows a
   `kelir <subcommand>` or `--flag` that `kelir --help` does not list. **Whoever merges M7 rewrites
@@ -1681,8 +1679,10 @@ side). Where the code had to choose:
   agent" without saying live; a lifetime count would make a long-lived TUI session unable to
   delegate after ten tasks, and the brief speaks of a crashed child leaking a "slot", which only
   a live count has. The same holds for the other two caps. A `brief` takes a slot while it runs.
-- **The caps are three top-level keys** (`max_child_depth`, `max_children`,
-  `max_live_descendants`), not a `[children]` table: the drift test reads `RawConfig`'s fields.
+- **The caps are grouped under `[children]`** (`max_depth`, `max_per_agent`,
+  `max_live_descendants`) since rewrite P4B; the historical top-level spellings
+  (`max_child_depth`, `max_children`, `max_live_descendants`) were removed, with no aliases.
+  Grouping keys by feature is what P4B asks for; the drift test reads `RawConfig`'s fields.
 - **`child_started`/`child_settled` carry more than the spec's list**: `session`, `parent`,
   `kind` (`child`/`brief`), `model`, and `exit_code?` on settle. The root writes the pair for
   every descendant (that is the registry); a parent that is not the root writes the same pair
@@ -1715,7 +1715,7 @@ side). Where the code had to choose:
   parent recorded (`killed`, `lost`, …), else `ended`/`crashed`. Outside a session it shows the
   ten newest roots and their descendants; `--all` shows every session. Costs are the tally of
   the logs (provider cost, else the price table; `-` when unknown).
-- **A resumed child is a root again.** `kelir resume <child>` reopens its log as an ordinary
+- **A resumed child is a root again.** `kelir run --resume <child>` reopens its log as an ordinary
   session (the link and the root's socket died with the parent). A resumed *root* settles the
   children its log shows unsettled as `lost`.
 - **`ctl status`** now reports `children` (live descendants; it was always 0) and `child_list`
@@ -1742,7 +1742,7 @@ side). Where the code had to choose:
 - **A project's notify hooks need trust.** The brief says "gate-like"; a project `jobs.toml` is
   repository content, so its hooks follow the project-gate rule (`trusted_projects` /
   `KELIR_TRUST_PROJECT`). The machine file's hooks always run.
-- **The date source is on every resume, not only on jobs.** `kelir resume` and `run --name` add it
+- **The date source is on every resume, not only on jobs.** `kelir run --resume` and `run --name` add it
   too (when a task or an in-flight turn follows), because the frozen prompt is stale the same way.
   A child or brief never adds it.
 - **The `owner` file.** There was no record of which pid owns a session, so the name-collision
@@ -1833,3 +1833,67 @@ own line, and a clean call shows no `ok` word.
 - **No `ok` verdict.** A clean call's right-hand column shows only its output size (`29 B`);
   a failure (`✗ exit 101`) and a stop (`⏹ cancelled`) keep their words. The headless progress
   line (`→ bash … · ok · …`) is a separate path and is unchanged.
+
+## Comment history stripped (P1, 2026-11-21)
+
+One-liners for the guarantees whose incident narratives were removed from the source; the
+original commits and reviews remain in git history.
+
+- `cancel` is a first-class verb, applied at once and kept in the scheduler queue as an action, so it can kill a job in an idle `--keep` session (6b1a8be).
+- A 400 that refuses a body field is remembered for the session so the same field is not sent again and the same 400 is not paid twice (a33bbc7).
+- A file created and then written has a window in which a reader sees it empty; content is written to a temp file and linked into place, or a young unreadable file is treated as somebody's (docs/reviews/buildinfra-review.md B2).
+- A connection close on Unix must not unlink a socket another process still uses; the listener owns its path (9bff9d4).
+- A SIGKILL can still leave a grandchild running; a shim's whole tree is in one process group (Unix) or Job Object (Windows) and dies with it (1f16d55).
+- A job's liveness and its recorded start time are both checked: a recycled pid or a zombie is not the shim that wrote a status file (774038f).
+
+## Cost removed (P2C, 2026-11-21)
+
+The rewrite drops cost tracking rather than carrying it across (#9 decision 3).
+The maintainer's 35 sessions hold 1,925 `usage` events and every one has no
+usable cost, so the price table, its estimates and the `warn_cost` warning were
+display-only. The deviation from the old SPEC is deliberate:
+
+- `usage` events keep `prompt_tokens`, `completion_tokens`, `cached_tokens`,
+  `cache_write_tokens` and `allowance?`; `cost` and `cost_source` are gone with
+  no reader for logs that still have them.
+- The token tally a resumed session folds from `events.jsonl` drives compaction
+  and `warn_prompt_tokens`. The cache-hit ratio stays in `ls`, `status` and job
+  STATUS; no display now claims a dollar amount.
+- `[prices]` and `warn_cost` are ordinary unknown config keys. `src/spend.rs`
+  became `src/usage.rs` with tokens and status only.
+- The built-in delegation skill says children use tokens and shows the
+  cache-hit ratio, not a spend figure.
+
+## Signed status and child links removed (P2A, 2026-11-21)
+
+The rewrite drops the STEER-7 Ed25519 status signatures, per-job capabilities, per-child link
+secrets and socket/pipe permission read-back (#12). Same-user processes cannot be kept out of a
+harness that gives the model a real shell as that user, so those checks added complexity and keys
+without holding a real boundary. What remains: a 256-bit per-session token required on every
+socket request, owner-only state directories and socket/pipe creation, an owned-job check on
+`bg`/`cancel`/`bg-spawn`, subtree checks in the child registry, and settle-once for each job id
+(the bound on the original forged-report flood). Status files are plain JSON written atomically;
+`bg_started` no longer carries `pubkey`, and a resume does not verify signatures.
+
+`SystemRng::fill_bytes` panics when the OS has no entropy. The rewrite catches that panic and
+returns an empty token/id: `Trust::create` and `Trust::mint_for` then refuse cleanly, so no
+predictable fallback is ever used and an entropy-less platform fails to start instead of
+minting a session. The emptiness guards in `src/trust.rs` are live on that path.
+## Built-in gates (rewrite P2B)
+
+- The pushed hint moved out of `Session` into `src/gates/builtin/hint.rs`; the
+  core keeps only the generic gate `context` path. `hint` is a Rust built-in
+  behind the same `GateInput`/`GateAnswer` interface external gates use, with
+  one instance per session held in the gate runner (state: the scored prompt
+  seq and the resolved scorer).
+- `prompt_submit` gates run before the human message is recorded, so the built-in
+  takes its prompt from the gate input rather than the event log; the answer is
+  held until that message exists and then appended through the same `source`
+  append function as an external gate's `context`. Seq-based dedupe applies only
+  when a matching user event exists (a gate run has no seq yet).
+- A built-in's non-streaming scorer call uses its own `reqwest::Client` (the
+  session client's stream future is `!Send`). `endpoint` overrides the base URL
+  before the scorer is built; a foreign origin drops the key, as before.
+- The hint catalogue scores skills only. MCP servers are named in the base
+  prompt for the model to pull with `kelir mcp`; they are not candidates for
+  the built-in scorer (this narrows the issue #13 wording "skills + MCP").

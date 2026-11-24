@@ -1,30 +1,36 @@
 # The TUI (keys, commands, states)
 
-**Summary:** the interactive session (`kelir`, no subcommand) is an inline
-8-row view: the live area, a state row, the editor and a facts row, with
-finished turns written above it into the terminal's own scrollback.
+**Summary:** the interactive session (`kelir`, no subcommand) owns the
+terminal's alternate screen: a four-area full-screen view with an owned
+transcript, a state row, an editor and a facts row. Finished turns stay in the
+app, every prompt and answer is reachable by scrolling, and the terminal's own
+scrollback is left untouched.
 **Read this when:** you are driving kelir by hand, or changing `src/tui.rs`,
 `src/theme.rs`, `src/activity.rs`, `src/markdown.rs`, `src/tools_view.rs` or
 `src/attachments.rs`.
 
-Code: `src/tui.rs` (the app, rows, keys, loop), `src/activity.rs` (the state
+Code: `src/tui.rs` (the loop), `src/tui/{app,view,keys,terminal}.rs` (the
+owned transcript, painting, key translation and terminal setup),
+`src/activity.rs` (the state
 machine), `src/theme.rs` (colours and glyphs), `src/markdown.rs` (the
 renderer), `src/tools_view.rs` (tool lines and groups), `src/attachments.rs`
 (images), `src/commands.rs` (`/` commands), `src/editor.rs` (the buffer and its
 image chips).
 
-## Rows
+## Areas
 
-| row | what it holds |
+| area | what it holds |
 |---|---|
-| live (3) | the tail of the streaming answer (markdown) or the open tool group |
+| transcript (remaining rows) | the owned, reflowed transcript; `PageUp`/`PageDown` and `Home`/`End` move through it, and a `N new lines` marker appears when output lands while the reader is away from the tail |
 | state (1) | `● idle · ready`, `⠹ thinking 12s · waiting for the provider · esc stops`, … |
 | editor (3+) | `› your message` in the user colour (cyan); the prompt dims while the agent works. Long prompts wrap onto the next editor row (prompt only on the first row) and the editor **grows** with the wrapped text (up to a cap) so the whole message is visible; the window scrolls to keep the cursor visible |
-| facts (1) | the session title (from the first prompt), `model · 1.5k tok` — steps, cache and cost are not ambient |
+| facts (1) | the session title (from the first prompt), `model · 1.5k tok` — steps and cache are not ambient |
 
-A shorter terminal gives rows up in this order: the facts row, live rows, the
-editor down to one row; the state row is the last to go. Up and Down move
-between **visual** (wrapped) rows, keeping the display column you see.
+The view reflows from its source entries on resize and keeps the reader's
+scroll position. No finished turn is written into the terminal's scrollback;
+leaving the TUI restores the alternate screen and cursor. The kitty keyboard
+protocol (for Shift-Enter), bracketed paste and raw mode are pushed on entry
+and popped on exit.
 
 The session title is a short summary of the first prompt, recorded as a
 `session_title` event. It replaces the old `kelir idle`/`kelir working` prefix
@@ -77,7 +83,7 @@ the next boundary or during the wait.
 
 A turn that ends **paused** or **in error** keeps its row after it ends (with
 the step cap or the provider's reason and the next action) and writes one
-outcome line (`⏸ paused · 3 steps · 4.8k tok`, no cost or timing); `done` ends
+outcome line (`⏸ paused · 3 steps · 4.8k tok`, no timing); `done` ends
 on its prose and goes back to `● idle · ready`, and `stopped` writes one line
 and does the same. The facts row names the session title for a finished turn — the state row is
 where the phase word lives.
@@ -100,7 +106,12 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | Ctrl-Backspace | delete the word before the cursor (a chip is one element) |
 | Ctrl-Delete, Alt-Backspace | delete the word after the cursor |
 | Alt-← / Alt-→ | move by one word |
-| Home / End | start/end of the visual (wrapped) row, then of the whole line on a second press |
+| Home / End | jump to the start/end of the transcript |
+| PageUp / PageDown | scroll the transcript by one viewport |
+| Ctrl-U | clear the editor |
+| Ctrl-D | delete the word after the cursor |
+| Ctrl-Y | copy the last answer (OSC 52) |
+| Ctrl-Shift-Y | dump the whole transcript to `transcript.txt` in the session directory |
 | ↑ / ↓ | history (first line ↑, last line ↓) |
 | Backspace on an image chip | removes the whole chip and deletes its file (a plain Backspace on text still deletes one character) |
 

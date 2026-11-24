@@ -165,7 +165,7 @@ config keys, so they do not appear in `docs/reference/config.md` (STEER-11) when
    `--keep` (default 3) **per job**, so an idle job keeps its warm `target/` no matter how many other jobs ran
    after it. Nothing is removed without `--yes`: the first call is always a dry run.
 6. **No core dumps: `ulimit -c 0` is deliberate — do not drop it.** The suite contains tests that abort a
-   `kelir` on purpose (M3's `KELIR_CRASH_AT` crash injection, and the reviews that re-run it). On a stock
+   `kelir` on purpose (M3's `KELIR_TEST_CRASH_AT` crash injection, and the reviews that re-run it). On a stock
    Linux box each one wrote a core into the system store: on 2026-11-20 the gate machine held **2,660 cores,
    904 MB, ~290 KB each**, every one a `.../target/debug/kelir` SIGABRT from the Linux gate. Whether a core is
    written is the host's decision (`kernel.core_pattern` here is `systemd-coredump`, plus `fs.suid_dumpable`),
@@ -201,8 +201,8 @@ those suites are the ones that feel it. `.config/nextest.toml` caps them:
 
 | group | filter | cap | why |
 |---|---|---|---|
-| `pty` | `binary(e2e_tui)` | 2 | 17 tests each driving a real terminal |
-| `process-heavy` | `binary(e2e_m4) \| binary(review_m4b) \| binary(review_m4)` | 2 | each kills a session and scans for surviving pids |
+| `pty` | `test(/^tui::/)` | 2 | the tests driving a real terminal |
+| `process-heavy` | `test(/^bg::/)` and the process-heavy gate/review modules | 2 | tests that kill a session and scan for surviving pids |
 
 Measured over repeated full runs at `-j 4`:
 

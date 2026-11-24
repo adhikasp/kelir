@@ -6,7 +6,7 @@
   file/process/socket/event conditions, gated mock replies and held bash calls, all under one
   90 s hang ceiling with a diagnostic dump on timeout.
 - Fixed a real product bug the load run exposed: date-change sources compared against the
-  event's wall-clock timestamp rather than the `KELIR_TODAY` date frozen in the system prompt.
+  event's wall-clock timestamp rather than the `KELIR_TEST_TODAY` date frozen in the system prompt.
   Red unit test first, then the minimal fix (`jobs::clock_source_from` plus
   `Session::rendered_date`). The e2e test that was failing 3/3 under load now passes alone and
   under stress.

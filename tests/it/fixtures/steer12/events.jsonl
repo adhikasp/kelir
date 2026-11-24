@@ -1,0 +1,30 @@
+{"ts":"2026-11-20T10:00:00.0000000Z","type":"session_started","id":"ses_01fixture0000000000000000","depth":0,"cwd":".","os":"windows","kelir_version":"0.1.0","provider":"openrouter","model":"test/model","sources":[],"tools":["bash","edit","compact"],"system":{"text":"# fixture"},"seq":1,"format":1}
+{"ts":"2026-11-20T10:00:00.0000000Z","type":"step_started","step":1,"model":"m","provider":"p","request_hash":"h1","seq":2}
+{"ts":"2026-11-20T10:00:10.0000000Z","type":"assistant","step":1,"text":"","tool_calls":[{"id":"c1","name":"bash","args":{"command":"cd C:/w && sed -n '1,40p' src/lib.rs; echo === tests; ls tests"}}],"finish_reason":"tool_calls","seq":3}
+{"ts":"2026-11-20T10:00:10.0000000Z","type":"call_started","kind":"tool","id":"c1","info":{"name":"bash","input":{"command":"cd C:/w && sed -n '1,40p' src/lib.rs; echo === tests; ls tests"}},"seq":4}
+{"ts":"2026-11-20T10:00:12.0000000Z","type":"call_settled","kind":"tool","id":"c1","outcome":"ok","info":{"exit_code":0,"bytes":900,"lines":40,"out_path":"commands/c1/out","spilled":false,"result":"..."},"seq":5}
+{"ts":"2026-11-20T10:00:12.0000000Z","prompt_tokens":1000,"completion_tokens":100,"cached_tokens":0,"cache_write_tokens":0,"seq":6,"type":"step_usage"}
+{"ts":"2026-11-20T10:00:12.0000000Z","type":"step_started","step":2,"model":"m","provider":"p","request_hash":"h2","seq":7}
+{"ts":"2026-11-20T10:00:42.0000000Z","type":"assistant","step":2,"text":"","tool_calls":[{"id":"c2","name":"bash","args":{"command":"grep -n \"fn main\" -A5 src/main.rs"}},{"id":"c3","name":"bash","args":{"command":"git grep -n parallel_tool_calls -- src docs"}}],"finish_reason":"tool_calls","seq":8}
+{"ts":"2026-11-20T10:00:42.0000000Z","type":"call_started","kind":"tool","id":"c2","info":{"name":"bash","input":{"command":"grep -n \"fn main\" -A5 src/main.rs"}},"seq":9}
+{"ts":"2026-11-20T10:00:42.0000000Z","type":"call_started","kind":"tool","id":"c3","info":{"name":"bash","input":{"command":"git grep -n parallel_tool_calls -- src docs"}},"seq":10}
+{"ts":"2026-11-20T10:00:47.0000000Z","type":"call_settled","kind":"tool","id":"c2","outcome":"ok","info":{"exit_code":0,"bytes":900,"lines":40,"out_path":"commands/c2/out","spilled":false,"result":"..."},"seq":11}
+{"ts":"2026-11-20T10:00:50.0000000Z","type":"call_settled","kind":"tool","id":"c3","outcome":"ok","info":{"exit_code":0,"bytes":900,"lines":40,"out_path":"commands/c3/out","spilled":false,"result":"..."},"seq":12}
+{"ts":"2026-11-20T10:00:50.0000000Z","prompt_tokens":4000,"completion_tokens":2500,"cached_tokens":0,"cache_write_tokens":0,"seq":13,"type":"step_usage"}
+{"ts":"2026-11-20T10:00:50.0000000Z","type":"step_started","step":3,"model":"m","provider":"p","request_hash":"h3","seq":14}
+{"ts":"2026-11-20T10:01:20.0000000Z","type":"assistant","step":3,"text":"","tool_calls":[{"id":"c4","name":"bash","args":{"command":"cargo test --lib steer12 2>&1 | tail -20"}},{"id":"c6","name":"bash","args":{"command":"git status --short"}}],"finish_reason":"tool_calls","seq":15}
+{"ts":"2026-11-20T10:01:20.0000000Z","type":"call_started","kind":"tool","id":"c4","info":{"name":"bash","input":{"command":"cargo test --lib steer12 2>&1 | tail -20"}},"seq":16}
+{"ts":"2026-11-20T10:01:20.0000000Z","type":"call_started","kind":"tool","id":"c6","info":{"name":"bash","input":{"command":"git status --short"}},"seq":17}
+{"ts":"2026-11-20T10:01:22.0000000Z","type":"call_settled","kind":"tool","id":"c6","outcome":"ok","info":{"exit_code":0,"bytes":900,"lines":40,"out_path":"commands/c6/out","spilled":false,"result":"..."},"seq":18}
+{"ts":"2026-11-20T10:03:20.0000000Z","type":"call_settled","kind":"tool","id":"c4","outcome":"ok","info":{"exit_code":0,"bytes":900,"lines":40,"out_path":"commands/c4/out","spilled":false,"result":"..."},"seq":19}
+{"ts":"2026-11-20T10:03:20.0000000Z","prompt_tokens":9000,"completion_tokens":3000,"cached_tokens":0,"cache_write_tokens":0,"seq":20,"type":"step_usage"}
+{"ts":"2026-11-20T10:03:20.0000000Z","prompt_tokens":12000,"completion_tokens":800,"cached_tokens":0,"cache_write_tokens":0,"kind":"compaction","seq":21,"type":"step_usage"}
+{"ts":"2026-11-20T10:03:20.0000000Z","type":"step_started","step":4,"model":"m","provider":"p","request_hash":"h4","seq":22}
+{"ts":"2026-11-20T10:03:30.0000000Z","type":"assistant","step":4,"text":"","tool_calls":[{"id":"c5","name":"bash","args":{"command":"grep -n 'fn main\\|fn run' src/main.rs; echo === lib; sed -n '1,20p' src/lib.rs"}}],"finish_reason":"tool_calls","seq":23}
+{"ts":"2026-11-20T10:03:30.0000000Z","type":"call_started","kind":"tool","id":"c5","info":{"name":"bash","input":{"command":"grep -n 'fn main\\|fn run' src/main.rs; echo === lib; sed -n '1,20p' src/lib.rs"}},"seq":24}
+{"ts":"2026-11-20T10:03:33.0000000Z","type":"call_settled","kind":"tool","id":"c5","outcome":"ok","info":{"exit_code":0,"bytes":900,"lines":40,"out_path":"commands/c5/out","spilled":false,"result":"..."},"seq":25}
+{"ts":"2026-11-20T10:03:33.0000000Z","prompt_tokens":10000,"completion_tokens":300,"cached_tokens":0,"cache_write_tokens":0,"seq":26,"type":"step_usage"}
+{"ts":"2026-11-20T10:03:33.0000000Z","type":"step_started","step":5,"model":"m","provider":"p","request_hash":"h5","seq":27}
+{"ts":"2026-11-20T10:03:35.0000000Z","type":"assistant","step":5,"text":"done","tool_calls":[],"finish_reason":"stop","seq":28}
+{"ts":"2026-11-20T10:03:35.0000000Z","prompt_tokens":9500,"completion_tokens":50,"cached_tokens":0,"cache_write_tokens":0,"seq":29,"type":"step_usage"}
+{"ts":"2026-11-20T10:03:35.0000000Z","type":"turn_ended","outcome":"done","final_text":"done","seq":30}
