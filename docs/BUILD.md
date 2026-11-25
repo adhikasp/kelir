@@ -16,7 +16,12 @@ below says how many runs it averages.
   before a commit.
 - `cargo nextest run` instead of `cargo test` for the full suite: about 20 % faster and one process per test.
   `cargo test` still works; the gate just does not use it.
-- `target/` is 1.4 GB for a full test build (was 3.9 GB) after the debug-info change.
+- `target/` is 1.4 GB for a full test build (was 3.9 GB) after the debug-info change; on Linux after the
+  integration-test consolidation (Diet D1) a full test build is 1.2 GB, see *What a target costs*.
+- **Disk**: a finished worktree's `target/` is worth 1-3 GB and nothing removes it. `scripts/target-sweep.sh`
+  deletes it under guards (git-listed worktrees only, never the caller's or the script's, `locked`/`prunable`
+  skipped, a cargo `CACHEDIR.TAG` required, nothing written in the last `--older-than` hours); dry run by
+  default. On the dev box it reclaimed 41.8 GB in one run at `--older-than 48`.
 
 ## Measurements
 
@@ -63,6 +68,47 @@ removes the Visual Studio Build Tools requirement (rust-lld ships in the toolcha
 keeping even though the win is small on this box. Linux keeps its default linker: there `lld` is a separate
 package, not part of the toolchain, so opting in would add an install step for no measured win.
 
+### Linux: what a target costs, and reclaiming it
+
+Measured on the Linux dev box (12 cores, `rustc`/`cargo` 1.100.0 nightly-2026-11-21, on `66c1a85`, Diet
+D1's merge; that history is now the rewrite squash `2b19518` on `main`), so it is the number to expect from
+`cargo build --tests` here rather than the Windows table above. Cold means no `target/` at all, `-j 4` as
+the gate runs it.
+
+| what | cost | where it goes |
+|---|---|---|
+| cold `cargo build --tests` | **116 s**, `target/` **1.2 GB** | — |
+| incremental rebuild after touching `src/lib.rs` | **6 s** | — |
+| `target/debug/incremental/` | **669 MB** | `dep-graph.bin` + `query-cache.bin` per crate (265 + 220 MB of it for `kelir`'s two crate hashes, 177 MB for the `it` binary): the compiler's notebook, not code |
+| dependency `*.rlib` | 175 MB over 172 crates | tokio, reqwest, rustls, ring, ratatui, clap… statically linked into every test binary |
+| dependency `*.rmeta` | 99 MB over 172 crates | type metadata, so the next compile does not re-parse deps |
+| `it` test binary | 59 MB | one binary now (Diet D1), still the whole graph plus line tables |
+| `kelir` dev binary + its test-env twin | 56 MB + 59 MB | `cargo build --tests` builds both; `CARGO_BIN_EXE_kelir` needs the second |
+
+So the 1.2 GB is 56 % compiler notebook and 44 % artifacts, and none of it is the 4.8 MB shipped binary. Two
+things were tried and **not** taken:
+
+- **`CARGO_INCREMENTAL=0` as a default.** It removes the 669 MB, but the next edit pays a full 76-81 s instead
+  of 6 s (13x). Worse, flipping it does not free the old notebook: the variable is part of every fingerprint,
+  so the tree rebuilds beside the old `incremental/` and measured **1.5 GB** until a `cargo clean`. Worth it
+  only for a tree that will never be edited again — which is what the sweep below decides.
+- **`-Z share-generics=y`** (the nightly is pinned): 131 s and 1.2 GB, i.e. no change at all. The default
+  already shares what it can at `opt-level=0`.
+
+**`scripts/target-sweep.sh`** is the answer for the rest: a worktree's `target/` is a cache, so it can be
+deleted without losing source, a branch or a commit. The script's candidate set is
+`git worktree list --porcelain`, so only real worktrees of this repo are considered and only their `target/`;
+a target is skipped when it belongs to the worktree the script runs from or the caller's cwd, when git
+reports the worktree `locked` or `prunable`, when `target` is a symlink or has no cargo `CACHEDIR.TAG`, when it
+is under `--min-mb` (100), or when anything in it was written in the last `--older-than` hours (24). Nothing
+happens without `--yes`.
+
+On the dev box (2026-11-24), `--older-than 24` offered **150 GB** of the farm's 167 GB; at `--older-than 48`
+(the run actually made) 8 trees were stale and **41.8 GB** was reclaimed, taking `~/Workspace/kelir-wt` from
+167 GB to 135 GB with no worktree removed and every tree touched in the last two days left warm. Run it when
+the farm is idle: a build that starts inside the age window is skipped, but one that starts between the check
+and the `rm` loses its cache (that build fails and says so; nothing else is affected).
+
 ### Linux (the far box, 12 cores)
 
 | what | before | after | how |
@@ -99,6 +145,7 @@ test in its own process, names a retry and enforces the leak rule. Nothing else 
 | `scripts/gate-lock.sh` | one gate at a time across every worktree of this clone (atomic publish; waits on an outside driver's lock) |
 | `scripts/gate-load.sh` | the STEER-9 stress run: the suite once under N busy loops |
 | `scripts/remote-check.sh` | the Linux gate into a reused work dir (with `ulimit -c 0`), plus marker-guarded, per-job `prune` |
+| `scripts/target-sweep.sh` | delete `target/` of worktrees nobody is building in (git-listed, guarded, dry run by default) |
 
 `tests/buildinfra.rs` holds these as tests: the profiles cargo resolves, the nextest numbers, the lock's
 behaviour (serializes, takes over a dead holder, gives up with 75, never removes a holder's lock, never takes
@@ -245,6 +292,10 @@ everyone to ignore failures, which hides real ones".
   the workspace and a change to all 19 test files, which is more churn than the few seconds it saves.
 - **`debug = 0` (no debug info at all)**: would be marginally faster but makes a panic backtrace useless; the
   whole point of the tests is that a failure is diagnosable.
+- **`CARGO_INCREMENTAL=0` as a project default**: 13x slower on the next edit (6 s → 76-81 s) and it doubles
+  the tree until a clean, because the flag is part of every fingerprint. Numbers in *What a target costs*.
+- **`-Z share-generics=y`**: measured 1.2 GB and 131 s at `opt-level=0`, i.e. no change; the default already
+  shares what it can.
 
 ## Defender exclusions
 
