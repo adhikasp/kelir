@@ -1,5 +1,11 @@
 //! Where each provider's key comes from.
-//! Exactly two providers, and each one has its own first-match-wins list:
+//! Exactly two providers, and each one has its own first-match-wins list.
+//!
+//! opencode's stored credential is the one source kelir cannot rotate itself: opencode owns the
+//! refresh grant, and a second refresher would log it out of the account they share. A provider's
+//! `refresh_cmd` is the supported way to make opencode refresh *itself* when its entry has lapsed:
+//! kelir runs that command once and reads the store again, so a host that rarely uses opencode no
+//! longer needs a person (or a second machine) to poke it (kelir#61).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -11,6 +17,12 @@ use crate::config::{ProviderConfig, ProviderKind};
 
 /// How long `opencode auth export` (or a `key_cmd`) may take before the whole process tree is killed.
 pub const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a provider's `refresh_cmd` may take. It is a real model call (`opencode run` on a free
+/// model), not a store read, so the 5 s `AUTH_TIMEOUT` is too tight; this is still a bound, not an
+/// expectation. Past it the tree is killed and the store is read anyway: an expired entry then
+/// fails with the command named, never a hang at session start.
+pub const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A credential this close to its expiry is worth re-reading before it is used: opencode
 /// refreshes its own token when it runs, so a second read may already carry the new one.
@@ -151,7 +163,8 @@ pub const REFRESH_FIX: &str =
 pub fn resolve(provider: &mut ProviderConfig) -> Result<Credential, String> {
     let env = |name: &str| crate::envs::named(name);
     let run = |argv: &[String]| run_command(argv, AUTH_TIMEOUT);
-    let credential = resolve_with(provider, &env, &run)?;
+    let refresh = |argv: &[String]| run_command(argv, REFRESH_TIMEOUT);
+    let credential = resolve_with(provider, &env, &run, &refresh)?;
     // The one place the secret lands: memory, on the config the client holds.
     // Everything else records the *source* only.
     provider.key = Some(credential.key.clone());
@@ -160,12 +173,16 @@ pub fn resolve(provider: &mut ProviderConfig) -> Result<Credential, String> {
     Ok(credential)
 }
 
-/// The resolution with the environment and the command runner injected, so the precedence
+/// The resolution with the environment and the command runners injected, so the precedence
 /// rules are unit-testable without touching this process's env or spawning anything.
+///
+/// `run` reads a key source (bounded by [`AUTH_TIMEOUT`]); `refresh` runs the provider's
+/// `refresh_cmd` (bounded by [`REFRESH_TIMEOUT`]), which is a different kind of process.
 pub fn resolve_with(
     provider: &ProviderConfig,
     env: &dyn Fn(&str) -> Option<String>,
     run: &dyn Fn(&[String]) -> Result<String, String>,
+    refresh: &dyn Fn(&[String]) -> Result<String, String>,
 ) -> Result<Credential, String> {
     // The default variable first, then the one `key_env` names (when that is a different name), then
     // `key_cmd`: SPEC.md, "first match wins".
@@ -213,23 +230,49 @@ pub fn resolve_with(
         return Ok(credential);
     }
     match provider.kind {
-        ProviderKind::OpencodeGo => store_credential(run),
+        ProviderKind::OpencodeGo => store_credential(
+            run,
+            provider
+                .refresh_cmd
+                .as_deref()
+                .filter(|argv| !argv.is_empty()),
+            refresh,
+        ),
         ProviderKind::OpenRouter => Err(format!(
             "provider `openrouter`: missing API key: set {OPENROUTER_ENV} (or `key_env`), or `[providers.openrouter] key_cmd = [\"…\"]`"
         )),
     }
 }
 
-/// opencode's own credential, read through its supported CLI and re-read once when it is already about
-/// to expire — expired on the first read included: opencode refreshes its token when it runs, so the
+/// opencode's own credential, read through its supported CLI. An entry that is expired or inside
+/// [`EXPIRY_MARGIN`] is given one chance to become fresh: the provider's `refresh_cmd` runs (when
+/// configured), then the store is read once more. Without a `refresh_cmd` the re-read happens after
+/// a short pause, because the CLI call that produced the parse may have been racing exactly the
+/// rotation opencode performs when it runs. Exactly one refresh and one re-read; past that the
+/// expiry is the answer.
 fn store_credential(
     run: &dyn Fn(&[String]) -> Result<String, String>,
+    refresh_cmd: Option<&[String]>,
+    refresh: &dyn Fn(&[String]) -> Result<String, String>,
 ) -> Result<Credential, String> {
     let started = Instant::now();
     let mut credential = read_store(run)?;
     let now = crate::provider::models::now_ms();
+    // A failed refresh is not fatal on its own: the re-read below still decides, and an entry that
+    // stayed expired reports *why* (the command and its status, never its output).
+    let mut refresh_failure: Option<(String, String)> = None;
+    let mut refreshed = false;
     if credential.expires_within_margin(now) {
-        pause_before_reread();
+        match refresh_cmd {
+            Some(argv) => {
+                refreshed = true;
+                let name = program_name(argv);
+                if let Err(error) = refresh(argv) {
+                    refresh_failure = Some((name, error));
+                }
+            }
+            None => pause_before_reread(),
+        }
         if let Ok(fresh) = read_store(run)
             && !fresh.expires_within_margin(now)
             && fresh.expires_at_ms != credential.expires_at_ms
@@ -243,9 +286,19 @@ fn store_credential(
             .expires_at_ms
             .map(format_ms)
             .unwrap_or_else(|| "an unknown time".to_string());
-        return Err(format!(
-            "the opencode credential expired at {at}: {REFRESH_FIX}"
-        ));
+        let fix = match (&refresh_failure, refresh_cmd) {
+            (Some((name, error)), _) => format!(
+                "`refresh_cmd {name}` failed ({error}): fix that command, or run `opencode auth \
+                 login` if the grant is gone"
+            ),
+            (None, Some(argv)) if refreshed => format!(
+                "`refresh_cmd {}` ran but the store still holds an expired credential: run \
+                 `opencode auth login` if the grant is gone",
+                program_name(argv)
+            ),
+            _ => REFRESH_FIX.to_string(),
+        };
+        return Err(format!("the opencode credential expired at {at}: {fix}"));
     }
     Ok(credential)
 }
@@ -532,6 +585,7 @@ mod tests {
             base_url: "https://example.invalid/v1".into(),
             key_env: key_env.map(str::to_string),
             key_cmd: key_cmd.map(|argv| argv.iter().map(|part| part.to_string()).collect()),
+            refresh_cmd: None,
             key: None,
             key_origin: None,
             key_expires_at_ms: None,
@@ -557,16 +611,40 @@ mod tests {
         }
     }
 
+    /// A refresh that must not happen: a test that reaches it has a bug.
+    fn no_refresh(argv: &[String]) -> Result<String, String> {
+        Err(format!("unexpected refresh command {argv:?}"))
+    }
+
+    /// The resolver without a `refresh_cmd` (the path before kelir#61). It shadows the glob
+    /// import so the existing tests keep exercising exactly that path.
+    fn resolve_with(
+        provider: &ProviderConfig,
+        env: &dyn Fn(&str) -> Option<String>,
+        run: &dyn Fn(&[String]) -> Result<String, String>,
+    ) -> Result<Credential, String> {
+        super::resolve_with(provider, env, run, &no_refresh)
+    }
+
+    /// [`store_credential`] with no refresh command configured.
+    fn store_without_refresh(
+        run: &dyn Fn(&[String]) -> Result<String, String>,
+    ) -> Result<Credential, String> {
+        store_credential(run, None, &no_refresh)
+    }
+
     // ------------------------------------------------------- JSON shapes
 
     /// The export shape opencode writes today: an array, one entry per
     /// integration, `value.access` the token and `value.expires` epoch ms.
+    /// The expiry is far in the future on purpose: a fixture dated "now" would
+    /// turn this suite red the day it lapses (2100-01-01T00:00:00Z).
     const EXPORT: &str = r#"[
       {"id":"id-1","integrationID":"github","label":"gh","active":true,
        "value":{"type":"oauth","access":"gho_not_ours","expires":9999999999999}},
       {"id":"id-2","integrationID":"opencode","label":"opencode","active":true,
        "value":{"type":"oauth","methodID":"m","refresh":"r","access":"oc_sk_live",
-                "expires":1795513914282,"metadata":{}}}
+                "expires":4102444800000,"metadata":{}}}
     ]"#;
 
     fn credential_at(expires: Option<u64>) -> Credential {
@@ -582,7 +660,7 @@ mod tests {
     fn auth_export_parsing_and_reread_decisions() {
         let token = parse_auth_export(EXPORT).unwrap();
         assert_eq!(token.access, "oc_sk_live");
-        assert_eq!(token.expires_at_ms, Some(1_795_513_914_282));
+        assert_eq!(token.expires_at_ms, Some(4_102_444_800_000));
         for bad in ["", "not json", "{}", "{\"a\":1}", "[1,2,3]"] {
             assert!(!parse_auth_export(bad).unwrap_err().is_empty(), "{bad:?}");
         }
@@ -603,7 +681,7 @@ mod tests {
         };
         // Three store reads: expired-then-fresh, expired-twice, and fresh.
         let reads = std::cell::Cell::new(0);
-        let credential = store_credential(&|_| {
+        let credential = store_without_refresh(&|_| {
             reads.set(reads.get() + 1);
             Ok(export(
                 if reads.get() == 1 {
@@ -620,7 +698,7 @@ mod tests {
         assert_eq!(credential.expires_at_ms, Some(later));
 
         let reads = std::cell::Cell::new(0);
-        let error = store_credential(&|_| {
+        let error = store_without_refresh(&|_| {
             reads.set(reads.get() + 1);
             Ok(export("oc_sk_stale", past + reads.get() as u64))
         })
@@ -629,13 +707,126 @@ mod tests {
         assert!(error.contains("expired at"), "{error}");
 
         let reads = std::cell::Cell::new(0);
-        let credential = store_credential(&|_| {
+        let credential = store_without_refresh(&|_| {
             reads.set(reads.get() + 1);
             Ok(export("oc_sk_ok", later))
         })
         .unwrap();
         assert_eq!(reads.get(), 1);
         assert_eq!(credential.key(), "oc_sk_ok");
+    }
+
+    #[test]
+    fn a_refresh_command_renews_a_lapsed_store_credential() {
+        let now = crate::provider::models::now_ms();
+        let past = now.saturating_sub(60_000);
+        let later = now + 3_600_000;
+        let export = |access: &str, expires: u64| {
+            format!(
+                r#"[{{"integrationID":"opencode","active":true,"value":{{"access":"{access}","expires":{expires}}}}}]"#
+            )
+        };
+        let argv: Vec<String> = [
+            "opencode",
+            "run",
+            "--archived",
+            "-m",
+            "opencode-go/beam-free",
+            "ok",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let reads = std::cell::Cell::new(0);
+        let refreshes = std::cell::Cell::new(0);
+        let credential = store_credential(
+            &|_| {
+                reads.set(reads.get() + 1);
+                let first = reads.get() == 1;
+                Ok(export(
+                    if first { "oc_sk_dead" } else { "oc_sk_fresh" },
+                    if first { past } else { later },
+                ))
+            },
+            Some(argv.as_slice()),
+            &|called| {
+                refreshes.set(refreshes.get() + 1);
+                assert_eq!(called, argv.as_slice());
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+        assert_eq!(refreshes.get(), 1, "one refresh, never a second");
+        assert_eq!(reads.get(), 2, "one read after the refresh");
+        assert_eq!(credential.key(), "oc_sk_fresh");
+        assert_eq!(credential.expires_at_ms, Some(later));
+    }
+
+    #[test]
+    fn a_failed_refresh_is_not_fatal_but_names_the_command_in_the_error() {
+        let now = crate::provider::models::now_ms();
+        let past = now.saturating_sub(60_000);
+        let export = format!(
+            r#"[{{"integrationID":"opencode","active":true,"value":{{"access":"oc_sk_stale","expires":{past}}}}}]"#
+        );
+        let argv: Vec<String> = ["opencode", "run"].map(str::to_string).to_vec();
+        let reads = std::cell::Cell::new(0);
+        let error = store_credential(
+            &|_| {
+                reads.set(reads.get() + 1);
+                Ok(export.clone())
+            },
+            Some(argv.as_slice()),
+            &|_| Err("`opencode` exited with status 1".into()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            reads.get(),
+            2,
+            "the store is read once after the failed refresh"
+        );
+        assert!(error.contains("expired at"), "{error}");
+        assert!(error.contains("refresh_cmd opencode"), "{error}");
+        assert!(error.contains("exited with status 1"), "{error}");
+        assert!(!error.contains("oc_sk_stale"), "{error}");
+        assert!(
+            !error.contains(REFRESH_FIX),
+            "the fix that just failed is not repeated: {error}"
+        );
+
+        // A refresh that exits cleanly but leaves the store expired says so.
+        let error = store_credential(&|_| Ok(export.clone()), Some(argv.as_slice()), &|_| {
+            Ok(String::new())
+        })
+        .unwrap_err();
+        assert!(error.contains("ran but the store still holds"), "{error}");
+    }
+
+    #[test]
+    fn a_refresh_command_runs_only_inside_the_margin() {
+        let now = crate::provider::models::now_ms();
+        let later = now + 3_600_000;
+        let export = format!(
+            r#"[{{"integrationID":"opencode","active":true,"value":{{"access":"oc_sk_ok","expires":{later}}}}}]"#
+        );
+        let argv: Vec<String> = ["opencode", "run"].map(str::to_string).to_vec();
+        let credential = store_credential(&|_| Ok(export.clone()), Some(argv.as_slice()), &|_| {
+            panic!("a credential far from its expiry must not be refreshed")
+        })
+        .unwrap();
+        assert_eq!(credential.key(), "oc_sk_ok");
+    }
+
+    #[test]
+    fn an_explicit_key_override_never_runs_the_refresh() {
+        let store = provider(ProviderKind::OpencodeGo, None, None);
+        let credential = super::resolve_with(
+            &store,
+            &env_of(&[(GO_ENV, "oc_sk_override")]),
+            &|_| panic!("the store must not be read when the override is set"),
+            &|_| panic!("a key with no expiry has nothing to refresh"),
+        )
+        .unwrap();
+        assert_eq!(credential.key(), "oc_sk_override");
     }
 
     #[test]

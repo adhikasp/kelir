@@ -83,6 +83,7 @@ fn report(cfg: &Config, name: &str) -> Value {
         "base_url": provider_cfg.base_url,
         "key_env": provider_cfg.key_env,
         "key_cmd": provider_cfg.key_cmd,
+        "refresh_cmd": provider_cfg.refresh_cmd,
         "ok": false,
         "key_origin": Value::Null,
         "expires_at": Value::Null,

@@ -86,6 +86,14 @@ pub fn load_for_cwd(explicit: Option<&Path>, cwd: &Path) -> Result<Config, Confi
             .filter(|url| !url.is_empty())
             .ok_or_else(|| ConfigError(format!("provider `{name}`: base_url is required")))?;
         let (effort, effort_explicit) = reasoning_effort(entry.reasoning_effort, name)?;
+        // Only opencode-go reads a credential that can lapse behind kelir's back; a refresh command
+        // on the other table would be silently dead, so it is refused instead.
+        if kind == ProviderKind::OpenRouter && entry.refresh_cmd.is_some() {
+            return Err(ConfigError(format!(
+                "`[providers.{name}] refresh_cmd` has no effect: only `{PROVIDER_GO}` reads a \
+                 stored credential an expiry applies to"
+            )));
+        }
         providers.insert(
             name.to_string(),
             ProviderConfig {
@@ -94,6 +102,7 @@ pub fn load_for_cwd(explicit: Option<&Path>, cwd: &Path) -> Result<Config, Confi
                 // The key is resolved at session start ([`crate::provider::keys`]); load stays pure.
                 key_env: entry.key_env,
                 key_cmd: entry.key_cmd,
+                refresh_cmd: entry.refresh_cmd,
                 key: None,
                 key_origin: None,
                 key_expires_at_ms: None,

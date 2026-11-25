@@ -513,8 +513,8 @@ One OpenAI Chat Completions client, and exactly two providers: `openrouter` and 
 accepts only those two; anything else is a usage error that names them. There are no ad-hoc
 provider names and no `kind = …`: the name *is* the provider. An optional
 `[providers.openrouter]` / `[providers.opencode-go]` table only overrides that provider's settings
-(`base_url`, extra headers, key source, `reasoning_field`, `reasoning_effort`, `session_header`,
-`max_concurrent_requests`), and a table for any other name is the same usage error.
+(`base_url`, extra headers, key source, `refresh_cmd`, `reasoning_field`, `reasoning_effort`,
+`session_header`, `max_concurrent_requests`), and a table for any other name is the same usage error.
 
 Go needs `x-opencode-session` and a `kelir/<version>` User-Agent. Go's `allowance` comes
 from the final usage chunk (`stream_options.include_usage`). The default model is
@@ -530,7 +530,10 @@ equivalent is `deepseek-v4.1-flash`.
   `opencode auth export opencode` CLI (JSON array; the `integrationID == "opencode"` entry with
   `active: true`; token `value.access`, expiry `value.expires` in epoch ms). A store entry that
   is expired or inside its two-minute margin is read **once more** (opencode refreshes its own
-  token when it runs) before an expired one becomes a usage error naming the expiry. No SQLite and no
+  token when it runs) before an expired one becomes a usage error naming the expiry — and, when
+  the provider has a `refresh_cmd`, that command runs once first: it is a command that makes
+  opencode refresh *itself* (`opencode run …`), so a host that rarely uses opencode does not need
+  a person to poke it (kelir#61). No SQLite and no
   reading `opencode.db`; no OAuth refresh of kelir's own, because opencode rotates the refresh
   token and a second refresher would break the account it shares with kelir. The `opencode`
   executable is found on `PATH` (`.exe`/`.cmd`/`.bat`/`.com` on Windows, a `.cmd` shim through
@@ -548,7 +551,9 @@ OPENROUTER_API_KEY`, `key_cmd getkey`, `opencode auth export opencode`).
 **Freshness.** A key whose source publishes an expiry (opencode's store does) is re-read before a
 request when it is within two minutes of `expires`; a 401/403 re-reads the source once and retries
 the request once with the new key. When it is still expired the turn fails with the expiry time and
-the fix ("run any `opencode` command once so it refreshes its credential, then retry").
+the fix ("run any `opencode` command once so it refreshes its credential, then retry"), after the
+provider's `refresh_cmd` — a bounded command that makes opencode refresh its own grant — has run
+once and the store been read again.
 
 **`kelir doctor [--json] [--provider <name>]`** prints both providers (or one), their base URL,
 which source answered, the expiry and the read time, and the fix when there is none — never a key.

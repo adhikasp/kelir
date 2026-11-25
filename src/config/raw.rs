@@ -119,6 +119,7 @@ pub(super) struct RawProvider {
     pub(super) base_url: Option<String>,
     pub(super) key_env: Option<String>,
     pub(super) key_cmd: Option<Vec<String>>,
+    pub(super) refresh_cmd: Option<Vec<String>>,
     pub(super) extra_headers: BTreeMap<String, String>,
     pub(super) reasoning_field: Option<String>,
     pub(super) reasoning_effort: Option<String>,

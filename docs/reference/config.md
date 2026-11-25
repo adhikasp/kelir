@@ -53,6 +53,7 @@ and `mcp`; their keys are nested, never flat aliases.
 | `base_url` | string | provider's endpoint | `KELIR_BASE_URL` | proxy, gateway or mock server | `src/config.rs:load` |
 | `key_env` | string | `OPENROUTER_API_KEY` / `KELIR_GO_API_KEY` | — | variable read first for the key | `src/config.rs:load` |
 | `key_cmd` | array of strings | unset | — | command whose trimmed stdout is the key; only its file name is recorded | `src/config.rs:load` |
+| `refresh_cmd` | array of strings | unset | — | only opencode's store: run once when the credential is expired or near expiry, then re-read it | `src/config/load.rs:load` |
 | `extra_headers` | table of strings | empty | — | headers added to every request | `src/config.rs:load` |
 | `reasoning_field` | string | provider default | — | request field for reasoning effort | `src/config.rs:load` |
 | `reasoning_effort` | `low`, `medium`, `high`, `none` | `medium` | — | `none` sends no field; an explicit value overrides provider model metadata | `src/config.rs:load` |

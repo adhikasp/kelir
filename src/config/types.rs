@@ -32,6 +32,11 @@ pub struct ProviderConfig {
     /// A command whose trimmed stdout is the key, when the environment says
     /// nothing. Never a literal in the config file (see [`load`]).
     pub key_cmd: Option<Vec<String>>,
+    /// Run this once when the key's published expiry is inside its margin, then
+    /// read the source again: for `opencode-go`'s store, a command that makes
+    /// opencode refresh *itself* (`opencode run …`). Never a refresh of kelir's
+    /// own, so the account keeps one refresher.
+    pub refresh_cmd: Option<Vec<String>>,
     /// The resolved key. Filled at session start by [`crate::provider::keys`] and
     /// held in memory only; never serialised, logged or put on a command line.
     pub key: Option<String>,
@@ -180,6 +185,7 @@ pub const KEYS: &[&str] = &[
     "base_url",
     "key_env",
     "key_cmd",
+    "refresh_cmd",
     "extra_headers",
     "reasoning_field",
     "reasoning_effort",

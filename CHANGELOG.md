@@ -7,6 +7,13 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 ## [Unreleased]
 
+### Added
+
+- `[providers.opencode-go] refresh_cmd`: when opencode's stored credential is expired or inside
+  its two-minute margin, kelir runs this command once (a command that makes opencode refresh
+  *itself*) and reads the store again, so a host that rarely uses opencode no longer needs a
+  manual `opencode` run, an env copy or a second refresher (#61).
+
 ### Breaking — the rewrite
 
 - Event log v1, the state layout, the CLI, the config file and the wire format all

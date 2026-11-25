@@ -99,6 +99,34 @@ extra_headers = { "x-extra" = "yes" }
     }
 
     #[test]
+    fn refresh_cmd_belongs_to_the_opencode_go_table_only() {
+        let path = temp_config(
+            "[providers.opencode-go]\nrefresh_cmd = [\"opencode\", \"run\", \"-m\", \"x\", \"ok\"]\n",
+        );
+        let cfg = load(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.providers
+                .get(PROVIDER_GO)
+                .unwrap()
+                .refresh_cmd
+                .as_deref(),
+            Some(
+                ["opencode", "run", "-m", "x", "ok"]
+                    .map(str::to_string)
+                    .as_slice()
+            )
+        );
+        // The other provider has no stored credential, so the key would be silently dead there.
+        let error = load(Some(&temp_config(
+            "[providers.openrouter]\nrefresh_cmd = [\"opencode\", \"run\"]\n",
+        )))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("refresh_cmd"), "{error}");
+        assert!(error.contains("opencode-go"), "{error}");
+    }
+
+    #[test]
     fn deep_merge_keeps_sibling_keys() {
         let mut base: toml::Value = toml::from_str("a = 1\n[t]\nx = 1\ny = 2\n").unwrap();
         let over: toml::Value = toml::from_str("a = 2\n[t]\ny = 3\n").unwrap();

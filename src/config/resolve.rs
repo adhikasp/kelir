@@ -210,6 +210,7 @@ pub(super) fn overlay(base: RawProvider, user: RawProvider) -> RawProvider {
         base_url: user.base_url.or(base.base_url),
         key_env: user.key_env.or(base.key_env),
         key_cmd: user.key_cmd.or(base.key_cmd),
+        refresh_cmd: user.refresh_cmd.or(base.refresh_cmd),
         extra_headers: {
             let mut headers = base.extra_headers;
             headers.extend(user.extra_headers);

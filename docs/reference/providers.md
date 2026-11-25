@@ -24,13 +24,19 @@ is repeated at most once — and only when the entry it returned is expired or
 inside a two-minute margin — because running the CLI refreshes the token as a
 side effect.
 
+A host that rarely uses opencode can sit on an expired token, where re-reading
+changes nothing. `refresh_cmd` (kelir#61) runs once when the entry is expired or
+inside the margin (30 s bound, silent), then the store is re-read:
+`["opencode", "run", "--archived", "-m", "opencode-go/beam-free", "ok"]` makes
+opencode refresh itself, so the one-refresher rule holds.
+
 What is recorded about a key is its **source**, never the value:
 `session_started.key_origin` (`env OPENROUTER_API_KEY`, `key_cmd getkey`,
 `opencode auth export opencode`), `kelir doctor`, and the one-line notice a
 session prints. `key_cmd` is named by its file name, so a private path does not
 reach the log. An expired store credential is a usage error (exit 2) with the
 expiry and the fix ("run any `opencode` command once") *before* a request is
-sent.
+sent (after `refresh_cmd` has had its one chance, when configured).
 
 ## Retries
 
