@@ -14,10 +14,10 @@ use crate::provider::{BuiltRequest, Client};
 /// The summary prompt, embedded; `[compaction] prompt` in the config (or
 /// `compact.md` in the config dir) replaces it.
 pub const DEFAULT_COMPACT_PROMPT: &str = "\
-You are compacting the conversation of an autonomous coding agent so it can keep \
-working in a smaller context.
+You are now compacting the conversation above, which belongs to an autonomous coding \
+agent, so it can keep working in a smaller context. Do not call any tool.
 
-Write a dense, factual summary of the conversation you are given: the task and \
+Write a dense, factual summary of the conversation above: the task and \
 its constraints, what was decided, what was changed and where, what was verified \
 and how, what failed and why, and what is still open. Keep file paths, command \
 lines and identifiers exact; do not invent anything. Do not address the agent, do \
@@ -202,51 +202,32 @@ pub fn queued_compaction(events: &[LogEvent], session_dir: &Path) -> Option<Opti
     pending
 }
 
-pub fn render_transcript(messages: &[ChatMessage]) -> String {
-    let mut out = String::new();
-    for message in messages {
-        out.push_str("### ");
-        out.push_str(&message.role);
-        out.push('\n');
-        if let Some(content) = &message.content {
-            out.push_str(content);
-            out.push('\n');
-        }
-        if let Some(calls) = &message.tool_calls {
-            for call in calls {
-                out.push_str("→ call ");
-                out.push_str(&call.id);
-                out.push(' ');
-                out.push_str(&call.function.name);
-                out.push(' ');
-                out.push_str(&call.function.arguments);
-                out.push('\n');
-            }
-        }
-        out.push('\n');
-    }
-    out
-}
-
-/// The summarising request. Sealed on purpose: the prompt and one user message,
-/// no tools, so the summary cannot be a tool call.
+/// The summarising request. It is the live request up to the cut — same system message, same
+/// `tools` array, same messages, so the prefix is byte-identical to a request the provider already
+/// cached — followed by one final user message carrying the prompt and the optional focus.
+/// `tools` stay in the body only to keep that prefix; `tool_choice: "none"` asks the provider not to
+/// use them, and the caller reads only the text of the reply either way.
 pub fn summarise_request(
     client: &Client,
     model: &str,
+    live: &[ChatMessage],
+    tools: &[serde_json::Value],
+    parallel_calls: bool,
     prompt: &str,
-    transcript: &str,
     focus: Option<&str>,
 ) -> BuiltRequest {
-    let mut user = String::new();
+    let mut user = String::from(prompt);
     if let Some(focus) = focus.map(str::trim).filter(|focus| !focus.is_empty()) {
-        user.push_str("Focus for this summary: ");
+        user.push_str("\n\nFocus for this summary: ");
         user.push_str(focus);
-        user.push_str("\n\n");
     }
-    user.push_str("Conversation to summarise:\n\n");
-    user.push_str(transcript);
-    let messages = vec![ChatMessage::system(prompt), ChatMessage::user(&user)];
-    client.build(model, &messages, &[])
+    let mut messages = live.to_vec();
+    messages.push(ChatMessage::user(&user));
+    let mut request = client.build_with(model, &messages, tools, parallel_calls);
+    if !tools.is_empty() {
+        request.body["tool_choice"] = serde_json::Value::String("none".into());
+    }
+    request
 }
 
 #[cfg(test)]

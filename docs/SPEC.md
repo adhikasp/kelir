@@ -390,8 +390,12 @@ like any other skill, so the pushed hint and steering rules can inject it. The b
 Three triggers, one mechanism: the model calls the `compact` tool, a human sends `/compact
 [focus]` (or `kelir ctl … compact`), or the context passes 80 % of the model's window (from
 the provider's model metadata; configurable). It applies at the next boundary after the current
-batch settles. A summarising request (prompt in `compact.md`, configurable data) produces a
-summary; the `compacted` event then replaces the range with it, **pinning verbatim** the first
+batch settles. A summarising request produces a
+summary. It is the live request up to the cut (same system message, same `tools`, same
+messages, so a provider that caches a prefix serves it from the session's cache) plus one final
+user message holding the prompt (`compact.md`, configurable data) and the focus; `tool_choice:
+"none"` is sent, a host that rejects it is remembered and not asked again, and a reply with
+no text is asked for once more. The `compacted` event then replaces the range with the summary, the `compacted` event then replaces the range with it, **pinning verbatim** the first
 user message (the task) and every message a human typed. Spill files are untouched, so the
 summary can cite their paths.
 

@@ -143,7 +143,9 @@ impl Session {
         // earlier one summarises its summary instead of losing it .
         let range = crate::log::fold::range_events(&self.log.events, plan.through_seq);
         let folded_range = crate::log::fold::fold(&range, &self.log.dir)?;
-        let transcript = compact::render_transcript(&folded_range.messages);
+        // The summarising request shares the live request's prefix up to the cut, so it is served
+        // from the session's prompt cache like any other step.
+        let live = folded_range.request_messages();
         // Both numbers describe the whole request the provider sees, so asking
         // "did it shrink?" is a real question about the context.
         let whole = crate::log::fold::fold(&self.log.events, &self.log.dir)?;
@@ -176,36 +178,47 @@ impl Session {
         let summarising = self.capabilities(compact::summarise_request(
             &self.provider.client,
             &self.provider.model,
+            &live,
+            &self.tool_specs(),
+            self.parallel_calls(),
             &self.cfg.compact_prompt,
-            &transcript,
             request.focus.as_deref(),
         ));
-        let assembler = match self
-            .stream(rx, RequestFor::Built(&summarising), true)
-            .await?
-        {
-            StreamEnd::Assembled(assembler) => assembler,
-            StreamEnd::Stopped(reason) => return Ok(CompactRun::Stopped(reason)),
-            StreamEnd::End => return Ok(CompactRun::End),
-            // A summary is tried once and has no budget to use, so it can never pause; if that ever
-            // changes, a paused summary is a summary that did not happen.
-            StreamEnd::Paused(_) => return Ok(CompactRun::End),
+        // A reply with no text (a tool call from a host that ignored `tool_choice`) is asked for once
+        // more; the second empty reply is an error.
+        let mut tries = 0;
+        let summary = loop {
+            tries += 1;
+            let assembler = match self
+                .stream(rx, RequestFor::Built(&summarising), true)
+                .await?
+            {
+                StreamEnd::Assembled(assembler) => assembler,
+                StreamEnd::Stopped(reason) => return Ok(CompactRun::Stopped(reason)),
+                StreamEnd::End => return Ok(CompactRun::End),
+                // A summary is tried once and has no budget to use, so it can never pause; if that ever
+                // changes, a paused summary is a summary that did not happen.
+                StreamEnd::Paused(_) => return Ok(CompactRun::End),
+            };
+            // The summary's tokens belong in the log like any step's, marked so a reader (and
+            // `kelir ls`) can tell it is not a step of the turn; a retry is billed too.
+            if let Some(usage) = &assembler.usage {
+                self.record(EventBody::StepUsage(crate::log::event::Usage {
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
+                    cached_tokens: usage.cached_tokens,
+                    cache_write_tokens: usage.cache_write_tokens,
+                    allowance: usage.allowance.clone(),
+                    kind: Some("compact".into()),
+                }))?;
+                self.note_warnings();
+                self.sync();
+            }
+            let summary = assembler.text.trim().to_string();
+            if !summary.is_empty() || tries >= 2 {
+                break summary;
+            }
         };
-        // The summary's tokens belong in the log like any step's, marked so a
-        // reader (and `kelir ls`) can tell it is not a step of the turn
-        if let Some(usage) = &assembler.usage {
-            self.record(EventBody::StepUsage(crate::log::event::Usage {
-                prompt_tokens: usage.prompt_tokens,
-                completion_tokens: usage.completion_tokens,
-                cached_tokens: usage.cached_tokens,
-                cache_write_tokens: usage.cache_write_tokens,
-                allowance: usage.allowance.clone(),
-                kind: Some("compact".into()),
-            }))?;
-            self.note_warnings();
-            self.sync();
-        }
-        let summary = assembler.text.trim().to_string();
         if summary.is_empty() {
             return Err("the summarising request returned no text".to_string());
         }

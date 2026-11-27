@@ -517,8 +517,10 @@ async fn a_human_compact_keeps_the_task_and_human_messages_verbatim() {
     let requests = mock.requests();
     assert_eq!(requests.len(), 3, "{requests:?}");
     // The summarising request is sealed: no tools, the focus, the transcript.
-    assert!(requests[1].body.get("tools").is_none());
-    let summarising = requests[1].messages()[1]["content"].as_str().unwrap();
+    assert!(requests[1].body["tool_choice"] == "none");
+    let summarising = requests[1].messages().last().unwrap()["content"]
+        .as_str()
+        .unwrap();
     assert!(
         summarising.contains("Focus for this summary: keep the failing test"),
         "{summarising}"

@@ -285,7 +285,7 @@ impl Session {
         if dropped.is_some() || !error.message.starts_with("http 400") {
             return false;
         }
-        let field = ["reasoning_effort", "parallel_tool_calls"]
+        let field = ["reasoning_effort", "parallel_tool_calls", "tool_choice"]
             .into_iter()
             .find(|field| {
                 request.has_field(field)
