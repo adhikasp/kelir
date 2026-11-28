@@ -70,10 +70,9 @@ fn relaunch() -> ExitCode {
     }
     #[cfg(not(unix))]
     match command.status() {
-        Ok(status) => match status.code() {
-            Some(code) => ExitCode::from((code & 0xff) as u8),
-            None => ExitCode::FAILURE,
-        },
+        Ok(status) => status.code().map_or(ExitCode::FAILURE, |code| {
+            ExitCode::from((code & 0xff) as u8)
+        }),
         Err(error) => {
             eprintln!("kelir: cannot start a new session: {error}");
             ExitCode::FAILURE
