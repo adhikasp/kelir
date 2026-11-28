@@ -329,11 +329,25 @@ impl App {
                 path,
                 ..
             } => {
-                let detail = text
-                    .as_ref()
-                    .map(payload_text)
-                    .or_else(|| path.clone())
-                    .unwrap_or_default();
+                // Where the text came from, not the text: a skill's `SKILL.md`
+                // is a kilobyte of prose and it is now in the context, which
+                // is the fact worth showing. A short body with no file (an
+                // inline `text`) is still worth its line.
+                let detail = match (path, text) {
+                    (Some(path), _) => path.clone(),
+                    (None, Some(text)) => {
+                        let body = payload_text(text);
+                        // A spilled body arrives as a preview: its newlines and
+                        // its length are the tell, and its first line is not
+                        // the fact — "in context" is.
+                        if body.contains('\n') || body.len() >= crate::log::event::PREVIEW_BYTES {
+                            "in context".to_string()
+                        } else {
+                            body
+                        }
+                    }
+                    (None, None) => "in context".to_string(),
+                };
                 self.push_text(&format!("· {kind} {name}: {detail}"));
             }
             EventBody::Verb {

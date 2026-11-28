@@ -43,14 +43,15 @@ Directories, searched read-only, machine layer first:
 A skill is a **directory** holding a `SKILL.md` with Agent Skills front matter
 (`name`, `description`, optional `metadata`), at most 64 KB. Its name is the
 directory's name; a project skill of that name replaces a machine one. A
-directory whose `SKILL.md` is missing, unreadable or malformed is skipped with a
-note (`error` event, `where: "source"`), never listed.
+directory whose `SKILL.md` is missing, unreadable or malformed is skipped with
+a note (`error` event, `where: "source"`), never listed.
 
-**Skills are pull.** The base prompt names the directories, and the builtin skills
-by name and description (they have no file): the skill's body costs no token until
-a task needs it, and then it is `bash` (`cat <dir>/<name>/SKILL.md`, or
-`kelir docs --skill <name>` for a builtin). `sources[]` still records each skill (name, real
-path, hash), so editing one mid-session is noticed.
+**Skills are pull.** The base prompt names the directories and the builtin skills
+by name and description (they have no file): a body costs no token until a task
+needs it, then it is `bash` (`cat <dir>/<name>/SKILL.md`, or `kelir docs --skill
+<name>` for a builtin) or `/skill <name>` in the TUI (the `/` popup lists the
+names, Tab completes them). `sources[]` still records each skill (name, path,
+hash), so an edit mid-session is noticed.
 
 ### The builtin `kelir` skill
 

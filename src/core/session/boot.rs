@@ -171,6 +171,7 @@ pub(crate) async fn drive(opts: Options) -> u8 {
             session.cfg.max_steps,
             token.clone(),
             crate::tui::theme::Theme::from_env(),
+            skill_catalogue(&session.cfg, &session.ctx.cwd),
         ) {
             Ok(mut handle) => {
                 // The session dir is where a pasted image is saved, and where

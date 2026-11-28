@@ -65,3 +65,37 @@ pub(super) fn chip_span(line: &str, chip: &Chip) -> Option<(usize, usize)> {
     let from = line[..at].chars().count();
     Some((from, from + chip.label.chars().count()))
 }
+
+// --------------------------------------------------------------- completion
+
+impl Editor {
+    /// The buffer and the cursor's character index in it: a completion reads
+    /// the whole message, because a `/` command is the first line *whole* — a
+    /// second line makes it a message, and no popup belongs on it.
+    pub fn completion_point(&self) -> (String, usize) {
+        let text = self.text();
+        let cursor = self.lines[..self.row]
+            .iter()
+            .map(|line| line.chars().count() + 1)
+            .sum::<usize>()
+            + self.col;
+        (text, cursor)
+    }
+
+    /// Replace the characters `start..self.col` of the current line with
+    /// `text`, leaving the cursor after it: what Tab does to the word it
+    /// completed. Characters, not bytes, because the cursor counts characters
+    /// and a wide glyph must not split the line.
+    pub fn replace_before_cursor(&mut self, start: usize, text: &str) {
+        let row = self.row;
+        let line = &self.lines[row];
+        let byte = |index: usize| {
+            line.char_indices()
+                .nth(index)
+                .map_or(line.len(), |(at, _)| at)
+        };
+        let (from, to) = (byte(start), byte(self.col));
+        self.lines[row].replace_range(from..to, text);
+        self.col = start + text.chars().count();
+    }
+}

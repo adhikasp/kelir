@@ -168,26 +168,27 @@ a file is missing or an entry is stale.
 
 | file | owns |
 |---|---|
-| `src/tui/mod.rs` | the TUI module: the alternate screen and the transcript viewport |
-| `src/tui/app/mod.rs` | the app state: every row comes from the events applied here |
-| `src/tui/app/entry.rs` | app methods: transcript entry |
+| `src/tui/mod.rs` | the TUI module: alternate screen, transcript viewport |
+| `src/tui/app/mod.rs` | the app state: every row comes from the events |
+| `src/tui/app/entry.rs` | app methods: entry |
 | `src/tui/app/events.rs` | app methods: events |
 | `src/tui/app/input.rs` | app methods: input |
 | `src/tui/app/layout.rs` | app methods: layout |
-| `src/tui/view.rs` | status/format helpers, the fixed layout and painting |
+| `src/tui/view.rs` | status/format helpers, the layout and painting |
 | `src/tui/keys.rs` | keyboard translation and the kitty keyboard handshake |
 | `src/tui/commands.rs` | `/` commands: one line in, one verb out |
-| `src/tui/editor.rs` | the input editor: a multi-line buffer with a cursor and history |
-| `src/tui/editor_impl.rs` | the editor's line-loading helper (split for the 800-line cap) |
+| `src/tui/complete.rs` | the `/` popup: catalogue, score, context |
+| `src/tui/editor.rs` | the input editor: a buffer, cursor and history |
+| `src/tui/editor_impl.rs` | the editor's line and cursor helpers (split for the 800-line cap) |
 | `src/tui/terminal.rs` | terminal setup, teardown and restore |
 | `src/tui/activity.rs` | the state row's activity machine |
-| `src/tui/theme.rs` | every style and glyph, including `NO_COLOR` and ASCII fallbacks |
+| `src/tui/theme.rs` | every style and glyph, with `NO_COLOR` and ASCII fallbacks |
 | `src/tui/markdown/mod.rs` | the agent's markdown renderer |
 | `src/tui/markdown/render.rs` | markdown blocks to styled rows |
 | `src/tui/markdown/stream.rs` | incremental markdown rendering during a stream |
 | `src/tui/markdown/table.rs` | markdown tables |
 | `src/tui/markdown/wrap.rs` | wrapping and display width |
-| `src/tui/scrollback.rs` | turning text into terminal rows |
+| `src/tui/scrollback.rs` | text into terminal rows |
 | `src/tui/tools_view.rs` | one dim line per tool call and its append-only expansion |
 
 ## `src/docs/` — the embedded reference

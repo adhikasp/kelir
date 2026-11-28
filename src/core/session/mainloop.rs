@@ -289,6 +289,14 @@ impl Session {
                             focus: focus.clone(),
                             immediate: true,
                         });
+                    } else if matches!(pending.verb, Verb::Skills { .. }) {
+                        // A skill named while idle has no boundary to wait
+                        // for: nothing is running, so it lands now, the same
+                        // way an immediate `/compact` does.
+                        let mut applied = Option::<StreamEnd>::None;
+                        if let Err(message) = self.apply_one(pending, &mut applied).await {
+                            self.ui_note(format!("» skill: {message}"));
+                        }
                     } else {
                         self.scheduler.push(pending);
                     }

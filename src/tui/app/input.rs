@@ -4,6 +4,41 @@ use crate::tui::*;
 
 impl App {
     pub fn press(&mut self, press: Press) {
+        // The popup owns three keys while it is open: Tab accepts the
+        // highlighted row, Up/Down walk the list (instead of the history), and
+        // Esc closes it instead of stopping the turn. Everything else edits the
+        // line and re-ranks the list afterwards.
+        match press {
+            Press::Complete => {
+                self.accept_completion();
+                return;
+            }
+            Press::Stop if self.completion.is_some() => {
+                // Closed until the line changes: Esc means "not now", and an
+                // edit is the next thing that asks again.
+                self.completion = None;
+                self.completion_off = Some(self.editor.text());
+                return;
+            }
+            Press::Edit(Key::Up) if self.completion.is_some() => {
+                if let Some(completion) = &mut self.completion {
+                    completion.move_by(-1);
+                }
+                return;
+            }
+            Press::Edit(Key::Down) if self.completion.is_some() => {
+                if let Some(completion) = &mut self.completion {
+                    completion.move_by(1);
+                }
+                return;
+            }
+            _ => {}
+        }
+        self.press_editor(press);
+        self.refresh_completion();
+    }
+
+    fn press_editor(&mut self, press: Press) {
         match press {
             Press::Edit(key) => {
                 let typed = matches!(key, Key::Char(c) if !c.is_control());
@@ -25,6 +60,8 @@ impl App {
                     Outcome::Edited | Outcome::Ignored => {}
                 },
             },
+            // Handled above: Tab never reaches the editor.
+            Press::Complete => {}
             Press::CtrlC => self.ctrl_c(),
             Press::ToggleTail => self.toggle_tail(),
             Press::Stop => {
@@ -71,6 +108,74 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Re-rank the popup for the line as it is now, or close it: it follows
+    /// the word under the cursor, so every edit is a re-query.
+    pub(super) fn refresh_completion(&mut self) {
+        // An Esc holds while the line is untouched: the reader dismissed this
+        // word, and neither a scroll nor a history walk is a new query.
+        let text = self.editor.text();
+        if self
+            .completion_off
+            .as_deref()
+            .is_some_and(|off| off == text)
+        {
+            self.completion = None;
+            return;
+        }
+        self.completion_off = None;
+        // The row the reader had highlighted, so a keystroke that only narrows
+        // the list keeps it highlighted where it still matches.
+        let previous = self
+            .completion
+            .as_ref()
+            .and_then(Completion::chosen)
+            .and_then(|index| self.catalogue.entries().get(index))
+            .map(|entry| entry.label.clone());
+        let next = {
+            let (buffer, cursor) = self.editor.completion_point();
+            crate::tui::complete::context(&buffer, cursor)
+                .map(|context| Completion::new(&self.catalogue, context))
+        };
+        self.completion = next.and_then(|mut completion| {
+            // Nothing matches: no popup. An empty box would still eat Tab,
+            // Up and Esc, and say nothing.
+            if completion.rows.is_empty() {
+                return None;
+            }
+            if let Some(label) = previous
+                && let Some(at) = completion.rows.iter().position(|index| {
+                    self.catalogue
+                        .entries()
+                        .get(*index)
+                        .is_some_and(|entry| entry.label == label)
+                })
+            {
+                completion.selected = at;
+            }
+            Some(completion)
+        });
+    }
+
+    /// Tab: type the highlighted row over the word being completed. The
+    /// catalogue row carries what to insert, so the accepted line always parses
+    /// (a command) or names a real skill (`/skill <name>`).
+    pub(super) fn accept_completion(&mut self) {
+        let Some(completion) = self.completion.as_ref() else {
+            return;
+        };
+        let Some(entry) = completion
+            .chosen()
+            .and_then(|index| self.catalogue.entries().get(index))
+        else {
+            return;
+        };
+        let text = entry.accept(completion.context.skill_argument);
+        let start = completion.context.start;
+        self.editor.replace_before_cursor(start, &text);
+        self.completion = None;
+        self.refresh_completion();
     }
 
     /// Take the image path that was just typed at the cursor and turn it into
@@ -169,6 +274,22 @@ impl App {
         text = self.absorb_image_paths(&text);
         match commands::parse(&text) {
             Ok(Parsed::Action(action)) => {
+                // A skill the session discovered is known here by name only:
+                // the catalogue holds the path the list showed. The verb has
+                // no discovery of its own, so without it a name that discovery
+                // did find would come back as a usage error and the keystroke
+                // would be lost.
+                let action = match action {
+                    Action::Skill { name, path } if path.is_empty() => Action::Skill {
+                        path: self
+                            .catalogue
+                            .skill(&name)
+                            .map(|entry| entry.path.clone())
+                            .unwrap_or_default(),
+                        name,
+                    },
+                    other => other,
+                };
                 self.separate();
                 match &action {
                     // The echo remembers the raw text: `EventBody::User` carries

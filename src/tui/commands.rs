@@ -25,6 +25,10 @@ pub enum Action {
     },
     /// `/compact [focus]` — the verb exists from, the compactor from.
     Compact(Option<String>),
+    /// `/skill <name>`: load that skill's `SKILL.md` into this session, as one
+    /// `source` message at the next boundary. `path` is empty for a skill
+    /// compiled into the binary, which has nothing to read from disk.
+    Skill { name: String, path: String },
     /// `/new`: end this session and start a fresh one in the same place. It is
     /// not a verb: the process restarts, so no session is left half-alive.
     New,
@@ -51,6 +55,7 @@ impl Action {
             Action::Model(_) => "model",
             Action::Tools { .. } => "tools",
             Action::Compact(_) => "compact",
+            Action::Skill { .. } => "skills",
             // `/new` never reaches `dispatch`: it ends the session itself.
             Action::New => "end",
             Action::Quit => "end",
@@ -78,6 +83,15 @@ impl Action {
             }
             Action::Compact(None) => json!({}),
             Action::Compact(Some(focus)) => json!({"focus": focus}),
+            // A skill compiled into the binary has no file to read, so its
+            // body goes with the verb: the same `source` message either way.
+            Action::Skill { name, path } if path.is_empty() => match builtin_skill(name) {
+                Some(text) => json!({"name": name, "text": text}),
+                // Not a builtin and no path: the session says what is
+                // missing, and the transcript carries its words.
+                None => json!({"name": name}),
+            },
+            Action::Skill { name, path } => json!({"name": name, "path": path}),
             Action::New => json!({}),
             Action::Quit => json!({}),
         }
@@ -104,6 +118,7 @@ impl Action {
             }
             Action::Compact(None) => "» compact".to_string(),
             Action::Compact(Some(focus)) => format!("» compact {focus}"),
+            Action::Skill { name, .. } => format!("» skill {name}"),
             Action::New => "» new session".to_string(),
             Action::Quit => "» quit".to_string(),
         }
@@ -186,6 +201,21 @@ pub fn parse(line: &str) -> Result<Parsed, String> {
             }
         }
         "compact" => Action::Compact(non_empty(rest)),
+        // `/skill <name>`: the name the popup lists, so a name is enough. A
+        // second word is a path, for a skill discovery did not find, and is
+        // left exactly as typed: it may be absolute, and stripping its leading
+        // `/` would lose that.
+        "skill" if rest.trim().is_empty() => return Ok(Parsed::Note(usage("skill"))),
+        "skill" => match rest.split_once(char::is_whitespace) {
+            Some((name, path)) => Action::Skill {
+                name: name.to_string(),
+                path: path.trim().to_string(),
+            },
+            None => Action::Skill {
+                name: rest.to_string(),
+                path: String::new(),
+            },
+        },
         "new" => Action::New,
         "quit" | "exit" => Action::Quit,
         "help" | "?" => return Ok(Parsed::Note(help())),
@@ -207,6 +237,14 @@ fn text_arg(command: &str, rest: &str) -> Result<String, String> {
 fn non_empty(text: &str) -> Option<String> {
     let trimmed = text.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// The body of a skill compiled into the binary, by name.
+fn builtin_skill(name: &str) -> Option<&'static str> {
+    crate::features::sources::BUILTIN_SKILLS
+        .iter()
+        .find(|(skill, _)| *skill == name)
+        .map(|(_, text)| *text)
 }
 
 /// The `/` commands, for `/help`.
@@ -236,6 +274,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "/new",
         "end this session and start a fresh one here (same cwd, model and config)",
+    ),
+    (
+        "/skill <name>",
+        "load that skill's instructions now (Tab completes the name)",
     ),
     ("/quit", "end the session (a second Ctrl-C does the same)"),
     ("/help", "this list"),
@@ -285,6 +327,23 @@ mod tests {
             }
         );
         assert_eq!(action("/compact"), Action::Compact(None));
+        assert_eq!(
+            action("/skill sift"),
+            Action::Skill {
+                name: "sift".into(),
+                path: String::new()
+            }
+        );
+        assert_eq!(
+            action("/skill sift /skills/sift"),
+            Action::Skill {
+                name: "sift".into(),
+                path: "/skills/sift".into()
+            }
+        );
+        // Bare `/skill` is the usage line: the popup lists the names, so the
+        // person rarely types it, but Enter on it must say what it takes.
+        assert!(matches!(parse("/skill"), Ok(Parsed::Note(_))));
         assert_eq!(action("/new"), Action::New);
         assert_eq!(action("/quit"), Action::Quit);
         assert_eq!(action("/exit"), Action::Quit);

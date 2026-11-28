@@ -23,11 +23,12 @@ buffer and its image chips).
 | state (1) | `● idle · ready`, `⠹ thinking 12s · waiting for the provider · esc stops`, … |
 | editor (3+) | `› your message` in the user colour (cyan); the prompt dims while the agent works. Long prompts wrap onto the next editor row (prompt only on the first row) and the editor **grows** with the wrapped text (up to a cap) so the whole message is visible; the window scrolls to keep the cursor visible |
 | facts (1) | the session title (from the first prompt), `model · 1.5k tok` — steps and cache are not ambient |
+| completion (0–8) | the `/` popup, above the editor, taking its rows from the transcript |
 
 The view reflows from its source entries on resize and keeps the reader's
 scroll position; no finished turn is written into the terminal's scrollback.
-The kitty keyboard protocol (for Shift-Enter), bracketed paste and raw mode are
-pushed on entry and popped on exit.
+The kitty keyboard protocol, bracketed paste and raw mode are pushed on entry
+and popped on exit.
 
 ## Leaving
 
@@ -37,26 +38,21 @@ never lands on the shell's own screen. Then the visible rows are cleared and one
 line is printed: `resume: kelir tui --resume <id>`. `2J`, never `3J`: what was
 on screen before the TUI is not ours to erase.
 
-The session title is a short summary of the first prompt, recorded as a
-`session_title` event. It replaces the old `kelir idle`/`kelir working` prefix
-in the facts row and is written as the terminal/OSC title so a Herdr pane is
-named after the session. Before a first prompt, facts shows just model + tokens.
+The session title (a short summary of the first prompt, a `session_title`
+event) fills the facts row and is the terminal/OSC title, so a Herdr pane is
+named after the session; before a first prompt, facts shows only model + tokens.
 
 ## The banner
 
 The banner is `kelir · provider · model`, `session <id>`, `cwd <path>`, the
-help line (`Enter sends · /help shows the commands`), the step cap when set, and a `resumed …` line after a resume. It carries **no** window line: the window compaction
-measures against is not ambient, and `state` (every `kelir ctl` verb's answer)
-reports `window`, `window_source` and `window_note` for anyone who asks.
-
-The one exception is a window that is **not** the provider's, because that
-silently changes when the session compacts: a default fallback (an offline
+help line (`Enter sends · /help shows the commands`), the step cap when set, and
+a `resumed …` line after a resume. It carries **no** window line — that is not
+ambient — and `state` reports `window`, `window_source` and `window_note` for
+whoever asks. The one exception is a window that is **not** the provider's,
+because that silently changes when the session compacts: a fallback (an offline
 endpoint, a 401, a list that never landed) adds one dim line under `cwd`,
-`window 128000 tokens (default) · the model list: offline`. It is said once:
-when the start already knows, the banner carries it; otherwise the line appears
-when the answer that failed lands (`» window 128000 tokens (default) · …`). A
-`/model` swap that changes the window says so the same way, once, because the
-banner has no window line to update: `» window 200000 tokens (api)`.
+`window 128000 tokens (default) · the model list: offline`, or says it once as
+`» window …` when it lands later or a `/model` swap changes it.
 
 While the session waits to retry the provider (a retryable HTTP status) or for
 a governor slot, the facts row shows the wait instead of the summary: `kelir
@@ -65,9 +61,8 @@ left`. The countdown is read from the wall clock on each tick, so it moves; a
 slot wait has no deadline and shows its words only. A retry also turns the state
 row `rate limited` (below); a slot wait leaves it on the work it was doing. The
 wait is one dim line in the scrollback (`» rate limited (429): …`, same hint) and
-an `error` event. Only the pane names the key: plain text in the prompt is a
-`say` the model receives, while Esc and Ctrl-C stop the turn and `/stop` ends it
-at the next boundary.
+an `error` event. Only the pane names the key: typed text is a `say` the model
+receives, while Esc and Ctrl-C stop the turn and `/stop` ends it at a boundary.
 
 ## States (the state row)
 
@@ -82,12 +77,11 @@ at the next boundary.
 | paused | `⏸` | `⏸ paused · step cap 50 reached · say continue` |
 | error | `✗` | `✗ error · provider 401 · say to retry` |
 
-A turn that ends **paused** or **in error** keeps its row after it ends (with
-the step cap or the provider's reason and the next action) and writes one
-outcome line (`⏸ paused · 3 steps · 4.8k tok`, no timing); `done` ends
-on its prose and goes back to `● idle · ready`, and `stopped` writes one line
-and does the same. The facts row names the session title for a finished turn — the state row is
-where the phase word lives.
+A turn that ends **paused** or **in error** keeps its row (with the step cap or
+the provider's reason and the next action) and writes one outcome line
+(`⏸ paused · 3 steps · 4.8k tok`, no timing); `done` ends on its prose and
+`stopped` writes one line, both back to `● idle · ready`. The phase word lives
+in the state row; the facts row names the title.
 
 Spinner and elapsed time exist only while working. Herdr's OSC 7501 word comes
 from the same state: thinking/writing/running/rate limited → `working`,
@@ -98,23 +92,24 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | key | does |
 |---|---|
 | Enter | send; while working it is a `say` (the prompt dims to say so) |
-| Alt-Enter, Shift-Enter, Ctrl-J | newline (kelir negotiates the kitty keyboard protocol so Shift-Enter survives nested terminals such as Herdr) |
+| Alt-Enter, Shift-Enter, Ctrl-J | newline (the kitty protocol makes Shift-Enter survive nested terminals such as Herdr) |
 | Esc | stop the turn (only while working) |
 | Ctrl-C once | stop the turn; twice within 1 s quits |
-| Ctrl-O | the last tool call's output tail (`Esc`/`Ctrl-O` closes) |
+| Ctrl-O | the last call's output tail (`Esc`/`Ctrl-O` closes) |
 | Ctrl-L | redraw |
 | Ctrl-K / Ctrl-U | cut to end of line / clear |
 | Ctrl-Backspace | delete the word before the cursor (a chip is one element) |
 | Ctrl-Delete, Alt-Backspace | delete the word after the cursor |
 | Alt-← / Alt-→ | move by one word |
-| Ctrl-← / Ctrl-→ | move by one word (the same as Alt-←/→) |
+| Ctrl-← / Ctrl-→ | move by one word (as Alt-←/→) |
 | Alt-b / Alt-f | move by one word back/forward |
 | Home / End | jump to the start/end of the transcript |
-| PageUp / PageDown | scroll the transcript by one viewport |
+| PageUp / PageDown | scroll the transcript one viewport |
 | wheel | scroll the transcript, 3 rows a notch |
 | Ctrl-Y | copy the last answer (OSC 52) |
-| Ctrl-Shift-Y | dump the whole transcript to `transcript.txt` in the session directory |
-| ↑ / ↓ | history (first line ↑, last line ↓) |
+| Ctrl-Shift-Y | dump the whole transcript to `transcript.txt` in the session dir |
+| Tab | accept the highlighted completion row |
+| ↑ / ↓ | history (first line ↑, last line ↓); while the popup is open they walk it, and `Esc` closes it |
 | Backspace on an image chip | removes the whole chip and deletes its file (a plain Backspace on text still deletes one character) |
 
 ## `/` commands
@@ -127,23 +122,35 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | `/model <p/m>` | swap provider/model for the rest of the session |
 | `/tools off\|on <name>` | disable or enable `bash`/`edit` |
 | `/compact [focus]` | summarise the earlier context |
-| `/expand n\|last` | append call `n`'s output here (a committed line cannot be unfolded) |
-| `/new` | end this session cleanly and start a fresh one in the same place (prints `resume: kelir tui --resume <id>`) |
+| `/expand n\|last` | append call `n`'s output here |
+| `/new` | end this session cleanly and start a fresh one in the same place |
+| `/skill <name> [path]` | load a skill's instructions into the context now (a discovered name, or a file the discovery missed) |
 | `/help` (`/?`) | the list |
 | `/quit` (`/exit`) | end the session |
 
-Calls always print one line each: there is no output policy to toggle, so
-`/collapse` and bare `/expand` are not commands.
+A call always prints one line, so there is no `/collapse`.
+
+## Completion
+
+A `/` in the first column opens a list above the editor: every command, then
+every discovered skill, with its description; at most eight rows, windowed
+around the highlight (`▸`). `/skill ` narrows it to skills and Tab types just
+the name; any other argument (`/model `) opens nothing. The match is a greedy
+subsequence over the name (`/cmp` → `/compact`, `/mfc` → `monthly-finance-close`),
+scored for a first character, a word start, a camel hump, adjacency, and an
+exact name over a prefix over the initials; ties keep catalogue order. Tab
+accepts (the name and a space, never the usage's placeholder), ↑/↓ walk it
+wrapping, Esc closes it and leaves the line, further typing re-searches, and
+with no list open the keys are their usual ones. Same discovery as the prompt's
+skill list: `src/tui/complete.rs`.
 
 ## Spacing
 
-A prompt echo, a run of tool lines, prose and the outcome line (paused,
-stopped, error) are separate blocks with **one** blank row between them and
-never two. A reasoning-only step (empty assistant text between tool calls) is
-not prose: it does not split a run of calls with a blank row.
-The human's own words in the scrollback are cyan (the terminal's ANSI 6), so a
-long session can be scanned for what was asked; a palette that remaps it light
-loses contrast, which is a reason to change the palette, not the transcript.
+A prompt echo, a run of tool lines, prose and the outcome line are separate
+blocks with **one** blank row between them, never two; a reasoning-only step (an
+empty assistant text between calls) is not prose and splits nothing. The human's
+own words are cyan (ANSI 6) so a long session scans by what was asked — a palette
+that remaps it light loses contrast, which is a reason to change the palette.
 
 ## Tool lines
 
@@ -183,23 +190,14 @@ separators stay Unicode in both sets: they are decoration, not state, and
 every byte ASCII.
 
 Markdown is rendered **block by block as it streams**, and within a block **row
-by row** wherever a row is already final:
-
-- A fence commits every line that has ended, keeping the last three lines in
-  the live area, so a 60-line code block scrolls into history as it arrives
-  instead of becoming a three-row ticker.
-- A top-level list commits every item that has ended (the cut is just before a
-  new top-level item), keeping three lines live, so a long list fills the
-  scrollback too. A fence *inside* an item is held with the item, because its
-  indent belongs to that item's render.
-- A paragraph and a table commit when the block closes: a paragraph's wrap
-  depends on all of it, and a boxed table's column widths on every row it has.
-
-A closed block is rendered once, when it closes, and its rows are cached, so
-the work per delta does not grow with the message: only the open block
-re-renders, and it holds at most the last three live lines. Nothing shown ever
-vanishes, and a loose list item's continuation paragraph keeps its indent (the
-block splitter joins it back) with one blank row between the item's paragraphs.
+by row** wherever a row is already final: a fence commits each ended line and a
+top-level list each ended item, keeping three lines live (a fence *inside* an item
+is held with it — its indent is the item's), so a long block fills the scrollback
+instead of ticking in three rows. A paragraph and a table wait for the block to
+close: a paragraph's wrap depends on all of it, a boxed table's widths on every
+row. A closed block is rendered once and its rows cached, so the work per delta
+does not grow with the message. Nothing shown ever vanishes, and a loose item's
+continuation paragraph keeps its indent with one blank row between paragraphs.
 
 ## Images
 

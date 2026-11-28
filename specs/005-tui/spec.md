@@ -30,7 +30,7 @@ A person runs `kelir` with no subcommand in a terminal. The program takes over t
 
 ### User Story 2 - Control a running turn with keys and slash commands (Priority: P1)
 
-While the agent works, the person can stop it (Esc, Ctrl-C, `/stop`), redirect it (`/say-now`), queue a follow-up (`/later`), swap model (`/model`), toggle tools (`/tools`), compact context (`/compact`), inspect output (`/expand`, Ctrl-O), or quit (`/quit`, double Ctrl-C).
+While the agent works, the person can stop it (Esc, Ctrl-C, `/stop`), redirect it (`/say-now`), queue a follow-up (`/later`), swap model (`/model`), toggle tools (`/tools`), compact context (`/compact`), load a skill (`/skill`), inspect output (`/expand`, Ctrl-O), start a fresh session (`/new`), or quit (`/quit`, double Ctrl-C).
 
 **Why this priority**: Being able to interrupt and steer is essential to trust the agent.
 
@@ -161,11 +161,12 @@ The state row shows glyph, phase word, elapsed time and detail; the facts row sh
 - **FR-013**: Ctrl-Y MUST copy the last non-empty assistant markdown via an OSC 52 sequence and set note `last answer copied`; Ctrl-Shift-Y MUST write the whole plain-text transcript to `transcript.txt` in the session directory and set note `transcript saved: <path>`.
 - **FR-014**: Up/Down MUST move between visual rows and, past the first/last row, browse submitted history, restoring the unsent draft past the newest entry; consecutive duplicates MUST NOT be added to history.
 - **FR-015**: Key release events MUST be ignored.
+- **FR-015a**: Tab MUST accept the highlighted row of the `/` completion popup (spec `specs/010-tui-slash-completion`); with no popup open Tab MUST do nothing and MUST never insert a literal tab.
 
 **Slash commands**
 
-- **FR-016**: A line not starting with `/` MUST be a `say`. A line starting with `/` MUST be parsed as a command; names are `stop`, `say-now` (`say_now`, `now`), `later`, `model`, `tools`, `compact`, `expand`, `quit` (`exit`), `help` (`?`).
-- **FR-017**: Each session-changing command MUST be dispatched as the same verb `kelir ctl` sends (`stop`, `say` with `now`, `later`, `model`, `tools`, `compact`, `end`), tagged `from: tui`, with a local `» …` echo line before the answer.
+- **FR-016**: A line not starting with `/` MUST be a `say`. A line starting with `/` MUST be parsed as a command; names are `stop`, `say-now` (`say_now`, `now`), `later`, `model`, `tools`, `compact`, `expand`, `skill`, `new`, `quit` (`exit`), `help` (`?`).
+- **FR-017**: Each session-changing command MUST be dispatched as the same verb `kelir ctl` sends (`stop`, `say` with `now`, `later`, `model`, `tools`, `compact`, `skills`, `end`), tagged `from: tui`, with a local `» …` echo line before the answer.
 - **FR-018**: `/help` MUST list every command with a one-line description and send no verb. `/expand` MUST be a local view with no verb or log event.
 - **FR-019**: Verb replies MUST be shown as `» <verb>: <applies>` except for `say`, `later` and a `stop` that was `dropped`, which are silent; a failed reply MUST show `kelir: <error>` and set a note in the state row.
 
@@ -242,6 +243,7 @@ The state row shows glyph, phase word, elapsed time and detail; the facts row sh
 6. `docs/reference/tui.md` (Keys table) says ↑/↓ are history on first/last line; the code first moves by visual (wrapped) row and only then falls back to history (`src/tui/editor.rs:544-557`).
 7. `docs/reference/tui.md` (Images) does not state the 8-images-per-prompt cap (`src/features/attachments.rs:19`, `src/tui/app/input.rs:88-91`).
 8. `docs/reference/tui.md` (Keys table) says Home/End scroll the transcript; the editor's own Home/End handling (`src/tui/editor.rs:558-583`) is unreachable from the keymap (`src/tui/keys.rs:84-85`), so there is no key for start/end of the input line.
+9. The `/` completion popup, its ranking and `/skill` are specified in `specs/010-tui-slash-completion`; this spec owns only the keys and commands they hook into.
 
 ## Source map
 
@@ -255,6 +257,7 @@ The state row shows glyph, phase word, elapsed time and detail; the facts row sh
 - src/tui/keys.rs
 - src/tui/terminal.rs
 - src/tui/commands.rs
+- src/tui/complete.rs
 - src/tui/editor.rs
 - src/tui/editor_impl.rs
 - src/tui/scrollback.rs

@@ -101,6 +101,32 @@ pub fn render_system(
     })
 }
 
+/// The skills a `/skill` picker offers, resolved exactly as the system prompt
+/// resolved them.
+pub fn skill_catalogue(cfg: &Config, cwd: &Path) -> Vec<crate::tui::complete::SkillInfo> {
+    let mut places = crate::features::sources::source::places(
+        cwd,
+        &cfg.skills_dirs,
+        Some(crate::paths::config_dir()),
+    );
+    places.memory_dir = cfg
+        .memory_dir
+        .as_deref()
+        .map(|dir| crate::features::memory::resolve(dir, cwd));
+    crate::features::sources::source::skills_available(&places)
+        .into_iter()
+        .map(|skill| crate::tui::complete::SkillInfo {
+            name: skill.name,
+            about: skill.about,
+            path: if skill.path.as_os_str().is_empty() {
+                String::new()
+            } else {
+                crate::util::path_string(&skill.path)
+            },
+        })
+        .collect()
+}
+
 /// The date goes in, never the time: the system prefix must be stable for the
 /// life of a session (and across a resume).
 pub fn today() -> String {

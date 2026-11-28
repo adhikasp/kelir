@@ -447,3 +447,40 @@ fn unquote(value: &str) -> String {
     }
     value.to_string()
 }
+
+/// One skill a picker can offer: what it is called, what it is for, and the
+/// file to read it from (empty for a skill compiled into the binary).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillEntry {
+    pub name: String,
+    pub about: String,
+    pub path: PathBuf,
+}
+
+/// Every skill this session can load, in the order discovery resolves them:
+/// the layers and the project-over-machine rule are the ones the system prompt
+/// was rendered from, so a picker cannot list a skill the context does not have.
+///
+/// This reads the skill files a second time (the render already did): it is one
+/// pass at TUI start, and the alternative is carrying every skill body through
+/// the renderer just to show a description.
+pub fn skills_available(places: &Places) -> Vec<SkillEntry> {
+    let mut out: Vec<SkillEntry> = discover(places)
+        .into_iter()
+        .filter(|found| found.kind == SourceKind::Skill)
+        .map(|found| SkillEntry {
+            about: parse_skill(&found.text)
+                .map(|skill| skill.description)
+                .unwrap_or_default(),
+            path: if found.builtin {
+                PathBuf::new()
+            } else {
+                found.path
+            },
+            name: found.name,
+        })
+        .collect();
+    // The render sorts skills by name; a list is read the same way.
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}

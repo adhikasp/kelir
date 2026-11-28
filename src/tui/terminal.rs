@@ -111,6 +111,7 @@ pub fn start(
     cap: Option<u32>,
     token: String,
     theme: Theme,
+    skills: Vec<crate::tui::complete::SkillInfo>,
 ) -> std::io::Result<Tui> {
     let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     // Capture the hook from before ratatui's own one, so teardown happens
@@ -143,6 +144,7 @@ pub fn start(
 
     let mut app = super::App::new(width as usize, height as usize, to_tui, verbs, token);
     app.theme = theme;
+    app.set_skills(skills);
     for line in banner {
         if line.dim {
             app.push_dim_text(&line.text);

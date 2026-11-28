@@ -14,6 +14,7 @@ use crate::features::herdr;
 use crate::ipc::{Incoming, Request};
 use crate::tui::activity::{self, Activity, Kind};
 use crate::tui::commands::{self, Action, Parsed};
+use crate::tui::complete::{Catalogue, Completion, SkillInfo};
 use crate::tui::editor::{Chip, Editor, Key, Outcome};
 use crate::tui::markdown::Stream;
 use crate::tui::theme::Theme;
@@ -116,6 +117,16 @@ pub struct App {
     /// `/new` ended this session: the process leaves and starts a fresh one in
     /// the same place instead of returning to the shell.
     pub restart: bool,
+    /// The `/` popup's catalogue: the commands, plus the skills this session
+    /// found. Built from the skills at start; a skill added mid-session is
+    /// named by `/skill <path>`.
+    catalogue: Catalogue,
+    /// The popup, while the line has a word it can complete.
+    completion: Option<Completion>,
+    /// The buffer as it was when Esc dismissed the popup: the dismissal holds
+    /// until the line changes, so scrolling or walking the history does not
+    /// bring the list back under the cursor.
+    completion_off: Option<String>,
     to_tui: mpsc::UnboundedSender<View>,
     verbs: mpsc::UnboundedSender<Incoming>,
     token: String,
@@ -165,10 +176,43 @@ impl App {
             status_records: Vec::new(),
             quit: false,
             restart: false,
+            catalogue: Catalogue::default(),
+            completion: None,
+            completion_off: None,
             to_tui,
             verbs,
             token,
         }
+    }
+
+    /// The skills the popup offers: the ones the session's own discovery
+    /// found, so the list and the context cannot disagree.
+    pub fn set_skills(&mut self, skills: Vec<SkillInfo>) {
+        self.catalogue = Catalogue::new(&skills);
+        self.refresh_completion();
+    }
+
+    pub fn completion(&self) -> Option<&Completion> {
+        self.completion.as_ref()
+    }
+
+    /// The row the popup shows, in order: `(label, about, kind)`.
+    pub fn completion_rows(&self) -> Vec<(String, String, &'static str)> {
+        let Some(completion) = &self.completion else {
+            return Vec::new();
+        };
+        completion
+            .rows
+            .iter()
+            .filter_map(|index| self.catalogue.entries().get(*index))
+            .map(|entry| {
+                let kind = match entry.kind {
+                    crate::tui::complete::Kind::Command => "command",
+                    crate::tui::complete::Kind::Skill => "skill",
+                };
+                (entry.label.clone(), entry.about.clone(), kind)
+            })
+            .collect()
     }
 
     pub fn set_session_dir(&mut self, dir: PathBuf) {
