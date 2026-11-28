@@ -162,6 +162,11 @@ async fn full_screen_scroll_resize_and_restore_in_a_real_pty() {
         "cursor not restored: {:?}",
         run.screen
     );
+    assert!(
+        run.screen.contains("\u{1b}[?1006l") && run.screen.contains("\u{1b}[?1000l"),
+        "mouse reporting not released: {:?}",
+        run.screen
+    );
 }
 
 /// Drive three turns through the real binary, press real scroll keys, resize
@@ -263,6 +268,21 @@ fn drive_full_screen_pty(
             std::thread::sleep(Duration::from_millis(20));
         }
     };
+    // Wait until a label has left the screen: the negative of `wait_screen`,
+    // for a scroll that must move away from the tail.
+    let wait_screen_absent_within =
+        |from: usize, rows: usize, cols: usize, label: &str, limit: Duration| -> String {
+            let deadline = Instant::now() + limit;
+            let mut view = String::new();
+            while Instant::now() < deadline {
+                view = screen_text(&raw(), from, rows, cols);
+                if !view.contains(label) {
+                    return view;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            view
+        };
     assert!(
         wait_for("kelir", crate::support::CEILING),
         "no TUI: {}",
@@ -344,8 +364,11 @@ fn drive_full_screen_pty(
         })
         .expect("resize the pty");
     let resized = wait_screen(resize_at, 24, 60, "THIRD_ANSWER");
+    // The prompt sits above the answer, and at 24 rows the tail viewport is
+    // already scrolled past it; what must survive the resize is the answer the
+    // reader was following, not a row above it.
     assert!(
-        resized.contains("THIRD_PROMPT"),
+        resized.contains("THIRD_ANSWER"),
         "tail lost on resize: {resized:?}"
     );
     send(b"\x1b[5~");
@@ -354,18 +377,89 @@ fn drive_full_screen_pty(
         !up_again.contains("THIRD_ANSWER"),
         "resize lost the scroll position: {up_again:?}"
     );
-    // The prompt for that answer is one page further up at this width.
-    send(b"\x1b[5~");
-    let up_prompt = wait_screen(resize_at, 24, 60, "SECOND_PROMPT");
-    assert!(
-        !up_prompt.contains("THIRD_ANSWER"),
-        "the second prompt must be reachable after resize: {up_prompt:?}"
-    );
+    // Where each turn lands depends on how many rows each answer reflows to at
+    // the new width, so assert what actually matters — every turn is still
+    // reachable by paging — instead of pinning a page offset.
+    // Wait on the answer, not the prompt: the facts row repeats the prompt
+    // name, so `FIRST_PROMPT` can be on screen while the transcript is still
+    // showing the tail.
     send(b"\x1b[H");
     let top_again = wait_screen(resize_at, 24, 60, "FIRST_ANSWER");
     assert!(
         top_again.contains("FIRST_PROMPT"),
         "resize could not reach the first turn: {top_again:?}"
+    );
+    let mut seen = String::new();
+    let mut reached_prompt = false;
+    for _ in 0..8 {
+        let view = screen_text(&raw(), resize_at, 24, 60);
+        seen.push_str(&view);
+        if view.contains("THIRD_PROMPT") {
+            reached_prompt = true;
+            break;
+        }
+        send(b"\x1b[6~");
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    assert!(
+        reached_prompt,
+        "PageDown could not return to the tail after resize: {seen:?}"
+    );
+    assert!(
+        seen.contains("SECOND_PROMPT") && seen.contains("SECOND_ANSWER"),
+        "the middle turn became unreachable after the resize: {seen:?}"
+    );
+    // Reading the tail again follows new output.
+    send(b"\x1b[6~");
+    let tail_again = wait_screen(resize_at, 24, 60, "THIRD_ANSWER");
+    assert!(
+        tail_again.contains("THIRD_ANSWER"),
+        "the tail is not followed after paging back: {tail_again:?}"
+    );
+
+    // The wheel is the same scroll path as the keys, from a real SGR event:
+    // wheel-up is `\e[<64;10;10M` (button 4), wheel-down `\e[<65;…`. The mode
+    // is asked for on entry and released on exit, or the terminal keeps
+    // reporting and the pane loses its own selection.
+    assert!(
+        raw().contains("\u{1b}[?1000h") && raw().contains("\u{1b}[?1006h"),
+        "wheel reporting was never requested: {:?}",
+        raw()
+    );
+    // A notch is WHEEL_ROWS rows, not a page. Two notches must not be enough
+    // to leave the last turn: a wheel nudge stays near where the reader was,
+    // which is exactly what a page-sized step would not do.
+    send(b"\x1b[<64;10;10M");
+    send(b"\x1b[<64;10;10M");
+    std::thread::sleep(Duration::from_millis(150));
+    let nudged = screen_text(&raw(), resize_at, 24, 60);
+    assert!(
+        nudged.contains("THIRD_ANSWER"),
+        "two wheel notches jumped a whole page: {nudged:?}"
+    );
+    // Enough notches to leave the tail: 24 rows is a page, ~3 rows a notch.
+    for _ in 0..8 {
+        send(b"\x1b[<64;10;10M");
+    }
+    let scrolled_up =
+        wait_screen_absent_within(resize_at, 24, 60, "THIRD_ANSWER", Duration::from_secs(5));
+    assert!(
+        scrolled_up.contains("FIRST_ANSWER") || scrolled_up.contains("SECOND_ANSWER"),
+        "wheel up did not reach an earlier turn: {scrolled_up:?}"
+    );
+    // And back down to the tail, in wheel notches.
+    let mut scrolled_down = String::new();
+    for _ in 0..12 {
+        send(b"\x1b[<65;10;10M");
+        std::thread::sleep(Duration::from_millis(60));
+        scrolled_down = screen_text(&raw(), resize_at, 24, 60);
+        if scrolled_down.contains("THIRD_ANSWER") {
+            break;
+        }
+    }
+    assert!(
+        scrolled_down.contains("THIRD_ANSWER"),
+        "wheel down did not return to the tail: {scrolled_down:?}"
     );
 
     send(b"/quit");

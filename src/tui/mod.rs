@@ -27,7 +27,7 @@ use crate::tui::activity::Kind;
 use crate::tui::theme::Theme;
 
 pub use app::{App, Entry};
-pub use keys::{Press, translate};
+pub use keys::{Press, WHEEL_ROWS, translate, translate_mouse};
 
 /// An out-of-log note shown exactly like a log note. The session records the
 /// real event when it has a sequence number; this is for the few UI-only
@@ -302,6 +302,11 @@ impl Tui {
                 }
             }
             Event::Paste(text) => self.app.paste(&text),
+            Event::Mouse(mouse) => {
+                if let Some(press) = keys::translate_mouse(mouse) {
+                    self.app.press(press);
+                }
+            }
             // ratatui's backend resizes on the next draw; `set_size` in
             // `render` is the single resize path (it preserves scroll).
             _ => {}

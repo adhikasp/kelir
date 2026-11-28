@@ -15,9 +15,21 @@ impl App {
         }
     }
 
+    /// A prompt submitted here, echoed before the session records it.
+    ///
+    /// The *text* is what the log will carry, so that is what is remembered:
+    /// `apply_log` matches an `EventBody::User` on its raw text, and a rendered
+    /// row (`› hello`) would never match, so the log copy would be appended
+    /// after it as a second, bare row.
     pub fn push_user(&mut self, text: &str) {
         self.own_user_echoes.push(text.to_string());
-        self.push_user_row(text);
+        self.push_user_row(&commands::echo_row(text, ""));
+    }
+
+    /// `/say-now`: the same user row, marked as taking effect immediately.
+    pub fn push_user_now(&mut self, text: &str) {
+        self.own_user_echoes.push(text.to_string());
+        self.push_user_row(&commands::echo_row(text, "  (now)"));
     }
 
     /// A user row from the log: unlike a local echo it must not raise the

@@ -435,8 +435,10 @@ ingress + chip + attachments dir, (6) `kelir view` + `source` event + e2e, (7) W
 
 ## 9. Do not copy
 
-- **Alt-screen, sidebars, mouse capture** (opencode). Breaks scrollback, terminal selection and the inline
-  premise; a sidebar also needs 200 columns.
+- **Alt-screen, sidebars, full mouse capture** (opencode). Alt-screen breaks scrollback and the inline
+  premise; a sidebar needs 200 columns; capturing all motion takes drag-selection from the terminal. (The
+  wheel is the one exception, because the alternate screen swallows it otherwise: see
+  [DEVIATIONS](../DEVIATIONS.md#the-mouse-wheel-scrolls-the-transcript-fr-003-2026-11-28).)
 - **Random whimsical verbs and tip lines** (Claude Code: `Topsy-turvying…`, `⎿ Tip: …`). Noise, not
   deterministic, impossible to snapshot; STEER-10 names the exact words.
 - **LLM-generated session titles** (opencode sidebar title). A hidden model call per session: spends tokens

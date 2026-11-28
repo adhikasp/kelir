@@ -14,6 +14,18 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
   *itself*) and reads the store again, so a host that rarely uses opencode no longer needs a
   manual `opencode` run, an env copy or a second refresher (#61).
 
+### Fixed
+
+- The TUI's mouse wheel now scrolls the transcript, three rows a notch, in both directions
+  (reaching the bottom resumes following). It reports the wheel only — never motion — and
+  releases the terminal on every exit path, so the pane keeps its own drag-selection and Herdr
+  keeps the wheel outside `kelir tui`. `specs/005-tui` FR-003 said "no mouse capture"; the
+  wheel is a documented deviation.
+- A prompt submitted in the TUI is shown once. The local echo remembered its *rendered* row
+  (`› hello there`) while the log carries the plain text (`hello there`), so the log copy
+  never matched the echo and the prompt was appended a second time as a bare line.
+- `/say-now` gets the same single row, and its `(now)` marker no longer duplicates it either.
+
 ### Breaking — the rewrite
 
 - Event log v1, the state layout, the CLI, the config file and the wire format all

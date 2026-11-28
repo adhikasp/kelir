@@ -4,8 +4,8 @@
 use std::io::Write;
 
 use ratatui::crossterm::event::{
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
+    MouseEventKind, PushKeyboardEnhancementFlags,
 };
 
 use crate::tui::editor::Key;
@@ -29,10 +29,31 @@ pub enum Press {
     /// Home / End: the top / bottom of the transcript.
     Top,
     Bottom,
+    /// Mouse wheel up / down: the transcript, a few rows at a time. A wheel is
+    /// a nudge, not a page, so it moves [`WHEEL_ROWS`] rather than a viewport.
+    ScrollUp,
+    ScrollDown,
     /// Ctrl-Y: copy the last answer (OSC 52) or dump the whole transcript to a
     /// file in the session dir (with Shift).
     CopyLast,
     DumpTranscript,
+}
+
+/// Rows one wheel notch moves the transcript. A notch is a nudge: enough to
+/// feel like the wheel is connected, small enough that a fast flick does not
+/// jump past a whole answer.
+pub const WHEEL_ROWS: usize = 3;
+
+/// Translate one mouse event. Only the wheel is used: kelir takes normal
+/// tracking (`?1000`) with SGR coordinates (`?1006`), so clicks and motion are
+/// not reported at all, and a terminal never loses drag-selection or the
+/// host's own scrolling to the app.
+pub fn translate_mouse(mouse: MouseEvent) -> Option<Press> {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => Some(Press::ScrollUp),
+        MouseEventKind::ScrollDown => Some(Press::ScrollDown),
+        _ => None,
+    }
 }
 
 /// Ask the terminal for CSI-u key reporting so Shift-Enter survives a

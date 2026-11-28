@@ -18,6 +18,20 @@ use crate::tui::theme::Theme;
 /// How long the input thread waits for a key before checking again.
 const KEY_POLL: Duration = Duration::from_millis(30);
 
+/// Ask for wheel reporting only: normal tracking (`?1000`) with SGR coordinates
+/// (`?1006`). Deliberately not `?1002`/`?1003` (drag and any-motion tracking):
+/// those turn every hover into an event and take a pane's own drag-selection
+/// away from the terminal. Written as bytes rather than as crossterm commands,
+/// whose `EnableMouseCapture` asks for all five modes.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
+
+/// Turn wheel reporting on. Best effort: a terminal that does not know the
+/// modes ignores them and the keys still scroll.
+fn mouse_on(stdout: &mut impl Write) {
+    let _ = stdout.write_all(MOUSE_ON);
+}
+
 /// Restores the terminal on every exit path, including a panic between the
 /// setup and the loop. Crossterm's teardown sequences are idempotent, so a
 /// normal exit and a panic hook may both run it.
@@ -39,12 +53,13 @@ impl Drop for RestoreGuard {
 /// guard never emit the teardown twice.
 static RESTORED: AtomicBool = AtomicBool::new(false);
 
-/// Leave the alternate screen, raw mode, paste and kitty keyboard mode.
+/// Leave the alternate screen, raw mode, paste, the mouse and kitty keyboard mode.
 pub fn restore() {
     if RESTORED.swap(true, Ordering::AcqRel) {
         return;
     }
     let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(MOUSE_OFF);
     let _ = ratatui::crossterm::execute!(
         stdout,
         ratatui::crossterm::event::DisableBracketedPaste,
@@ -89,6 +104,7 @@ pub fn start(
     install_panic_hook(previous_hook);
     let mut stdout = std::io::stdout();
     keys::push_enhancements(&mut stdout);
+    mouse_on(&mut stdout);
     let _ = ratatui::crossterm::execute!(stdout, ratatui::crossterm::event::EnableBracketedPaste);
     let _ = stdout.flush();
 
@@ -111,6 +127,10 @@ pub fn start(
                     Ok(event) => {
                         let keep = match &event {
                             Event::Key(key) => key.kind != KeyEventKind::Release,
+                            // The wheel only: clicks are reported because the
+                            // terminal reports the wheel that way, not because
+                            // the TUI wants them.
+                            Event::Mouse(mouse) => keys::translate_mouse(*mouse).is_some(),
                             Event::Paste(_) | Event::Resize(_, _) => true,
                             _ => false,
                         };

@@ -69,6 +69,12 @@ fn scroll(app: &mut App) -> Vec<String> {
     app.take_scroll().iter().map(line_text).collect()
 }
 
+/// Every rendered row, non-destructively: `scroll` is `take_scroll`, which
+/// empties what earlier rows a second call would see.
+fn all_rows(app: &App) -> Vec<String> {
+    app.transcript_text().lines().map(str::to_string).collect()
+}
+
 fn pos(rows: &[String], needle: &str) -> usize {
     rows.iter()
         .position(|r| r.contains(needle))
@@ -659,4 +665,132 @@ fn two_queued_echoes_match_by_text_not_by_position() {
         1,
         "the second echo must not be duplicated or swallowed: {rows:#?}"
     );
+}
+
+/// A prompt typed here is echoed once. The echo is remembered by its raw text
+/// (what `EventBody::User` carries) while the row shows the `›` marker, so the
+/// log copy finds it; matching a rendered row against the raw text never did,
+/// and the prompt was appended a second time as a bare line.
+#[test]
+fn a_submitted_prompt_is_shown_once_after_its_log_copy_arrives() {
+    let mut app = app(80);
+    // Exactly what `submit` does for a plain line, then the session's record.
+    app.push_user("hello there");
+    let rows = all_rows(&app);
+    assert_eq!(
+        rows.iter().filter(|r| r.contains("hello there")).count(),
+        1,
+        "the local echo must be one row: {rows:#?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.starts_with("› hello there")),
+        "the echo carries the submit marker: {rows:#?}"
+    );
+    app.apply(kelir::tui::View::Log(kelir::log::event::LogEvent::new(
+        1,
+        kelir::log::event::EventBody::User {
+            text: kelir::log::event::Payload::text("hello there"),
+            from: "tui".into(),
+            delivery: "next".into(),
+            attachments: Vec::new(),
+        },
+    )));
+    let rows = all_rows(&app);
+    assert_eq!(
+        rows.iter().filter(|r| r.contains("hello there")).count(),
+        1,
+        "the log copy must replace the echo, not follow it: {rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.trim() == "hello there"),
+        "no bare duplicate row: {rows:#?}"
+    );
+}
+
+/// `/say-now` is the same row plus `(now)`, and the same single row: the
+/// marker the echo adds is not part of the text the log matches on.
+#[test]
+fn a_say_now_is_also_shown_once() {
+    let mut app = app(80);
+    app.push_user_now("steer this");
+    let rows = all_rows(&app);
+    assert!(
+        rows.iter().any(|r| r.contains("steer this  (now)")),
+        "the now marker is on the echo: {rows:#?}"
+    );
+    app.apply(kelir::tui::View::Log(kelir::log::event::LogEvent::new(
+        1,
+        kelir::log::event::EventBody::User {
+            text: kelir::log::event::Payload::text("steer this"),
+            from: "tui".into(),
+            delivery: "now".into(),
+            attachments: Vec::new(),
+        },
+    )));
+    let rows = all_rows(&app);
+    assert_eq!(
+        rows.iter().filter(|r| r.contains("steer this")).count(),
+        1,
+        "a say-now is one row: {rows:#?}"
+    );
+}
+
+/// The wheel moves the transcript a few rows per notch, in both directions,
+/// and reaching the bottom resumes following. `ScrollDown` from the tail must
+/// not scroll past it into a blank screen.
+#[test]
+fn the_mouse_wheel_scrolls_the_transcript_both_ways() {
+    let mut app = app(40);
+    for i in 0..60 {
+        app.push_text(&format!("row {i}"));
+    }
+    assert_eq!(app.scroll_position(), None, "starts following the tail");
+    app.press(kelir::tui::Press::ScrollUp);
+    let after_up = app.scroll_position();
+    assert_eq!(
+        after_up,
+        Some(60usize.saturating_sub(app.viewport_height()) - kelir::tui::WHEEL_ROWS),
+        "one notch up moves exactly WHEEL_ROWS"
+    );
+    app.press(kelir::tui::Press::ScrollDown);
+    assert_eq!(
+        app.scroll_position(),
+        None,
+        "scrolling back to the tail resumes following"
+    );
+    // Already following: a downward notch is a no-op, never a jump.
+    app.press(kelir::tui::Press::ScrollDown);
+    assert_eq!(app.scroll_position(), None);
+}
+
+/// A wheel event is translated to a scroll and nothing else: clicks, drags and
+/// hover are not the TUI's to interpret (the terminal keeps selection).
+#[test]
+fn only_wheel_mouse_events_are_used() {
+    use kelir::tui::translate_mouse;
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    let at = |kind| MouseEvent {
+        kind,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(
+        translate_mouse(at(MouseEventKind::ScrollUp)),
+        Some(kelir::tui::Press::ScrollUp)
+    );
+    assert_eq!(
+        translate_mouse(at(MouseEventKind::ScrollDown)),
+        Some(kelir::tui::Press::ScrollDown)
+    );
+    for ignored in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Moved,
+        MouseEventKind::ScrollLeft,
+        MouseEventKind::ScrollRight,
+    ] {
+        assert_eq!(translate_mouse(at(ignored)), None, "{ignored:?}");
+    }
 }

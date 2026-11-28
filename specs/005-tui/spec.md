@@ -145,7 +145,7 @@ The state row shows glyph, phase word, elapsed time and detail; the facts row sh
 
 - **FR-001**: The system MUST take the alternate screen, raw mode, bracketed paste and the kitty keyboard disambiguation flag on entry, and release all of them on clean exit, error return and panic, once.
 - **FR-002**: The system MUST lay out, top to bottom: transcript (remaining rows), a 1-row state line (when height ≥ 3), an editor of 1–12 rows (capped at height − 2), and a 1-row facts line (when height ≥ 4).
-- **FR-003**: The system MUST NOT write finished turns into the terminal's scrollback and MUST NOT capture the mouse.
+- **FR-003**: The system MUST NOT write finished turns into the terminal's scrollback and MUST NOT capture mouse motion or clicks; it MUST report the wheel (normal tracking, SGR coordinates) so it can scroll the transcript, and MUST release mouse reporting on every exit path (see [docs/DEVIATIONS.md](../../docs/DEVIATIONS.md#the-mouse-wheel-scrolls-the-transcript-fr-003-2026-11-28)).
 - **FR-004**: The system MUST rebuild all transcript rows from their source entries on resize, preserving the reader's fractional scroll position, and MUST coalesce queued session events into one paint (minimum ~33 ms between bursts).
 - **FR-005**: The system MUST print `resume: kelir tui --resume <id>` on leaving when a session id is known.
 - **FR-006**: The spinner MUST tick every 100 ms only while a phase is working; idle sets no timer.

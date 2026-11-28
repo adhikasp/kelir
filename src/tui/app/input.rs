@@ -42,6 +42,14 @@ impl App {
                 let viewport = self.viewport_height();
                 self.scroll_by(viewport.max(1) as isize, viewport);
             }
+            Press::ScrollUp => {
+                let viewport = self.viewport_height();
+                self.scroll_by(-(keys::WHEEL_ROWS as isize), viewport);
+            }
+            Press::ScrollDown => {
+                let viewport = self.viewport_height();
+                self.scroll_by(keys::WHEEL_ROWS as isize, viewport);
+            }
             Press::Top => self.scroll_to(0, self.viewport_height()),
             Press::Bottom => {
                 self.scroll = None;
@@ -163,7 +171,10 @@ impl App {
             Ok(Parsed::Action(action)) => {
                 self.separate();
                 match &action {
-                    Action::Submit(_) | Action::SayNow(_) => self.push_user(&action.line()),
+                    // The echo remembers the raw text: `EventBody::User` carries
+                    // that, and a rendered row would never match it.
+                    Action::Submit(text) => self.push_user(text),
+                    Action::SayNow(text) => self.push_user_now(text),
                     _ => self.push_text(&action.line()),
                 }
                 self.dispatch(&action);

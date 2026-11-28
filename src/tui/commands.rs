@@ -29,6 +29,16 @@ pub enum Action {
     Quit,
 }
 
+/// The transcript row a submitted prompt shows as: the marker, the text as
+/// typed, and `(now)` for a message that skips the queue.
+///
+/// The local echo and the log copy must agree on it: the echo remembers the
+/// raw *text* (what the log carries) and renders the row with this, so the two
+/// cannot drift apart and the prompt is shown once.
+pub fn echo_row(text: &str, suffix: &str) -> String {
+    format!("› {text}{suffix}")
+}
+
 impl Action {
     pub fn verb(&self) -> &'static str {
         match self {
@@ -70,8 +80,8 @@ impl Action {
     /// What the TUI shows in the scrollback before the session answers.
     pub fn line(&self) -> String {
         match self {
-            Action::Submit(text) => format!("› {text}"),
-            Action::SayNow(text) => format!("› {text}  (now)"),
+            Action::Submit(text) => echo_row(text, ""),
+            Action::SayNow(text) => echo_row(text, "  (now)"),
             Action::Stop(None) => "» stop".to_string(),
             Action::Stop(Some(reason)) => format!("» stop: {reason}"),
             Action::Later(text) => format!("» later: {text}"),

@@ -1879,6 +1879,31 @@ socket request, owner-only state directories and socket/pipe creation, an owned-
 returns an empty token/id: `Trust::create` and `Trust::mint_for` then refuse cleanly, so no
 predictable fallback is ever used and an entropy-less platform fails to start instead of
 minting a session. The emptiness guards in `src/trust.rs` are live on that path.
+## The mouse wheel scrolls the transcript (FR-003, 2026-11-28)
+
+FR-003 said "MUST NOT capture the mouse", and `docs/design/TUI-v2.md` §9 lists mouse capture
+under "do not copy". The rule's reason still holds: a pane that captures all motion takes
+drag-selection away from the terminal and turns every hover into an event. What it did not
+account for is that a reader in a full-screen transcript reaches for the wheel, and with no
+reporting at all the wheel went to the terminal, which does nothing inside the alternate
+screen — so the most natural scroll gesture in the app was inert.
+
+- **Only the wheel is reported.** The TUI asks for normal tracking (`?1000h`) plus SGR
+  coordinates (`?1006h`), never `?1002`/`?1003` (drag and any-motion tracking). A terminal
+  reports the wheel as a button event, which is why `?1000` is the minimum; motion is still
+  never sent, and drag-selection stays the terminal's. Clicks that do arrive are ignored, and
+  `keys::translate_mouse` returns `None` for everything but the two scroll directions.
+- **It is released on every exit path**, next to bracketed paste and the kitty keyboard flag
+  (`?1006l`/`?1000l` first, so a half-run teardown cannot leave the terminal reporting into
+  the shell).
+- **Herdr's own scrolling now yields to the pane while the app runs.** Herdr routes the wheel
+  to its host scroll only while the pane reports no mouse modes; once the TUI asks for them,
+  the pane gets the wheel — which is the point, and why the release on exit matters: outside
+  `kelir tui`, the wheel belongs to Herdr and the terminal again.
+
+A notch moves `WHEEL_ROWS` (3) rows, not a viewport: the wheel is a nudge, PageUp/PageDown
+remain the page-sized step, and reaching the bottom resumes following.
+
 ## Built-in gates (rewrite P2B)
 
 - The pushed hint moved out of `Session` into `src/gates/builtin/hint.rs`; the

@@ -108,8 +108,7 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | Alt-← / Alt-→ | move by one word |
 | Home / End | jump to the start/end of the transcript |
 | PageUp / PageDown | scroll the transcript by one viewport |
-| Ctrl-U | clear the editor |
-| Ctrl-D | delete the word after the cursor |
+| wheel | scroll the transcript, 3 rows a notch |
 | Ctrl-Y | copy the last answer (OSC 52) |
 | Ctrl-Shift-Y | dump the whole transcript to `transcript.txt` in the session directory |
 | ↑ / ↓ | history (first line ↑, last line ↓) |
