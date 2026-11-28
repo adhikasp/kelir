@@ -594,6 +594,7 @@ impl Editor {
                 if start == end {
                     return self.handle(Key::Backspace);
                 }
+                let (start, end) = self.widen_over_chips(start, end);
                 match self.remove_range(start, end) {
                     Some(chip) => Outcome::ChipRemoved(chip),
                     None => Outcome::Edited,
@@ -605,18 +606,19 @@ impl Editor {
                 if start == end {
                     return self.handle(Key::Delete);
                 }
+                let (start, end) = self.widen_over_chips(start, end);
                 match self.remove_range(start, end) {
                     Some(chip) => Outcome::ChipRemoved(chip),
                     None => Outcome::Edited,
                 }
             }
             Key::WordLeft => {
-                let col = self.word_left_start();
+                let col = self.snap_out_of_chip(self.word_left_start(), false);
                 self.col = col;
                 Outcome::Edited
             }
             Key::WordRight => {
-                let col = self.word_right_start();
+                let col = self.snap_out_of_chip(self.word_right_start(), true);
                 self.col = col;
                 Outcome::Edited
             }
@@ -722,8 +724,6 @@ impl Editor {
         self.col = start;
         removed
     }
-
-    // ----------------------------------------------------------- internals
 
     fn split_line(&mut self) {
         let row = self.row;
@@ -1049,6 +1049,61 @@ mod tests {
         assert_eq!(editor.display_window(3), (7, 3));
         let short = typed("x");
         assert_eq!(short.display_window(3), (0, 1));
+    }
+
+    #[test]
+    fn word_keys_on_an_empty_buffer_do_nothing() {
+        // Every word key on an empty prompt is a no-op: it never inserts the
+        // control character the terminal sent, and it never panics.
+        for key in [
+            Key::KillPrevWord,
+            Key::KillNextWord,
+            Key::KillToEnd,
+            Key::Clear,
+            Key::WordLeft,
+            Key::WordRight,
+            Key::Home,
+            Key::Backspace,
+            Key::Delete,
+        ] {
+            let mut editor = Editor::default();
+            let outcome = editor.handle(key.clone());
+            assert_eq!(editor.text(), "", "{key:?} edited an empty buffer");
+            assert_eq!(editor.cursor(), (0, 0), "{key:?} moved an empty cursor");
+            assert!(
+                matches!(outcome, Outcome::Ignored | Outcome::Edited),
+                "{key:?} did something else: {outcome:?}"
+            );
+            assert!(!editor.text().chars().any(char::is_control) || editor.text().is_empty());
+        }
+        // And at the very start of a filled buffer, `KillPrevWord` has nothing
+        // to cut before the cursor.
+        let mut editor = typed("alpha");
+        editor.handle(Key::Home);
+        editor.handle(Key::KillPrevWord);
+        assert_eq!(editor.text(), "alpha");
+        assert_eq!(editor.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn a_word_delete_takes_the_chip_before_the_cursor() {
+        // A chip is one element: Ctrl-Backspace behind it removes the chip and
+        // the space before it, never half of its label, and reports the chip so
+        // the caller can delete its file.
+        let mut editor = typed("look");
+        editor.insert_chip(Chip::new(1, "attachments/1-a.png", "[image: x]"));
+        let outcome = editor.handle(Key::KillPrevWord);
+        assert!(
+            matches!(&outcome, Outcome::ChipRemoved(chip) if chip.seq == 1),
+            "a chip word-delete must report the chip: {outcome:?}"
+        );
+        assert_eq!(
+            editor.text().trim_end(),
+            "look",
+            "the chip and its label must be gone whole"
+        );
+        assert!(!editor.text().contains("[image"));
+        assert!(editor.chips().is_empty());
     }
 
     #[test]

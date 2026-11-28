@@ -135,6 +135,16 @@ impl Runner {
                                     continue;
                                 }
                             },
+                            "timebox" => match builtin::timebox::Timebox::new(def) {
+                                Ok(gate) => Box::new(gate),
+                                Err(why) => {
+                                    drop(slots);
+                                    let mut run = Self::empty_run(def, event, started, 0);
+                                    run.error = Some(why);
+                                    chain.runs.push(run);
+                                    continue;
+                                }
+                            },
                             _ => {
                                 drop(slots);
                                 let mut run = Self::empty_run(def, event, started, 0);
@@ -218,13 +228,16 @@ impl Runner {
             }
             match parsed {
                 Parsed::Allow { reason, .. } => run.reason = reason,
-                Parsed::Deny { reason, .. } => {
+                Parsed::Deny {
+                    reason, max_denies, ..
+                } => {
                     run.decision = "deny".into();
                     run.reason = reason.clone();
                     if event.can_deny() {
                         chain.verdict = Verdict::Deny {
                             gate: def.name.clone(),
                             reason,
+                            max_denies: if max_denies == 0 { 1 } else { max_denies },
                         };
                         chain.runs.push(run);
                         return chain;
@@ -527,7 +540,8 @@ mod tests {
             chain.verdict,
             Verdict::Deny {
                 gate: "seen".into(),
-                reason: "stop here".into()
+                reason: "stop here".into(),
+                max_denies: 1
             }
         );
         let second: Value =

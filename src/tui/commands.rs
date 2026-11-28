@@ -25,6 +25,9 @@ pub enum Action {
     },
     /// `/compact [focus]` — the verb exists from, the compactor from.
     Compact(Option<String>),
+    /// `/new`: end this session and start a fresh one in the same place. It is
+    /// not a verb: the process restarts, so no session is left half-alive.
+    New,
     /// `/quit`: the `end` verb.
     Quit,
 }
@@ -48,6 +51,8 @@ impl Action {
             Action::Model(_) => "model",
             Action::Tools { .. } => "tools",
             Action::Compact(_) => "compact",
+            // `/new` never reaches `dispatch`: it ends the session itself.
+            Action::New => "end",
             Action::Quit => "end",
         }
     }
@@ -73,6 +78,7 @@ impl Action {
             }
             Action::Compact(None) => json!({}),
             Action::Compact(Some(focus)) => json!({"focus": focus}),
+            Action::New => json!({}),
             Action::Quit => json!({}),
         }
     }
@@ -98,6 +104,7 @@ impl Action {
             }
             Action::Compact(None) => "» compact".to_string(),
             Action::Compact(Some(focus)) => format!("» compact {focus}"),
+            Action::New => "» new session".to_string(),
             Action::Quit => "» quit".to_string(),
         }
     }
@@ -179,6 +186,7 @@ pub fn parse(line: &str) -> Result<Parsed, String> {
             }
         }
         "compact" => Action::Compact(non_empty(rest)),
+        "new" => Action::New,
         "quit" | "exit" => Action::Quit,
         "help" | "?" => return Ok(Parsed::Note(help())),
         "" => return Err("no command after `/` (try `/help`)".to_string()),
@@ -224,6 +232,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "/expand [n|last]",
         "append that call's output here (a committed line cannot unfold)",
+    ),
+    (
+        "/new",
+        "end this session and start a fresh one here (same cwd, model and config)",
     ),
     ("/quit", "end the session (a second Ctrl-C does the same)"),
     ("/help", "this list"),
@@ -273,7 +285,28 @@ mod tests {
             }
         );
         assert_eq!(action("/compact"), Action::Compact(None));
+        assert_eq!(action("/new"), Action::New);
         assert_eq!(action("/quit"), Action::Quit);
         assert_eq!(action("/exit"), Action::Quit);
+    }
+
+    #[test]
+    fn every_slash_command_in_help_parses() {
+        // `/help` is the contract: a row that does not parse is a lie, and a
+        // command that parses but is missing from `/help` is a secret.
+        for (usage, _) in COMMANDS {
+            let name = usage.split_whitespace().next().expect("a command name");
+            let line = if name == "/expand" {
+                "/expand last".to_string()
+            } else if usage.contains('<') || usage.contains('[') {
+                format!("{name} x")
+            } else {
+                name.to_string()
+            };
+            match parse(&line) {
+                Ok(Parsed::Action(_) | Parsed::Note(_) | Parsed::View(_)) => {}
+                other => panic!("`{line}` from /help does not parse: {other:?}"),
+            }
+        }
     }
 }

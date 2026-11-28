@@ -32,3 +32,6 @@ mod tui_window;
 
 #[path = "tui_pty_images.rs"]
 mod tui_pty_images;
+
+#[path = "tui_pty_keys.rs"]
+mod tui_pty_keys;

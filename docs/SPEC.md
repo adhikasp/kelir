@@ -412,7 +412,7 @@ as an inline command string.
 | `prompt_submit` | the prompt is dropped with a reason | the prompt text |
 | `before_tool` | the call returns `denied by gate <name>: <reason>` | the call's input |
 | `after_tool` | — | the result (or appends a note to it) |
-| `turn_end` | the turn continues once with the reason as a message; **blocks at most once per turn** | the final text |
+| `turn_end` | the turn continues with the reason as a message; **blocks at most once per turn** unless the gate raised its own budget (`max_denies`, as `timebox` does) | the final text |
 | `session_end` | nothing (side effects only, e.g. commit and push) | — |
 
 The event goes to the gate as JSON on stdin (with the session dir and log path); the gate answers
@@ -420,7 +420,7 @@ The event goes to the gate as JSON on stdin (with the session dir and log path);
 A gate's `context` is appended as a `source` event at the tail (`prompt_submit`: after the user
 message), the same path for external and built-in gates. A built-in gate is declared as
 `[gates.<name>] builtin = "<name>"` in the same table and runs in Rust with the gate interface;
-`hint` is the first one. **Timeout 30 s.** A gate
+`hint` and `timebox` are the built-ins. **Timeout 30 s.** A gate
 that crashes, times out or prints garbage is logged and treated as `allow` (fail open). Every run
 is a `gate` event, so `observe` shows what fired.
 

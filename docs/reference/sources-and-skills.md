@@ -67,7 +67,7 @@ still read how kelir works.
   changed. Editing the repo's copy takes a rebuild, and the drift test fails if
   the file stops being a valid Agent Skill.
 
-### The builtin `delegation` and `herdr` skills (M8)
+### The builtin `delegation` and `herdr` skills
 
 Two more embedded skills, discovered exactly like `kelir` (machine layer, no file,
 replaced by a skills-directory entry of the same name): `delegation`

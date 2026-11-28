@@ -47,8 +47,9 @@ pub(crate) struct GatesConfig<'a> {
 /// The gates feature's state, moved out of `Session`.
 pub(crate) struct Gates {
     runner: Option<Arc<crate::features::gates::Runner>>,
-    /// A `turn_end` gate already blocked this turn: it blocks at most once.
-    turn_blocked: bool,
+    /// How many times each `turn_end` gate has already blocked this turn. A
+    /// gate blocks at most its own `max_denies` (one unless it says more).
+    blocks: std::collections::BTreeMap<String, u32>,
     /// Tool calls the turn has started, given to `turn_end` gates.
     turn_tool_calls: u32,
     /// The command-line task, held back until `session_start` gates ran and
@@ -64,7 +65,7 @@ impl Gates {
     pub(crate) fn new() -> Self {
         Self {
             runner: None,
-            turn_blocked: false,
+            blocks: std::collections::BTreeMap::new(),
             turn_tool_calls: 0,
             initial_task: None,
             notes: Vec::new(),
@@ -124,12 +125,26 @@ impl Gates {
         self.runner.clone()
     }
 
-    pub(crate) fn turn_blocked(&self) -> bool {
-        self.turn_blocked
+    /// The gates that already spent their block budget this turn, for the
+    /// `blocked` field `turn_end` gates see.
+    pub(crate) fn blocked_gates(&self) -> Vec<String> {
+        self.blocks.keys().cloned().collect()
     }
 
-    pub(crate) fn set_turn_blocked(&mut self, blocked: bool) {
-        self.turn_blocked = blocked;
+    /// Whether this turn was blocked by any gate already.
+    pub(crate) fn turn_blocked(&self) -> bool {
+        !self.blocks.is_empty()
+    }
+
+    /// Take one block from `gate`'s budget, returning how many it had already
+    /// spent (0 for the first). `None` means the budget is gone.
+    pub(crate) fn take_block(&mut self, gate: &str, max_denies: u32) -> Option<u32> {
+        let spent = self.blocks.get(gate).copied().unwrap_or(0);
+        if spent >= max_denies.max(1) {
+            return None;
+        }
+        self.blocks.insert(gate.to_string(), spent + 1);
+        Some(spent)
     }
 
     pub(crate) fn turn_tool_calls(&self) -> u32 {
@@ -141,7 +156,7 @@ impl Gates {
     }
 
     pub(crate) fn reset_turn(&mut self) {
-        self.turn_blocked = false;
+        self.blocks.clear();
         self.turn_tool_calls = 0;
     }
 
@@ -303,7 +318,7 @@ impl Gates {
                     .unwrap_or(&text)
                     .to_string(),
             )),
-            crate::features::gates::Verdict::Deny { gate, reason } => {
+            crate::features::gates::Verdict::Deny { gate, reason, .. } => {
                 let message = format!(
                     "prompt dropped by gate {gate}{}",
                     if reason.is_empty() {
@@ -415,39 +430,55 @@ impl Feature for Gates {}
 pub(crate) fn apply_turn_verdict(
     session: &mut crate::core::session::types::Session,
     verdict: crate::features::gates::Verdict,
-    blocked: bool,
 ) -> Result<bool, String> {
     use crate::log::event::EventBody;
     match verdict {
-        crate::features::gates::Verdict::Deny { gate, reason } if !blocked => {
-            session.gates_do(|gates, _| gates.set_turn_blocked(true));
+        crate::features::gates::Verdict::Deny {
+            gate,
+            reason,
+            max_denies,
+        } => {
+            // Each gate has its own budget for the turn, so a gate that only
+            // wants one veto cannot spend a timebox's blocks and vice versa.
+            let Some(spent) = session.gates_do(|gates, _| gates.take_block(&gate, max_denies))
+            else {
+                let _ = session.record(EventBody::Error {
+                    location: "gate".into(),
+                    message: format!(
+                        "turn_end: the deny from gate {gate} was ignored (it already blocked \
+                         this turn {max_denies} time(s))"
+                    ),
+                    retryable: false,
+                    status: None,
+                    attempt: None,
+                    retry_in_ms: None,
+                });
+                return Ok(false);
+            };
             let reason = if reason.trim().is_empty() {
                 "no reason given".to_string()
             } else {
                 reason
             };
+            // The first block is the plain "not accepted"; a later one says how
+            // often the gate has sent this turn back, so a steering message that
+            // repeats reads as a clock rather than as a loop.
+            let text = if spent == 0 {
+                format!("[gate {gate}] Your answer was not accepted: {reason}")
+            } else {
+                format!(
+                    "[gate {gate}] Still not accepted (blocked {} times this turn): {reason}",
+                    spent + 1
+                )
+            };
             session.record(EventBody::User {
-                text: format!("[gate {gate}] Your answer was not accepted: {reason}").into(),
+                text: text.into(),
                 from: "gate".into(),
                 delivery: "next".into(),
                 attachments: Vec::new(),
             })?;
             session.sync();
             Ok(true)
-        }
-        crate::features::gates::Verdict::Deny { gate, .. } => {
-            // Blocks at most once per turn: a second deny is logged, not enforced.
-            let _ = session.record(EventBody::Error {
-                location: "gate".into(),
-                message: format!(
-                    "turn_end: the deny from gate {gate} was ignored (this turn was already blocked once)"
-                ),
-                retryable: false,
-                status: None,
-                attempt: None,
-                retry_in_ms: None,
-            });
-            Ok(false)
         }
         crate::features::gates::Verdict::Rewrite(value) => {
             if let Some(new) = value.get("text").and_then(serde_json::Value::as_str) {
@@ -480,7 +511,9 @@ pub(crate) async fn apply_tool_verdict(
         )
         .await?
     {
-        crate::features::gates::Verdict::Deny { gate, reason } => Ok((input, Some((gate, reason)))),
+        crate::features::gates::Verdict::Deny { gate, reason, .. } => {
+            Ok((input, Some((gate, reason))))
+        }
         crate::features::gates::Verdict::Rewrite(args) => Ok((args, None)),
         crate::features::gates::Verdict::Allow => Ok((input, None)),
     }
@@ -494,11 +527,31 @@ mod turn_tests {
     fn turn_counters_are_scoped_to_the_turn() {
         let mut gates = Gates::new();
         gates.add_turn_tool_calls(3);
-        gates.set_turn_blocked(true);
+        assert_eq!(gates.take_block("a", 1), Some(0));
         assert_eq!(gates.turn_tool_calls(), 3);
         assert!(gates.turn_blocked());
         gates.reset_turn();
         assert_eq!(gates.turn_tool_calls(), 0);
         assert!(!gates.turn_blocked());
+    }
+
+    #[test]
+    fn each_gate_spends_its_own_block_budget() {
+        let mut gates = Gates::new();
+        // The default budget of one block.
+        assert_eq!(gates.take_block("once", 1), Some(0));
+        assert_eq!(gates.take_block("once", 1), None);
+        // A timebox keeps blocking until its own budget runs out.
+        assert_eq!(gates.take_block("box", 3), Some(0));
+        assert_eq!(gates.take_block("box", 3), Some(1));
+        assert_eq!(gates.take_block("box", 3), Some(2));
+        assert_eq!(gates.take_block("box", 3), None);
+        // The other gates are unaffected, and zero means the default of one.
+        assert_eq!(
+            gates.blocked_gates(),
+            vec!["box".to_string(), "once".to_string()]
+        );
+        assert_eq!(gates.take_block("other", 0), Some(0));
+        assert_eq!(gates.take_block("other", 0), None);
     }
 }

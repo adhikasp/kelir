@@ -113,6 +113,9 @@ pub struct App {
     last_ctrl_c: Option<Instant>,
     status_records: Vec<String>,
     pub quit: bool,
+    /// `/new` ended this session: the process leaves and starts a fresh one in
+    /// the same place instead of returning to the shell.
+    pub restart: bool,
     to_tui: mpsc::UnboundedSender<View>,
     verbs: mpsc::UnboundedSender<Incoming>,
     token: String,
@@ -161,6 +164,7 @@ impl App {
             last_ctrl_c: None,
             status_records: Vec::new(),
             quit: false,
+            restart: false,
             to_tui,
             verbs,
             token,

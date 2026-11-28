@@ -83,15 +83,23 @@ pub fn translate(key: KeyEvent) -> Option<Press> {
         KeyCode::Char('d') if ctrl && !alt => Some(Press::Edit(Key::KillNextWord)),
         KeyCode::Char('y') if ctrl && shift => Some(Press::DumpTranscript),
         KeyCode::Char('y') if ctrl => Some(Press::CopyLast),
+        // Delete the previous word. Four spellings reach this, all meaning the
+        // same key to a person: Ctrl-W (0x17, readline and Herdr's own
+        // `ctrl-backspace` binding), Ctrl-Backspace in a kitty terminal
+        // (`CSI 127;5u`, decoded as Backspace+CONTROL below), Ctrl-H (0x08,
+        // what a legacy terminal sends for Ctrl-Backspace), and Alt-Backspace.
+        KeyCode::Char('w') if ctrl && !alt => Some(Press::Edit(Key::KillPrevWord)),
         // Ctrl-Backspace arrives as raw 0x08 in a legacy terminal, which
         // crossterm decodes as Char('h')+CONTROL (0x08 = Ctrl-H).
         KeyCode::Char('h') if ctrl && !alt => Some(Press::Edit(Key::KillPrevWord)),
         KeyCode::Char(c) if !ctrl && !alt => Some(Press::Edit(Key::Char(c))),
         KeyCode::Char(c) if alt && !ctrl => match c {
             // Alt-Left/Alt-Right are the GUI word-jump keys, but some
-            // terminals send them as Alt-h / Alt-l (readline muscle memory).
-            'h' => Some(Press::Edit(Key::WordLeft)),
-            'l' => Some(Press::Edit(Key::WordRight)),
+            // terminals and apps send them as Alt-h / Alt-l (readline
+            // muscle memory) or Alt-b / Alt-f (emacs, and Herdr's own
+            // `ctrl-left` / `ctrl-right` bindings).
+            'h' | 'b' => Some(Press::Edit(Key::WordLeft)),
+            'l' | 'f' => Some(Press::Edit(Key::WordRight)),
             'd' => Some(Press::Edit(Key::KillNextWord)),
             _ => None,
         },
@@ -115,5 +123,66 @@ pub fn translate(key: KeyEvent) -> Option<Press> {
         KeyCode::Home => Some(Press::Top),
         KeyCode::End => Some(Press::Bottom),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The key a terminal event decodes to, as `translate` sees it.
+    fn at(code: KeyCode, modifiers: KeyModifiers) -> Option<Press> {
+        translate(KeyEvent::new(code, modifiers))
+    }
+
+    #[test]
+    fn every_word_delete_spelling_deletes_the_previous_word() {
+        let want = Some(Press::Edit(Key::KillPrevWord));
+        // Ctrl-W: readline, and what Herdr's `ctrl-backspace` sends.
+        assert_eq!(at(KeyCode::Char('w'), KeyModifiers::CONTROL), want);
+        // Ctrl-H: the raw 0x08 a legacy terminal sends for Ctrl-Backspace.
+        assert_eq!(at(KeyCode::Char('h'), KeyModifiers::CONTROL), want);
+        // Ctrl-Backspace (kitty `CSI 127;5u`) and Alt-Backspace.
+        assert_eq!(at(KeyCode::Backspace, KeyModifiers::CONTROL), want);
+    }
+
+    #[test]
+    fn every_word_motion_spelling_moves_by_a_word() {
+        let left = Some(Press::Edit(Key::WordLeft));
+        let right = Some(Press::Edit(Key::WordRight));
+        // Ctrl-Left/Right: `CSI 1;5D` / `CSI 1;3D` through crossterm's modifier path.
+        assert_eq!(at(KeyCode::Left, KeyModifiers::CONTROL), left);
+        assert_eq!(at(KeyCode::Right, KeyModifiers::CONTROL), right);
+        assert_eq!(at(KeyCode::Left, KeyModifiers::ALT), left);
+        assert_eq!(at(KeyCode::Right, KeyModifiers::ALT), right);
+        // Alt-h/l (readline) and Alt-b/f (emacs; Herdr's `ctrl-left`/`ctrl-right`).
+        assert_eq!(at(KeyCode::Char('h'), KeyModifiers::ALT), left);
+        assert_eq!(at(KeyCode::Char('b'), KeyModifiers::ALT), left);
+        assert_eq!(at(KeyCode::Char('l'), KeyModifiers::ALT), right);
+        assert_eq!(at(KeyCode::Char('f'), KeyModifiers::ALT), right);
+    }
+
+    #[test]
+    fn word_keys_do_not_swallow_plain_typing() {
+        // The same characters, unmodified, are text: `w`, `b` and `f` must type.
+        for c in ['w', 'b', 'f', 'h', 'l'] {
+            assert_eq!(
+                at(KeyCode::Char(c), KeyModifiers::NONE),
+                Some(Press::Edit(Key::Char(c))),
+                "{c} must type as text"
+            );
+        }
+        // Ctrl-B and Ctrl-F are not claimed: `Ctrl-F` would read as a forward
+        // word motion in emacs, but a plain `f` is not a word key here and
+        // claiming two more control chords for no gain is not worth it.
+        assert_eq!(at(KeyCode::Char('b'), KeyModifiers::CONTROL), None);
+        assert_eq!(at(KeyCode::Char('f'), KeyModifiers::CONTROL), None);
+    }
+
+    #[test]
+    fn a_release_event_is_ignored() {
+        let mut key = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        key.kind = KeyEventKind::Release;
+        assert_eq!(translate(key), None);
     }
 }

@@ -175,6 +175,17 @@ impl App {
                     // that, and a rendered row would never match it.
                     Action::Submit(text) => self.push_user(text),
                     Action::SayNow(text) => self.push_user_now(text),
+                    Action::New => {
+                        // The old id is the only thing worth keeping: the new
+                        // session is a new process with no memory of this one.
+                        if let Some(id) = &self.session_id {
+                            self.push_text(&format!(
+                                "» new session (this one: kelir tui --resume {id})"
+                            ));
+                        } else {
+                            self.push_text(&action.line());
+                        }
+                    }
                     _ => self.push_text(&action.line()),
                 }
                 self.dispatch(&action);
@@ -229,6 +240,14 @@ impl App {
             })
             .is_err()
         {
+            self.quit = true;
+            return;
+        }
+        // `/new` is the `end` verb plus one more thing: when the UI leaves, the
+        // process starts a fresh session instead of returning to the shell. The
+        // flag is set here so the reply and the shutdown race cannot lose it.
+        if matches!(action, Action::New) {
+            self.restart = true;
             self.quit = true;
             return;
         }

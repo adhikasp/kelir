@@ -45,8 +45,8 @@ per id; a `done` id stays deduped after compaction and restart. A torn tail is r
 The text arrives as a `user` event with `from: channel` and an envelope naming
 server, conversation and sender; the model is told the sender is a remote user,
 not the operator, and that the text is untrusted data, not a session command.
-M8 `prompt_submit` gates run on the envelope. Nothing from an MCP server's
-`env` is ever logged.
+`prompt_submit` gates run on the envelope. Nothing from an MCP server's `env` is
+ever logged.
 
 ## Status
 

@@ -16,6 +16,9 @@ pub enum Parsed {
         reason: String,
         context: Option<Context>,
         usage: Option<crate::provider::stream::Usage>,
+        /// How many times this turn the deny may be enforced; zero is the
+        /// default of one.
+        max_denies: u32,
     },
     Rewrite {
         reason: String,
@@ -121,6 +124,14 @@ pub fn parse_decision(stdout: &str) -> Result<Parsed, String> {
             reason,
             context,
             usage,
+            max_denies: match object.get("max_denies").filter(|v| !v.is_null()) {
+                None => 0,
+                Some(value) => match value.as_u64() {
+                    Some(n) => u32::try_from(n)
+                        .map_err(|_| "`max_denies` is a positive integer".to_string())?,
+                    None => return Err("`max_denies` is a positive integer".into()),
+                },
+            },
         }),
         "rewrite" => {
             let input = object
@@ -159,6 +170,11 @@ pub enum Verdict {
     Deny {
         gate: String,
         reason: String,
+        /// How many times this turn the gate's deny may be enforced before the
+        /// next one is only logged. One is what a gate that answers "not yet"
+        /// wants; a timebox sets more, because the clock, not the count, is what
+        /// should end it.
+        max_denies: u32,
     },
     /// The event's value after every rewrite: `{"text"}` for a prompt or a final answer, the tool
     /// input for `before_tool`, `{"result"}` for `after_tool`.
@@ -328,6 +344,9 @@ pub struct GateAnswer {
     pub input: Option<Value>,
     pub context: Option<Context>,
     pub usage: Option<crate::provider::stream::Usage>,
+    /// `deny` only: how many times this turn the deny may be enforced. Zero
+    /// means the default of one.
+    pub max_denies: u32,
 }
 
 impl GateAnswer {
@@ -338,6 +357,17 @@ impl GateAnswer {
             input: None,
             context: None,
             usage: None,
+            max_denies: 0,
+        }
+    }
+
+    /// A `deny`, enforced once when the answer does not raise the budget.
+    pub fn deny(reason: impl Into<String>) -> GateAnswer {
+        GateAnswer {
+            reason: reason.into(),
+            decision: "deny",
+            max_denies: 0,
+            ..GateAnswer::allow()
         }
     }
 }

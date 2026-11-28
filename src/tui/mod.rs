@@ -225,11 +225,14 @@ pub fn start(
 }
 
 impl Tui {
-    pub async fn run(self) -> std::io::Result<()> {
+    /// Drive the UI until it quits. `Ok(true)` means the person asked for a new
+    /// session (`/new`): the terminal is already restored, and the process is
+    /// meant to start a fresh one rather than return to the shell.
+    pub async fn run(self) -> std::io::Result<bool> {
         self.run_inner().await
     }
 
-    async fn run_inner(mut self) -> std::io::Result<()> {
+    async fn run_inner(mut self) -> std::io::Result<bool> {
         loop {
             self.flush_status()?;
             self.draw()?;
@@ -269,7 +272,7 @@ impl Tui {
             }
         }
         self.finish();
-        Ok(())
+        Ok(self.app.restart)
     }
 
     /// Everything already queued is applied before the next paint: a burst of

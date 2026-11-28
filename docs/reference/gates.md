@@ -68,8 +68,9 @@ is ignored with a warning).
 4. **A built-in gate**: a named table in `[gates]` with `builtin = "<name>"` in
    place of a command. The built-in runs in-process through the same runner and
    produces the same `gate` event; only its options live in the same table. The
-   known built-ins are `hint` (default event `prompt_submit`); an unknown name is
-   a config error that lists the known ones.
+   known built-ins are `hint` (default event `prompt_submit`) and `timebox`
+   (default and only event `turn_end`); an unknown name is a config error that
+   lists the known ones.
 
    ```toml
    [gates.hint]
@@ -81,6 +82,34 @@ is ignored with a warning).
    # timeout_ms = 2000  # positive integer; `timeout` is an alias, not documented
    # max_names = 3      # positive integer
    ```
+
+   ### `timebox`: a turn with a clock does not end early
+
+   ```toml
+   [gates.timebox]
+   builtin = "timebox"
+   duration = "30m"          # "90s" | "15m" | "2h" | "1h30m" | seconds
+   # only_when_asked = true  # no window unless the prompt states one
+   # steering = "you stopped after {elapsed} of {target}: … {left} left"
+   # max_denies = 10
+   ```
+
+   While the turn's window is open, `turn_end` answers `deny` with the steering
+   text, recorded as a `user` message from `gate`, so the model keeps working
+   instead of stopping five minutes into a thirty-minute question; once it has
+   closed the turn ends and the run's `reason` says how long it measured.
+
+   - **The window** starts at the current turn's latest human message (`from`
+     `tui`/`ctl`/`cli`/`channel`, after the last `turn_ended`), measured from that
+     event's `ts`: gate steering never opens one, a resumed session measures from
+     recorded timestamps, and a turn with no human message has none.
+   - **The length** is the budget the prompt states (`you have 30 minutes`,
+     `1h30m`, a bare `30m`), else `duration`, which `only_when_asked` turns off. A
+     phrase is a clock when it uses a short unit or follows "you have"/"you've
+     got"/"timebox"/"within", so "the 5 minute rule" stays a topic.
+   - **How often it blocks** is `max_denies` (default 10), its own budget for the
+     turn: the clock, not a counter, ends a timebox. `{elapsed}`, `{target}` and
+     `{left}` print as `5m`/`30m`/`25m`.
 
    Built-ins fail open like external gates: an error or timeout is logged and
    treated as `allow`. A built-in may use the session's provider client and
@@ -95,7 +124,7 @@ is ignored with a warning).
 | `prompt_submit` | `text`, `from` (`tui`, `ctl`, `cli`, `channel`) | the prompt is dropped, with the reason shown to the person | `{"text": …}` the prompt |
 | `before_tool` | `tool`, `call_id`, `input` | the call returns `denied by gate <name>: <reason>` (outcome `denied`) | the call's input object |
 | `after_tool` | `tool`, `call_id`, `input`, `result`, `outcome`, `exit_code`, `out_path` | nothing | `{"result": …}` replaces what the model reads; `{"note": …}` appends `[gate <name>] …` |
-| `turn_end` | `final_text`, `tool_calls`, `steps`, `blocked` | the turn continues once with the reason as a message from `gate`; **blocks at most once per turn** | `{"text": …}` the final text |
+| `turn_end` | `final_text`, `tool_calls`, `steps`, `blocked`, `blocked_gates` | the turn continues with the reason as a message from `gate`; **blocks at most once per turn** unless the gate raised its own budget (`max_denies`), which is per gate | `{"text": …}` the final text |
 | `session_end` | `reason` | nothing | nothing |
 
 `tool` is the native name (`bash`, `edit`, `compact`) or `mcp:<server>.<tool>`
@@ -129,23 +158,17 @@ the same one. `usage` (optional object with `prompt_tokens`,
 
 A gate that cannot start, exits non-zero, runs past **30 s**, prints something
 that is not one decision object, prints more than 1 MiB, or rewrites with the
-wrong shape is **allowed**. The `gate` event for the run says `decision: allow`
-and `error` says why. A timed-out gate's whole process tree is killed (Windows:
-its Job Object; Unix: its process group, then every process that still carries the
-run's `KELIR_GATE_RUN` token, so a gate that detaches with `setsid` or a double
-fork is found too); no gate leaves a process behind, and none opens a console
-window on Windows. If kelir itself is killed mid-gate, a small `kelir gate-guard`
-process started beside the gate notices within about 0.2 s and kills the gate's
-tree (Unix). The runner owns the tree while kelir is alive (process group on Unix,
-kill-on-close Job Object on Windows), but a hard kill of the session runs no
-cleanup in the dead process: on Unix the separate guard is the only thing that
-still signals the gate's group. This is why `gate-guard` remains a hidden
-subcommand. **Limits:** the token sweep reads `/proc` on Linux and `ps` on
-macOS (on other Unix systems only the process group is killed); a gate that
-clears its own environment before detaching escapes the sweep on either system,
-and one that crosses `ssh` or a container boundary is out of reach on any
-system. While a gate runs the session waits
-for it, so a `stop` verb is read when the gate ends (at most 30 s).
+wrong shape is **allowed**, with the cause in the run's `error`. A timed-out
+gate's whole tree is killed (Windows: its Job Object; Unix: its process group,
+then every process still carrying the run's `KELIR_GATE_RUN` token, which finds
+one that detached); none leaves a process behind or opens a console window. If
+kelir is killed mid-gate, the `kelir gate-guard` started beside the gate notices
+within about 0.2 s and kills its tree (Unix): a hard kill runs no cleanup in the
+dead process, which is why `gate-guard` is a hidden subcommand. The token sweep
+reads `/proc` on Linux and `ps` on macOS; a gate that clears its environment
+before detaching escapes it, and one that crosses `ssh` or a container boundary
+is out of reach. While a gate runs the session waits, so a `stop` is read when
+the gate ends (at most 30 s).
 
 ## Limits: a gate cannot multiply
 
@@ -156,13 +179,10 @@ never a retry. A kelir started by a gate (it inherits `KELIR_GATE_EVENT`) runs *
 gates**: a gate never triggers gates. An empty command is a config error at load.
 
 **Child sessions** (`kelir run --child`, `kelir brief`) run the same gates with their
-own session directory (`KELIR_SESSION_DIR` is the child's), their own `gate` events in
-their own log, and the same scrubbed environment: a child's gate never sees the token,
-the socket or a provider key either. The cap is per process, so a child is limited to
-**2** live gate processes (the root keeps 8); with the default 16 live descendants a
-whole tree has at most 8 + 16 x 2 = **40** gate processes alive. A `brief` is a child
-and counts the same. A prompt a parent hands to a child (`from` `parent` or `brief`) is
-not a human prompt and goes through no `prompt_submit` gate.
+own session directory, their own `gate` events, and the same scrubbed environment. The
+cap is per process, so a child is limited to **2** live gate processes (the root keeps
+8): 8 + 16 x 2 = **40** for a whole tree. A prompt a parent hands to a child (`from`
+`parent` or `brief`) is not a human prompt and meets no `prompt_submit` gate.
 
 ## What a gate's environment holds
 
@@ -177,13 +197,12 @@ key, no `key_env` variable. A gate that needs a secret is given it in its own
 ## What is logged
 
 One `gate` event per run (`gate`, `event`, `decision`, `reason`, `ms`,
-`rewritten?`, `error?`), including failed-open runs. A gate's rewritten input
-is in the `call_started`/`call_settled` (`kind: "tool"`), `user` or `turn_ended` event that used it; the model's
-own `assistant` event keeps what it said. `kelir observe <session>` prints the
-effective gates (`== gates ==`, commands and `env` names only) and the runs so
-far (`== gates fired ==`). `kelir ctl <session> status` carries a `gates` object:
-`declared`, `runs`, `denied`, `rewritten`, `failed_open` and the `last` run (printed as one `gates` line when any gate is declared)
-(`gate`, `event`, `decision`).
+`rewritten?`, `error?`), failed-open runs included. A rewritten input is in the
+`call_started`/`call_settled`, `user` or `turn_ended` event that used it.
+`kelir observe <session>` prints the effective gates (`== gates ==`: commands and
+`env` names only) and their runs (`== gates fired ==`); `kelir ctl <session>
+status` carries `declared`, `runs`, `denied`, `rewritten`, `failed_open` and the
+`last` run.
 
 ## The example gates (`examples/gates/`)
 

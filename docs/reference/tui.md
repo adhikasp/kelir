@@ -62,15 +62,12 @@ While the session waits to retry the provider (a retryable HTTP status) or for
 a governor slot, the facts row shows the wait instead of the summary: `kelir
 working · rate limited (429): retrying in 34 s, attempt 5, esc stops · 33 s
 left`. The countdown is read from the wall clock on each tick, so it moves; a
-slot wait has no deadline worth reading and shows its words only. A provider
-retry also turns the state row `rate limited` (below); a slot wait leaves the
-state row on the work it was doing. The same wait is one dim line in the
-scrollback (`» rate limited (429): …`, same hint) and an `error` event, so
-NDJSON, the pane and the transcript agree. The log and the CLI keep STEER-5's
-`says stop to cancel`: true for `kelir` driven from a shell. Only the pane names
-the key, because plain text in the prompt is a `say` the model receives, while
-Esc and Ctrl-C stop the turn and `/stop` ends it at the next boundary or during
-the wait.
+slot wait has no deadline and shows its words only. A retry also turns the state
+row `rate limited` (below); a slot wait leaves it on the work it was doing. The
+wait is one dim line in the scrollback (`» rate limited (429): …`, same hint) and
+an `error` event. Only the pane names the key: plain text in the prompt is a
+`say` the model receives, while Esc and Ctrl-C stop the turn and `/stop` ends it
+at the next boundary.
 
 ## States (the state row)
 
@@ -110,6 +107,8 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | Ctrl-Backspace | delete the word before the cursor (a chip is one element) |
 | Ctrl-Delete, Alt-Backspace | delete the word after the cursor |
 | Alt-← / Alt-→ | move by one word |
+| Ctrl-← / Ctrl-→ | move by one word (the same as Alt-←/→) |
+| Alt-b / Alt-f | move by one word back/forward |
 | Home / End | jump to the start/end of the transcript |
 | PageUp / PageDown | scroll the transcript by one viewport |
 | wheel | scroll the transcript, 3 rows a notch |
@@ -129,6 +128,7 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | `/tools off\|on <name>` | disable or enable `bash`/`edit` |
 | `/compact [focus]` | summarise the earlier context |
 | `/expand n\|last` | append call `n`'s output here (a committed line cannot be unfolded) |
+| `/new` | end this session cleanly and start a fresh one in the same place (prints `resume: kelir tui --resume <id>`) |
 | `/help` (`/?`) | the list |
 | `/quit` (`/exit`) | end the session |
 

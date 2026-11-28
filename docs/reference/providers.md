@@ -18,7 +18,7 @@ There are exactly two, and a config naming a third is a usage error that says so
 | `openrouter` | `OPENROUTER_API_KEY` | `key_env` from the config, when it names another variable | `key_cmd` (a command's trimmed stdout) |
 | `opencode-go` | `KELIR_GO_API_KEY` or a configured `key_env`/`key_cmd` (an *override*) | `opencode auth export opencode`, read directly | — |
 
-The store read is the point of STEER-2: nobody has to copy a token into a
+The store read is the point: nobody has to copy a token into a
 variable that goes stale. It is one `opencode` invocation, bounded at 5 s, and it
 is repeated at most once — and only when the entry it returned is expired or
 inside a two-minute margin — because running the CLI refreshes the token as a

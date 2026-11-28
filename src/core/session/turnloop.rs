@@ -215,20 +215,25 @@ impl Session {
                     .expect("gates feature")
                     .gated(crate::features::gates::Event::TurnEnd, None)
                 {
-                    let (tool_calls, blocked) = {
+                    let (tool_calls, blocked, blocked_gates) = {
                         let gates = self.features.gates.as_ref().expect("gates feature");
-                        (gates.turn_tool_calls(), gates.turn_blocked())
+                        (
+                            gates.turn_tool_calls(),
+                            gates.turn_blocked(),
+                            gates.blocked_gates(),
+                        )
                     };
                     let payload = json!({
                         "final_text": self.run.final_text,
                         "tool_calls": tool_calls,
                         "steps": self.run.turn_steps,
                         "blocked": blocked,
+                        "blocked_gates": blocked_gates,
                     });
                     let verdict = self
                         .gates_call(crate::features::gates::Event::TurnEnd, None, payload)
                         .await?;
-                    if crate::features::gates::apply_turn_verdict(self, verdict, blocked)? {
+                    if crate::features::gates::apply_turn_verdict(self, verdict)? {
                         continue;
                     }
                 }

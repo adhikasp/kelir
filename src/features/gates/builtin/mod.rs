@@ -3,11 +3,12 @@
 //! only the provider client and log access in `GateCtx` are extra.
 
 pub mod hint;
+pub mod timebox;
 
 use super::{Event, GateAnswer, GateCtx, GateDef, GateInput};
 use serde_json::{Value, json};
 
-pub const NAMES: &[&str] = &["hint"];
+pub const NAMES: &[&str] = &["hint", "timebox"];
 
 pub fn is_known(name: &str) -> bool {
     NAMES.contains(&name)
@@ -16,6 +17,7 @@ pub fn is_known(name: &str) -> bool {
 pub fn default_event(name: &str) -> &'static str {
     match name {
         "hint" => "prompt_submit",
+        "timebox" => "turn_end",
         _ => "session_start",
     }
 }
@@ -37,6 +39,14 @@ pub fn validate_options(name: &str, options: &toml::Table, at: &str) -> Result<(
             "tool",
             "name",
         ],
+        "timebox" => &[
+            "builtin",
+            "event",
+            "duration",
+            "steering",
+            "only_when_asked",
+            "max_denies",
+        ],
         _ => &[],
     };
     for key in options.keys() {
@@ -45,6 +55,26 @@ pub fn validate_options(name: &str, options: &toml::Table, at: &str) -> Result<(
                 "{at}: unknown key `{key}` ({})",
                 allowed.join(", ")
             ));
+        }
+    }
+    if name == "timebox" {
+        if let Some(value) = options.get("duration") {
+            timebox_duration(value).map_err(|why| format!("{at}: {why}"))?;
+        }
+        if let Some(value) = options.get("steering")
+            && !value.is_str()
+        {
+            return Err(format!("{at}: `steering` is a string"));
+        }
+        if let Some(value) = options.get("only_when_asked")
+            && value.as_bool().is_none()
+        {
+            return Err(format!("{at}: `only_when_asked` is true or false"));
+        }
+        if let Some(value) = options.get("max_denies")
+            && (!value.is_integer() || value.as_integer().is_none_or(|v| v < 1))
+        {
+            return Err(format!("{at}: `max_denies` is a positive integer"));
         }
     }
     if name == "hint" {
@@ -78,6 +108,7 @@ pub fn validate_options(name: &str, options: &toml::Table, at: &str) -> Result<(
 pub fn supported_events(name: &str) -> &'static str {
     match name {
         "hint" => "prompt_submit",
+        "timebox" => "turn_end",
         _ => "",
     }
 }
@@ -86,7 +117,30 @@ pub fn supported_events(name: &str) -> &'static str {
 pub fn supports_event(name: &str, event: Event) -> bool {
     match name {
         "hint" => event == Event::PromptSubmit,
+        "timebox" => event == Event::TurnEnd,
         _ => false,
+    }
+}
+
+/// A `timebox` duration at config time, so a bad one is a config error and not a
+/// session that silently never nudges.
+fn timebox_duration(value: &toml::Value) -> Result<(), String> {
+    match value {
+        toml::Value::Integer(seconds) if *seconds > 0 => Ok(()),
+        toml::Value::Integer(_) => Err("`duration` is a positive number of seconds".into()),
+        toml::Value::String(text) => {
+            if timebox::budget_in_prompt(text).is_some()
+                || timebox::budget_in_prompt(&format!("you have {text}")).is_some()
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "`duration` is not a duration: `{text}` (use `90s`, `15m`, `2h`, `1h30m` or \
+                     seconds)"
+                ))
+            }
+        }
+        other => Err(format!("`duration` is a string, not {}", other.type_str())),
     }
 }
 
@@ -99,6 +153,9 @@ pub fn to_stdout(answer: &GateAnswer) -> String {
     });
     if let Some(input) = &answer.input {
         object["input"] = input.clone();
+    }
+    if answer.max_denies > 0 {
+        object["max_denies"] = json!(answer.max_denies);
     }
     if let Some(context) = &answer.context {
         object["context"] = Value::String(context.text.clone());
