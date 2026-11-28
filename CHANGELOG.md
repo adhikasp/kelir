@@ -9,6 +9,19 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 ### Added
 
+- **Word keys in the prompt editor**: `Ctrl-W` and `Ctrl-Backspace` delete a whole word (a pasted
+  image or file path deletes as one chip, not as scattered characters), and `Alt-b` / `Alt-f` join
+  `Ctrl-Left` / `Ctrl-Right` and `Alt-h` / `Alt-l` as word motion. Several spellings are bound
+  because terminals differ in what they send for the same key.
+- **`/new`**: ends the current session cleanly and starts a fresh one in the same directory, with
+  the same model, provider and config, and no `--resume`. The finished session keeps its log and
+  its resume line; the new process `exec`s the binary in place on Unix, so no parent is left
+  holding the terminal.
+- **Built-in `timebox` gate**: `[gates.timebox] duration = "30m"` makes a turn that says "you have
+  30 minutes" keep working until the window closes. The gate fires at the end of a turn and denies
+  with steering (`{elapsed}`, `{target}` and `{left}` are filled in), up to `max_denies` times
+  (default 10), so an agent that wants to stop five minutes in is pushed to go deeper instead. A
+  deny budget is now per gate, not one per turn: `max_denies = 1` is the old behaviour.
 - `[providers.opencode-go] refresh_cmd`: when opencode's stored credential is expired or inside
   its two-minute margin, kelir runs this command once (a command that makes opencode refresh
   *itself*) and reads the store again, so a host that rarely uses opencode no longer needs a

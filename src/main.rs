@@ -30,7 +30,80 @@ fn close_handle_inheritance() {}
 async fn main() -> ExitCode {
     close_handle_inheritance();
     let cli = Cli::parse();
-    let code = match cli.command {
+    // Only the interactive session can ask for a fresh process. The sentinel
+    // shares its number with `kelir run --single-flight`'s "skipped, another run
+    // is in flight" (both are `EX_TEMPFAIL`), and a job that re-execed itself on
+    // every skip would never finish: the check is on the command, not the code.
+    let interactive = matches!(cli.command, None | Some(Command::Tui(_)));
+    let code = run(cli).await;
+    if interactive && code == kelir::core::session::EXIT_RESTART {
+        return relaunch();
+    }
+    ExitCode::from(code)
+}
+
+/// Start a fresh `kelir` in this process's place, with the same arguments minus
+/// `--resume`. The new process gets this terminal, this working directory and
+/// this environment; nothing is kept in memory.
+///
+/// On Unix the new session takes this process over with `exec`: one process, one
+/// owner of the terminal, so a `/new` leaves nothing behind and the terminal is
+/// never held by a parent that is waiting. Windows has no `exec`, so there the
+/// parent waits for the child and returns its code.
+fn relaunch() -> ExitCode {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            eprintln!("kelir: cannot find this binary to start a new session: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut command = kelir::sys::runner::std_command(&exe);
+    command.args(without_resume(&args));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let error = command.exec();
+        eprintln!("kelir: cannot start a new session: {error}");
+        ExitCode::FAILURE
+    }
+    #[cfg(not(unix))]
+    match command.status() {
+        Ok(status) => status.code().map_or(ExitCode::FAILURE, |code| {
+            ExitCode::from((code & 0xff) as u8)
+        }),
+        Err(error) => {
+            eprintln!("kelir: cannot start a new session: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `args` without `--resume <id>` and `--resume=<id>`.
+fn without_resume(args: &[std::ffi::OsString]) -> Vec<std::ffi::OsString> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip = false;
+    for arg in args {
+        let text = arg.to_string_lossy();
+        if skip {
+            skip = false;
+            continue;
+        }
+        if text == "--resume" || text == "-r" {
+            skip = true;
+            continue;
+        }
+        if text.starts_with("--resume=") {
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
+async fn run(cli: Cli) -> u8 {
+    match cli.command {
         Some(Command::Run(args)) => kelir::core::session::run(args).await,
         // Flags before the subcommand fill in what it did not set.
         Some(Command::Tui(args)) => kelir::core::session::tui(args.with_fallback(cli.tui)).await,
@@ -74,6 +147,5 @@ async fn main() -> ExitCode {
         Some(Command::GateGuard(_)) => 0,
         // `kelir` with no subcommand is the interactive session.
         None => kelir::core::session::tui(cli.tui).await,
-    };
-    ExitCode::from(code)
+    }
 }

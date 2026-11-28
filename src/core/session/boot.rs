@@ -191,7 +191,15 @@ pub(crate) async fn drive(opts: Options) -> u8 {
                     handle.app.set_title(title);
                 }
                 session.out.ui = Some(to_tui.clone());
-                let task = tokio::spawn(handle.run());
+                // `/new` ends this session and asks for a fresh process; the
+                // flag comes back out of the TUI task once it has restored the
+                // terminal, so nothing restarts while the screen is half-owned.
+                let restart = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = restart.clone();
+                let task = tokio::spawn(async move {
+                    let ended = handle.run().await;
+                    flag.store(ended.unwrap_or(false), Ordering::SeqCst);
+                });
                 // If the UI dies (a panic, a terminal error) the session ends the same way `/quit` ends it,
                 // instead of running forever with nobody watching.
                 let verbs = tx.clone();
@@ -207,7 +215,7 @@ pub(crate) async fn drive(opts: Options) -> u8 {
                         action: None,
                     });
                 });
-                tui = Some((watchdog, to_tui));
+                tui = Some((watchdog, to_tui, restart));
             }
             Err(error) => {
                 // Raw mode may already be on; leave the terminal usable.
@@ -222,15 +230,20 @@ pub(crate) async fn drive(opts: Options) -> u8 {
     if let Some(mcp) = session.features.mcp.as_ref() {
         mcp.shutdown().await;
     }
-    if let Some((watchdog, to_tui)) = tui {
+    let mut restart = false;
+    if let Some((watchdog, to_tui, flag)) = tui {
         // One last paint, then the terminal goes back to the shell.
         let _ = to_tui.send(crate::tui::View::Live(crate::tui::Live::Quit));
         let _ = watchdog.await;
+        restart = flag.load(Ordering::SeqCst);
     }
     if opts.ask && !session.run.final_text.is_empty() {
         println!("{}", session.run.final_text);
     }
     session.print_result(code);
+    if restart {
+        return crate::core::session::EXIT_RESTART;
+    }
     code
 }
 

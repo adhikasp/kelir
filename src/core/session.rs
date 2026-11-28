@@ -48,6 +48,12 @@ const SLOT_POLL: Duration = Duration::from_millis(100);
 /// `state` carries the provider's window as soon as it is there instead of at the next turn.
 const IDLE_MODELS_WAIT: Duration = Duration::from_millis(100);
 
+/// The exit code an interactive session leaves when the person asked for a fresh one
+/// (`/new`): the process has ended its session and restored the terminal, and `main`
+/// starts another in the same place. `EX_TEMPFAIL`, because nothing failed and the
+/// shell must not treat the end of a `/new` session as an error.
+pub const EXIT_RESTART: u8 = 75;
+
 /// What a resume says to a log whose last turn ended cleanly but was never closed: the
 /// model's last message is its own answer, and a request may not end on one.
 const CONTINUE_NOTE: &str = "[kelir] the session was interrupted between turns; continue the task \

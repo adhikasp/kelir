@@ -124,6 +124,7 @@ a file is missing or an entry is stale.
 | `src/features/gates/limits.rs` | gate timeouts, process caps and the token sweep |
 | `src/features/gates/builtin/mod.rs` | built-in gates behind the external gate interface |
 | `src/features/gates/builtin/hint.rs` | `builtin = "hint"`: "might be relevant: name - description" |
+| `src/features/gates/builtin/timebox.rs` | `builtin = "timebox"`: a turn with a clock does not end before it runs out |
 | `src/features/herdr/mod.rs` | herdr agent status: one OSC 7501 record per change |
 | `src/features/herdr/ctx.rs` | the one frozen herdr line in the system sources |
 | `src/features/mcp/mod.rs` | MCP as a CLI |

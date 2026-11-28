@@ -644,6 +644,7 @@ mod tests {
                     reason: "no".into(),
                     context: None,
                     usage: None,
+                    max_denies: 0,
                 },
             ),
             (

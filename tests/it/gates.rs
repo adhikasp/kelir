@@ -11,3 +11,6 @@ mod gates_observe;
 
 #[path = "gates_children.rs"]
 mod gates_children;
+
+#[path = "gates_timebox.rs"]
+mod gates_timebox;

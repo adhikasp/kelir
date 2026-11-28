@@ -338,7 +338,7 @@ async fn gated_mcp_call(
             .await;
         runs.extend(chain.runs);
         match chain.verdict {
-            Verdict::Deny { gate, reason } => {
+            Verdict::Deny { gate, reason, .. } => {
                 let output = crate::features::mcp::CallOutput::failed(
                     crate::features::mcp::render::EXIT_TOOL_ERROR,
                     "denied",

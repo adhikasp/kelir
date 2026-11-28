@@ -51,17 +51,14 @@ the error and exits 2.
 - **A server's stderr is redacted.** The last line of a failed server's stderr
   is shown in errors and `kelir mcp ls`; every `env` value of 6 or more bytes
   in it is replaced by `***`.
-- **A killed session leaves no server (Unix).** Each server runs under a small
-  watcher in its process group that kills the group when the session is gone,
-  even if the server ignores stdin EOF. On Windows a Job Object does this.
-- **When the file is read.** The session reads both layers once, when it
-  starts. Editing `config.toml` has no effect on a running session (`kelir run --resume`
-  or a new session picks it up); a one-shot `kelir mcp` outside a session
-  reads it on every command.
+- **A killed session leaves no server.** Each server runs under a small watcher
+  in its process group that kills the group when the session is gone, even if
+  the server ignores stdin EOF (a Job Object on Windows).
+- **When the file is read.** Both layers, once, when the session starts: editing
+  `config.toml` does not reach a running session (a `--resume` or a new one picks
+  it up). A one-shot `kelir mcp` reads it on every command.
 - **A project file is code.** `.kelir/config.toml` can name any `command`, and
-  `channel = true` starts it when the session starts. Only open projects you
-  trust; a trust prompt for project-defined servers belongs with the verb
-  authentication work (STEER-7).
+  `channel = true` starts it with the session. Only open projects you trust.
 
 ## The commands
 
@@ -107,50 +104,42 @@ kelir mcp <server> <tool> [k=v …] [--json '{…}'] [--schema] [--envelope]
 Inside a session `KELIR_SOCK` is set, and `kelir mcp` sends every request to the
 **session process** (the broker) instead of starting anything itself:
 
-- A server is started by the first call that needs it, kept for the session and
-  restarted by the next call after it dies. Each server is a process tree of its
-  own (a process group on Unix, a kill-on-close Job Object on Windows): ending
-  the session, or killing it outright, takes the servers with it.
-- Calls to one server run concurrently; starting a server is serialised.
-- A request that fails after it reached the session (the session died or
-  closed the socket mid-call) is exit 4, not a one-shot retry: the tool may
-  have run. Only a failed *connect* falls back to starting the server in the
-  CLI. A session that is killed mid-call and resumed gets `call_settled` with
-  `kind: "mcp"` and `outcome: "unknown"` (exit 4) for the call, and the call is not re-run.
-- A server that dies while starting is exit 3 with the last line of its
-  stderr in the message (`(server stderr: …)`), the one place it says why.
-- `notifications/tools/list_changed` makes the broker read the tool list again
-  at the next request.
-- Each call is a `call_started` / `call_settled` pair in the log, written by the
-  session (the only writer), with `kind: "mcp"` and `info.name = "<server>/<tool>"`.
-  `call_settled.out_path` is the file holding the whole result (a result over
-  10 KB is never inline in the log); the CLI still prints the whole result, so a
-  pipe sees every byte, and the bash call's own 10 KB rule gives the model a
-  spill notice when the output is not piped.
-- The broker's internal verbs (`mcp-settle`, `mcp-notify`) carry a per-session
-  random key, so a socket client cannot forge a settlement.
-- **Verb authentication (STEER-7).** Every request the CLI sends is the one
-  verb `mcp` (`op` = `servers`, `tools` or `call`), built and sent in one place
-  (`Backend::ask` in `cli.rs`, served by `Session::mcp_verb`). All three ops
-  carry the session token, which the CLI reads from `KELIR_TOKEN` exactly as
-  `kelir bg` does (a bash child gets it from the session); the listener refuses
-  a request without it before anything is logged or any server is started, and
-  the CLI reports exit 3 ("the session refused the request") rather than
-  falling back to an unlogged one-shot call. Outside a session (no `KELIR_SOCK`)
-  there is no token and none is needed. `mcp-settle` and `mcp-notify` travel
-  in-process, not through the listener, and keep their key as the second layer.
-- **Secrets.** The `env` table of `config.toml` goes to the server child only; it
-  is never printed, logged or echoed in an error. `call_started.info.input` records
-  the *shape* of the arguments (keys kept, strings replaced by `<string, N bytes>`),
-  never their values: the values are in the enclosing bash call's `call_started`
-  event. A server is started with an allow-listed environment (no
-  `KELIR_*`, so no token or socket), no secret on its command line, and dies
-  with the session.
+- A server starts on the first call that needs it, is kept for the session and
+  restarted by the next call after it dies. Its process tree is its own (group on
+  Unix, kill-on-close Job Object on Windows), so ending the session takes it.
+- Calls to one server run concurrently; starting one is serialised.
+- A request that failed after reaching the session is exit 4, never a retried
+  one-shot: the tool may have run. Only a failed *connect* falls back to starting
+  the server in the CLI. A session killed mid-call and resumed gets
+  `call_settled` `kind: "mcp"`, `outcome: "unknown"`, and does not re-run it.
+- A server that dies while starting is exit 3, with the last line of its stderr
+  in the message (`(server stderr: …)`), the one place it says why.
+- `notifications/tools/list_changed` makes the broker re-read the tool list at
+  the next request.
+- Each call is a `call_started`/`call_settled` pair written by the session (the
+  only writer), `kind: "mcp"`, `info.name = "<server>/<tool>"`. `out_path` holds
+  the whole result (over 10 KB is never inline); the CLI prints every byte, so a
+  pipe sees it all, and the bash call's own 10 KB rule spills the rest.
+- The broker's internal verbs carry a per-session random key, so a socket client
+  cannot forge a settlement.
+- **Verb authentication.** Every request the CLI sends is the one verb `mcp`
+  (`op` = `servers`, `tools` or `call`), built in one place (`Backend::ask` in
+  `cli.rs`, served by `Session::mcp_verb`), and all three carry the session
+  token from `KELIR_TOKEN` exactly as `kelir bg` does. The listener refuses a
+  request without it before anything is logged or any server starts, and the CLI
+  reports exit 3 rather than falling back to an unlogged one-shot call. Outside
+  a session there is no token and none is needed; `mcp-settle`/`mcp-notify`
+  travel in-process and keep their key as the second layer.
+- **Secrets.** A server's `env` table goes to its child only: never printed,
+  logged or echoed in an error. `call_started.info.input` records the *shape* of
+  the arguments (keys kept, strings as `<string, N bytes>`) and the values live in
+  the enclosing bash call. The server's environment is an allow-list (no
+  `KELIR_*`, so no token or socket) and no secret reaches its command line.
 - `kelir ctl <session> tools '{"disable":"mcp:<server>.<tool>"}'` (or
   `mcp:<server>`) switches calls off: they are logged and answered
   `disabled by user` (exit 1).
-- Stopping the bash call kills the CLI, not the in-flight server request; the
-  call still settles in the log when the server answers or times out.
+- Stopping the bash call kills the CLI, not the in-flight request: the call still
+  settles in the log when the server answers or times out.
 
 Outside a session (a plain shell, or a background job that outlived its
 session and cannot reach the socket) the CLI starts the server for that one
