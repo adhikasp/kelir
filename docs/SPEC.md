@@ -504,6 +504,7 @@ a systemd timer, Task Scheduler, any trigger) calls `kelir run --name <n>
 - `kelir run --json` streams the events as NDJSON on stdout and ends with a `result` event and
   an exit code. `kelir run --ask "<question>"` is the one-shot mode (cold start under 100 ms).
 - The TUI is ratatui in the alternate screen with its own owned scrollback viewport and no terminal-side `insert_before`; finished turns stay in the app and the whole screen is repainted on change. It resizes with the pane and preserves the reader's scroll position. Every TUI action exists as a verb
+- A `/` in the first column opens a **completion popup** above the editor: every command and every skill the session's discovery found, fuzzy-ranked over the name, Tab accepting the highlighted row. `/skill <name>` loads that skill through the `skills` verb (`next_step` while a turn runs, immediately when idle), so a pulled skill costs the model nothing until it is asked for.
 - Herdr status is OSC 7501 (`app=kelir`, root session only, a resume label): `working` at turn
   start, `done` on success, `idle` on stop, `error` with a `msg`; `idle` instead of `done` when
   `TERM_PROGRAM=herdr-telegram`. A turn paused on an explicit step cap reports `blocked`: it is the

@@ -3,6 +3,12 @@
 #[path = "tui_output.rs"]
 mod tui_output;
 
+#[path = "tui_screen.rs"]
+mod tui_screen;
+
+#[path = "tui_completion.rs"]
+mod tui_completion;
+
 #[path = "tui_pty.rs"]
 mod tui_pty;
 
@@ -35,3 +41,6 @@ mod tui_pty_images;
 
 #[path = "tui_pty_keys.rs"]
 mod tui_pty_keys;
+
+#[path = "tui_pty_completion.rs"]
+mod tui_pty_completion;

@@ -9,6 +9,16 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 ### Added
 
+- **`/` completion popup**: typing `/` in the prompt opens a list above the editor with every command
+  and every skill this session discovered, each with its description, and a fuzzy match over the name
+  (`/cmp` → `/compact`, `/mfc` → `monthly-finance-close`). Tab accepts the highlighted row, ↑/↓ walk it,
+  Esc closes it and leaves the line. A command inserts its name and a space (never the usage's
+  placeholder), so the accepted line always parses.
+- **`/skill <name>`**: loads that skill's instructions into the context now, through the `skills` verb —
+  a name the session's own discovery resolved, or a `<path>` for a skill discovery missed, and a
+  builtin's text for one compiled into the binary. It waits for the next boundary while a turn runs and
+  applies immediately when idle; the frozen system prompt (and the provider's cache prefix) is not
+  touched.
 - **Word keys in the prompt editor**: `Ctrl-W` and `Ctrl-Backspace` delete a whole word (a pasted
   image or file path deletes as one chip, not as scattered characters), and `Alt-b` / `Alt-f` join
   `Ctrl-Left` / `Ctrl-Right` and `Alt-h` / `Alt-l` as word motion. Several spellings are bound

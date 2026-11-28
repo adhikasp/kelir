@@ -19,8 +19,11 @@ pub enum Press {
     Backspace,
     CtrlC,
     ToggleTail,
-    /// Esc: stop the turn, but only while working.
+    /// Esc: close the completion popup when one is open, otherwise stop the
+    /// turn (and only while working).
     Stop,
+    /// Tab: accept the highlighted completion row.
+    Complete,
     Redraw,
     /// PageUp: scroll the transcript up one viewport.
     PageUp,
@@ -118,6 +121,7 @@ pub fn translate(key: KeyEvent) -> Option<Press> {
         KeyCode::Right => Some(Press::Edit(Key::Right)),
         KeyCode::Up => Some(Press::Edit(Key::Up)),
         KeyCode::Down => Some(Press::Edit(Key::Down)),
+        KeyCode::Tab => Some(Press::Complete),
         KeyCode::PageUp => Some(Press::PageUp),
         KeyCode::PageDown => Some(Press::PageDown),
         KeyCode::Home => Some(Press::Top),
@@ -177,6 +181,15 @@ mod tests {
         // claiming two more control chords for no gain is not worth it.
         assert_eq!(at(KeyCode::Char('b'), KeyModifiers::CONTROL), None);
         assert_eq!(at(KeyCode::Char('f'), KeyModifiers::CONTROL), None);
+    }
+
+    #[test]
+    fn tab_completes_and_esc_is_one_key() {
+        assert_eq!(at(KeyCode::Tab, KeyModifiers::NONE), Some(Press::Complete));
+        // Shift-Tab is not a reverse cycle: the list is a ring and Up is the
+        // key that goes back.
+        assert_eq!(at(KeyCode::Tab, KeyModifiers::SHIFT), Some(Press::Complete));
+        assert_eq!(at(KeyCode::Esc, KeyModifiers::NONE), Some(Press::Stop));
     }
 
     #[test]

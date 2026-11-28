@@ -277,24 +277,38 @@ pub fn entry_lines(app: &App, entry: &Entry, width: usize) -> Vec<Line<'static>>
 
 // ------------------------------------------------------------------ layout
 
-/// The full screen's four areas: transcript, state, editor, facts.
+/// The full screen's areas: transcript, state, editor, facts, and the
+/// completion popup (empty when none is open).
 #[derive(Debug, Clone, Copy)]
 pub struct Areas {
     pub transcript: Rect,
     pub state: Rect,
     pub editor: Rect,
     pub facts: Rect,
+    pub popup: Rect,
 }
+
+/// The most rows the completion popup takes. Eight fit a narrow pane and are
+/// enough to see the best rows of a query without covering the answer above.
+pub const POPUP_ROWS: u16 = 8;
+
+/// The marker on the highlighted completion row, first on the line so a long
+/// description cut at the right edge cannot hide it.
+pub const COMPLETION_MARK: &str = "▸ ";
 
 /// The layout: a transcript viewport that takes all the space above the fixed
 /// rows; the editor grows with its wrapped content up to [`MAX_EDITOR_ROWS`].
-pub fn layout(area: Rect, editor_rows: u16) -> Areas {
+/// A `popup` of zero is the plain layout; with rows, the completion list takes
+/// them from the transcript, directly above the editor, so the fixed rows keep
+/// their height and the line never moves under the cursor.
+pub fn layout_with(area: Rect, editor_rows: u16, popup: u16) -> Areas {
     if area.height == 0 {
         return Areas {
             transcript: area,
             state: area,
             editor: area,
             facts: area,
+            popup: Rect::new(area.x, area.y, area.width, 0),
         };
     }
     let facts_h = u16::from(area.height >= 4);
@@ -304,9 +318,13 @@ pub fn layout(area: Rect, editor_rows: u16) -> Areas {
     } else {
         1.min(area.height)
     };
-    let transcript_h = area.height.saturating_sub(facts_h + state_h + editor_h);
+    let fixed = facts_h + state_h + editor_h;
+    let below = area.height.saturating_sub(fixed);
+    let popup_h = popup.min(below);
+    let transcript_h = below.saturating_sub(popup_h);
     let transcript = Rect::new(area.x, area.y, area.width, transcript_h);
-    let state = Rect::new(area.x, transcript.y + transcript_h, area.width, state_h);
+    let popup = Rect::new(area.x, transcript.y + transcript_h, area.width, popup_h);
+    let state = Rect::new(area.x, popup.y + popup_h, area.width, state_h);
     let editor = Rect::new(area.x, state.y + state_h, area.width, editor_h);
     let facts = Rect::new(area.x, editor.y + editor_h, area.width, facts_h);
     Areas {
@@ -314,6 +332,7 @@ pub fn layout(area: Rect, editor_rows: u16) -> Areas {
         state,
         editor,
         facts,
+        popup,
     }
 }
 
@@ -323,7 +342,11 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     app.set_size(area.width as usize, area.height as usize);
     let rows = rows(app);
-    let areas = layout(area, app.editor.visual_rows().len() as u16);
+    let editor_rows = app.editor.visual_rows().len() as u16;
+    let popup = popup_rows(app);
+    // The popup sits directly above the editor and takes its rows from the
+    // transcript, so the line stays where the eyes left it.
+    let areas = layout_with(area, editor_rows, popup);
     let top = app.scroll_top(rows.len(), areas.transcript.height as usize);
     frame.render_widget(Paragraph::new(rows).scroll((top, 0)), areas.transcript);
     if app.show_tail {
@@ -333,6 +356,66 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         render_state(app, frame, areas.state);
     }
     render_facts(app, frame, areas.facts);
+    if !app.show_tail {
+        render_completion(app, frame, areas.popup);
+    }
+}
+
+/// How many rows the popup takes: its rows, capped, and never more than the
+/// room above the fixed rows leaves. A narrow pane with a short list shows the
+/// list; an empty one takes no space at all.
+fn popup_rows(app: &App) -> u16 {
+    match app.completion() {
+        Some(completion) if !completion.rows.is_empty() => {
+            (completion.rows.len() as u16).min(POPUP_ROWS)
+        }
+        _ => 0,
+    }
+}
+
+/// The completion popup: one row per candidate, the label, the kind and the
+/// description, with the highlighted row reversed. The list is windowed around
+/// the highlight, so a long skill list never scrolls the first row out from
+/// under the query.
+fn render_completion(app: &App, frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let Some(completion) = app.completion() else {
+        return;
+    };
+    let theme = app.theme;
+    let rows = app.completion_rows();
+    if rows.is_empty() {
+        return;
+    }
+    let height = area.height as usize;
+    // Keep the highlight visible: shift the window so it sits inside it.
+    let first = completion.selected.saturating_sub(height.saturating_sub(1));
+    let width = area.width as usize;
+    // One description column for the whole list, so they line up.
+    let label_width = rows
+        .iter()
+        .map(|(label, _, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    for (offset, (label, about, kind)) in rows.iter().enumerate().skip(first).take(height) {
+        let chosen = offset == completion.selected;
+        let style = if chosen {
+            theme.chip()
+        } else if *kind == "skill" {
+            theme.dim()
+        } else {
+            theme.prose()
+        };
+        // The mark goes first: a long description is cut at the right edge, so
+        // a hint appended after it would be the first thing lost.
+        let mark = if chosen { COMPLETION_MARK } else { "  " };
+        let text = format!("{mark}{label:<label_width$}  {about}");
+        lines.push(Line::from(Span::styled(fit(&text, width), style)));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// The editor: the window of rows that keeps the cursor visible, the prompt

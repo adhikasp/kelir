@@ -5,6 +5,7 @@
 pub mod activity;
 mod app;
 pub mod commands;
+pub mod complete;
 pub mod editor;
 mod editor_impl;
 mod keys;
@@ -59,8 +60,8 @@ pub fn error_event(message: impl Into<String>) -> crate::log::event::LogEvent {
 }
 
 pub use view::{
-    PROMPT_WIDTH, call_head, call_label, facts_for_width, fit, last_line, read_tail, render,
-    status_text, tokens, tui_wait_line,
+    COMPLETION_MARK, POPUP_ROWS, PROMPT_WIDTH, call_head, call_label, facts_for_width, fit,
+    last_line, read_tail, render, status_text, tokens, tui_wait_line,
 };
 
 /// The one channel from the session to the view. Log events are the source of
@@ -220,8 +221,9 @@ pub fn start(
     cap: Option<u32>,
     token: String,
     theme: Theme,
+    skills: Vec<complete::SkillInfo>,
 ) -> std::io::Result<Tui> {
-    terminal::start(events, to_tui, verbs, banner, cap, token, theme)
+    terminal::start(events, to_tui, verbs, banner, cap, token, theme, skills)
 }
 
 impl Tui {
