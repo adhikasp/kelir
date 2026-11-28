@@ -383,6 +383,9 @@ pub fn serve(
     let (stop, mut stopped) = oneshot::channel::<oneshot::Sender<()>>();
     #[cfg(unix)]
     let path = Some(socket_path(dir, id));
+    // A TPipe needs no path, so on Windows the address is not used at all.
+    #[cfg(not(unix))]
+    let _ = (dir, id);
     tokio::spawn(async move {
         loop {
             tokio::select! {
