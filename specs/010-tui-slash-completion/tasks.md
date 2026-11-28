@@ -63,4 +63,4 @@ on the base commit.
 - [x] T016 Prove the PTY test fails on the base commit ("the popup never drew"), then passes here.
 - [x] T017 Before/after screenshots of the **release** binaries, same keystrokes, from a PTY replay.
 - [x] T018 `env -u RUSTUP_TOOLCHAIN bash scripts/gate.sh`: fmt, shape, clippy, nextest, doctest.
-- [ ] T019 Open the MR with the screenshots attached and the failing assertion pasted.
+- [x] T019 Open the MR with the screenshots attached and the failing assertion pasted.
