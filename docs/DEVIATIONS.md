@@ -649,7 +649,14 @@ can start in a test.
   instead of overwriting the banner (M2 review F3, N5). The user's own
   scrollback is never erased: it was untouched while the TUI ran. The panic
   hook does this itself and then ratatui's hook; the normal exit calls the same
-  idempotent restore.
+  idempotent restore. **The buffer is entered explicitly** (`EnterAlternateScreen`
+  before the first frame): `ratatui::try_init_with_options`, unlike `try_init`,
+  only enables raw mode, so the app used to paint its frames straight onto the
+  caller's screen while `restore` emitted `LeaveAlternateScreen` for a buffer it
+  had never entered — the finished turn stayed behind in the shell. The clean
+  exit now leaves the buffer, clears the visible rows (`2J`, never `3J`: the
+  person's scrollback is not ours to wipe) and prints one line,
+  `resume: kelir tui --resume <id>`.
 - **A TUI session starts with no task and no `user` event.** `session_started`
   is written first; the first turn begins when the first `say` arrives, so the
   log and the request sequence are the same as any other session's.

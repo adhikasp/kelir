@@ -16,6 +16,12 @@ ids, reviewer verdicts) is in `docs/PROGRESS.md`.
 
 ### Fixed
 
+- Leaving the TUI gives the terminal back clean: the run used to paint its frames onto the
+  caller's screen (raw mode only — the alternate buffer was never entered, though the teardown
+  left it) and then printed the resume line underneath, so the finished conversation stayed in the
+  shell and a resumed pane inherited it. The buffer is entered before the first frame, and the
+  exit now clears the visible rows and prints nothing but `resume: kelir tui --resume <id>`. The
+  person's own scrollback is left alone (`2J`, never `3J`).
 - The TUI's mouse wheel now scrolls the transcript, three rows a notch, in both directions
   (reaching the bottom resumes following). It reports the wheel only — never motion — and
   releases the terminal on every exit path, so the pane keeps its own drag-selection and Herdr

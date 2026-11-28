@@ -341,19 +341,16 @@ impl Tui {
         result.map(|_| ())
     }
 
-    /// On the way out: leave the alternate screen, put the cursor back and
-    /// hand the person the exact command to resume this session.
+    /// On the way out: back to the shell's own screen, flushed, with one line
+    /// saying how to come back to this session.
+    ///
+    /// The transcript the TUI painted is app state, not terminal scrollback
+    /// (the alternate buffer saw it), so it goes away entirely instead of
+    /// being dumped over whatever the person had on screen before.
     fn finish(&mut self) {
         self.flush_status().ok();
-        let mut stdout = std::io::stdout();
-        if let Some(id) = &self.app.session_id {
-            let _ = ratatui::crossterm::execute!(
-                stdout,
-                ratatui::crossterm::style::Print(format!("resume: kelir tui --resume {id}\r\n"))
-            );
-        }
-        let _ = stdout.flush();
         terminal::restore();
+        terminal::clear_and_hint(self.app.session_id.as_deref());
     }
 }
 

@@ -5,17 +5,15 @@ terminal's alternate screen: a four-area full-screen view with an owned
 transcript, a state row, an editor and a facts row. Finished turns stay in the
 app, every prompt and answer is reachable by scrolling, and the terminal's own
 scrollback is left untouched.
-**Read this when:** you are driving kelir by hand, or changing `src/tui.rs`,
-`src/theme.rs`, `src/activity.rs`, `src/markdown.rs`, `src/tools_view.rs` or
-`src/attachments.rs`.
+**Read this when:** you are driving kelir by hand, or changing
+`src/tui/`.
 
-Code: `src/tui.rs` (the loop), `src/tui/{app,view,keys,terminal}.rs` (the
+Code: `src/tui/mod.rs` (the loop), `src/tui/{app,view,keys,terminal}.rs` (the
 owned transcript, painting, key translation and terminal setup),
-`src/activity.rs` (the state
-machine), `src/theme.rs` (colours and glyphs), `src/markdown.rs` (the
-renderer), `src/tools_view.rs` (tool lines and groups), `src/attachments.rs`
-(images), `src/commands.rs` (`/` commands), `src/editor.rs` (the buffer and its
-image chips).
+`activity.rs` (the state machine), `theme.rs` (colours and glyphs),
+`markdown/` (the renderer), `tools_view.rs` (tool lines and groups),
+`attachments.rs` (images), `commands.rs` (`/` commands), `editor.rs` (the
+buffer and its image chips).
 
 ## Areas
 
@@ -27,10 +25,17 @@ image chips).
 | facts (1) | the session title (from the first prompt), `model · 1.5k tok` — steps and cache are not ambient |
 
 The view reflows from its source entries on resize and keeps the reader's
-scroll position. No finished turn is written into the terminal's scrollback;
-leaving the TUI restores the alternate screen and cursor. The kitty keyboard
-protocol (for Shift-Enter), bracketed paste and raw mode are pushed on entry
-and popped on exit.
+scroll position; no finished turn is written into the terminal's scrollback.
+The kitty keyboard protocol (for Shift-Enter), bracketed paste and raw mode are
+pushed on entry and popped on exit.
+
+## Leaving
+
+The TUI enters the alternate buffer before its first frame and leaves it on
+every exit (`/quit`, a double Ctrl-C, an error, a panic), so what it painted
+never lands on the shell's own screen. Then the visible rows are cleared and one
+line is printed: `resume: kelir tui --resume <id>`. `2J`, never `3J`: what was
+on screen before the TUI is not ours to erase.
 
 The session title is a short summary of the first prompt, recorded as a
 `session_title` event. It replaces the old `kelir idle`/`kelir working` prefix
@@ -53,20 +58,19 @@ when the answer that failed lands (`» window 128000 tokens (default) · …`). 
 `/model` swap that changes the window says so the same way, once, because the
 banner has no window line to update: `» window 200000 tokens (api)`.
 
-While the session waits before trying the provider again (a retryable HTTP
-status) or for a concurrency-governor slot, the facts row shows the wait
-instead of the usual summary: `kelir working · rate limited (429): retrying in
-34 s, attempt 5, esc stops · 33 s left`. The countdown is read from the
-wall clock on each tick, so it moves; a slot wait has no deadline worth reading
-and shows its words only. A provider retry also turns the state row `rate
-limited` (see below); a slot wait leaves the state row on the work it was doing.
-The same wait is one dim line in the scrollback (`» rate limited (429): …`,
-with the same `esc stops` hint) and an `error` event in the log, so NDJSON, the
-pane and the transcript agree. The log and the CLI keep STEER-5's sentence
-(`say stop to cancel`), which is true for `kelir` driven from a shell: only the
-pane's rows name the key, because plain text typed into the prompt is a `say`
-the model receives, while Esc and Ctrl-C stop the turn and `/stop` ends it at
-the next boundary or during the wait.
+While the session waits to retry the provider (a retryable HTTP status) or for
+a governor slot, the facts row shows the wait instead of the summary: `kelir
+working · rate limited (429): retrying in 34 s, attempt 5, esc stops · 33 s
+left`. The countdown is read from the wall clock on each tick, so it moves; a
+slot wait has no deadline worth reading and shows its words only. A provider
+retry also turns the state row `rate limited` (below); a slot wait leaves the
+state row on the work it was doing. The same wait is one dim line in the
+scrollback (`» rate limited (429): …`, same hint) and an `error` event, so
+NDJSON, the pane and the transcript agree. The log and the CLI keep STEER-5's
+`says stop to cancel`: true for `kelir` driven from a shell. Only the pane names
+the key, because plain text in the prompt is a `say` the model receives, while
+Esc and Ctrl-C stop the turn and `/stop` ends it at the next boundary or during
+the wait.
 
 ## States (the state row)
 
@@ -129,8 +133,7 @@ paused → `blocked`, error → `error`, done → `done`, idle → `idle`.
 | `/quit` (`/exit`) | end the session |
 
 Calls always print one line each: there is no output policy to toggle, so
-`/collapse` and bare `/expand` are not commands. Only `/expand n|last` appends
-a call's output.
+`/collapse` and bare `/expand` are not commands.
 
 ## Spacing
 
@@ -138,10 +141,9 @@ A prompt echo, a run of tool lines, prose and the outcome line (paused,
 stopped, error) are separate blocks with **one** blank row between them and
 never two. A reasoning-only step (empty assistant text between tool calls) is
 not prose: it does not split a run of calls with a blank row.
-The human's own words in the scrollback are cyan, so a long session can be
-scanned for what was asked. Cyan is the terminal's ANSI 6: a terminal whose
-palette remaps it light loses contrast on a light background. Change the
-palette, not the transcript.
+The human's own words in the scrollback are cyan (the terminal's ANSI 6), so a
+long session can be scanned for what was asked; a palette that remaps it light
+loses contrast, which is a reason to change the palette, not the transcript.
 
 ## Tool lines
 
@@ -150,7 +152,7 @@ A settled call is one dim line with a right-aligned verdict:
 is not a profiler). A failure is red, keeps its line and gains one dim tail
 line with the last output line. A stopped call reads `⏹ cancelled`. A clean
 call shows only its output size — no `ok` word: the line and its dim weight
-already say it ran. Every call keeps its own line; there is no folding.
+already say it ran.
 
 ```
   $ cargo test                    ✗ exit 101 · 4.1 KB
@@ -194,11 +196,10 @@ by row** wherever a row is already final:
   depends on all of it, and a boxed table's column widths on every row it has.
 
 A closed block is rendered once, when it closes, and its rows are cached, so
-the work per delta does not grow with the message: the open block is the only
-thing re-rendered, and it holds at most the last three live lines. Nothing that
-was shown ever vanishes, and a loose list item's continuation paragraph keeps
-its indent (the block splitter joins it back to its item) with one blank row
-between the item's paragraphs.
+the work per delta does not grow with the message: only the open block
+re-renders, and it holds at most the last three live lines. Nothing shown ever
+vanishes, and a loose list item's continuation paragraph keeps its indent (the
+block splitter joins it back) with one blank row between the item's paragraphs.
 
 ## Images
 

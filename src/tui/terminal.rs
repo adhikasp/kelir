@@ -6,8 +6,9 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use ratatui::crossterm::cursor::MoveTo;
 use ratatui::crossterm::event::{Event, KeyEventKind};
-use ratatui::crossterm::terminal::LeaveAlternateScreen;
+use ratatui::crossterm::terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use tokio::sync::mpsc;
 
 use super::keys;
@@ -53,6 +54,25 @@ impl Drop for RestoreGuard {
 /// guard never emit the teardown twice.
 static RESTORED: AtomicBool = AtomicBool::new(false);
 
+/// Put the screen back the way a person expects after a full-screen app: a
+/// blank screen, one line saying how to come back.
+///
+/// Called after [`restore`] has left the alternate buffer, so this paints on
+/// the shell's own screen. Only the visible rows are cleared: the person's
+/// scrollback is theirs, and wiping it (`3J`) to tidy up after a TUI would
+/// destroy history they never asked to lose.
+pub fn clear_and_hint(session_id: Option<&str>) {
+    let mut stdout = std::io::stdout();
+    let _ = ratatui::crossterm::execute!(stdout, MoveTo(0, 0), Clear(ClearType::All));
+    if let Some(id) = session_id {
+        let _ = ratatui::crossterm::execute!(
+            stdout,
+            ratatui::crossterm::style::Print(format!("resume: kelir tui --resume {id}\r\n"))
+        );
+    }
+    let _ = stdout.flush();
+}
+
 /// Leave the alternate screen, raw mode, paste, the mouse and kitty keyboard mode.
 pub fn restore() {
     if RESTORED.swap(true, Ordering::AcqRel) {
@@ -93,16 +113,29 @@ pub fn start(
     theme: Theme,
 ) -> std::io::Result<Tui> {
     let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-    // ratatui::try_init enables raw mode, enters the alternate screen and
-    // installs its own restore-on-panic hook. Our hook (below) chains to it.
-    // ratatui::try_init installs its own restore-on-panic hook. Capture the
-    // hook from before it and chain to that, so teardown happens exactly once.
+    // Capture the hook from before ratatui's own one, so teardown happens
+    // exactly once: ours chains to the hook that was there first, not to the
+    // one `try_init_with_options` installs.
     let previous_hook = std::panic::take_hook();
-    let terminal = ratatui::try_init_with_options(ratatui::TerminalOptions {
-        viewport: ratatui::Viewport::Fullscreen,
-    })?;
-    install_panic_hook(previous_hook);
+    // `try_init_with_options` enables raw mode but, unlike `try_init`, does not
+    // enter the alternate screen. The TUI paints every row, so without it the
+    // app is drawn over the shell's scrollback — and `restore`'s
+    // `LeaveAlternateScreen` then hands back a terminal the person never left.
     let mut stdout = std::io::stdout();
+    ratatui::crossterm::execute!(stdout, EnterAlternateScreen)?;
+    let _ = stdout.flush();
+    let terminal = match ratatui::try_init_with_options(ratatui::TerminalOptions {
+        viewport: ratatui::Viewport::Fullscreen,
+    }) {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            // Raw mode may be on and the alternate buffer is entered: leave
+            // both before the caller reports the failure.
+            restore();
+            return Err(error);
+        }
+    };
+    install_panic_hook(previous_hook);
     keys::push_enhancements(&mut stdout);
     mouse_on(&mut stdout);
     let _ = ratatui::crossterm::execute!(stdout, ratatui::crossterm::event::EnableBracketedPaste);

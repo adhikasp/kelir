@@ -70,6 +70,44 @@ each rule fails on a seeded violation.
    against a real model via OpenRouter, the fixed task for the milestone, observed with `hc read`.
    Script: `scripts/live/` — commands that need keys read them from the environment only.
 
+## Terminal output is proved by driving it, not by describing it
+
+When a change is about what a terminal *shows* — the TUI, a spinner, a banner, an exit, an
+escape sequence, a resize — a green unit test that renders a `TestBackend` buffer is not proof.
+It renders a buffer, not a terminal. The proof is a recording of the real binary in a real
+pane, and the PR carries it.
+
+How, every time:
+
+1. **Build both sides.** The base commit and the change, each as a release binary
+   (`cargo build --release`, pinned toolchain — `RUSTUP_TOOLCHAIN=nightly-<pinned>`; a bare stable
+   `cargo` cannot even parse `Cargo.toml`'s `profile-rustflags`). Never compare a release binary
+   against a debug one: frame timing, panic strategy and the alternate-buffer path all differ.
+2. **Run it for real in a Herdr pane**, not in this session's own shell: `hc run --bg --name X --cwd DIR bash`,
+   then `hc send` the command, `hc keys` the keystrokes, `hc read` what the screen actually shows.
+   A pane is the terminal a person has; the agent's own stdout is not. Use a **canned mock server**
+   (`python3 scripts/live/canned_server.py <port> '<command>'`, `KELIR_BASE_URL=http://127.0.0.1:<port>`)
+   so the run is free, offline, deterministic and publishes nothing; never spend a provider key or
+   put a real key in a script, a fixture or a transcript.
+3. **Record it.** `asciinema rec --overwrite --cols 100 --rows 30 --idle-time-limit 2 -c ./run-X.sh X.cast`
+   inside the pane (install with `uv tool install asciinema`; `agg --renderer font`-style GIFs from
+   `asciinema/agg`'s release tarball). Record **before and after with the same keystrokes**, so the
+   difference is the change and nothing else.
+4. **Assert on the bytes, not on the impression.** Grep the cast for the sequence that matters
+   (`\x1b[?1049h` entered, `\x1b[?1049l` left, `\x1b[2J` flushed, the hint line) and say the counts.
+   "Looks right" is not a result; `1049h 0 → 1` is.
+5. **A new PTY test must fail on the base commit and pass on the change.** Write it, run it against
+   the unfixed tree (`git stash`/`git checkout -- src/`), see it fail for the *stated* reason, then
+   restore the fix and see it pass. A test that passes both ways proves nothing; paste the failing
+   assertion in the PR.
+6. **The PR body carries the proof.** Text cast (`<details>` with the raw escape-stripped frames)
+   and a GIF via `gh pr edit --attach ./before.gif --attach ./after.gif` — never commit images to
+   the repo (`scripts/no-binary-check.sh` refuses them: history bloat, un-scrubbable private data).
+   Say what to look at in each: the leftover frame in `before`, the one resume line in `after`.
+
+Anything TUI-facing that lands without a `hc`-driven recording, a before/after byte diff and a
+failing-then-passing PTY test is not done, however many unit tests are green.
+
 ## Gates per milestone
 
 `bash scripts/gate.sh` (add `--linux=<machine>` to include the Linux half; the machine comes from the

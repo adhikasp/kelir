@@ -232,6 +232,91 @@ async fn a_ctrl_c_before_the_first_message_does_not_stop_the_turn() {
     );
 }
 
+/// A full-screen app must give the screen back: the TUI enters the alternate
+/// buffer, so the turn it painted is never left over the shell's own screen,
+/// and on the way out it clears the visible rows and prints one line saying how
+/// to resume the session.
+#[tokio::test]
+async fn the_tui_flushes_the_screen_and_leaves_the_resume_command() {
+    let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("PARROT", 0)))]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider = \"openrouter\"\nmodel = \"test/model\"\n",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let base_url = mock.base_url();
+    let run = tokio::task::spawn_blocking(move || {
+        drive_in_a_pty(cwd, config, state, base_url, b"", vec!["PARROT".into()])
+    })
+    .await
+    .expect("the pty driver");
+
+    assert_eq!(run.code, 0, "screen: {:?}", run.screen);
+    // Entered, so the transcript was painted on a buffer of its own: the run
+    // painted whole frames (`?2026h`) over the caller's screen, so without this
+    // the turn stays visible in the shell after the app is gone.
+    let enter = run.screen.find("\u{1b}[?1049h").unwrap_or_else(|| {
+        panic!(
+            "the TUI never entered the alternate screen: {:?}",
+            run.screen
+        )
+    });
+    // Left again, exactly once: a second `?1049l` would drop a buffer the app
+    // does not own.
+    assert_eq!(
+        run.screen.matches("\u{1b}[?1049l").count(),
+        1,
+        "the alternate screen is not left exactly once: {:?}",
+        run.screen
+    );
+    let leave = run.screen.find("\u{1b}[?1049l").unwrap();
+
+    // The screen is flushed after the buffer is left, and only the visible rows
+    // are cleared: `2J` is the visible screen, `3J` would take the person's own
+    // scrollback with it.
+    let flush = run
+        .screen
+        .find("\u{1b}[2J")
+        .unwrap_or_else(|| panic!("the screen was never flushed on exit: {:?}", run.screen));
+    assert!(
+        leave < flush,
+        "the screen was flushed inside the alternate buffer, not on the shell's: {:?}",
+        run.screen
+    );
+    assert!(
+        !run.screen.contains("\u{1b}[3J"),
+        "the person's scrollback was wiped: {:?}",
+        run.screen
+    );
+
+    // And what is left on screen is the hint, exactly one line.
+    let hint_at = run
+        .screen
+        .find("resume: kelir tui --resume ses_")
+        .unwrap_or_else(|| panic!("no resume hint: {:?}", run.screen));
+    assert!(
+        enter < hint_at && flush < hint_at,
+        "the hint was printed before the screen was given back: {:?}",
+        run.screen
+    );
+    let session_id = std::fs::read_dir(run.session_dir.parent().unwrap())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.starts_with("ses_"))
+        .expect("a session id");
+    assert!(
+        run.screen[hint_at..].contains(&session_id),
+        "the hint names no real session: expected {session_id:?} in {:?}",
+        &run.screen[hint_at..]
+    );
+}
+
 /// N5: a panic while the TUI owns the terminal must leave the terminal usable.
 /// `KELIR_TEST_PANIC` panics right after raw mode is on, so this drives the
 /// real panic path: the hook has to turn bracketed paste off, show the cursor,
