@@ -97,6 +97,11 @@ impl ChannelTest {
 
     /// Spawn `kelir channel`; the guard owns the whole process tree.
     async fn spawn_driver(&self, base_url: &str) -> tokio::process::Child {
+        self.spawn_driver_max(base_url, 1).await
+    }
+
+    /// The same, answering `max` messages before it exits.
+    async fn spawn_driver_max(&self, base_url: &str, max: u32) -> tokio::process::Child {
         let mut command = self.sandbox.kelir_command(base_url);
         command
             .args([
@@ -104,7 +109,7 @@ impl ChannelTest {
                 "--server",
                 "fake",
                 "--max-messages",
-                "1",
+                &max.to_string(),
                 "--status-once",
             ])
             .stdout(std::process::Stdio::piped())
@@ -221,6 +226,59 @@ async fn one_fallback_on_failure() {
     let _ = child.wait().await;
 }
 
+/// A conversation's second message must be answered, not refused as "already
+/// running". One `kelir channel` runs every turn of a conversation in one
+/// process, so the turn for `m-1` ends and its session must become resumable
+/// again: the owner marker and the listening socket have to be released when a
+/// session ends, or the resume sees a live pid and a bound socket and fails the
+/// turn with the fallback reply (2026-11-28: every Telegram message after the
+/// first in a topic answered "Sorry — I couldn't finish that").
+async fn a_second_message_in_one_conversation_is_answered() {
+    let test = ChannelTest::new();
+    let mock = Mock::start(vec![
+        Reply::Sse(sse(&text_turn("first answer", 0))),
+        Reply::Sse(sse(&text_turn("second answer", 0))),
+    ])
+    .await;
+    let mut child = test.spawn_driver_max(&mock.base_url(), 2).await;
+    for (id, text) in [("m-1", "one"), ("m-2", "two")] {
+        test.inject(json!({
+            "message_id": id,
+            "conversation_id": "chat-second",
+            "sender": "Ada",
+            "content": text
+        }))
+        .await;
+        // The second message must not go out before the first turn is over: a
+        // conversation is single-flight, and the point of the test is a resume
+        // of a session that has already ended.
+        let want = if id == "m-1" { 1 } else { 2 };
+        let _ = test
+            .wait_for(&test.replies, |lines| lines.len() >= want)
+            .await;
+    }
+    let replies = test.lines(&test.replies);
+    assert_eq!(replies.len(), 2, "one reply per message: {replies:?}");
+    assert_eq!(replies[0]["id"], "m-1");
+    assert_eq!(replies[1]["id"], "m-2");
+    for reply in &replies {
+        let text = reply["text"].as_str().unwrap_or_default();
+        assert!(
+            !text.contains("Sorry"),
+            "a live conversation must not get the fallback: {reply:?}"
+        );
+    }
+    assert!(
+        replies[1]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("second answer"),
+        "the second message is answered by its own turn: {replies:?}"
+    );
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
 async fn dedupe_replayed_id() {
     let test = ChannelTest::new();
     let mock = Mock::start(vec![Reply::Sse(sse(&text_turn("once", 0)))]).await;
@@ -272,6 +330,7 @@ async fn channel_e2e_pyramid() {
     one_answer_and_done_spool().await;
     one_fallback_on_failure().await;
     dedupe_replayed_id().await;
+    a_second_message_in_one_conversation_is_answered().await;
     let leaked = shell_count().saturating_sub(shells_before);
     assert!(leaked <= 20, "the channel tests leaked {leaked} shells");
 }

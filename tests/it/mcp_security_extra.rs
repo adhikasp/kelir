@@ -134,7 +134,7 @@ async fn a_lost_session_after_the_send_is_exit_4_and_not_run_again() {
         dir.clone(),
         "fake-token".into(),
     ));
-    kelir::ipc::serve(listener, trust, tx);
+    let _served = kelir::ipc::serve(&dir, id, listener, trust, tx);
     tokio::spawn(async move {
         while let Some(incoming) = rx.recv().await {
             match incoming.request.args["op"].as_str() {

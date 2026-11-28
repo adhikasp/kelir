@@ -249,6 +249,59 @@ pub struct SessionLock {
     _file: std::fs::File,
 }
 
+/// The session's listening socket, and the way to stop listening. A session
+/// that has ended must not leave a bound socket behind: a later resume of the
+/// same session id refuses to start while anything answers on it, and in a
+/// long-lived process (one `kelir channel` runs many turns of the same
+/// conversation in one process) nothing else would ever close it.
+pub struct Served {
+    stop: Option<tokio::sync::oneshot::Sender<tokio::sync::oneshot::Sender<()>>>,
+    #[cfg(unix)]
+    path: Option<PathBuf>,
+}
+
+impl Served {
+    /// Stop accepting and wait until the listener is dropped, then (on Unix)
+    /// remove the socket file. The listener has to be gone before the file is
+    /// removed, or the accept loop can recreate the name; and a caller that
+    /// resumes this session right after must not see either. Safe to call more
+    /// than once.
+    pub async fn close(&mut self) {
+        let Some(stop) = self.stop.take() else {
+            return;
+        };
+        let (done, closed) = tokio::sync::oneshot::channel();
+        if stop.send(done).is_ok() {
+            // The accept loop drops the listener and then answers.
+            let _ = closed.await;
+        }
+        self.unlink();
+    }
+
+    /// The `Drop` path: ask the loop to stop, without waiting (a destructor
+    /// cannot). A session that ends normally calls `close` first.
+    #[cfg(unix)]
+    fn unlink(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn unlink(&mut self) {}
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        // Best effort: the loop may already be gone, and a TPipe needs no file
+        // cleanup. `close().await` is what the session's end uses.
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(tokio::sync::oneshot::channel().0);
+        }
+        self.unlink();
+    }
+}
+
 /// Take the session's write lock, or say who else has it.
 pub fn lock(dir: &Path) -> Result<SessionLock, String> {
     #[cfg(unix)]
@@ -321,24 +374,47 @@ pub fn bind(dir: &Path, id: &str) -> Result<LocalListener, String> {
 /// Accept connections forever. Every connection gets its own task; answers go back on each
 /// request's own channel, so two clients never block each other.
 pub fn serve(
+    dir: &Path,
+    id: &str,
     listener: LocalListener,
     trust: Arc<crate::sys::trust::Trust>,
     tx: mpsc::UnboundedSender<Incoming>,
-) {
+) -> Served {
+    let (stop, mut stopped) = oneshot::channel::<oneshot::Sender<()>>();
+    #[cfg(unix)]
+    let path = Some(socket_path(dir, id));
+    // A TPipe needs no path, so on Windows the address is not used at all.
+    #[cfg(not(unix))]
+    let _ = (dir, id);
     tokio::spawn(async move {
         loop {
-            match listener.accept().await {
-                Ok(stream) => {
-                    let tx = tx.clone();
-                    let trust = trust.clone();
-                    tokio::spawn(async move { connection(stream, trust, tx).await });
+            tokio::select! {
+                // The session is over: drop the listener here, then answer, so
+                // the caller removes the socket file knowing nothing can bind
+                // it again.
+                done = &mut stopped => {
+                    drop(listener);
+                    let _ = done.map(|done| done.send(()));
+                    break;
                 }
-                // The listener only fails for good reasons (the pipe name was taken, the runtime is going
-                // away); retry so one bad accept cannot stop the session from being reachable.
-                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                accepted = listener.accept() => match accepted {
+                    Ok(stream) => {
+                        let tx = tx.clone();
+                        let trust = trust.clone();
+                        tokio::spawn(async move { connection(stream, trust, tx).await });
+                    }
+                    // The listener only fails for good reasons (the pipe name was taken, the runtime is going
+                    // away); retry so one bad accept cannot stop the session from being reachable.
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                },
             }
         }
     });
+    Served {
+        stop: Some(stop),
+        #[cfg(unix)]
+        path,
+    }
 }
 
 async fn connection(
@@ -887,7 +963,7 @@ mod tests {
         let token = trust.token().to_string();
         let listener = bind(dir, id).unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
-        serve(listener, trust, tx);
+        let _served = serve(dir, id, listener, trust, tx);
         tokio::spawn(async move {
             let incoming = rx.recv().await.unwrap();
             assert_eq!(incoming.request.verb, "say");
@@ -941,7 +1017,7 @@ mod tests {
         let trust = Arc::new(crate::sys::trust::Trust::create(dir.clone()).unwrap());
         let listener = bind(&dir, id).unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
-        serve(listener, trust, tx);
+        let _served = serve(&dir, id, listener, trust, tx);
         let seen = tokio::spawn(async move {
             // Nothing should ever arrive; the test ends the task.
             tokio::time::timeout(Duration::from_secs(2), rx.recv())

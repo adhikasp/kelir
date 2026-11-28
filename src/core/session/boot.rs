@@ -89,7 +89,17 @@ pub(crate) async fn drive(opts: Options) -> u8 {
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Incoming>();
-    ipc::serve(listener, trust.clone(), tx.clone());
+    // Held until this function returns: dropping it stops the accept loop and
+    // removes the socket file, so a session that has ended is resumable in the
+    // same process (one `kelir channel` runs every turn of a conversation) and
+    // leaves no bound socket for a later resume to trip over.
+    let served = ipc::serve(
+        &session.log.dir,
+        &session.log.id,
+        listener,
+        trust.clone(),
+        tx.clone(),
+    );
     // Background jobs: `kelir bg run` reports itself over the socket, and this watcher is the safety net
     // that also catches a promoted call settling while the session runs.
     watch_bg(crate::paths::calls_dir(&session.log.dir), tx.clone());
@@ -241,6 +251,15 @@ pub(crate) async fn drive(opts: Options) -> u8 {
         println!("{}", session.run.final_text);
     }
     session.print_result(code);
+    // The session has ended: stop listening and stop advertising an owner
+    // before anything else so a resume of this id (a channel conversation's
+    // next message, a named job's next run) cannot see a live socket or a live
+    // owner pid and refuse to start. The pid is still alive when one process
+    // serves many turns (a `kelir channel` daemon), so killing liveness
+    // detection is not enough: the marker itself has to go.
+    let mut served = served;
+    served.close().await;
+    crate::features::names::release_owner(&session.log.dir);
     if restart {
         return crate::core::session::EXIT_RESTART;
     }

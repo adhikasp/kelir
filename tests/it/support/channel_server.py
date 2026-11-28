@@ -15,6 +15,7 @@ The `reply` tool is idempotent by message_id: a repeated id is logged with
 import json
 import os
 import sys
+import threading
 import time
 
 sent = set()
@@ -23,11 +24,15 @@ replies = os.environ.get("MCP_CHAN_REPLIES", "")
 events = os.environ.get("MCP_CHAN_EVENTS", "")
 offset = 0
 last_check = 0.0
+# The poller thread and the request loop both write to stdout; one line must
+# never interleave with another.
+write_lock = threading.Lock()
 
 
 def send(message):
-    sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+    with write_lock:
+        sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
 
 
 def note(kind, **fields):
@@ -86,10 +91,21 @@ def poll():
         note("inbound", message_id=message.get("message_id", ""))
 
 
+def tick():
+    while True:
+        time.sleep(0.05)
+        poll()
+
+
 def main():
     sys.stdout.reconfigure(newline="\n")
+    # A real chat bridge delivers a message when the chat service sends it, not
+    # when kelir happens to write to it. Polling only inside the stdin loop
+    # hides that: an injected message would wait for the next request, so a
+    # conversation's second message was never delivered while the first turn
+    # was the only traffic.
+    threading.Thread(target=tick, daemon=True).start()
     for line in sys.stdin:
-        poll()
         line = line.strip()
         if not line:
             continue
